@@ -5,6 +5,7 @@ import {
   Builder,
   Cell,
   Dictionary,
+  DictionaryValue,
   Message,
   Slice,
   toNano,
@@ -30,6 +31,60 @@ export class ConfigParams {
     return (builder: Builder) => {
       builder.storeDictDirect(this.dict);
     };
+  }
+
+  setRaw(idx: number, value: Cell) {
+    this.dict.set(idx, value);
+  }
+
+  getRaw(idx: number): Cell | undefined {
+    return this.dict.get(idx);
+  }
+
+  setSignatureModifiers(args: {
+    signatureWithId: boolean;
+    signatureDomain: boolean;
+  }) {
+    const GLOBAL_VERSION_TAG = 0xc4;
+    const SIGNATURE_WITH_ID_FLAG = 0x4000000n;
+    const SIGNATURE_DOMAIN_FLAG = 0x800000000n;
+
+    const setFlag = (value: bigint, flag: bigint, set: boolean) => {
+      if (set) {
+        return value | flag;
+      } else {
+        return value & ~flag;
+      }
+    };
+
+    const global = this.dict.get(8)?.asSlice();
+    if (global == null) {
+      return;
+    }
+
+    const tag = global.loadUint(8);
+    if (tag != GLOBAL_VERSION_TAG) {
+      throw new UnknownTagError({ tag, bits: 8 });
+    }
+    const version = global.loadUint(32);
+    let capabilities = global.loadUintBig(64);
+    capabilities = setFlag(
+      capabilities,
+      SIGNATURE_WITH_ID_FLAG,
+      args.signatureWithId,
+    );
+    capabilities = setFlag(
+      capabilities,
+      SIGNATURE_DOMAIN_FLAG,
+      args.signatureDomain,
+    );
+
+    const newGlobal = beginCell()
+      .storeUint(tag, 8)
+      .storeUint(version, 32)
+      .storeUint(capabilities, 64)
+      .endCell();
+    this.dict.set(8, newGlobal);
   }
 
   getVsetTimings(): VsetTimings {
@@ -139,10 +194,10 @@ export async function makeStubValidatorSet(args: {
   utimeUntil: number;
   validatorCount: number;
 }): Promise<ValidatorSet> {
-  let validators = Dictionary.empty(Dictionary.Keys.Uint(16), {
-    parse: loadValidatorDescr,
-    serialize: storeValidatorDescr,
-  });
+  let validators = Dictionary.empty(
+    Dictionary.Keys.Uint(16),
+    ValidatorDescrValue,
+  );
 
   for (let i = 0; i < args.validatorCount; i++) {
     validators.set(i, {
@@ -167,20 +222,29 @@ export function loadValidatorSet(cs: Slice): ValidatorSet {
     throw new UnknownTagError({ tag, bits: 8 });
   }
 
+  const utimeSince = cs.loadUint(32);
+  const utimeUntil = cs.loadUint(32);
+  const total = cs.loadUint(16);
+  const main = cs.loadUint(16);
+  const totalWeight = cs.loadUintBig(64);
+  const validators = cs.loadDict(Dictionary.Keys.Uint(16), ValidatorDescrValue);
+  if (validators.size != total) {
+    throw new Error(
+      `validator count mismatch: expected=${total}, got=${validators.size}`,
+    );
+  }
+
   return {
-    utimeSince: cs.loadUint(32),
-    utimeUntil: cs.loadUint(32),
-    main: cs.loadUint(16),
-    totalWeight: cs.loadUintBig(64),
-    validators: cs.loadDict(Dictionary.Keys.Uint(16), {
-      parse: loadValidatorDescr,
-      serialize: storeValidatorDescr,
-    }),
+    utimeSince,
+    utimeUntil,
+    main,
+    totalWeight,
+    validators,
   };
 }
 
 export function storeValidatorSet(
-  vset: ValidatorSet
+  vset: ValidatorSet,
 ): (builder: Builder) => void {
   return (builder: Builder) => {
     builder.storeUint(VALIDATOR_SET_TAG, 8);
@@ -194,8 +258,17 @@ export function storeValidatorSet(
 }
 
 const VALIDATOR_DESCR_TAG_SIMPLE = 0x53;
-const VALIDATOR_DESCR_TAG_WITH_ADDR = 0x53;
+const VALIDATOR_DESCR_TAG_WITH_ADDR = 0x73;
 const PUBKEY_TAG_ED25519 = 0x8e81278a;
+
+export const ValidatorDescrValue: DictionaryValue<ValidatorDescr> = {
+  serialize: (src, builder) => builder.store(storeValidatorDescr(src)),
+  parse: (cs) => {
+    const res = loadValidatorDescr(cs);
+    cs.endParse();
+    return res;
+  },
+};
 
 export type ValidatorDescr = {
   pubkey: bigint;
@@ -212,8 +285,13 @@ export function loadValidatorDescr(cs: Slice): ValidatorDescr {
     default:
       throw new UnknownTagError({ tag, bits: 8 });
   }
-
   const withAddr = tag === VALIDATOR_DESCR_TAG_WITH_ADDR;
+
+  const pubkeyTag = cs.loadUint(32);
+  if (pubkeyTag != PUBKEY_TAG_ED25519) {
+    throw new UnknownTagError({ tag: pubkeyTag, bits: 32 });
+  }
+
   return {
     pubkey: cs.loadUintBig(256),
     weight: cs.loadUintBig(64),
@@ -222,14 +300,14 @@ export function loadValidatorDescr(cs: Slice): ValidatorDescr {
 }
 
 export function storeValidatorDescr(
-  d: ValidatorDescr
+  d: ValidatorDescr,
 ): (builder: Builder) => void {
   return (builder: Builder) => {
     builder.storeUint(
       d.adnlAddr != null
         ? VALIDATOR_DESCR_TAG_WITH_ADDR
         : VALIDATOR_DESCR_TAG_SIMPLE,
-      8
+      8,
     );
     builder.storeUint(PUBKEY_TAG_ED25519, 32);
     builder.storeUint(d.pubkey, 256);
@@ -283,7 +361,7 @@ export class ValidatorAccount {
 
   public createStakeMessage(
     electorAddress: Address,
-    args: ParticipateInElections
+    args: ParticipateInElections,
   ): Message {
     return simpleInternal({
       src: this.address,
@@ -370,7 +448,7 @@ export class UnknownTagError extends Error {
     super(
       `unknown tag 0x${args.tag
         .toString(16)
-        .padStart(Math.ceil(args.bits / 8), "0")}`
+        .padStart(Math.ceil(args.bits / 8), "0")}`,
     );
   }
 }
