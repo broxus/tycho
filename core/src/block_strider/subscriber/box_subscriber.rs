@@ -246,6 +246,7 @@ mod tests {
             mc_block_id: Default::default(),
             mc_is_key_block: false,
             is_key_block: false,
+            is_top_block: true,
             block: BlockStuff::new_empty(ShardIdent::MASTERCHAIN, 0),
             archive_data: ArchiveData::Existing,
             delayed: DelayedTasks::new().1,
