@@ -26,7 +26,6 @@ use tycho_core::global_config::ZerostateId;
 use tycho_core::node::NodeKeys;
 use tycho_core::storage::CoreStorage;
 use tycho_crypto::ed25519;
-use tycho_slasher_traits::NoopValidatorEventsListener;
 use tycho_storage::StorageContext;
 use tycho_types::models::{BlockId, BlockIdShort, ShardIdent};
 

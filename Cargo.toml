@@ -63,7 +63,10 @@ exponential-backoff = "1.2.1"
 fdlimit = "0.3.0"
 futures-executor = "0.3"
 futures-util = "0.3"
-governor = { version = "0.9", default-features = false, features = ["std", "quanta"] }
+governor = { version = "0.9", default-features = false, features = [
+    "std",
+    "quanta",
+] }
 getip = "0.2.0"
 hdrhistogram = "7.5.4"
 hex = "0.4"
@@ -85,7 +88,10 @@ proc-macro2 = "1.0"
 prost = "0.14.1"
 prost-build = "0.14.1"
 quick_cache = "0.6.0"
-quinn = { version = "0.11.9", default-features = false, features = ["runtime-tokio", "rustls"] }
+quinn = { version = "0.11.9", default-features = false, features = [
+    "runtime-tokio",
+    "rustls",
+] }
 quote = "1.0"
 object_store = "0.12"
 rand = "0.9"
@@ -128,7 +134,9 @@ tikv-jemalloc-ctl = { version = "0.6.0", features = ["stats"] }
 tl-proto = "0.5.1"
 tokio = { version = "1", default-features = false }
 tokio-stream = "0.1.15"
-tokio-util = { version = "0.7.10", default-features = false, features = ["codec"] }
+tokio-util = { version = "0.7.10", default-features = false, features = [
+    "codec",
+] }
 tower = "0.5"
 tower-http = "0.6"
 tracing = "0.1"
@@ -184,7 +192,7 @@ dbg_macro = "warn"
 debug_assert_with_mut_call = "warn"
 disallowed_methods = "warn"
 doc_markdown = "warn"
-empty_enum = "warn"
+empty_enums = "warn"
 enum_glob_use = "warn"
 exit = "warn"
 expl_impl_clone_on_copy = "warn"
