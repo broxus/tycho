@@ -7,6 +7,7 @@ use indexmap::{self, IndexMap};
 use serde::{Deserialize, Serialize};
 use session::DebugLogValidatorSesssion;
 use tycho_crypto::ed25519::KeyPair;
+use tycho_slasher_traits::{ValidatorEvents, ValidatorEventsListener};
 use tycho_types::models::*;
 use tycho_util::{FastHashMap, serde_helpers};
 
@@ -76,6 +77,7 @@ impl ValidatorStdImpl {
         net_context: ValidatorNetworkContext,
         keypair: Arc<KeyPair>,
         config: ValidatorStdImplConfig,
+        recorder: Arc<dyn ValidatorEventsListener>,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -83,6 +85,7 @@ impl ValidatorStdImpl {
                 keypair,
                 sessions: Default::default(),
                 config,
+                events: ValidatorEvents::new(recorder),
             }),
         }
     }
@@ -91,18 +94,19 @@ impl ValidatorStdImpl {
 #[async_trait]
 impl Validator for ValidatorStdImpl {
     fn add_session(&self, info: AddSession<'_>) -> Result<()> {
-        let session = ValidatorSession::new(
-            &self.inner.net_context,
-            self.inner.keypair.clone(),
-            &self.inner.config,
-            info,
-        )?;
-
         let mut sessions = self.inner.sessions.lock();
         let shard_sessions = sessions.entry(info.shard_ident).or_default();
 
         match shard_sessions.entry(info.session_id) {
             indexmap::map::Entry::Vacant(entry) => {
+                let session = ValidatorSession::new(
+                    &self.inner.net_context,
+                    self.inner.keypair.clone(),
+                    &self.inner.config,
+                    info,
+                    &self.inner.events,
+                )?;
+
                 tracing::debug!(
                     target: tracing_targets::VALIDATOR,
                     session = ?DebugLogValidatorSesssion(&session),
@@ -217,6 +221,7 @@ struct Inner {
     keypair: Arc<KeyPair>,
     sessions: parking_lot::Mutex<Sessions>,
     config: ValidatorStdImplConfig,
+    events: ValidatorEvents,
 }
 
 type Sessions = FastHashMap<ShardIdent, ShardSessions>;

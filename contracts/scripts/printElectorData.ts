@@ -1,4 +1,4 @@
-import arg from "arg";
+import arg from "arg"
 import util from "util";
 import {
   TychoExecutor,
@@ -6,7 +6,7 @@ import {
 } from "@tychosdk/emulator";
 import { Blockchain } from "@ton/sandbox";
 import { Address, Cell, Dictionary } from "@ton/core";
-import { Elector, loadElectorData } from "../wrappers/Elector";
+import { loadElectorData } from "../wrappers/Elector";
 
 const ELECTOR_ADDRESS = Address.parse(
   "-1:3333333333333333333333333333333333333333333333333333333333333333"

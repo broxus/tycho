@@ -4,7 +4,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use tycho_crypto::ed25519::PublicKey;
 use tycho_network::{Network, OverlayService, PeerId, PeerResolver};
-use tycho_types::models::{BlockId, BlockIdShort, ShardIdent, ValidatorDescription};
+use tycho_types::models::{BlockId, BlockIdShort, IndexedValidatorDescription, ShardIdent};
 use tycho_util::FastHashMap;
 
 pub use self::impls::*;
@@ -70,7 +70,7 @@ pub struct AddSession<'a> {
     pub shard_ident: ShardIdent,
     pub start_block_seqno: u32,
     pub session_id: ValidationSessionId,
-    pub validators: &'a [ValidatorDescription],
+    pub validators: &'a [IndexedValidatorDescription],
 }
 
 #[derive(Debug, Clone)]
@@ -92,12 +92,11 @@ pub struct BriefValidatorDescr {
     pub peer_id: PeerId,
     pub public_key: PublicKey,
     pub weight: u64,
+    pub validator_idx: u16,
 }
 
-impl TryFrom<&ValidatorDescription> for BriefValidatorDescr {
-    type Error = anyhow::Error;
-
-    fn try_from(descr: &ValidatorDescription) -> Result<Self> {
+impl BriefValidatorDescr {
+    pub fn from_descr(descr: &IndexedValidatorDescription) -> Result<Self> {
         let Some(public_key) = PublicKey::from_bytes(descr.public_key.0) else {
             anyhow::bail!("invalid validator public key");
         };
@@ -106,6 +105,7 @@ impl TryFrom<&ValidatorDescription> for BriefValidatorDescr {
             peer_id: PeerId(descr.public_key.0),
             public_key,
             weight: descr.weight,
+            validator_idx: descr.validator_idx,
         })
     }
 }

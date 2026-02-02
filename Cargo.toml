@@ -20,11 +20,13 @@ members = [
     "network",
     "rpc",
     "simulator",
-    "storage",
+    "slasher-traits",
+    "slasher",
     "storage-traits",
+    "storage",
     "tycho-build-info",
-    "util",
     "util-proc",
+    "util",
     "wu-tuner",
     "rpc-subscriptions",
 ]
@@ -154,6 +156,8 @@ tycho-core = { path = "./core", version = "0.3.6" }
 tycho-network = { path = "./network", version = "0.3.6" }
 tycho-rpc-subscriptions = { path = "./rpc-subscriptions", version = "0.3.6" }
 tycho-rpc = { path = "./rpc", version = "0.3.6" }
+tycho-slasher = { path = "./slasher", version = "0.3.6" }
+tycho-slasher-traits = { path = "./slasher-traits", version = "0.3.6" }
 tycho-storage = { path = "./storage", version = "0.3.6" }
 tycho-storage-traits = { path = "./storage-traits", version = "0.3.6" }
 tycho-util = { path = "./util", version = "0.3.6" }
@@ -162,6 +166,7 @@ tycho-wu-tuner = { path = "./wu-tuner", version = "0.3.6" }
 
 [patch.crates-io]
 # patches here
+tycho-types = { git = "https://github.com/broxus/tycho-types.git", rev = "47a4e746d008904d3d02aae398139cc7e7e25765" }
 
 [workspace.lints.rust]
 future_incompatible = "warn"
