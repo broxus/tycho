@@ -66,11 +66,18 @@ export class SlasherStub implements Contract {
     return new SlasherStub(address);
   }
 
-  async isBlocksBatchValid(provider: ContractProvider, blocksBatch: Cell) {
+  async isBlocksBatchValid(
+    provider: ContractProvider,
+    args: { blocksBatch: Cell; mcSeqno: number },
+  ) {
     const { stack } = await provider.get("is_blocks_batch_valid", [
       {
         type: "cell",
-        cell: blocksBatch,
+        cell: args.blocksBatch,
+      },
+      {
+        type: "int",
+        value: BigInt(args.mcSeqno),
       },
     ]);
     return {
