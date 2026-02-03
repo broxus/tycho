@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Cursor;
 use std::num::NonZeroU8;
@@ -46,11 +45,12 @@ pub struct ShardStateStorage {
 
     accumulated_per_shard: parking_lot::Mutex<FastHashMap<ShardIdent, ShardAccumulator>>,
 
-    shard_states_cache: FastDashMap<ShardIdent, BTreeMap<u32, ShardStateStuff>>,
+    shard_states_cache: FastDashMap<ShardIdent, FastHashMap<u32, ShardStateStuff>>,
 
     shard_split_depth: u8,
     new_cells_threshold: usize,
     store_shard_state_step: NonZeroU8,
+    states_cache_force_reload_interval: NonZeroU8,
 }
 
 impl ShardStateStorage {
@@ -77,6 +77,7 @@ impl ShardStateStorage {
             shard_split_depth: config.shard_split_depth,
             new_cells_threshold: config.max_new_cells_threshold,
             store_shard_state_step: config.store_shard_state_step,
+            states_cache_force_reload_interval: config.states_cache_force_reload_interval,
             gc_lock: Default::default(),
             min_ref_mc_state: MinRefMcStateTracker::new(),
             max_new_mc_cell_count: AtomicUsize::new(0),
@@ -174,13 +175,11 @@ impl ShardStateStorage {
             if !force_store && acc.new_cells < self.new_cells_threshold {
                 metrics::counter!("tycho_storage_shard_state_skipped").increment(1);
 
-                // HAS_STATE is set because the state can always be reconstructed
-                // by applying merkle updates from stored blocks.
-                let updated = handle.meta().add_flags(BlockFlags::HAS_STATE);
-                if updated {
-                    let block_handle_storage = self.block_handle_storage.clone();
-                    block_handle_storage.store_handle(handle, false);
-                }
+                drop(guard);
+
+                self.block_handle_storage
+                    .set_has_virtual_shard_state(handle);
+
                 return Ok(StoreStateStatus::Skipped);
             }
 
@@ -244,7 +243,8 @@ impl ShardStateStorage {
 
             hist.finish();
 
-            let updated = handle.meta().add_flags(BlockFlags::HAS_STATE);
+            let mut updated = handle.meta().add_flags(BlockFlags::HAS_STATE);
+            updated |= handle.meta().remove_flags(BlockFlags::HAS_VIRTUAL_STATE);
 
             let status = if updated {
                 block_handle_storage.store_handle(&handle, false);
@@ -335,12 +335,12 @@ impl ShardStateStorage {
         ref_by_mc_seqno: u32,
         block_id: &BlockId,
     ) -> Result<ShardStateStuff> {
-        self.load_state_with_cache(ref_by_mc_seqno, block_id, |_| None)
+        self.load_state_with_updates_cache(ref_by_mc_seqno, block_id, |_| None)
             .await
     }
 
     /// Loads state for specified block using optional cache with `CachedStateUpdate` lookups.
-    pub async fn load_state_with_cache<F>(
+    pub async fn load_state_with_updates_cache<F>(
         &self,
         mut ref_by_mc_seqno: u32,
         block_id: &BlockId,
@@ -349,11 +349,6 @@ impl ShardStateStorage {
     where
         F: Fn(&BlockId) -> Option<CachedStateUpdate>,
     {
-        // Fast path: exact cache hit
-        if let Some(state) = self.get_cached_shard_state(block_id) {
-            return Ok(state);
-        }
-
         // Masterchain states are always stored
         if block_id.is_masterchain() {
             return self.load_state_direct(ref_by_mc_seqno, block_id).await;
@@ -659,10 +654,11 @@ impl ShardStateStorage {
             return Ok(());
         }
 
-        /// Force reload interval: clear cache and skip insertion so that
-        /// the next `load_state` loads a clean state from storage.
-        const FORCE_RELOAD: u32 = 10;
-        if block_id.seqno.is_multiple_of(FORCE_RELOAD) {
+        // Force reload: clear cache and skip insertion
+        if block_id
+            .seqno
+            .is_multiple_of(self.states_cache_force_reload_interval.get() as u32)
+        {
             if let Some(mut shard_states) = self.shard_states_cache.get_mut(&block_id.shard) {
                 let old = std::mem::take(&mut *shard_states);
                 Reclaimer::instance().drop(old);

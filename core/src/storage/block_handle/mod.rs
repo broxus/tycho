@@ -44,6 +44,14 @@ impl BlockHandleStorage {
         updated
     }
 
+    pub fn set_has_virtual_shard_state(&self, handle: &BlockHandle) -> bool {
+        let updated = handle.meta().add_flags(BlockFlags::HAS_VIRTUAL_STATE);
+        if updated {
+            self.store_handle(handle, false);
+        }
+        updated
+    }
+
     pub fn set_block_persistent(&self, handle: &BlockHandle) -> bool {
         let updated = handle.meta().add_flags(BlockFlags::IS_PERSISTENT);
         if updated {
