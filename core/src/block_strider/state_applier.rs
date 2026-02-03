@@ -77,8 +77,8 @@ where
         let state_storage = self.inner.storage.shard_state_storage();
 
         // Load/Apply state
-        let state = if handle.has_state() {
-            // Fast path when state is already applied
+        let state = if handle.has_state() || handle.has_virtual_state() {
+            // Fast path when state is already applied or was skipped for not `is_top_block`
             state_storage
                 .load_state(handle.ref_by_mc_seqno(), handle.id())
                 .await
@@ -371,6 +371,7 @@ impl<S> Inner<S> {
     ) -> Result<()> {
         let block_handles = self.storage.block_handle_storage();
         let persistent_states = self.storage.persistent_state_storage();
+        let state_storage = self.storage.shard_state_storage();
 
         let mc_seqno = mc_block_handle.id().seqno;
         for entry in mc_block.load_custom()?.shards.latest_blocks() {
@@ -378,6 +379,22 @@ impl<S> Inner<S> {
             let Some(block_handle) = block_handles.load_handle(&block_id) else {
                 anyhow::bail!("top shard block handle not found: {block_id}");
             };
+
+            // Ensure skipped state is stored in DB before saving persistent state.
+            if block_handle.has_virtual_state() {
+                let state = state_storage
+                    .load_state(mc_seqno, &block_id)
+                    .await
+                    .context("failed to load skipped shard state for persistent save")?;
+
+                state_storage
+                    .store_state(&block_handle, &state, StoreStateHint {
+                        is_top_block: Some(true),
+                        ..Default::default()
+                    })
+                    .await
+                    .context("failed to store skipped shard state for persistent save")?;
+            }
 
             // NOTE: We could have also called the `set_block_persistent` here, but we
             //       only do this in the first part of the `save_persistent_queue_states`.

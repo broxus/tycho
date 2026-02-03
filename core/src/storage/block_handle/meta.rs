@@ -134,6 +134,8 @@ bitflags::bitflags! {
         const IS_REMOVED = 1 << 15;
         const IS_ZEROSTATE = 1 << 16;
 
+        const HAS_VIRTUAL_STATE = 1 << 17;
+
         // Composite flags
         const HAS_ALL_BLOCK_PARTS =
             Self::HAS_DATA.bits() | Self::HAS_PROOF.bits() | Self::HAS_QUEUE_DIFF.bits();
