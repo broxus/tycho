@@ -30,7 +30,7 @@ impl ExternalsRangeReaderState {
         by_partitions: BTreeMap<QueuePartitionIdx, ExternalsPartitionRangeReaderState>,
     ) -> Self {
         Self {
-            range: TransactionalValue::new(range),
+            range: range.into(),
             by_partitions: by_partitions.into(),
             fully_read: false,
         }

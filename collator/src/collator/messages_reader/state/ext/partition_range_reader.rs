@@ -33,9 +33,9 @@ impl ExternalsPartitionRangeReaderState {
     ) -> Self {
         Self {
             buffer,
-            skip_offset: TransactionalValue::new(skip_offset),
-            processed_offset: TransactionalValue::new(processed_offset),
-            last_expire_check_on_ct: TransactionalValue::new(last_expire_check_on_ct),
+            skip_offset: skip_offset.into(),
+            processed_offset: processed_offset.into(),
+            last_expire_check_on_ct: last_expire_check_on_ct.into(),
         }
     }
 
@@ -51,9 +51,9 @@ impl From<&ExternalsRangeInfo> for ExternalsPartitionRangeReaderState {
     fn from(value: &ExternalsRangeInfo) -> Self {
         Self {
             buffer: Default::default(),
-            skip_offset: TransactionalValue::new(value.skip_offset),
-            processed_offset: TransactionalValue::new(value.processed_offset),
-            last_expire_check_on_ct: TransactionalValue::new(None),
+            skip_offset: value.skip_offset.into(),
+            processed_offset: value.processed_offset.into(),
+            last_expire_check_on_ct: None.into(),
         }
     }
 }

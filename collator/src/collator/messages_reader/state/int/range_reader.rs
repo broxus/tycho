@@ -56,8 +56,8 @@ impl InternalsRangeReaderState {
 
     pub fn from_range_info(range_info: &InternalsRangeStuff, processed_to: &ProcessedTo) -> Self {
         let mut res = Self {
-            skip_offset: TransactionalValue::new(range_info.skip_offset),
-            processed_offset: TransactionalValue::new(range_info.processed_offset),
+            skip_offset: range_info.skip_offset.into(),
+            processed_offset: range_info.processed_offset.into(),
             ..Default::default()
         };
 

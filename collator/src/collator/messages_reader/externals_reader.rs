@@ -5,7 +5,6 @@ use tycho_block_util::queue::{QueuePartitionIdx, get_short_addr_string, get_shor
 use tycho_types::cell::HashBytes;
 use tycho_types::models::{IntAddr, MsgInfo, ShardIdent};
 use tycho_util::FastHashSet;
-use tycho_util::transactional::value::TransactionalValue;
 
 use super::{
     GetNextMessageGroupMode, InternalsPartitionReader, MessagesReaderMetrics,
@@ -116,8 +115,7 @@ impl<'a, 'b> ExternalsReader<'a, 'b> {
                     .or_insert(*range_reader_state_by_partition.processed_offset);
 
                 if par.curr_processed_offset > *max_processed_offset && is_last {
-                    range_reader_state_by_partition.processed_offset =
-                        TransactionalValue::new(par.curr_processed_offset);
+                    *range_reader_state_by_partition.processed_offset = par.curr_processed_offset;
                 }
             }
 

@@ -71,8 +71,8 @@ impl From<&InternalsProcessedUptoStuff> for InternalsPartitionReaderState {
             .collect();
 
         Self {
-            curr_processed_offset: TransactionalValue::new(0),
-            processed_to: TransactionalValue::new(value.processed_to.clone()),
+            curr_processed_offset: 0.into(),
+            processed_to: value.processed_to.clone().into(),
             ranges: ranges.into(),
         }
     }
