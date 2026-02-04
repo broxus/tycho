@@ -20,14 +20,12 @@ pub fn derive_partial_config(input: TokenStream) -> TokenStream {
 }
 
 #[proc_macro_derive(Transactional, attributes(tx))]
-pub fn transactional(input: TokenStream) -> TokenStream {
+pub fn derive_transactional(input: TokenStream) -> TokenStream {
     let input = syn::parse_macro_input!(input as syn::DeriveInput);
-    match derive_transactional::impl_transactional(input) {
-        Ok(tokens) => tokens.into(),
-        Err(err) => err.to_compile_error().into(),
-    }
+    derive_transactional::impl_transactional(input)
+        .unwrap_or_else(|e| e.to_compile_error())
+        .into()
 }
-
 fn to_compile_errors(errors: Vec<syn::Error>) -> proc_macro2::TokenStream {
     let compile_errors = errors.iter().map(syn::Error::to_compile_error);
     quote!(#(#compile_errors)*)
