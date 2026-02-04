@@ -3,7 +3,7 @@ use std::collections::hash_map::Entry;
 use anyhow::Context;
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 use tycho_types::models::ShardIdent;
-use tycho_util::transactional_types::Transactional;
+use tycho_util::transactional::Transactional;
 use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::collator::statistics::queue::TrackedQueueStatistics;
@@ -25,6 +25,8 @@ enum ProcessMode {
     CommitRetainOnly,
 }
 
+type StagedAppliedDiffKey = (ShardIdent, ShardIdent, QueuePartitionIdx, QueueKey);
+
 #[derive(Debug)]
 pub struct QueueStatisticsWithRemaning {
     pub initial_stats: QueueStatistics,
@@ -44,6 +46,9 @@ struct CumulativeStatisticsTx {
 
     /// Stores `processed_to` updates during the transaction
     processed_updates: FastHashMap<ShardIdent, ProcessedToByPartitions>,
+
+    /// Diffs already decremented in `Staged` mode for a specific destination shard.
+    staged_applied_diffs: FastHashSet<StagedAppliedDiffKey>,
 }
 
 pub struct CumulativeStatistics {
@@ -90,10 +95,10 @@ impl Transactional for CumulativeStatistics {
 
         // Commit stats changes (skip newly added entries without active transaction)
         for stats in self.result.values_mut() {
-            if stats.initial_stats.is_in_transaction() {
+            if stats.initial_stats.in_tx() {
                 stats.initial_stats.commit();
             }
-            if stats.remaning_stats.is_in_transaction() {
+            if stats.remaning_stats.in_tx() {
                 stats.remaning_stats.commit();
             }
         }
@@ -106,6 +111,7 @@ impl Transactional for CumulativeStatistics {
                 dst_shard,
                 processed_to,
                 ProcessMode::CommitRetainOnly,
+                None,
             );
         }
     }
@@ -117,10 +123,10 @@ impl Transactional for CumulativeStatistics {
 
         // Rollback result (skip newly added entries without active transaction)
         for stats in self.result.values_mut() {
-            if stats.initial_stats.is_in_transaction() {
+            if stats.initial_stats.in_tx() {
                 stats.initial_stats.rollback();
             }
-            if stats.remaning_stats.is_in_transaction() {
+            if stats.remaning_stats.in_tx() {
                 stats.remaning_stats.rollback();
             }
         }
@@ -148,7 +154,7 @@ impl Transactional for CumulativeStatistics {
         self.all_shards_processed_to_by_partitions = tx.all_shards_processed_to_by_partitions;
     }
 
-    fn is_in_transaction(&self) -> bool {
+    fn in_tx(&self) -> bool {
         self.tx.is_some()
     }
 }
@@ -226,7 +232,8 @@ impl CumulativeStatistics {
         dst_shard: &ShardIdent,
         processed_to: &ProcessedToByPartitions,
     ) {
-        let in_tx = self.is_in_transaction();
+        let in_tx = self.in_tx();
+        let staged_applied_diffs = self.tx.as_mut().map(|tx| &mut tx.staged_applied_diffs);
 
         Self::process_processed_to_update(
             &mut self.result,
@@ -239,6 +246,7 @@ impl CumulativeStatistics {
             } else {
                 ProcessMode::Immediate
             },
+            staged_applied_diffs,
         );
 
         if let Some(tx) = &mut self.tx {
@@ -331,12 +339,18 @@ impl CumulativeStatistics {
         entry.initial_stats.append(&diff_partition_stats);
         entry.remaning_stats.append(&diff_partition_stats);
 
-        self.shards_stats_by_partitions
+        let prev = self
+            .shards_stats_by_partitions
             .entry(diff_shard)
             .or_default()
             .entry(partition)
             .or_default()
             .insert(diff_max_message, diff_partition_stats);
+
+        debug_assert!(
+            prev.is_none(),
+            "duplicate diff_max_message: {diff_max_message:?}"
+        );
 
         if let Some(tx) = tx {
             tx.added_diffs
@@ -351,9 +365,11 @@ impl CumulativeStatistics {
         dst_shard: &ShardIdent,
         processed_to: &ProcessedToByPartitions,
         mode: ProcessMode,
+        mut staged_applied_diffs: Option<&mut FastHashSet<StagedAppliedDiffKey>>,
     ) {
         let do_decrement = matches!(mode, ProcessMode::Staged | ProcessMode::Immediate);
         let do_retain = matches!(mode, ProcessMode::Immediate | ProcessMode::CommitRetainOnly);
+        let is_staged = matches!(mode, ProcessMode::Staged);
 
         for (src_shard, shard_stats) in shards_stats.iter_mut() {
             for (partition, diffs) in shard_stats.iter_mut() {
@@ -364,8 +380,18 @@ impl CumulativeStatistics {
                     continue;
                 };
 
-                for (_, diff_stats) in diffs.range_mut(..=to_key) {
+                for (diff_max_message, diff_stats) in diffs.range_mut(..=to_key) {
                     if do_decrement {
+                        if is_staged {
+                            let diff_key = (*dst_shard, *src_shard, *partition, *diff_max_message);
+                            let already_applied = staged_applied_diffs
+                                .as_deref_mut()
+                                .is_some_and(|set| !set.insert(diff_key));
+                            if already_applied {
+                                continue;
+                            }
+                        }
+
                         let cumulative_stats = result.entry(*partition).or_insert_with(|| {
                             QueueStatisticsWithRemaning {
                                 initial_stats: QueueStatistics::default(),
@@ -373,15 +399,16 @@ impl CumulativeStatistics {
                             }
                         });
 
+                        let mut remaning_guard = (for_shard != dst_shard)
+                            .then(|| cumulative_stats.remaning_stats.statistics_mut());
+
                         for (dest_addr, count) in diff_stats.iter() {
                             if dst_shard.contains_address(dest_addr) {
                                 cumulative_stats
                                     .initial_stats
                                     .decrement_for_account(dest_addr.clone(), *count);
-                                if for_shard != dst_shard {
-                                    cumulative_stats
-                                        .remaning_stats
-                                        .decrement_for_account(dest_addr.clone(), *count);
+                                if let Some(guard) = &mut remaning_guard {
+                                    guard.decrement_for_account(dest_addr.clone(), *count);
                                 }
                             }
                         }
@@ -512,6 +539,49 @@ mod tests {
         cs.commit();
 
         // THEN: Data is physically removed from internal storage via retain
+        assert!(cs.shards_stats_by_partitions.is_empty());
+    }
+
+    #[test]
+    fn test_repeated_staged_processed_to_update_does_not_double_decrement() {
+        let for_shard = mock_shard(1);
+        let from_shard = mock_shard(2);
+        let partition = QueuePartitionIdx::ZERO;
+        let mut cs = CumulativeStatistics::new(for_shard, Default::default());
+
+        let mut stats = AccountStatistics::default();
+        stats.insert(mock_addr(1), 5);
+        cs.apply_diff(partition, from_shard, QueueKey::max_for_lt(10), stats);
+
+        cs.begin();
+
+        let mut pt_map = ProcessedToByPartitions::default();
+        let mut inner = BTreeMap::default();
+        inner.insert(from_shard, QueueKey::max_for_lt(10));
+        pt_map.insert(partition, inner);
+
+        cs.handle_processed_to_update(&for_shard, &pt_map);
+        assert_eq!(
+            cs.result()
+                .get(&partition)
+                .unwrap()
+                .initial_stats
+                .total_count(),
+            0
+        );
+
+        // Same staged update in the same transaction must be idempotent.
+        cs.handle_processed_to_update(&for_shard, &pt_map);
+        assert_eq!(
+            cs.result()
+                .get(&partition)
+                .unwrap()
+                .initial_stats
+                .total_count(),
+            0
+        );
+
+        cs.commit();
         assert!(cs.shards_stats_by_partitions.is_empty());
     }
 

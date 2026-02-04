@@ -40,7 +40,7 @@ humantime = { workspace = true }
 indexmap = { workspace = true }
 metrics = { workspace = true }
 num-bigint = { workspace = true }
-parking_lot = { workspace = true }
+parking_lot = { workspace = true, features = ["send_guard"] }
 rand = { workspace = true }
 rayon = { workspace = true }
 scc = { workspace = true }
@@ -68,9 +68,9 @@ tycho-network = { workspace = true }
 tycho-storage = { workspace = true }
 tycho-util = { workspace = true }
 tycho-vm = { workspace = true }
-criterion = "0.7.0"
 
 [dev-dependencies]
+criterion = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 tycho-block-util = { workspace = true, features = ["test"] }
 tycho-core = { workspace = true, features = ["test"] }
