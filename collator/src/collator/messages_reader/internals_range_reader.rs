@@ -55,7 +55,7 @@ impl<V: InternalMessageValue> InternalsRangeReader<V> {
         if !reader_state.is_fully_read() {
             let mut ranges = Vec::with_capacity(reader_state.shards.len());
 
-            for (shard_id, shard_reader_state) in &reader_state.shards {
+            for (shard_id, shard_reader_state) in &*reader_state.shards {
                 let shard_range_to = QueueKey::max_for_lt(shard_reader_state.to);
                 ranges.push(QueueShardBoundedRange {
                     shard_ident: *shard_id,
@@ -120,8 +120,8 @@ impl<V: InternalMessageValue> InternalsRangeReader<V> {
                     // check buffers in previous partition
                     for prev_par_range_reader in prev_par_reader.range_readers().values() {
                         let reader_state = prev_par_reader
-                            .reader_state()
-                            .ranges()
+                            .reader_state
+                            .ranges
                             .get(&prev_par_range_reader.seqno)
                             .unwrap();
 
@@ -198,11 +198,7 @@ pub fn partitions_have_intersecting_accounts<V: InternalMessageValue>(
 
     // Check buffers in range readers
     for range_reader_seqno in next.range_readers.keys() {
-        let state = next
-            .reader_state()
-            .ranges()
-            .get(range_reader_seqno)
-            .unwrap();
+        let state = next.reader_state.ranges.get(range_reader_seqno).unwrap();
 
         for (account_address, _) in state.buffer.iter() {
             let addr = IntAddr::Std(StdAddr::new(workchain, *account_address));

@@ -1,3 +1,4 @@
+use tycho_util::transactional::value::TransactionalValue;
 use tycho_util_proc::Transactional;
 
 use crate::collator::messages_buffer::{
@@ -9,22 +10,18 @@ use crate::types::processed_upto::ExternalsRangeInfo;
 pub struct ExternalsPartitionRangeReaderState {
     /// Buffer to store external messages
     /// before collect them to the next execution group
-    #[tx(transactional)]
     pub buffer: MessagesBuffer,
     /// Skip offset before collecting messages from this range.
     /// Because we should collect from others.
-    pub skip_offset: u32,
+    pub skip_offset: TransactionalValue<u32>,
     /// How many times externals messages were collected from all ranges.
     /// Every range contains offset that was reached when range was the last.
     /// So the current last range contains the actual offset.
-    pub processed_offset: u32,
+    pub processed_offset: TransactionalValue<u32>,
     /// Last chain time used to check externals expiration.
     /// If `next_chain_time` was not changed on collect,
     /// we can omit the expire check.
-    pub last_expire_check_on_ct: Option<u64>,
-
-    #[tx(state)]
-    tx: Option<ExternalsPartitionRangeReaderStateTx>,
+    pub last_expire_check_on_ct: TransactionalValue<Option<u64>>,
 }
 
 impl ExternalsPartitionRangeReaderState {
@@ -36,10 +33,9 @@ impl ExternalsPartitionRangeReaderState {
     ) -> Self {
         Self {
             buffer,
-            skip_offset,
-            processed_offset,
-            last_expire_check_on_ct,
-            tx: None,
+            skip_offset: TransactionalValue::new(skip_offset),
+            processed_offset: TransactionalValue::new(processed_offset),
+            last_expire_check_on_ct: TransactionalValue::new(last_expire_check_on_ct),
         }
     }
 
@@ -55,10 +51,9 @@ impl From<&ExternalsRangeInfo> for ExternalsPartitionRangeReaderState {
     fn from(value: &ExternalsRangeInfo) -> Self {
         Self {
             buffer: Default::default(),
-            skip_offset: value.skip_offset,
-            processed_offset: value.processed_offset,
-            last_expire_check_on_ct: None,
-            tx: Default::default(),
+            skip_offset: TransactionalValue::new(value.skip_offset),
+            processed_offset: TransactionalValue::new(value.processed_offset),
+            last_expire_check_on_ct: TransactionalValue::new(None),
         }
     }
 }

@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use tycho_util::transactional::btreemap::deep::TransactionalBTreeMapDeep;
+use tycho_util::transactional::value::TransactionalValue;
 use tycho_util_proc::Transactional;
 
 use crate::collator::messages_reader::state;
@@ -11,38 +13,18 @@ use crate::types::processed_upto::{BlockSeqno, InternalsProcessedUptoStuff};
 pub struct InternalsPartitionReaderState {
     /// Ranges will be extracted during collation process.
     /// Should access them only before collation and after reader finalization.
-    #[tx(collection)]
-    ranges: BTreeMap<BlockSeqno, InternalsRangeReaderState>,
+    pub ranges: TransactionalBTreeMapDeep<BlockSeqno, InternalsRangeReaderState>,
 
-    pub processed_to: ProcessedTo,
+    pub processed_to: TransactionalValue<ProcessedTo>,
 
     /// Actual current processed offset
     /// during the messages reading.
     /// Is incremented before collect.
-    pub curr_processed_offset: u32,
-
-    #[tx(state)]
-    tx: Option<InternalsPartitionReaderStateTx>,
+    pub curr_processed_offset: TransactionalValue<u32>,
 }
 
 impl InternalsPartitionReaderState {
-    pub fn ranges(&self) -> &BTreeMap<BlockSeqno, InternalsRangeReaderState> {
-        &self.ranges
-    }
-
-    pub fn get_range_mut(&mut self, seqno: &BlockSeqno) -> Option<&mut InternalsRangeReaderState> {
-        self.ranges.get_mut(seqno)
-    }
-
-    pub fn tx_insert_range(&mut self, seqno: BlockSeqno, state: InternalsRangeReaderState) {
-        self.tx_insert_ranges(seqno, state);
-    }
-
-    pub fn tx_remove_range(&mut self, seqno: &BlockSeqno) -> bool {
-        self.tx_remove_ranges(seqno)
-    }
-
-    pub fn tx_retain_ranges<F>(&mut self, mut f: F)
+    pub fn retain_ranges<F>(&mut self, mut f: F)
     where
         F: FnMut(&BlockSeqno, &mut InternalsRangeReaderState) -> bool,
     {
@@ -55,7 +37,7 @@ impl InternalsPartitionReaderState {
         }
 
         for k in to_remove {
-            self.tx_remove_ranges(&k);
+            self.ranges.remove(&k);
         }
     }
 
@@ -71,26 +53,27 @@ impl InternalsPartitionReaderState {
             &'s mut InternalsRangeReaderState,
         ) -> anyhow::Result<R>,
     {
-        state::with_prev_list_and_current(&mut self.ranges, key, prev_keys, f)
+        state::with_prev_list_and_current(self.ranges.inner_mut(), key, prev_keys, f)
     }
 }
 
 impl From<&InternalsProcessedUptoStuff> for InternalsPartitionReaderState {
     fn from(value: &InternalsProcessedUptoStuff) -> Self {
+        let ranges: BTreeMap<u32, InternalsRangeReaderState> = value
+            .ranges
+            .iter()
+            .map(|(k, v)| {
+                (
+                    *k,
+                    InternalsRangeReaderState::from_range_info(v, &value.processed_to),
+                )
+            })
+            .collect();
+
         Self {
-            curr_processed_offset: 0,
-            processed_to: value.processed_to.clone(),
-            ranges: value
-                .ranges
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        *k,
-                        InternalsRangeReaderState::from_range_info(v, &value.processed_to),
-                    )
-                })
-                .collect(),
-            tx: None,
+            curr_processed_offset: TransactionalValue::new(0),
+            processed_to: TransactionalValue::new(value.processed_to.clone()),
+            ranges: ranges.into(),
         }
     }
 }

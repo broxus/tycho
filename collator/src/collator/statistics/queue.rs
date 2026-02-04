@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use parking_lot::{Mutex, MutexGuard};
 use tycho_types::models::{IntAddr, ShardIdent};
-use tycho_util::transactional_types::Transactional;
+use tycho_util::transactional::Transactional;
 
 use crate::internal_queue::types::stats::{AccountStatistics, QueueStatistics, StatisticsViewIter};
 
@@ -84,8 +84,8 @@ impl Transactional for TrackedQueueStatistics {
         guard.tracked_total = guard.tracked_total_snapshot;
     }
 
-    fn is_in_transaction(&self) -> bool {
-        self.inner.lock().statistics.is_in_transaction()
+    fn in_tx(&self) -> bool {
+        self.inner.lock().statistics.in_tx()
     }
 }
 

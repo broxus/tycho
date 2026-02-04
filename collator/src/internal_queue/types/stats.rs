@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 use tycho_types::models::{IntAddr, ShardIdent};
 use tycho_util::FastHashMap;
-use tycho_util::transactional_types::Transactional;
+use tycho_util::transactional::Transactional;
 
 use crate::internal_queue::types::diff::QueueDiffWithMessages;
 use crate::internal_queue::types::message::InternalMessageValue;
@@ -70,7 +70,7 @@ impl Transactional for QueueStatistics {
         });
     }
 
-    fn is_in_transaction(&self) -> bool {
+    fn in_tx(&self) -> bool {
         self.in_transaction
     }
 }
