@@ -2,11 +2,12 @@ use std::borrow::Borrow;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
+use bytes::Bytes;
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
-use tycho_network::{KnownPeerHandle, Network, PeerId, PeerResolver, PublicOverlay, Request};
+use tycho_network::{KnownPeerHandle, Network, PeerId, PeerResolver, PublicOverlay};
 use tycho_types::models::ValidatorSet;
 use tycho_util::FastHashSet;
 use tycho_util::futures::JoinTask;
@@ -357,7 +358,7 @@ impl Validators {
             tracing::debug!(epoch,"finished monitoring resolved validators");
         }
 
-        let request = Request::from_tl(overlay::Ping);
+        let request = Bytes::from(tl_proto::serialize(overlay::Ping));
 
         let max_validators = self.config.keep;
 
@@ -388,7 +389,7 @@ impl Validators {
                     let peer_id = validator.peer_id();
                     let res = tokio::time::timeout(
                         ping_timeout,
-                        overlay.query(&network, &peer_id, request),
+                        overlay.query(&network, &peer_id, request.into()),
                     )
                     .await;
 

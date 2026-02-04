@@ -10,7 +10,7 @@ use std::time::Duration;
 use anyhow::Result;
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
-use tycho_network::{DhtClient, Network, OverlayId, PeerId, PublicOverlay, Request};
+use tycho_network::{Body, DhtClient, Network, OverlayId, PeerId, PublicOverlay};
 
 use self::common::{NodeBase, Ping, PingPongService, Pong};
 
@@ -51,7 +51,7 @@ impl Node {
         for<'a> A: tl_proto::TlRead<'a, Repr = tl_proto::Boxed>,
     {
         self.public_overlay
-            .query(&self.network, peer_id, Request::from_tl(req))
+            .query(&self.network, peer_id, Body::from_tl(req))
             .await?
             .parse_tl::<A>()
             .map_err(Into::into)

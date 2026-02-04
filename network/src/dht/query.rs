@@ -16,7 +16,7 @@ use tycho_util::{FastDashMap, FastHashMap, FastHashSet};
 use crate::dht::routing::{HandlesRoutingTable, SimpleRoutingTable};
 use crate::network::Network;
 use crate::proto::dht::{NodeResponse, Value, ValueRef, ValueResponse, rpc};
-use crate::types::{PeerId, PeerInfo, Request};
+use crate::types::{Body, PeerId, PeerInfo, Request};
 use crate::util::NetworkExt;
 
 pub struct QueryCache<R> {
@@ -378,7 +378,7 @@ impl Query {
 
         let req = network.query(&node.id, Request {
             version: Default::default(),
-            body: request_body.clone(),
+            body: Body::simple(request_body),
         });
 
         let res = match tokio::time::timeout(REQUEST_TIMEOUT, req).await {
@@ -443,7 +443,7 @@ impl StoreValue<()> {
 
         let req = network.send(&node.id, Request {
             version: Default::default(),
-            body: request_body.clone(),
+            body: Body::simple(request_body),
         });
 
         let res = (tokio::time::timeout(REQUEST_TIMEOUT, req).await).ok();

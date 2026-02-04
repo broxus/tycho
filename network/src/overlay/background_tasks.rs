@@ -3,12 +3,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
+use bytes::Bytes;
 use futures_util::StreamExt;
 use indexmap::IndexSet;
 use rand::Rng;
 use tycho_util::futures::JoinTask;
 use tycho_util::time::{now_sec, shifted_interval, shifted_interval_immediate};
 
+use crate::Body;
 use crate::dht::{DhtClient, DhtQueryMode, DhtService};
 use crate::network::{KnownPeerHandle, Network, WeakNetwork};
 use crate::overlay::tasks_stream::TasksStream;
@@ -438,9 +440,9 @@ impl OverlayServiceInner {
         // Spawn tasks to collect overlay entries for unknown peers.
         let mut futures = futures_util::stream::FuturesUnordered::new();
         {
-            let req = Request::from_tl(rpc::GetPublicEntry {
+            let req = Bytes::from(tl_proto::serialize(rpc::GetPublicEntry {
                 overlay_id: overlay_id.to_bytes(),
-            });
+            }));
 
             // NOTE: This guard must be dropped before collecting futures.
             let all_entries = overlay.read_entries();
@@ -455,8 +457,14 @@ impl OverlayServiceInner {
                 let req = req.clone();
                 futures.push(JoinTask::new(
                     async move {
-                        match tokio::time::timeout(QUERY_TIMEOUT, network.query(&peer_id, req))
-                            .await
+                        match tokio::time::timeout(
+                            QUERY_TIMEOUT,
+                            network.query(&peer_id, Request {
+                                version: Default::default(),
+                                body: Body::simple(req),
+                            }),
+                        )
+                        .await
                         {
                             Ok(entry) => match entry?.parse_tl()? {
                                 PublicEntryResponse::Found(entry) => {

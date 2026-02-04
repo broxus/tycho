@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use arc_swap::ArcSwapOption;
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use indexmap::{IndexMap, IndexSet};
 use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use rand::Rng;
@@ -18,7 +18,9 @@ use crate::network::Network;
 use crate::overlay::OverlayId;
 use crate::overlay::metrics::Metrics;
 use crate::proto::overlay::{PublicEntry, PublicEntryToSign, rpc};
-use crate::types::{BoxService, PeerId, Request, Response, Service, ServiceExt, ServiceRequest};
+use crate::types::{
+    Body, BoxService, PeerId, Request, Response, Service, ServiceExt, ServiceRequest,
+};
 use crate::util::NetworkExt;
 
 pub struct PublicOverlayBuilder {
@@ -81,9 +83,9 @@ impl PublicOverlayBuilder {
     {
         const UNRESOLVED_QUEUE_CAPACITY: usize = 5; // peers
 
-        let request_prefix = tl_proto::serialize(rpc::Prefix {
+        let request_prefix = Bytes::from(tl_proto::serialize(rpc::Prefix {
             overlay_id: self.overlay_id.as_bytes(),
-        });
+        }));
 
         let entries = PublicOverlayEntries {
             items: Default::default(),
@@ -106,7 +108,7 @@ impl PublicOverlayBuilder {
                 unknown_peers_queue: UnknownPeersQueue::with_capacity(UNRESOLVED_QUEUE_CAPACITY),
                 banned_peer_ids: self.banned_peer_ids,
                 service: service.boxed(),
-                request_prefix: request_prefix.into_boxed_slice(),
+                request_prefix,
                 metrics: self
                     .name
                     .map(|label| Metrics::new("tycho_public_overlay", label))
@@ -155,22 +157,27 @@ impl PublicOverlay {
         &self,
         network: &Network,
         peer_id: &PeerId,
-        mut request: Request,
+        request: Body,
     ) -> Result<Response> {
-        self.inner.metrics.record_tx(request.body.len());
-        self.prepend_prefix_to_body(&mut request.body);
-        network.query(peer_id, request).await
+        // TODO: metrics
+        // self.inner.metrics.record_tx(request.body.len());
+        network
+            .query(peer_id, Request {
+                version: Default::default(),
+                body: request.with_prefix(self.inner.request_prefix.clone()),
+            })
+            .await
     }
 
-    pub async fn send(
-        &self,
-        network: &Network,
-        peer_id: &PeerId,
-        mut request: Request,
-    ) -> Result<()> {
-        self.inner.metrics.record_tx(request.body.len());
-        self.prepend_prefix_to_body(&mut request.body);
-        network.send(peer_id, request).await
+    pub async fn send(&self, network: &Network, peer_id: &PeerId, request: Body) -> Result<()> {
+        // TODO: metrics
+        // self.inner.metrics.record_tx(request.body.len());
+        network
+            .send(peer_id, Request {
+                version: Default::default(),
+                body: request.with_prefix(self.inner.request_prefix.clone()),
+            })
+            .await
     }
 
     /// Bans the given peer from the overlay.
@@ -391,16 +398,6 @@ impl PublicOverlay {
             self.inner.entries_removed.notify_waiters();
         }
     }
-
-    fn prepend_prefix_to_body(&self, body: &mut Bytes) {
-        let this = self.inner.as_ref();
-
-        // TODO: reduce allocations
-        let mut res = BytesMut::with_capacity(this.request_prefix.len() + body.len());
-        res.extend_from_slice(&this.request_prefix);
-        res.extend_from_slice(body);
-        *body = res.freeze();
-    }
 }
 
 impl std::fmt::Debug for PublicOverlay {
@@ -425,7 +422,7 @@ struct Inner {
     unknown_peers_queue: UnknownPeersQueue,
     banned_peer_ids: FastDashSet<PeerId>,
     service: BoxService<ServiceRequest, Response>,
-    request_prefix: Box<[u8]>,
+    request_prefix: Bytes,
     metrics: Metrics,
 }
 

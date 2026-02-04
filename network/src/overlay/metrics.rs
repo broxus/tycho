@@ -18,6 +18,8 @@ impl Metrics {
         }
     }
 
+    // TODO: Propagate metrics to streams
+    #[expect(unused)]
     pub fn record_tx(&self, value: usize) {
         if let Metrics::Enabled { tx, .. } = self {
             tx.increment(value as u64);

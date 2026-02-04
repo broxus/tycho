@@ -5,7 +5,7 @@ use anyhow::Result;
 use bytes::Bytes;
 use rand::prelude::IndexedRandom;
 use tokio::task::AbortHandle;
-use tycho_network::{ConnectionError, Network, PublicOverlay, Request, UnknownPeerError};
+use tycho_network::{Body, ConnectionError, Network, PublicOverlay, UnknownPeerError};
 
 pub use self::config::{NeighborsConfig, PublicOverlayClientConfig, ValidatorsConfig};
 pub use self::neighbour::{Neighbour, NeighbourStats, PunishReason};
@@ -118,16 +118,12 @@ impl PublicOverlayClient {
         self.inner.send(data).await
     }
 
-    pub async fn send_to_validator(
-        &self,
-        validator: Validator,
-        data: Request,
-    ) -> Result<(), Error> {
+    pub async fn send_to_validator(&self, validator: Validator, data: Body) -> Result<(), Error> {
         self.inner.send_to_validator(validator.clone(), data).await
     }
 
     #[inline]
-    pub async fn send_raw(&self, neighbour: Neighbour, req: Request) -> Result<(), Error> {
+    pub async fn send_raw(&self, neighbour: Neighbour, req: Body) -> Result<(), Error> {
         self.inner.send_impl(neighbour, req).await
     }
 
@@ -143,7 +139,7 @@ impl PublicOverlayClient {
     pub async fn query_raw<A>(
         &self,
         neighbour: Neighbour,
-        req: Request,
+        req: Body,
     ) -> Result<QueryResponse<A>, Error>
     where
         for<'a> A: tl_proto::TlRead<'a, Repr = tl_proto::Boxed>,
@@ -208,7 +204,7 @@ impl Inner {
         tracing::info!("started");
         scopeguard::defer! { tracing::info!("finished"); };
 
-        let req = Request::from_tl(overlay::Ping);
+        let req = Bytes::from(tl_proto::serialize(overlay::Ping));
 
         // Start pinging neighbours
         let mut interval = tokio::time::interval(self.config.neighbors.ping_interval);
@@ -222,7 +218,7 @@ impl Inner {
             };
 
             let peer_id = *neighbour.peer_id();
-            match self.query_impl(neighbour.clone(), req.clone()).await {
+            match self.query_impl(neighbour.clone(), req.clone().into()).await {
                 Ok(res) => match tl_proto::deserialize::<overlay::Pong>(&res.data) {
                     Ok(_) => {
                         res.accept();
@@ -341,10 +337,10 @@ impl Inner {
             return Err(Error::NoNeighbours);
         };
 
-        self.send_impl(neighbour, Request::from_tl(data)).await
+        self.send_impl(neighbour, Body::from_tl(data)).await
     }
 
-    async fn send_to_validator(&self, validator: Validator, data: Request) -> Result<(), Error> {
+    async fn send_to_validator(&self, validator: Validator, data: Body) -> Result<(), Error> {
         let res = self
             .overlay
             .send(&self.network, &validator.peer_id(), data)
@@ -361,12 +357,12 @@ impl Inner {
             return Err(Error::NoNeighbours);
         };
 
-        self.query_impl(neighbour, Request::from_tl(data))
+        self.query_impl(neighbour, Body::from_tl(data))
             .await?
             .parse()
     }
 
-    async fn send_impl(&self, neighbour: Neighbour, req: Request) -> Result<(), Error> {
+    async fn send_impl(&self, neighbour: Neighbour, req: Body) -> Result<(), Error> {
         let started_at = Instant::now();
 
         let res = tokio::time::timeout(
@@ -398,7 +394,7 @@ impl Inner {
     async fn query_impl(
         &self,
         neighbour: Neighbour,
-        req: Request,
+        req: Body,
     ) -> Result<QueryResponse<Bytes>, Error> {
         let started_at = Instant::now();
 

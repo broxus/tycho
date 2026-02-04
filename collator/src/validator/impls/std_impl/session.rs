@@ -8,6 +8,7 @@ use std::task::{Context, Poll, Waker};
 use anyhow::Result;
 use arc_swap::ArcSwapOption;
 use backon::BackoffBuilder;
+use bytes::Bytes;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{Future, StreamExt};
 use scc::TreeIndex;
@@ -478,10 +479,10 @@ impl Inner {
         let _histogram = HistogramGuard::begin(METRIC_RECEIVE_SIGNATURE_TIME);
 
         let block_seqno = block_signatures.block_id.seqno;
-        let req = (self.client).request_from_tl(proto::rpc::ExchangeSignaturesRef {
+        let req = Bytes::from(tl_proto::serialize(proto::rpc::ExchangeSignaturesRef {
             block_seqno,
             signature: block_signatures.own_signature.as_ref(),
-        });
+        }));
 
         let slot = block_signatures
             .other_signatures
@@ -526,7 +527,7 @@ impl Inner {
                     let timeout = self.config.exchange_signatures_timeout;
                     let query = {
                         let _histogram = HistogramGuard::begin(METRIC_EXCHANGE_SIGNATURE_TIME);
-                        self.client.query(&peer_id, req.clone())
+                        self.client.query(&peer_id, req.clone().into())
                     };
 
                     match tokio::time::timeout(timeout, query).await {

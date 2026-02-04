@@ -8,7 +8,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
-use tycho_network::{DhtClient, Network, OverlayId, PeerId, PrivateOverlay};
+use tycho_network::{Body, DhtClient, Network, OverlayId, PeerId, PrivateOverlay};
 
 use self::common::{NodeBase, Ping, PingPongService, Pong};
 
@@ -48,9 +48,8 @@ impl Node {
         Q: tl_proto::TlWrite<Repr = tl_proto::Boxed>,
         for<'a> A: tl_proto::TlRead<'a, Repr = tl_proto::Boxed>,
     {
-        let req = self.private_overlay.request_from_tl(req);
         self.private_overlay
-            .query(&self.network, peer_id, req)
+            .query(&self.network, peer_id, Body::from_tl(req))
             .await?
             .parse_tl::<A>()
             .map_err(Into::into)

@@ -12,7 +12,7 @@ use scopeguard::ScopeGuard;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tycho_block_util::archive::ArchiveVerifier;
-use tycho_network::{PublicOverlay, Request};
+use tycho_network::{Body, PublicOverlay};
 use tycho_types::models::BlockId;
 use tycho_util::compression::ZstdDecompressStream;
 use tycho_util::futures::JoinTask;
@@ -177,7 +177,7 @@ impl BlockchainRpcClient {
         let mut delivered_to = 0;
 
         let targets = client.get_broadcast_targets();
-        let request = Request::from_tl(ExternalMessage { data: message });
+        let request = Bytes::from(tl_proto::serialize(ExternalMessage { data: message }));
         let mut futures = FuturesUnordered::new();
 
         // we wait for all the responses to come back but cap them at `broadcast_timeout_upper_bound`
@@ -191,7 +191,7 @@ impl BlockchainRpcClient {
 
             futures.push(JoinTask::new(async move {
                 let start = Instant::now();
-                let res = client.send_to_validator(validator, request).await;
+                let res = client.send_to_validator(validator, request.into()).await;
                 this.response_tracker
                     .lock()
                     .append(start.elapsed().as_millis() as i64);
@@ -278,7 +278,7 @@ impl BlockchainRpcClient {
         let retries = self.inner.config.download_retries;
 
         download_block_inner(
-            Request::from_tl(rpc::GetBlockFull { block_id: *block }),
+            Body::from_tl(rpc::GetBlockFull { block_id: *block }),
             overlay_client,
             neighbour,
             requirement,
@@ -301,7 +301,7 @@ impl BlockchainRpcClient {
         let retries = self.inner.config.download_retries;
 
         download_block_inner(
-            Request::from_tl(rpc::GetNextBlockFull {
+            Body::from_tl(rpc::GetNextBlockFull {
                 prev_block_id: *prev_block,
             }),
             overlay_client,
@@ -356,7 +356,7 @@ impl BlockchainRpcClient {
         let data = client
             .query_raw::<Data>(
                 neighbour.clone(),
-                Request::from_tl(rpc::GetPersistentShardStateChunk {
+                Body::from_tl(rpc::GetPersistentShardStateChunk {
                     block_id: *block_id,
                     offset,
                 }),
@@ -378,20 +378,20 @@ impl BlockchainRpcClient {
             .neighbours()
             .choose_multiple(NEIGHBOUR_COUNT, NeighbourType::Reliable);
 
-        let req = match kind {
-            PersistentStateKind::Shard => Request::from_tl(rpc::GetPersistentShardStateInfo {
+        let req = Bytes::from(match kind {
+            PersistentStateKind::Shard => tl_proto::serialize(rpc::GetPersistentShardStateInfo {
                 block_id: *block_id,
             }),
-            PersistentStateKind::Queue => Request::from_tl(rpc::GetPersistentQueueStateInfo {
+            PersistentStateKind::Queue => tl_proto::serialize(rpc::GetPersistentQueueStateInfo {
                 block_id: *block_id,
             }),
-        };
+        });
 
         let mut futures = FuturesUnordered::new();
         for neighbour in neighbours {
             futures.push(
                 self.overlay_client()
-                    .query_raw::<PersistentStateInfo>(neighbour.clone(), req.clone()),
+                    .query_raw::<PersistentStateInfo>(neighbour.clone(), req.clone().into()),
             );
         }
 
@@ -463,14 +463,14 @@ impl BlockchainRpcClient {
             |offset| {
                 tracing::debug!("downloading persistent state chunk");
 
-                let req = match state.kind {
+                let req = Bytes::from(match state.kind {
                     PersistentStateKind::Shard => {
-                        Request::from_tl(rpc::GetPersistentShardStateChunk { block_id, offset })
+                        tl_proto::serialize(rpc::GetPersistentShardStateChunk { block_id, offset })
                     }
                     PersistentStateKind::Queue => {
-                        Request::from_tl(rpc::GetPersistentQueueStateChunk { block_id, offset })
+                        tl_proto::serialize(rpc::GetPersistentQueueStateChunk { block_id, offset })
                     }
-                };
+                });
                 download_with_retries(
                     req,
                     self.overlay_client().clone(),
@@ -503,14 +503,17 @@ impl BlockchainRpcClient {
 
         // Find a neighbour which has the requested archive
         let pending_archive = 'info: {
-            let req = Request::from_tl(rpc::GetArchiveInfo { mc_seqno });
+            let req = Bytes::from(tl_proto::serialize(rpc::GetArchiveInfo { mc_seqno }));
 
             // Number of ArchiveInfo::TooNew responses
             let mut new_archive_count = 0usize;
 
             let mut futures = FuturesUnordered::new();
             for neighbour in neighbours {
-                futures.push(self.overlay_client().query_raw(neighbour, req.clone()));
+                futures.push(
+                    self.overlay_client()
+                        .query_raw(neighbour, req.clone().into()),
+                );
             }
 
             let mut err = None;
@@ -599,7 +602,10 @@ impl BlockchainRpcClient {
 
                 tracing::debug!(archive_id, offset, "downloading archive chunk");
                 download_with_retries(
-                    Request::from_tl(rpc::GetArchiveChunk { archive_id, offset }),
+                    Bytes::from(tl_proto::serialize(rpc::GetArchiveChunk {
+                        archive_id,
+                        offset,
+                    })),
                     overlay_client,
                     neighbour,
                     retries,
@@ -689,7 +695,7 @@ pub enum DataRequirement {
 }
 
 async fn download_block_inner(
-    req: Request,
+    req: Body,
     overlay_client: PublicOverlayClient,
     neighbour: Neighbour,
     requirement: DataRequirement,
@@ -789,7 +795,10 @@ async fn download_block_inner(
 
             tracing::debug!(%block_id, offset, "downloading block data chunk");
             JoinTask::new(download_with_retries(
-                Request::from_tl(rpc::GetBlockDataChunk { block_id, offset }),
+                Bytes::from(tl_proto::serialize(rpc::GetBlockDataChunk {
+                    block_id,
+                    offset,
+                })),
                 overlay_client,
                 neighbour,
                 retries,
@@ -825,7 +834,7 @@ async fn download_block_inner(
 }
 
 async fn download_with_retries(
-    req: Request,
+    req: Bytes,
     overlay_client: PublicOverlayClient,
     neighbour: Neighbour,
     max_retries: usize,
@@ -834,7 +843,7 @@ async fn download_with_retries(
     let mut retries = 0;
     loop {
         match overlay_client
-            .query_raw::<Data>(neighbour.clone(), req.clone())
+            .query_raw::<Data>(neighbour.clone(), req.clone().into())
             .await
         {
             Ok(r) => {

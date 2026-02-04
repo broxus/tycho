@@ -1,4 +1,5 @@
 use anyhow::Result;
+use bytes::Bytes;
 use futures_util::StreamExt;
 use futures_util::sink::SinkExt;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -71,18 +72,17 @@ pub(crate) async fn send_request<T: AsyncWrite + Unpin>(
     request: Request,
 ) -> std::io::Result<()> {
     send_version(send_stream.get_mut(), request.version).await?;
-    send_stream.send(request.body).await
+    let mut stream = request.body.into_stream();
+    send_stream.send_all(&mut stream).await
 }
 
+// TODO: Propagate stream tail as body stream.
 pub(crate) async fn recv_request<T: AsyncRead + Unpin>(
     recv_stream: &mut FramedRead<T, LengthDelimitedCodec>,
-) -> std::io::Result<Request> {
+) -> std::io::Result<(Version, Bytes)> {
     let version = recv_version(recv_stream.get_mut()).await?;
     match recv_stream.next().await {
-        Some(body) => Ok(Request {
-            version,
-            body: body?.freeze(),
-        }),
+        Some(body) => Ok((version, body?.freeze())),
         None => Err(std::io::Error::new(
             std::io::ErrorKind::UnexpectedEof,
             WireError::UnexpectedEof,

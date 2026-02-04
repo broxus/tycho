@@ -12,10 +12,10 @@ pub use network::{
 };
 pub use quinn;
 pub use types::{
-    Address, BoxCloneService, BoxService, Direction, DisconnectReason, InboundRequestMeta,
-    PeerAffinity, PeerEvent, PeerEventData, PeerId, PeerInfo, PrefixedRequest, Request, Response,
-    RpcQuery, Service, ServiceExt, ServiceMessageFn, ServiceQueryFn, ServiceRequest, Version,
-    service_message_fn, service_query_fn,
+    Address, Body, BodyImpl, BoxBody, BoxCloneService, BoxService, Direction, DisconnectReason,
+    InboundRequestMeta, PeerAffinity, PeerEvent, PeerEventData, PeerId, PeerInfo, Request,
+    Response, RpcQuery, Service, ServiceExt, ServiceMessageFn, ServiceQueryFn, ServiceRequest,
+    SizeHint, Version, service_message_fn, service_query_fn,
 };
 
 pub use self::overlay::{

@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use bytes::Bytes;
 use tl_proto::TlError;
-use tycho_network::{PeerId, PrefixedRequest};
+use tycho_network::PeerId;
 use tycho_util::metrics::HistogramGuard;
 
 use crate::intercom::Dispatcher;
@@ -20,15 +20,14 @@ pub enum QueryError {
 
 pub struct BroadcastQuery {
     dispatcher: Dispatcher,
-    request: PrefixedRequest,
+    request: Bytes,
 }
 
 impl BroadcastQuery {
     pub fn new(dispatcher: Dispatcher, point: &Point) -> Self {
-        let request = QueryRequest::broadcast(&dispatcher, point);
         Self {
             dispatcher,
-            request,
+            request: QueryRequest::broadcast(point),
         }
     }
     pub async fn send(&self, peer_id: &PeerId) -> Result<BroadcastResponse, QueryError> {
@@ -43,7 +42,11 @@ impl BroadcastQuery {
             }
         };
 
-        let response = match self.dispatcher.query(peer_id, self.request.clone()).await {
+        let response = match self
+            .dispatcher
+            .query(peer_id, self.request.clone().into())
+            .await
+        {
             Ok(response) => response,
             Err(e) => return Err(QueryError::Network(e)),
         };
@@ -56,14 +59,13 @@ impl BroadcastQuery {
 
 pub struct SignatureQuery {
     dispatcher: Dispatcher,
-    request: PrefixedRequest,
+    request: Bytes,
 }
 impl SignatureQuery {
     pub fn new(dispatcher: Dispatcher, round: Round) -> Self {
-        let request = QueryRequest::signature(&dispatcher, round);
         Self {
             dispatcher,
-            request,
+            request: QueryRequest::signature(round),
         }
     }
     pub async fn send(&self, peer_id: &PeerId) -> Result<SignatureResponse, QueryError> {
@@ -78,7 +80,11 @@ impl SignatureQuery {
             }
         };
 
-        let response = match self.dispatcher.query(peer_id, self.request.clone()).await {
+        let response = match self
+            .dispatcher
+            .query(peer_id, self.request.clone().into())
+            .await
+        {
             Ok(response) => response,
             Err(e) => return Err(QueryError::Network(e)),
         };
@@ -93,16 +99,15 @@ impl SignatureQuery {
 pub struct DownloadQuery(Arc<DownloadQueryInner>);
 struct DownloadQueryInner {
     dispatcher: Dispatcher,
-    request: PrefixedRequest,
+    request: Bytes,
     point_id: PointId,
 }
 
 impl DownloadQuery {
     pub fn new(dispatcher: Dispatcher, point_id: &PointId) -> Self {
-        let request = QueryRequest::download(&dispatcher, point_id);
         Self(Arc::new(DownloadQueryInner {
             dispatcher,
-            request,
+            request: QueryRequest::download(point_id),
             point_id: *point_id,
         }))
     }
@@ -130,7 +135,7 @@ impl DownloadQuery {
         });
 
         let request = self.0.request.clone();
-        let query_result = self.0.dispatcher.query(peer_id, request).await;
+        let query_result = self.0.dispatcher.query(peer_id, request.into()).await;
 
         drop(permit);
         let start = scopeguard::ScopeGuard::into_inner(query_abort_guard);

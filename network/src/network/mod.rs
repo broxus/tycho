@@ -506,6 +506,7 @@ pub enum ConnectionError {
 
 #[cfg(test)]
 mod tests {
+    use bytes::Bytes;
     use futures_util::StreamExt;
     use futures_util::stream::FuturesUnordered;
 
@@ -590,13 +591,14 @@ mod tests {
             .known_peers()
             .insert(make_invalid_peer_info(&peer1), false)?;
 
-        let req = Request {
-            version: Default::default(),
-            body: "hello".into(),
-        };
+        let req = "hello";
 
-        peer1.query(peer2.peer_id(), req.clone()).await?;
-        peer2.query(peer1.peer_id(), req.clone()).await?;
+        peer1
+            .query(peer2.peer_id(), Request::new_simple(req))
+            .await?;
+        peer2
+            .query(peer1.peer_id(), Request::new_simple(req))
+            .await?;
 
         fn assert_is_invalid_certificate(e: anyhow::Error) {
             // A non-recursive downcast to find a connection error
@@ -605,14 +607,14 @@ mod tests {
         }
 
         let err = peer1
-            .query(&PeerId([0; 32]), req.clone())
+            .query(&PeerId([0; 32]), Request::new_simple(req))
             .await
             .map(|_| ())
             .unwrap_err();
         assert_is_invalid_certificate(err);
 
         let err = peer2
-            .query(&PeerId([0; 32]), req.clone())
+            .query(&PeerId([0; 32]), Request::new_simple(req))
             .await
             .map(|_| ())
             .unwrap_err();
@@ -626,7 +628,7 @@ mod tests {
 
         let invalid_peer_id = PeerId([0xff; 32]);
         let err = peer1
-            .query(&invalid_peer_id, req.clone())
+            .query(&invalid_peer_id, Request::new_simple(req))
             .await
             .map(|_| ())
             .unwrap_err();
@@ -646,16 +648,13 @@ mod tests {
             let _peer1_peer2_handle = peer1.known_peers().insert(make_peer_info(&peer2), false)?;
             let _peer2_peer1_handle = peer2.known_peers().insert(make_peer_info(&peer1), false)?;
 
-            let req = Request {
-                version: Default::default(),
-                body: "hello".into(),
-            };
-            let peer1_fut = std::pin::pin!(peer1.query(peer2.peer_id(), req.clone()));
-            let peer2_fut = std::pin::pin!(peer2.query(peer1.peer_id(), req.clone()));
+            let req = "hello";
+            let peer1_fut = std::pin::pin!(peer1.query(peer2.peer_id(), Request::new_simple(req)));
+            let peer2_fut = std::pin::pin!(peer2.query(peer1.peer_id(), Request::new_simple(req)));
 
             let (res1, res2) = futures_util::future::join(peer1_fut, peer2_fut).await;
-            assert_eq!(res1?.body, req.body);
-            assert_eq!(res2?.body, req.body);
+            assert_eq!(res1?.body, req);
+            assert_eq!(res2?.body, req);
         }
 
         Ok(())
@@ -688,15 +687,12 @@ mod tests {
         let _left_to_right = left.known_peers().insert(make_peer_info(&right), false)?;
         let _right_to_left = right.known_peers().insert(make_peer_info(&left), false)?;
 
-        let req = Request {
-            version: Default::default(),
-            body: vec![0xff; 750 * 1024].into(),
-        };
+        let req = Bytes::from(vec![0xff; 750 * 1024]);
 
         for _ in 0..10 {
             let mut futures = FuturesUnordered::new();
             for _ in 0..100 {
-                futures.push(left.send(right.peer_id(), req.clone()));
+                futures.push(left.send(right.peer_id(), Request::new_simple(req.clone())));
             }
 
             while let Some(res) = futures.next().await {

@@ -2,6 +2,7 @@ use std::borrow::Borrow;
 use std::sync::Arc;
 
 use anyhow::Result;
+use bytes::Bytes;
 use indexmap::IndexMap;
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use rand::Rng;
@@ -9,13 +10,14 @@ use tokio::sync::broadcast;
 use tycho_util::futures::BoxFutureOrNoop;
 use tycho_util::{FastHashSet, FastHasherState};
 
-use crate::PrefixedRequest;
 use crate::dht::{PeerResolver, PeerResolverHandle};
 use crate::network::Network;
 use crate::overlay::OverlayId;
 use crate::overlay::metrics::Metrics;
 use crate::proto::overlay::rpc;
-use crate::types::{BoxService, PeerId, Response, Service, ServiceExt, ServiceRequest};
+use crate::types::{
+    Body, BoxService, PeerId, Request, Response, Service, ServiceExt, ServiceRequest,
+};
 use crate::util::NetworkExt;
 
 pub struct PrivateOverlayBuilder {
@@ -64,9 +66,9 @@ impl PrivateOverlayBuilder {
         S: Send + Sync + 'static,
         S: Service<ServiceRequest, QueryResponse = Response>,
     {
-        let request_prefix = tl_proto::serialize(rpc::Prefix {
+        let request_prefix = Bytes::from(tl_proto::serialize(rpc::Prefix {
             overlay_id: self.overlay_id.as_bytes(),
-        });
+        }));
 
         let mut entries = PrivateOverlayEntries {
             items: Default::default(),
@@ -82,7 +84,7 @@ impl PrivateOverlayBuilder {
                 overlay_id: self.overlay_id,
                 entries: RwLock::new(entries),
                 service: service.boxed(),
-                request_prefix: request_prefix.into_boxed_slice(),
+                request_prefix,
                 metrics: self
                     .name
                     .map(|label| Metrics::new("tycho_private_overlay", label))
@@ -113,31 +115,31 @@ impl PrivateOverlay {
         &self.inner.overlay_id
     }
 
-    pub fn request_from_tl<T>(&self, body: T) -> PrefixedRequest
-    where
-        T: tl_proto::TlWrite<Repr = tl_proto::Boxed>,
-    {
-        PrefixedRequest::from_tl(&self.inner.request_prefix, body)
-    }
-
     pub async fn query(
         &self,
         network: &Network,
         peer_id: &PeerId,
-        request: PrefixedRequest,
+        request: Body,
     ) -> Result<Response> {
-        self.inner.metrics.record_rx(request.body_len());
-        network.query(peer_id, request.into()).await
+        // TODO: metrics
+        // self.inner.metrics.record_rx(request.body_len());
+        network
+            .query(peer_id, Request {
+                version: Default::default(),
+                body: request.with_prefix(self.inner.request_prefix.clone()),
+            })
+            .await
     }
 
-    pub async fn send(
-        &self,
-        network: &Network,
-        peer_id: &PeerId,
-        request: PrefixedRequest,
-    ) -> Result<()> {
-        self.inner.metrics.record_rx(request.body_len());
-        network.send(peer_id, request.into()).await
+    pub async fn send(&self, network: &Network, peer_id: &PeerId, request: Body) -> Result<()> {
+        // TODO: metrics
+        // self.inner.metrics.record_rx(request.body_len());
+        network
+            .send(peer_id, Request {
+                version: Default::default(),
+                body: request.with_prefix(self.inner.request_prefix.clone()),
+            })
+            .await
     }
 
     pub fn write_entries(&self) -> PrivateOverlayEntriesWriteGuard<'_> {
@@ -183,7 +185,7 @@ struct Inner {
     overlay_id: OverlayId,
     entries: RwLock<PrivateOverlayEntries>,
     service: BoxService<ServiceRequest, Response>,
-    request_prefix: Box<[u8]>,
+    request_prefix: Bytes,
     metrics: Metrics,
 }
 
