@@ -82,6 +82,12 @@ impl<T: Transactional> Default for TransactionalOption<T> {
     }
 }
 
+impl<T: Transactional> From<Option<T>> for TransactionalOption<T> {
+    fn from(value: Option<T>) -> Self {
+        Self::new(value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

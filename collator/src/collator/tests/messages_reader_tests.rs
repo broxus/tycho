@@ -970,7 +970,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
         tracing::debug!(
             int_curr_processed_offset = ?DebugIter(primary_messages_reader
                 .internals_partition_readers.iter()
-                .map(|(par_id, par)| (par_id, par.reader_state().curr_processed_offset))),
+                .map(|(par_id, par)| (par_id, *par.reader_state.curr_processed_offset))),
             ext_curr_processed_offset = ?DebugIter(primary_messages_reader
                 .externals_reader.reader_state()
                 .by_partitions.iter()
@@ -984,7 +984,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
         tracing::debug!(
             int_curr_processed_offset = ?DebugIter(secondary_messages_reader
                 .internals_partition_readers.iter()
-                .map(|(par_id, par)| (par_id, par.reader_state().curr_processed_offset))),
+                .map(|(par_id, par)| (par_id, *par.reader_state.curr_processed_offset))),
             ext_curr_processed_offset = ?DebugIter(secondary_messages_reader
                 .externals_reader.reader_state()
                 .by_partitions.iter()
