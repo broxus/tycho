@@ -18,10 +18,6 @@ impl<T: Transactional> TransactionalOption<T> {
         self.value.as_ref()
     }
 
-    pub fn get(&self) -> Option<&T> {
-        self.value.as_ref()
-    }
-
     pub fn inner_mut(&mut self) -> Option<&mut T> {
         self.value.as_mut()
     }

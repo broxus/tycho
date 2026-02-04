@@ -5,7 +5,6 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 use tycho_types::models::{MsgInfo, ShardIdent};
-use tycho_util::transactional::value::TransactionalValue;
 
 use super::MessagesReaderMetrics;
 use super::internals_reader::InternalsPartitionReader;
@@ -154,7 +153,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<'_, V> {
 
             let state = InternalsRangeReaderState {
                 // we do not use messages satistics when reading new messages
-                shards: TransactionalValue::new(new_shard_reader_states),
+                shards: new_shard_reader_states.into(),
                 ..Default::default()
             };
 

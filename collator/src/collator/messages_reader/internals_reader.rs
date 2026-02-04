@@ -6,7 +6,6 @@ use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, get_short_addr_string
 use tycho_types::cell::HashBytes;
 use tycho_types::models::{BlockIdShort, MsgInfo, ShardIdent};
 use tycho_util::FastHashSet;
-use tycho_util::transactional::value::TransactionalValue;
 
 use crate::collator::error::CollatorError;
 use crate::collator::messages_buffer::{
@@ -124,10 +123,6 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
 
         Ok(reader)
     }
-
-    // pub fn reader_state(&self) -> &InternalsPartitionReaderState {
-    //     self.reader_state
-    // }
 
     pub(super) fn reset_read_state(&mut self) {
         self.all_ranges_fully_read = false;
@@ -331,8 +326,8 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
         let curr_processed_offset = *self.reader_state.curr_processed_offset;
 
         let last_range_state = self.get_last_range_state_mut()?;
-        last_range_state.processed_offset = TransactionalValue::new(curr_processed_offset);
-        last_range_state.skip_offset = TransactionalValue::new(curr_processed_offset);
+        *last_range_state.processed_offset = curr_processed_offset;
+        *last_range_state.skip_offset = curr_processed_offset;
 
         Ok(())
     }
@@ -501,9 +496,9 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
         }
 
         let mut state = InternalsRangeReaderState {
-            shards: TransactionalValue::new(shard_reader_states),
-            skip_offset: TransactionalValue::new(*self.reader_state.curr_processed_offset),
-            processed_offset: TransactionalValue::new(*self.reader_state.curr_processed_offset),
+            shards: shard_reader_states.into(),
+            skip_offset: (*self.reader_state.curr_processed_offset).into(),
+            processed_offset: (*self.reader_state.curr_processed_offset).into(),
             ..Default::default()
         };
 
