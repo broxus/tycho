@@ -1092,7 +1092,7 @@ fn create_existing_range_reader<V: InternalMessageValue>(
             tracing::trace!(target: tracing_targets::COLLATOR,
                 partition_id = %partition_id,
                 seqno,
-                read_stats = ?DebugIter(range_reader_state.read_stats.inner().unwrap().statistics().iter().map(|(addr, count)| (addr.to_string(), count))),
+                read_stats = ?range_reader_state.read_stats.inner().map(|st| DebugIter(st.statistics().iter().map(|(addr, count)| (addr.to_string(), count)))),
                 "reduce cumulative remaning_msgs_stats by read_stats from range reader",
             );
 

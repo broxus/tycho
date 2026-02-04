@@ -1,6 +1,6 @@
 use tycho_block_util::queue::QueuePartitionIdx;
 use tycho_util::FastHashMap;
-use tycho_util::transactional::hashmap::deep::TransactionalHashMapDeep;
+use tycho_util::transactional::hashmap::TransactionalHashMap;
 use tycho_util::transactional::option::TransactionalOption;
 use tycho_util_proc::Transactional;
 
@@ -10,7 +10,7 @@ use crate::types::ProcessedTo;
 
 #[derive(Transactional, Default)]
 pub struct InternalsReaderState {
-    pub partitions: TransactionalHashMapDeep<QueuePartitionIdx, InternalsPartitionReaderState>,
+    pub partitions: TransactionalHashMap<QueuePartitionIdx, InternalsPartitionReaderState>,
     pub cumulative_statistics: TransactionalOption<CumulativeStatistics>,
 }
 
@@ -21,7 +21,7 @@ impl InternalsReaderState {
     ) -> Self {
         Self {
             partitions: partitions.into(),
-            cumulative_statistics: TransactionalOption::new(cumulative_statistics),
+            cumulative_statistics: cumulative_statistics.into(),
         }
     }
 

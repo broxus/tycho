@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use anyhow::Context;
 use tycho_block_util::queue::QueuePartitionIdx;
-use tycho_util::transactional::btreemap::deep::TransactionalBTreeMapDeep;
+use tycho_util::transactional::btreemap::TransactionalBTreeMap;
 use tycho_util::transactional::value::TransactionalValue;
 use tycho_util_proc::Transactional;
 
@@ -17,8 +17,7 @@ pub struct ExternalsRangeReaderState {
     pub range: TransactionalValue<ExternalsReaderRange>,
 
     /// Partition related externals range reader state
-    pub by_partitions:
-        TransactionalBTreeMapDeep<QueuePartitionIdx, ExternalsPartitionRangeReaderState>,
+    pub by_partitions: TransactionalBTreeMap<QueuePartitionIdx, ExternalsPartitionRangeReaderState>,
 
     #[tx(skip)]
     pub fully_read: bool,
@@ -36,19 +35,21 @@ impl ExternalsRangeReaderState {
         }
     }
 
-    pub fn get_state_by_partition_mut(
+    pub fn get_state_by_partition_mut<T: Into<QueuePartitionIdx>>(
         &mut self,
-        par_id: QueuePartitionIdx,
+        par_id: T,
     ) -> anyhow::Result<&mut ExternalsPartitionRangeReaderState> {
+        let par_id = par_id.into();
         self.by_partitions.get_mut(&par_id).with_context(|| {
-            format!("externals range reader state not exists for partition {par_id}")
+            format!("mut externals range reader state not exists for partition {par_id}")
         })
     }
 
-    pub fn get_state_by_partition(
+    pub fn get_state_by_partition<T: Into<QueuePartitionIdx>>(
         &self,
-        par_id: QueuePartitionIdx,
+        par_id: T,
     ) -> anyhow::Result<&ExternalsPartitionRangeReaderState> {
+        let par_id = par_id.into();
         self.by_partitions.get(&par_id).with_context(|| {
             format!("externals range reader state not exists for partition {par_id}")
         })

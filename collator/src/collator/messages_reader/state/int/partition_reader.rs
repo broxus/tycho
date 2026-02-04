@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use tycho_util::transactional::btreemap::deep::TransactionalBTreeMapDeep;
+use tycho_util::transactional::btreemap::TransactionalBTreeMap;
 use tycho_util::transactional::value::TransactionalValue;
 use tycho_util_proc::Transactional;
 
@@ -13,7 +13,7 @@ use crate::types::processed_upto::{BlockSeqno, InternalsProcessedUptoStuff};
 pub struct InternalsPartitionReaderState {
     /// Ranges will be extracted during collation process.
     /// Should access them only before collation and after reader finalization.
-    pub ranges: TransactionalBTreeMapDeep<BlockSeqno, InternalsRangeReaderState>,
+    pub ranges: TransactionalBTreeMap<BlockSeqno, InternalsRangeReaderState>,
 
     pub processed_to: TransactionalValue<ProcessedTo>,
 

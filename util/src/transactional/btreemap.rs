@@ -1,22 +1,21 @@
-use std::hash::Hash;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::transactional::Transactional;
-use crate::{FastHashMap, FastHashSet};
 
-pub struct TransactionalHashMapDeep<K, V> {
-    inner: FastHashMap<K, V>,
+pub struct TransactionalBTreeMap<K, V> {
+    inner: BTreeMap<K, V>,
     tx: Option<MapTx<K, V>>,
 }
 
 struct MapTx<K, V> {
-    added: FastHashSet<K>,
-    removed: FastHashMap<K, V>,
+    added: BTreeSet<K>,
+    removed: BTreeMap<K, V>,
 }
 
-impl<K: Hash + Eq + Clone, V: Transactional> TransactionalHashMapDeep<K, V> {
+impl<K: Ord + Clone, V: Transactional> TransactionalBTreeMap<K, V> {
     pub fn new() -> Self {
         Self {
-            inner: FastHashMap::default(),
+            inner: BTreeMap::new(),
             tx: None,
         }
     }
@@ -66,10 +65,6 @@ impl<K: Hash + Eq + Clone, V: Transactional> TransactionalHashMapDeep<K, V> {
         self.inner.get_mut(key)
     }
 
-    pub fn get_disjoint_mut<const N: usize>(&mut self, keys: [&K; N]) -> [Option<&mut V>; N] {
-        self.inner.get_disjoint_mut(keys)
-    }
-
     pub fn contains_key(&self, key: &K) -> bool {
         self.inner.contains_key(key)
     }
@@ -82,7 +77,7 @@ impl<K: Hash + Eq + Clone, V: Transactional> TransactionalHashMapDeep<K, V> {
         self.inner.is_empty()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> + Clone {
         self.inner.iter()
     }
 
@@ -101,32 +96,40 @@ impl<K: Hash + Eq + Clone, V: Transactional> TransactionalHashMapDeep<K, V> {
     pub fn keys(&self) -> impl Iterator<Item = &K> {
         self.inner.keys()
     }
+
+    pub fn last_key_value(&self) -> Option<(&K, &V)> {
+        self.inner.last_key_value()
+    }
+
+    pub fn inner_mut(&mut self) -> &mut BTreeMap<K, V> {
+        &mut self.inner
+    }
 }
 
-impl<K: Hash + Eq, V> Default for TransactionalHashMapDeep<K, V> {
+impl<K: Ord, V> Default for TransactionalBTreeMap<K, V> {
     fn default() -> Self {
         Self {
-            inner: FastHashMap::default(),
+            inner: BTreeMap::default(),
             tx: None,
         }
     }
 }
 
-impl<K: Hash + Eq, V> From<FastHashMap<K, V>> for TransactionalHashMapDeep<K, V> {
-    fn from(inner: FastHashMap<K, V>) -> Self {
+impl<K: Ord, V> From<BTreeMap<K, V>> for TransactionalBTreeMap<K, V> {
+    fn from(inner: BTreeMap<K, V>) -> Self {
         Self { inner, tx: None }
     }
 }
 
-impl<K: Hash + Eq + Clone, V: Transactional> Transactional for TransactionalHashMapDeep<K, V> {
+impl<K: Ord + Clone, V: Transactional> Transactional for TransactionalBTreeMap<K, V> {
     fn begin(&mut self) {
         debug_assert!(self.tx.is_none());
         for v in self.inner.values_mut() {
             v.begin();
         }
         self.tx = Some(MapTx {
-            added: FastHashSet::default(),
-            removed: FastHashMap::default(),
+            added: BTreeSet::new(),
+            removed: BTreeMap::new(),
         });
     }
 
