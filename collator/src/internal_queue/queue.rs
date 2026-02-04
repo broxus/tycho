@@ -1,8 +1,9 @@
 use std::marker::PhantomData;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
+use parking_lot::{ArcMutexGuard, ArcRwLockReadGuard, Mutex, RawMutex, RawRwLock, RwLock};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 use tycho_core::global_config::ZerostateId;
@@ -27,6 +28,20 @@ use crate::storage::models::DiffInfo;
 use crate::storage::transaction::InternalQueueTransaction;
 use crate::types::TopBlockIdUpdated;
 use crate::{internal_queue, tracing_targets};
+
+/// Pending queue diff transaction with lock guards.
+/// Locks are held until `write()` is called.
+pub struct PendingQueueDiff {
+    tx: InternalQueueTransaction,
+    _global_guard: ArcRwLockReadGuard<RawRwLock, ()>,
+    _shard_guard: ArcMutexGuard<RawMutex, ()>,
+}
+
+impl PendingQueueDiff {
+    pub fn write(self) -> anyhow::Result<()> {
+        self.tx.write()
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct QueueConfig {
@@ -90,7 +105,7 @@ where
         hash: &HashBytes,
         statistics: DiffStatistics,
         check_sequence: Option<DiffZone>,
-    ) -> Result<Option<InternalQueueTransaction>>;
+    ) -> Result<Option<PendingQueueDiff>>;
 
     /// Add messages to state from `diff.messages` and store diff info (writes immediately)
     fn apply_diff(
@@ -161,7 +176,7 @@ impl<V: InternalMessageValue> QueueFactory<V> for QueueFactoryStdImpl {
             state,
             zerostate_id: self.zerostate_id,
             gc,
-            global_lock: RwLock::new(()),
+            global_lock: Arc::new(RwLock::new(())),
             shard_locks: FastDashMap::default(),
             _phantom_data: Default::default(),
         })
@@ -176,7 +191,7 @@ where
     state: Arc<P>,
     zerostate_id: ZerostateId,
     gc: GcManager,
-    global_lock: RwLock<()>,
+    global_lock: Arc<RwLock<()>>,
     shard_locks: FastDashMap<ShardIdent, Arc<Mutex<()>>>,
     _phantom_data: PhantomData<V>,
 }
@@ -211,17 +226,17 @@ where
         hash: &HashBytes,
         statistics: DiffStatistics,
         check_sequence: Option<DiffZone>,
-    ) -> Result<Option<InternalQueueTransaction>> {
-        // NOTE: This method does not hold locks until write() is called.
-        // This is safe in collation context where only one collator works on a shard
-        // and manager waits for collation result.
+    ) -> Result<Option<PendingQueueDiff>> {
+        // Take global lock. Blocks commit and clear_uncommitted until write() is called.
+        let global_guard = self.global_lock.read_arc();
 
-        // Take global lock. Lock commit and clear uncommitted state for execution
-        let _global_read_guard = self.global_lock.read().unwrap_or_else(|e| e.into_inner());
-
-        // Take specific shard lock
-        let shard_lock = self.shard_locks.entry(block_id_short.shard).or_default();
-        let _shard_guard = shard_lock.lock().unwrap_or_else(|e| e.into_inner());
+        // Take specific shard lock for the duration of prepare
+        let shard_lock = self
+            .shard_locks
+            .entry(block_id_short.shard)
+            .or_default()
+            .clone();
+        let shard_guard = shard_lock.lock_arc();
 
         // Check for duplicate diffs based on the block_id_short.seqno and hash
         let shard_diff = internal_queue::queue::Queue::get_diff_info(
@@ -293,7 +308,11 @@ where
             .state
             .prepare_diff(&block_id_short, &statistics, *hash, diff)?;
 
-        Ok(Some(tx))
+        Ok(Some(PendingQueueDiff {
+            tx,
+            _global_guard: global_guard,
+            _shard_guard: shard_guard,
+        }))
     }
 
     fn apply_diff(
@@ -319,7 +338,7 @@ where
         partitions: &FastHashSet<QueuePartitionIdx>,
     ) -> Result<()> {
         // Take global lock
-        let _global_write_guard = self.global_lock.write().unwrap_or_else(|e| e.into_inner());
+        let _global_write_guard = self.global_lock.write();
 
         let mc_block_id = mc_top_blocks
             .iter()
@@ -421,7 +440,7 @@ where
         top_shards: &[ShardIdent],
     ) -> Result<()> {
         // Take global lock
-        let _global_write_guard = self.global_lock.write().unwrap_or_else(|e| e.into_inner());
+        let _global_write_guard = self.global_lock.write();
         self.state.clear_uncommitted(partitions, top_shards)
     }
 

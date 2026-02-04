@@ -4,7 +4,7 @@ use rayon::iter::IntoParallelIterator;
 use tycho_block_util::queue::QueueKey;
 use tycho_types::cell::HashBytes;
 use tycho_types::models::{ExtInMsgInfo, IntMsgInfo, MsgInfo};
-use tycho_util::transactional_types::Transactional;
+use tycho_util::transactional::Transactional;
 use tycho_util::{FastHashMap, FastHashSet};
 
 use super::types::ParsedMessage;
@@ -29,6 +29,10 @@ struct AccountEntry {
 impl AccountEntry {
     fn current(&self) -> Option<&VecDeque<ParsedMessage>> {
         self.new_val.as_ref()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.new_val.as_ref().is_none_or(|v| v.is_empty())
     }
 
     fn current_mut(&mut self) -> Option<&mut VecDeque<ParsedMessage>> {
@@ -76,6 +80,9 @@ impl Transactional for MessagesBuffer {
             entry.is_new = false;
             entry.new_val.as_ref().is_some_and(|v| !v.is_empty())
         });
+        if self.ext_count == 0 {
+            self.min_ext_chain_time = None;
+        }
     }
 
     fn rollback(&mut self) {
@@ -98,17 +105,14 @@ impl Transactional for MessagesBuffer {
         self.min_ext_chain_time = snapshot.min_ext_chain_time;
     }
 
-    fn is_in_transaction(&self) -> bool {
+    fn in_tx(&self) -> bool {
         self.tx.is_some()
     }
 }
 
 impl MessagesBuffer {
-    fn backup_account(&mut self, account_id: &HashBytes) {
-        if self.is_in_transaction()
-            && let Some(entry) = self.msgs.get_mut(account_id)
-            && entry.old_val.is_none()
-        {
+    fn backup_entry(entry: &mut AccountEntry, in_tx: bool) {
+        if in_tx && entry.old_val.is_none() {
             entry.old_val = entry.new_val.clone();
         }
     }
@@ -167,7 +171,7 @@ impl MessagesBuffer {
         };
         let account_id = dst.as_std().map(|a| a.address).unwrap_or_default();
 
-        self.backup_account(&account_id);
+        let in_tx = self.in_tx();
 
         match self.msgs.entry(account_id) {
             indexmap::map::Entry::Vacant(vacant) => {
@@ -179,23 +183,27 @@ impl MessagesBuffer {
             }
             indexmap::map::Entry::Occupied(mut occupied) => {
                 let entry = occupied.get_mut();
+                Self::backup_entry(entry, in_tx);
+
                 if let Some(msgs) = entry.current_mut() {
                     msgs.push_back(msg);
                 } else {
                     entry.new_val = Some([msg].into());
                 }
             }
-        };
+        }
     }
 
     pub fn remove_int_messages_by_accounts(
         &mut self,
         addresses_to_remove: &FastHashSet<HashBytes>,
     ) {
-        for addr in addresses_to_remove {
-            self.backup_account(addr);
+        let in_tx = self.in_tx();
 
+        for addr in addresses_to_remove {
             if let Some(entry) = self.msgs.get_mut(addr) {
+                Self::backup_entry(entry, in_tx);
+
                 if let Some(msgs) = entry.current() {
                     self.int_count -= msgs.len();
                 }
@@ -284,10 +292,7 @@ impl MessagesBuffer {
                     buf_account_idx += 1;
 
                     // skip removed accounts or accounts without messages
-                    let Some(account_msgs) = entry.current() else {
-                        continue;
-                    };
-                    if account_msgs.is_empty() {
+                    if entry.is_empty() {
                         continue;
                     }
 
@@ -415,10 +420,7 @@ impl MessagesBuffer {
                     buf_account_idx += 1;
 
                     // skip removed accounts or accounts without messages
-                    let Some(account_msgs) = entry.current() else {
-                        continue;
-                    };
-                    if account_msgs.is_empty() {
+                    if entry.is_empty() {
                         continue;
                     }
 
@@ -461,10 +463,7 @@ impl MessagesBuffer {
                 buf_account_idx += 1;
 
                 // skip removed accounts or accounts without messages
-                let Some(account_msgs) = entry.current() else {
-                    continue;
-                };
-                if account_msgs.is_empty() {
+                if entry.is_empty() {
                     continue;
                 }
 
@@ -475,13 +474,13 @@ impl MessagesBuffer {
         // remove empty accounts from buffer
         ops_count.saturating_add_assign(self.msgs.len() as u64);
 
-        if !self.is_in_transaction() {
+        if !self.in_tx() {
             self.msgs
                 .retain(|_, entry| entry.current().is_some_and(|v| !v.is_empty()));
         }
 
         // drop min externals chain time if buffer was drained
-        if self.msgs.is_empty() {
+        if self.ext_count == 0 {
             self.min_ext_chain_time = None;
         }
 
@@ -548,14 +547,17 @@ impl MessagesBuffer {
         let mut ext_skipped_count = 0;
 
         let mut should_add_account_to_slot_index = false;
-        self.backup_account(&account_id);
+
+        let in_tx = self.in_tx();
 
         if let Some(entry) = self.msgs.get_mut(&account_id) {
+            res.ops_count.saturating_add_assign(1);
+
+            Self::backup_entry(entry, in_tx);
+
             let Some(account_msgs) = entry.current_mut() else {
                 return res;
             };
-
-            res.ops_count.saturating_add_assign(1);
 
             amount = account_msgs.len().min(slot_cx.remaning_capacity);
 
@@ -664,20 +666,21 @@ impl MessagesBuffer {
             return;
         }
 
-        self.backup_account(account_id);
+        let in_tx = self.in_tx();
 
-        if let Some(entry) = self.msgs.get_mut(account_id)
-            && let Some(account_msgs) = entry.current_mut()
-        {
-            account_msgs.retain(|msg| {
-                let skip = filter.should_skip(msg);
-                debug_assert!(
-                    !skip || msg.info().is_external_in(),
-                    "we should only skip external messages"
-                );
-                self.ext_count -= skip as usize;
-                !skip
-            });
+        if let Some(entry) = self.msgs.get_mut(account_id) {
+            Self::backup_entry(entry, in_tx);
+            if let Some(account_msgs) = entry.current_mut() {
+                account_msgs.retain(|msg| {
+                    let skip = filter.should_skip(msg);
+                    debug_assert!(
+                        !skip || msg.info().is_external_in(),
+                        "we should only skip external messages"
+                    );
+                    self.ext_count -= skip as usize;
+                    !skip
+                });
+            }
         }
     }
 }
@@ -1147,15 +1150,7 @@ mod transaction_tests {
             dst: IntAddr::Std(StdAddr::new(0, account_id)),
             ..Default::default()
         };
-        ParsedMessage::new(
-            MsgInfo::Int(msg),
-            false,
-            Cell::default(),
-            None,
-            None,
-            None,
-            None,
-        )
+        ParsedMessage::from_int(msg, Cell::default(), false, None, None)
     }
 
     // Helper to create a test external message
@@ -1164,15 +1159,7 @@ mod transaction_tests {
             dst: IntAddr::Std(StdAddr::new(0, account_id)),
             ..Default::default()
         };
-        ParsedMessage::new(
-            MsgInfo::ExtIn(msg),
-            false,
-            Cell::default(),
-            None,
-            None,
-            None,
-            Some(chain_time),
-        )
+        ParsedMessage::from_ext(msg, Cell::default(), false, chain_time)
     }
 
     // ==================== BASIC TRANSACTION TESTS ====================
@@ -1180,14 +1167,14 @@ mod transaction_tests {
     #[test]
     fn test_transaction_not_active_by_default() {
         let buffer = MessagesBuffer::default();
-        assert!(!buffer.is_in_transaction());
+        assert!(!buffer.in_tx());
     }
 
     #[test]
     fn test_begin_starts_transaction() {
         let mut buffer = MessagesBuffer::default();
         buffer.begin();
-        assert!(buffer.is_in_transaction());
+        assert!(buffer.in_tx());
     }
 
     #[test]
@@ -1195,7 +1182,7 @@ mod transaction_tests {
         let mut buffer = MessagesBuffer::default();
         buffer.begin();
         buffer.commit();
-        assert!(!buffer.is_in_transaction());
+        assert!(!buffer.in_tx());
     }
 
     #[test]
@@ -1203,7 +1190,7 @@ mod transaction_tests {
         let mut buffer = MessagesBuffer::default();
         buffer.begin();
         buffer.rollback();
-        assert!(!buffer.is_in_transaction());
+        assert!(!buffer.in_tx());
     }
 
     // ==================== COMMIT TESTS ====================
@@ -1547,6 +1534,51 @@ mod transaction_tests {
 
         // After commit, changes persist
         assert_eq!(buffer.int_count, 2 - collected);
+    }
+
+    #[test]
+    fn test_fill_message_group_commit_clears_min_ext_chain_time_when_ints_remain() {
+        let mut buffer = MessagesBuffer::default();
+        let acc_ext = account(1);
+        let acc_int = account(2);
+
+        // Keep one internal message in buffer while expiring the only external message.
+        buffer.add_message(make_test_ext_message(acc_ext, 100));
+        buffer.add_message(make_test_int_message(acc_int, 200));
+
+        assert_eq!(buffer.ext_count, 1);
+        assert_eq!(buffer.int_count, 1);
+        assert_eq!(buffer.min_ext_chain_time(), 100);
+
+        buffer.begin();
+
+        let mut msg_group = MessageGroup::default();
+        let mut skipped = FastHashSet::default();
+        let mut expired_msgs_count = 0u64;
+
+        let _ = buffer.fill_message_group(
+            &mut msg_group,
+            10,
+            10,
+            &mut skipped,
+            |account_id| (account_id == &acc_int, 1), // keep internal account in buffer
+            SkipExpiredExternals {
+                chain_time_threshold_ms: 101, // ext(ct=100) is expired
+                total_skipped: &mut expired_msgs_count,
+            },
+        );
+
+        assert_eq!(expired_msgs_count, 1);
+        assert_eq!(buffer.ext_count, 0);
+        assert_eq!(buffer.int_count, 1);
+        assert_eq!(buffer.account_messages_count(&acc_int), 1);
+
+        buffer.commit();
+
+        // Buffer is not empty (internal remains), but there are no externals anymore.
+        assert_eq!(buffer.account_messages_count(&acc_int), 1);
+        assert_eq!(buffer.ext_count, 0);
+        assert_eq!(buffer.min_ext_chain_time(), u64::MAX);
     }
 
     // ==================== SKIP MESSAGES TESTS ====================
