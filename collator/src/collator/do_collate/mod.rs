@@ -20,7 +20,7 @@ use tycho_util::mem::Reclaimer;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::CancellationFlag;
 use tycho_util::time::now_millis;
-use tycho_util::transactional_types::Transactional;
+use tycho_util::transactional::TransactionGuard;
 
 use super::types::{
     AnchorsCache, BlockCollationData, BlockCollationDataBuilder, BlockSerializerCache,
@@ -34,12 +34,12 @@ use crate::collator::do_collate::work_units::{DoCollateWu, WuEvent, WuEventData}
 use crate::collator::error::{CollationCancelReason, CollatorError};
 use crate::collator::messages_reader::state::ReaderState;
 use crate::collator::types::{FinalizeMetrics, PartialValueFlow, RandSeed};
+use crate::internal_queue::queue::PendingQueueDiff;
 use crate::internal_queue::types::diff::{DiffZone, QueueDiffWithMessages};
 use crate::internal_queue::types::message::EnqueuedMessage;
 use crate::internal_queue::types::ranges::{Bound, QueueShardBoundedRange};
 use crate::internal_queue::types::stats::DiffStatistics;
 use crate::queue_adapter::MessageQueueAdapter;
-use crate::storage::transaction::InternalQueueTransaction;
 use crate::tracing_targets;
 use crate::types::processed_upto::{
     build_all_shards_processed_to_by_partitions, find_min_processed_to_by_shards,
@@ -196,58 +196,92 @@ impl CollatorStdImpl {
             move || {
                 let labels = [("workchain", shard_id.workchain().to_string())];
                 let _span = span.enter();
-                let mut anchor_cache_tx = AnchorsCacheTransaction::new(&mut anchors_cache);
 
-                reader_state.begin();
+                let result = {
+                    let mut anchor_cache_tx = AnchorsCacheTransaction::new(&mut anchors_cache);
+                    let mut reader_guard = TransactionGuard::new(&mut reader_state);
 
-                let run_result = Self::run(
-                    config,
-                    mq_adapter,
-                    &mut reader_state,
-                    &mut anchor_cache_tx,
-                    block_serializer_cache,
-                    state,
-                    collation_session,
-                    wu_used_from_last_anchor,
-                    usage_tree,
-                    zerostate_id,
-                    next_chain_time,
-                );
+                    let collation_is_cancelled = state.collation_is_cancelled.clone();
 
-                let result = match run_result {
-                    Ok((collation_result, pending_queue_diff_tx)) => {
-                        // Commit queue diff transaction first
-                        if let Some(tx) = pending_queue_diff_tx {
-                            let _histogram = HistogramGuard::begin_with_labels(
-                                "tycho_do_collate_queue_diff_commit_time",
-                                &labels,
-                            );
-                            tx.write().expect("queue diff commit must not fail");
+                    let result = Self::run(
+                        config,
+                        mq_adapter,
+                        &mut reader_guard,
+                        &mut anchor_cache_tx,
+                        block_serializer_cache,
+                        state,
+                        collation_session,
+                        wu_used_from_last_anchor,
+                        usage_tree,
+                        zerostate_id,
+                        next_chain_time,
+                    )
+                    .and_then(|(collation_result, pending_queue_diff_tx)| {
+                        // exit collation if cancelled before writing queue diff
+                        if collation_is_cancelled.check() {
+                            return Err(CollatorError::Cancelled(
+                                CollationCancelReason::ExternalCancel,
+                            ));
                         }
+                        Ok((collation_result, pending_queue_diff_tx))
+                    });
 
-                        {
-                            let _histogram = HistogramGuard::begin_with_labels(
-                                "tycho_do_collate_reader_state_commit_time",
-                                &labels,
-                            );
+                    // commit or rollback transaction based on collation result, and record metrics
+                    match result {
+                        // if collation was successful, commit all transactions
+                        Ok((collation_result, pending_queue_diff_tx)) => {
+                            let queue_diff_result = if let Some(tx) = pending_queue_diff_tx {
+                                let _h = HistogramGuard::begin_with_labels(
+                                    "tycho_do_collate_queue_diff_commit_time",
+                                    &labels,
+                                );
+                                tx.write()
+                                    .context("queue diff commit failed")
+                                    .map_err(CollatorError::Anyhow)
+                            } else {
+                                Ok(())
+                            };
 
-                            reader_state.commit();
+                            match queue_diff_result {
+                                Ok(()) => {
+                                    {
+                                        let _h = HistogramGuard::begin_with_labels(
+                                            "tycho_do_collate_reader_state_commit_time",
+                                            &labels,
+                                        );
+                                        reader_guard.commit();
+                                    }
+                                    anchor_cache_tx.commit();
+                                    Ok(collation_result)
+                                }
+                                Err(e) => {
+                                    drop(reader_guard);
+                                    drop(anchor_cache_tx);
+                                    Err(e)
+                                }
+                            }
                         }
-                        anchor_cache_tx.commit();
+                        // if collation failed, rollback reader and anchors cache transactions
+                        Err(e) => {
+                            {
+                                let _h = HistogramGuard::begin_with_labels(
+                                    "tycho_do_collate_reader_state_rollback_time",
+                                    &labels,
+                                );
+                                drop(reader_guard);
+                            }
 
-                        Ok(collation_result)
-                    }
-                    Err(e) => {
-                        let _histogram = HistogramGuard::begin_with_labels(
-                            "tycho_do_collate_reader_state_rollback_time",
-                            &labels,
-                        );
-                        reader_state.rollback();
-                        Err(e)
+                            {
+                                let _h = HistogramGuard::begin_with_labels(
+                                    "tycho_do_collate_anchors_cache_rollback_time",
+                                    &labels,
+                                );
+                                drop(anchor_cache_tx);
+                            }
+                            Err(e)
+                        }
                     }
                 };
-
-                drop(anchor_cache_tx);
 
                 CollationOutput {
                     reader_state,
@@ -277,7 +311,7 @@ impl CollatorStdImpl {
             reader_state,
             anchors_cache: restored_anchors_cache,
             result: do_collate_res,
-        } = do_collate_res.unwrap();
+        } = do_collate_res.expect("do_collate future must complete");
 
         self.anchors_cache = restored_anchors_cache;
 
@@ -304,11 +338,11 @@ impl CollatorStdImpl {
 
         let int_queue_len = reader_state
             .internals
-            .cumulative_statistics()
-            .as_ref()
+            .cumulative_statistics
+            .inner()
             .map(|cumulative_stats| cumulative_stats.remaining_total_for_own_shard());
 
-        let last_read_to_anchor_chain_time = reader_state.externals.last_read_to_anchor_chain_time;
+        let last_read_to_anchor_chain_time = *reader_state.externals.last_read_to_anchor_chain_time;
 
         let block_id = *finalized.block_candidate.block.id();
         let finalize_wu = finalized.finalize_wu.clone();
@@ -424,7 +458,7 @@ impl CollatorStdImpl {
         usage_tree: UsageTree,
         zerostate_id: ZerostateId,
         next_chain_time: u64,
-    ) -> Result<(CollationResult, Option<InternalQueueTransaction>), CollatorError> {
+    ) -> Result<(CollationResult, Option<PendingQueueDiff>), CollatorError> {
         let shard_id = state.shard_id;
         let labels = [("workchain", shard_id.workchain().to_string())];
         let mc_data = state.mc_data.clone();
@@ -1527,7 +1561,7 @@ fn serialize_diff(
 /// Returned type from `prepare_queue_diff_task`
 struct PreparedQueueDiff {
     elapsed: Duration,
-    tx: Option<InternalQueueTransaction>,
+    tx: Option<PendingQueueDiff>,
 }
 
 fn create_prepare_diff_task(
