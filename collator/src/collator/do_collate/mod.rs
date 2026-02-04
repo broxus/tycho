@@ -20,7 +20,7 @@ use tycho_util::mem::Reclaimer;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::CancellationFlag;
 use tycho_util::time::now_millis;
-use tycho_util::transactional_types::Transactional;
+use tycho_util::transactional::Transactional;
 
 use super::types::{
     AnchorsCache, BlockCollationData, BlockCollationDataBuilder, BlockSerializerCache,
@@ -304,11 +304,11 @@ impl CollatorStdImpl {
 
         let int_queue_len = reader_state
             .internals
-            .cumulative_statistics()
-            .as_ref()
+            .cumulative_statistics
+            .inner()
             .map(|cumulative_stats| cumulative_stats.remaining_total_for_own_shard());
 
-        let last_read_to_anchor_chain_time = reader_state.externals.last_read_to_anchor_chain_time;
+        let last_read_to_anchor_chain_time = *reader_state.externals.last_read_to_anchor_chain_time;
 
         let block_id = *finalized.block_candidate.block.id();
         let finalize_wu = finalized.finalize_wu.clone();

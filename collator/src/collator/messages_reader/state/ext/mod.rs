@@ -59,8 +59,8 @@ impl From<(&ExternalsReaderRange, &ExternalsPartitionRangeReaderState)> for Exte
             from: range.from.into(),
             to: range.to.into(),
             chain_time: range.chain_time,
-            skip_offset: state.skip_offset,
-            processed_offset: state.processed_offset,
+            skip_offset: *state.skip_offset,
+            processed_offset: *state.processed_offset,
         }
     }
 }

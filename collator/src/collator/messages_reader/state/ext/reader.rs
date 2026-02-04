@@ -2,13 +2,15 @@ use std::collections::BTreeMap;
 
 use anyhow::Context;
 use tycho_block_util::queue::QueuePartitionIdx;
+use tycho_util::transactional::btreemap::deep::TransactionalBTreeMapDeep;
+use tycho_util::transactional::value::TransactionalValue;
 use tycho_util_proc::Transactional;
 
 use crate::collator::messages_reader::state::ext::partition_reader::ExternalsPartitionReaderState;
 use crate::collator::messages_reader::state::ext::range_reader::ExternalsRangeReaderState;
 use crate::types::processed_upto::BlockSeqno;
 
-#[derive(Default, Transactional)]
+#[derive(Transactional, Default)]
 pub struct ExternalsReaderState {
     /// We fully read each externals range
     /// because we unable to get remaining messages info
@@ -18,17 +20,14 @@ pub struct ExternalsReaderState {
     ///
     /// Ranges will be extracted during collation process.
     /// Should access them only before collation and after reader finalization.
-    #[tx(collection)]
-    ranges: BTreeMap<BlockSeqno, ExternalsRangeReaderState>,
+    pub ranges: TransactionalBTreeMapDeep<BlockSeqno, ExternalsRangeReaderState>,
 
     /// Partition related externals reader state
-    pub by_partitions: BTreeMap<QueuePartitionIdx, ExternalsPartitionReaderState>,
+    pub by_partitions:
+        TransactionalValue<BTreeMap<QueuePartitionIdx, ExternalsPartitionReaderState>>,
 
     /// last read to anchor chain time
-    pub last_read_to_anchor_chain_time: Option<u64>,
-
-    #[tx(state)]
-    tx: Option<ExternalsReaderStateTx>,
+    pub last_read_to_anchor_chain_time: TransactionalValue<Option<u64>>,
 }
 
 impl ExternalsReaderState {
@@ -42,32 +41,10 @@ impl ExternalsReaderState {
             .with_context(|| format!("externals reader state not exists for partition {par_id}"))
     }
 
-    pub fn insert_range(
-        &mut self,
-        seqno: BlockSeqno,
-        state: ExternalsRangeReaderState,
-    ) -> Option<ExternalsRangeReaderState> {
-        self.tx_insert_ranges(seqno, state);
-        None
-    }
-
-    pub fn ranges(&self) -> &BTreeMap<BlockSeqno, ExternalsRangeReaderState> {
-        &self.ranges
-    }
-
-    pub fn ranges_mut(&mut self) -> &mut BTreeMap<BlockSeqno, ExternalsRangeReaderState> {
-        &mut self.ranges
-    }
-
     pub fn retain_ranges<F>(&mut self, mut f: F)
     where
         F: FnMut(&BlockSeqno, &mut ExternalsRangeReaderState) -> bool,
     {
-        if self.tx.is_none() {
-            self.ranges.retain(|k, v| f(k, v));
-            return;
-        }
-
         let mut to_remove: Vec<BlockSeqno> = Vec::new();
 
         for (k, v) in self.ranges.iter_mut() {
@@ -77,10 +54,7 @@ impl ExternalsReaderState {
         }
 
         for k in to_remove {
-            assert!(
-                self.tx_remove_ranges(&k),
-                "range {k} should exist for removal"
-            );
+            assert!(self.ranges.remove(&k), "range {k} should exist for removal");
         }
     }
 }

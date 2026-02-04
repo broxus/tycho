@@ -3,7 +3,7 @@ use std::collections::hash_map::Entry;
 use anyhow::Context;
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 use tycho_types::models::ShardIdent;
-use tycho_util::transactional_types::Transactional;
+use tycho_util::transactional::Transactional;
 use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::collator::statistics::queue::TrackedQueueStatistics;
@@ -90,10 +90,10 @@ impl Transactional for CumulativeStatistics {
 
         // Commit stats changes (skip newly added entries without active transaction)
         for stats in self.result.values_mut() {
-            if stats.initial_stats.is_in_transaction() {
+            if stats.initial_stats.in_tx() {
                 stats.initial_stats.commit();
             }
-            if stats.remaning_stats.is_in_transaction() {
+            if stats.remaning_stats.in_tx() {
                 stats.remaning_stats.commit();
             }
         }
@@ -117,10 +117,10 @@ impl Transactional for CumulativeStatistics {
 
         // Rollback result (skip newly added entries without active transaction)
         for stats in self.result.values_mut() {
-            if stats.initial_stats.is_in_transaction() {
+            if stats.initial_stats.in_tx() {
                 stats.initial_stats.rollback();
             }
-            if stats.remaning_stats.is_in_transaction() {
+            if stats.remaning_stats.in_tx() {
                 stats.remaning_stats.rollback();
             }
         }
@@ -148,7 +148,7 @@ impl Transactional for CumulativeStatistics {
         self.all_shards_processed_to_by_partitions = tx.all_shards_processed_to_by_partitions;
     }
 
-    fn is_in_transaction(&self) -> bool {
+    fn in_tx(&self) -> bool {
         self.tx.is_some()
     }
 }
@@ -226,7 +226,7 @@ impl CumulativeStatistics {
         dst_shard: &ShardIdent,
         processed_to: &ProcessedToByPartitions,
     ) {
-        let in_tx = self.is_in_transaction();
+        let in_tx = self.in_tx();
 
         Self::process_processed_to_update(
             &mut self.result,

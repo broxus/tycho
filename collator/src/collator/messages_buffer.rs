@@ -4,7 +4,7 @@ use rayon::iter::IntoParallelIterator;
 use tycho_block_util::queue::QueueKey;
 use tycho_types::cell::HashBytes;
 use tycho_types::models::{ExtInMsgInfo, IntMsgInfo, MsgInfo};
-use tycho_util::transactional_types::Transactional;
+use tycho_util::transactional::Transactional;
 use tycho_util::{FastHashMap, FastHashSet};
 
 use super::types::ParsedMessage;
@@ -98,14 +98,14 @@ impl Transactional for MessagesBuffer {
         self.min_ext_chain_time = snapshot.min_ext_chain_time;
     }
 
-    fn is_in_transaction(&self) -> bool {
+    fn in_tx(&self) -> bool {
         self.tx.is_some()
     }
 }
 
 impl MessagesBuffer {
     fn backup_account(&mut self, account_id: &HashBytes) {
-        if self.is_in_transaction()
+        if self.in_tx()
             && let Some(entry) = self.msgs.get_mut(account_id)
             && entry.old_val.is_none()
         {
@@ -475,7 +475,7 @@ impl MessagesBuffer {
         // remove empty accounts from buffer
         ops_count.saturating_add_assign(self.msgs.len() as u64);
 
-        if !self.is_in_transaction() {
+        if !self.in_tx() {
             self.msgs
                 .retain(|_, entry| entry.current().is_some_and(|v| !v.is_empty()));
         }
@@ -1180,14 +1180,14 @@ mod transaction_tests {
     #[test]
     fn test_transaction_not_active_by_default() {
         let buffer = MessagesBuffer::default();
-        assert!(!buffer.is_in_transaction());
+        assert!(!buffer.in_tx());
     }
 
     #[test]
     fn test_begin_starts_transaction() {
         let mut buffer = MessagesBuffer::default();
         buffer.begin();
-        assert!(buffer.is_in_transaction());
+        assert!(buffer.in_tx());
     }
 
     #[test]
@@ -1195,7 +1195,7 @@ mod transaction_tests {
         let mut buffer = MessagesBuffer::default();
         buffer.begin();
         buffer.commit();
-        assert!(!buffer.is_in_transaction());
+        assert!(!buffer.in_tx());
     }
 
     #[test]
@@ -1203,7 +1203,7 @@ mod transaction_tests {
         let mut buffer = MessagesBuffer::default();
         buffer.begin();
         buffer.rollback();
-        assert!(!buffer.is_in_transaction());
+        assert!(!buffer.in_tx());
     }
 
     // ==================== COMMIT TESTS ====================

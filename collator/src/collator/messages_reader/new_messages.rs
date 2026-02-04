@@ -5,6 +5,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 use tycho_types::models::{MsgInfo, ShardIdent};
+use tycho_util::transactional::value::TransactionalValue;
 
 use super::MessagesReaderMetrics;
 use super::internals_reader::InternalsPartitionReader;
@@ -138,7 +139,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<'_, V> {
         // create range reader for new messages if it does not exist
         if !matches!(kind, InternalsRangeReaderKind::NewMessages) {
             let mut new_shard_reader_states = BTreeMap::new();
-            for (shard_id, prev_shard_reader_state) in &state.shards {
+            for (shard_id, prev_shard_reader_state) in state.shards.iter() {
                 let shard_range_to = if *shard_id == for_shard_id {
                     current_next_lt
                 } else {
@@ -153,7 +154,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<'_, V> {
 
             let state = InternalsRangeReaderState {
                 // we do not use messages satistics when reading new messages
-                shards: new_shard_reader_states,
+                shards: TransactionalValue::new(new_shard_reader_states),
                 ..Default::default()
             };
 
@@ -177,8 +178,8 @@ impl<V: InternalMessageValue> InternalsPartitionReader<'_, V> {
                 "created new messages reader",
             );
 
-            self.insert_range_state(seqno, state);
-            self.insert_range_reader(seqno, reader);
+            self.reader_state.ranges.insert(seqno, state);
+            self.range_readers.insert(seqno, reader);
 
             self.all_ranges_fully_read = false;
         } else {
