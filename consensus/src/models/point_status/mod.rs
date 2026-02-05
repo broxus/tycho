@@ -56,8 +56,10 @@ bitflags::bitflags! {
     #[cfg_attr(any(test, feature = "test"), derive(PartialEq))]
     pub struct AnchorFlags : u8 {
         const Used = 0b_1 << 7;
-        const Trigger = 0b_1 << 6;
-        const Proof = 0b_1 << 5;
+
+        const Anchor = 0b_1 << 6;
+        const Trigger = 0b_1 << 5;
+        const Proof = 0b_1 << 4;
     }
 }
 

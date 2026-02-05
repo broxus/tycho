@@ -8,7 +8,7 @@ use crate::intercom::PeerSchedule;
 use crate::models::{AnchorStageRole, Round};
 
 /// How often the new leader is selected
-const WAVE_ROUNDS: u32 = 3;
+pub const WAVE_ROUNDS: u32 = 3;
 
 #[derive(Debug)]
 pub struct AnchorStage {
