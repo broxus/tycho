@@ -3,6 +3,7 @@ use std::fs::File;
 use anyhow::Result;
 use async_trait::async_trait;
 use futures_util::future::BoxFuture;
+use tycho_block_util::block::ShardPrefix;
 use tycho_types::models::BlockId;
 
 #[cfg(feature = "s3")]
@@ -33,15 +34,20 @@ impl StarterClient for BlockchainRpcClient {
         let pending_state = self.find_persistent_state(block_id, kind).await?;
         let this = self.clone();
 
+        let part_split_depth = pending_state.part_split_depth;
+
         Ok(FoundState {
-            download: Box::new(move |output| {
+            download: Box::new(move |output, part_shard_prefix| {
+                let this = this.clone();
+                let pending_state = pending_state.clone();
                 Box::pin(async move {
                     let output = this
-                        .download_persistent_state(pending_state, output)
+                        .download_persistent_state(pending_state, part_shard_prefix, output)
                         .await?;
                     Ok(output)
                 })
             }),
+            part_split_depth,
         })
     }
 
@@ -71,9 +77,11 @@ pub struct FoundBlockDataFull {
 
 pub struct FoundState<'a> {
     pub download: Box<DownloadFn<'a>>,
+    pub part_split_depth: u8,
 }
 
-type DownloadFn<'a> = dyn FnOnce(File) -> BoxFuture<'a, Result<File>> + Send + 'a;
+type DownloadFn<'a> =
+    dyn Fn(File, Option<ShardPrefix>) -> BoxFuture<'a, Result<File>> + Send + Sync + 'a;
 type PunishFn = dyn FnOnce(PunishReason) + Send + 'static;
 
 #[cfg(feature = "s3")]
@@ -121,8 +129,9 @@ mod s3 {
                 anyhow::bail!("not found");
             };
 
+            // TODO: should handle parts
             Ok(FoundState {
-                download: Box::new(move |output| {
+                download: Box::new(move |output, _part_shard_prefix| {
                     Box::pin(async move {
                         let output = self
                             .s3_client
@@ -131,6 +140,7 @@ mod s3 {
                         Ok(output)
                     })
                 }),
+                part_split_depth: 0,
             })
         }
 

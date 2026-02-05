@@ -4,6 +4,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use bytes::{Buf, Bytes};
 use serde::{Deserialize, Serialize};
+use tycho_block_util::block::ShardPrefix;
 use tycho_block_util::message::validate_external_message;
 use tycho_network::{Response, Service, ServiceRequest, try_handle_prefix};
 use tycho_types::models::BlockId;
@@ -266,6 +267,16 @@ impl<B: BroadcastListener> Service<ServiceRequest> for BlockchainRpcService<B> {
             )]
             rpc::GetPersistentShardStateChunk as req => {
                 inner.handle_get_persistent_shard_state_chunk(&req).await
+            },
+
+            #[meta(
+                "getPersistentShardStatePartChunk",
+                block_id = %req.block_id,
+                offset = %req.offset,
+                part_shard_prefix = ?req.part_shard_prefix,
+            )]
+            rpc::GetPersistentShardStatePartChunk as req => {
+                inner.handle_get_persistent_shard_state_part_chunk(&req).await
             },
 
             #[meta(
@@ -597,16 +608,39 @@ impl<B> Inner<B> {
         &self,
         req: &rpc::GetPersistentShardStateChunk,
     ) -> overlay::Response<Data> {
-        self.read_persistent_state_chunk(&req.block_id, req.offset, PersistentStateKind::Shard)
-            .await
+        self.read_persistent_state_chunk(
+            &req.block_id,
+            req.offset,
+            PersistentStateKind::Shard,
+            None,
+        )
+        .await
+    }
+
+    async fn handle_get_persistent_shard_state_part_chunk(
+        &self,
+        req: &rpc::GetPersistentShardStatePartChunk,
+    ) -> overlay::Response<Data> {
+        self.read_persistent_state_chunk(
+            &req.block_id,
+            req.offset,
+            PersistentStateKind::Shard,
+            Some(req.part_shard_prefix),
+        )
+        .await
     }
 
     async fn handle_get_persistent_queue_state_chunk(
         &self,
         req: &rpc::GetPersistentQueueStateChunk,
     ) -> overlay::Response<Data> {
-        self.read_persistent_state_chunk(&req.block_id, req.offset, PersistentStateKind::Queue)
-            .await
+        self.read_persistent_state_chunk(
+            &req.block_id,
+            req.offset,
+            PersistentStateKind::Queue,
+            None,
+        )
+        .await
     }
 }
 
@@ -668,10 +702,19 @@ impl<B> Inner<B> {
         if self.config.serve_persistent_states
             && let Some(info) = persistent_state_storage.get_state_info(block_id, state_kind)
         {
-            return PersistentStateInfo::Found {
-                size: info.size,
-                chunk_size: info.chunk_size,
-            };
+            if info.parts.is_empty() {
+                return PersistentStateInfo::Found {
+                    size: info.size,
+                    chunk_size: info.chunk_size,
+                };
+            } else {
+                return PersistentStateInfo::FoundWithParts {
+                    size: info.size,
+                    chunk_size: info.chunk_size,
+                    split_depth: info.split_depth as u32,
+                    parts: info.parts.into_iter().map(Into::into).collect(),
+                };
+            }
         }
         PersistentStateInfo::NotFound
     }
@@ -681,6 +724,7 @@ impl<B> Inner<B> {
         block_id: &BlockId,
         offset: u64,
         state_kind: PersistentStateKind,
+        part_shard_prefix: Option<ShardPrefix>,
     ) -> overlay::Response<Data> {
         let persistent_state_storage = self.storage().persistent_state_storage();
 
@@ -698,7 +742,7 @@ impl<B> Inner<B> {
         }
 
         match persistent_state_storage
-            .read_state_part(block_id, offset, state_kind)
+            .read_state_chunk(block_id, offset, state_kind, part_shard_prefix)
             .await
         {
             Some(data) => overlay::Response::Ok(Data { data: data.into() }),

@@ -137,14 +137,42 @@ blockchain.archiveInfo.tooNew = blockchain.ArchiveInfo;
 blockchain.archiveInfo.notFound = blockchain.ArchiveInfo;
 
 /**
-* A successful response for the 'getPersistentStateInfo' query
+* Persistent state part metadata
 *
-* @param size           state file size in bytes
+* @param prefix        shard prefix of the state part
+* @param size          state part file size in bytes
+*/
+blockchain.persistentStatePartInfo
+    prefix:long
+    size:long
+    = blockchain.PersistentStatePartInfo;
+
+/**
+* A successful response for the 'getPersistentStateInfo' query
+* when persistent state stored in a single file
+*
+* @param size           state main file size in bytes
 * @param chunk_size     chunk size in bytes
 */
 blockchain.persistentStateInfo.found
     size:long
     chunk_size:long
+    = blockchain.PersistentStateInfo;
+
+/**
+* A successful response for the 'getPersistentStateInfo' query
+* when persistent state stored with parts
+*
+* @param size           state main file size in bytes
+* @param chunk_size     chunk size in bytes
+* @param split_depth    state split depth on parts
+* @param parts          list of state parts files
+*/
+blockchain.persistentStateInfo.foundWithParts
+    size:long
+    chunk_size:long
+    split_depth:int
+    parts:(vector blockchain.PersistentStatePartInfo)
     = blockchain.PersistentStateInfo;
 
 /**
@@ -250,15 +278,29 @@ blockchain.getPersistentShardStateInfo
     = overlay.Response blockchain.PersistentStateInfo;
 
 /**
-* Get persistent shard state part
+* Get persistent shard state chunk
 *
-* @param block_id       requested block id
-* @param limit          max response size in bytes
-* @param offset         part offset in bytes
+* @param block_id               requested block id
+* @param offset                 chunk offset in bytes
 */
 blockchain.getPersistentShardStateChunk
     block_id:blockchain.blockId
     offset:long
+    = overlay.Response blockchain.Data;
+
+/**
+* Get persistent shard state part chunk
+*
+* @params flags                 flags to support optional part_shard_prefix
+* @param block_id               requested block id
+* @param offset                 chunk offset in bytes
+* @param part_shard_prefix      shard prefix of the state part (0 - main file)
+*/
+blockchain.getPersistentShardStatePartChunk
+    flags:#
+    block_id:blockchain.blockId
+    offset:long
+    part_shard_prefix:flags.1?long
     = overlay.Response blockchain.Data;
 
 /**

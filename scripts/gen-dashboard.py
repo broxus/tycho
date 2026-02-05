@@ -1082,10 +1082,6 @@ def storage() -> RowPanel:
             UNITS.BYTES,
             "0.999",
         ),
-        create_heatmap_panel(
-            "tycho_storage_state_store_time", "Time to store state with cell traversal"
-        ),
-        create_heatmap_panel("tycho_gc_states_time", "Time to garbage collect state"),
         timeseries_panel(
             targets=[
                 target(
@@ -1139,13 +1135,21 @@ def storage() -> RowPanel:
             "tycho_compaction_removes", "Number of deleted cells during compaction"
         ),
         create_counter_panel(
+            "tycho_storage_state_gc_cells_count", "number of deleted cells during gc"
+        ),
+        create_counter_panel(
             "tycho_storage_state_gc_count", "number of deleted states during gc"
         ),
         create_counter_panel(
-            "tycho_storage_state_gc_cells_count", "number of deleted cells during gc"
+            "tycho_storage_state_gc_parts_count",
+            "number of deleted states parts during gc",
         ),
         create_heatmap_panel(
-            "tycho_storage_state_gc_time_high", "time spent to gc single root"
+            "tycho_gc_states_time", "time to gc outdated states with parts"
+        ),
+        create_heatmap_panel(
+            "tycho_storage_state_gc_time_high",
+            "time spent to gc single root (main or part)",
         ),
         create_heatmap_panel(
             "tycho_storage_cell_in_mem_remove_time_high",
@@ -1590,12 +1594,12 @@ def collator_execution_metrics() -> RowPanel:
         ),
         create_heatmap_panel(
             "tycho_do_collate_one_tick_account_msgs_exec_mean_time",
-            "MEAN exec time in group",
+            "MEAN one account msgs exec time in group",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_do_collate_one_tick_account_msgs_exec_max_time",
-            "MAX exec time in group",
+            "tycho_do_collate_one_tick_group_exec_time_high",
+            "One exec tick group exec time",
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
@@ -1868,11 +1872,6 @@ def collator_time_metrics() -> RowPanel:
         create_heatmap_panel(
             "tycho_collator_try_collate_next_shard_block_time",
             "Try collate next shard block",
-        ),
-        create_heatmap_panel(
-            "tycho_collator_import_next_anchor_time_high",
-            "Import next anchor time",
-            labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
             "tycho_collator_anchor_importing_lag_ms",
@@ -3218,6 +3217,11 @@ def collator_execution_manager() -> RowPanel:
         ),
         create_heatmap_panel(
             "tycho_collator_execute_ticktock_time", "Execute ticktock time"
+        ),
+        create_heatmap_panel(
+            "tycho_collator_get_account_stuff_time_high",
+            "Time to get account stuff",
+            labels=['workchain=~"$workchain"'],
         ),
     ]
     return create_row("collator: Execution Manager", metrics)

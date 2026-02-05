@@ -12,7 +12,8 @@ use tycho_collator::types::processed_upto::ProcessedUptoInfoExtension;
 use tycho_collator::types::{McData, ShardDescriptionShortExt};
 use tycho_core::node::ConfiguredStorage;
 use tycho_core::storage::{
-    BlockConnection, CoreStorage, CoreStorageConfig, QueueStateWriter, ShardStateWriter,
+    BlockConnection, CellStorageDb, CoreStorage, CoreStorageConfig, QueueStateWriter,
+    ShardStateWriter,
 };
 use tycho_storage::StorageContext;
 use tycho_storage::fs::Dir;
@@ -180,6 +181,7 @@ impl Dumper {
     ) -> Result<ShardStateStuff> {
         println!("Dumping data for block {}", block_id);
         if let Err(e) = self.dump_block_data(block_id).await {
+            // TODO: consider hardfork
             if block_id.seqno == 0 {
                 println!(
                     "Skipping block data dump for zerostate block {}: {}",
@@ -212,11 +214,16 @@ impl Dumper {
         master_block_seqno: u32,
     ) -> Result<ShardStateStuff> {
         let dir = Dir::new(self.output_dir.path().join("persistents"))?;
-        let writer = ShardStateWriter::new(
-            self.storage.shard_state_storage().cell_storage().db(),
-            &dir,
-            block_id,
-        );
+        let CellStorageDb::Main(db) = self
+            .storage
+            .shard_state_storage()
+            .cell_storage()
+            .db()
+            .clone()
+        else {
+            unreachable!("main cell storage always use main cells db")
+        };
+        let writer = ShardStateWriter::new(db, &dir, block_id);
         let ref_by_mc_seqno = self
             .storage
             .block_handle_storage()
@@ -230,7 +237,7 @@ impl Dumper {
             .await?;
 
         writer
-            .write(state.root_cell().repr_hash(), None)
+            .write(state.root_cell().repr_hash(), None, None)
             .context(format!("Failed to write state for {}", block_id))?;
         println!(" - Persistent state saved");
         Ok(state)
@@ -238,6 +245,7 @@ impl Dumper {
 
     async fn dump_queue_state(&self, block_id: &BlockId) -> Result<()> {
         println!("Dumping queue state for block {}", block_id);
+        // TODO: consider hardfork
         if block_id.seqno == 0 {
             // For zerostate blocks, there is no queue state to dump
             return Ok(());
