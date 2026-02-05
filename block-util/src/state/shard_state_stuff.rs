@@ -1,15 +1,13 @@
 use std::mem::ManuallyDrop;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use tycho_types::cell::Lazy;
-use tycho_types::merkle::MerkleUpdate;
+use tycho_types::merkle::{MerkleUpdate, ParMerkleUpdateApplier};
 use tycho_types::models::*;
 use tycho_types::prelude::*;
-use tycho_util::FastHashSet;
 use tycho_util::mem::Reclaimer;
 
-use crate::dict::split_aug_dict_raw;
 use crate::state::RefMcStateHandle;
 
 /// Parsed shard state.
@@ -136,31 +134,43 @@ impl ShardStateStuff {
     /// the `tracker` from the initial state.
     ///
     /// NOTE: Call from inside `rayon`.
-    pub fn par_make_next_state(
+    pub fn par_make_next_state<F>(
         &self,
         next_block_id: &BlockId,
         merkle_update: &MerkleUpdate,
-        split_at_depth: Option<u8>,
-    ) -> Result<Self> {
-        let old_split_at = if let Some(depth) = split_at_depth {
-            let shard_accounts = self
-                .root_cell()
-                .reference_cloned(1)
-                .context("invalid shard state")?
-                .parse::<ShardAccounts>()
-                .context("failed to load shard accounts")?;
+        applier: &ParMerkleUpdateApplier<'_, F>,
+    ) -> Result<Self>
+    where
+        for<'a> F: Fn(&'a HashBytes) -> Option<Cell> + Send + Sync + 'static,
+    {
+        // let old_split_at = if let Some(depth) = split_at_depth {
+        //     let shard_accounts = self
+        //         .root_cell()
+        //         .reference_cloned(1)
+        //         .context("invalid shard state")?
+        //         .parse::<ShardAccounts>()
+        //         .context("failed to load shard accounts")?;
 
-            split_aug_dict_raw(shard_accounts, depth)
-                .context("failed to split shard accounts")?
-                .into_keys()
-                .collect::<FastHashSet<_>>()
-        } else {
-            Default::default()
+        //     split_aug_dict_raw(shard_accounts, depth)
+        //         .context("failed to split shard accounts")?
+        //         .into_keys()
+        //         .collect::<FastHashSet<_>>()
+        // } else {
+        //     Default::default()
+        // };
+
+        let new_root = 'apply: {
+            if merkle_update.old_hash == merkle_update.new_hash {
+                let Some(cell) = (applier.find_cell)(&merkle_update.old_hash) else {
+                    anyhow::bail!("old state not found");
+                };
+                break 'apply cell;
+            }
+
+            let new =
+                rayon::scope(|scope| applier.run(merkle_update.new.as_ref(), 0, 0, Some(scope)))?;
+            new.resolve(Cell::empty_context())?
         };
-
-        let new_root = merkle_update
-            .par_apply(&self.inner.root, &old_split_at)
-            .context("failed to apply merkle update")?;
 
         let shard_state = new_root.parse::<Box<ShardStateUnsplit>>()?;
         anyhow::ensure!(

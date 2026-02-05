@@ -15,8 +15,8 @@ use tycho_block_util::block::calc_next_block_id_short;
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_core::global_config::{MempoolGlobalConfig, ZerostateId};
 use tycho_network::PeerId;
-use tycho_types::cell::{Cell, HashBytes};
-use tycho_types::merkle::MerkleUpdate;
+use tycho_types::cell::{Cell, CellFamily, HashBytes};
+use tycho_types::merkle::{MerkleUpdate, ParMerkleUpdateApplier};
 use tycho_types::models::*;
 use tycho_util::futures::JoinTask;
 use tycho_util::mem::Reclaimer;
@@ -739,30 +739,41 @@ impl CollatorStdImpl {
                             &labels,
                         );
 
-                        // apply merkle updates
-                        while let Some(task) = unfinished_tasks.pop() {
-                            let prev_block_id = *prev_state.block_id();
-                            prev_state = rayon_run({
-                                let block_id = task.block_id;
-                                let merkle_update = task.state_update.clone();
-                                move || {
-                                    prev_state.par_make_next_state(
-                                        &block_id,
-                                        &merkle_update,
-                                        Some(5),
-                                    )
-                                }
-                            })
-                            .await
-                            .with_context(|| {
-                                format!(
-                                    "failed to apply merkle of block {} to {prev_block_id}",
-                                    task.block_id
-                                )
-                            })?;
+                        if !unfinished_tasks.is_empty() {
+                            let storage = self.state_node_adapter.clone();
+                            let tx = self.background_store_new_state_tx.clone();
+                            prev_state = rayon_run(move || {
+                                let applier = ParMerkleUpdateApplier {
+                                    new_cells: Default::default(),
+                                    context: Cell::empty_context(),
+                                    find_cell: move |hash: &HashBytes| {
+                                        storage.load_cell(hash, prev_mc_seqno).ok()
+                                    },
+                                    find_in_new_cells: true,
+                                };
 
-                            // finalize store task in background
-                            self.background_store_new_state_tx.send(task)?;
+                                while let Some(task) = unfinished_tasks.pop() {
+                                    prev_state = prev_state
+                                        .par_make_next_state(
+                                            &task.block_id,
+                                            &task.state_update,
+                                            &applier,
+                                        )
+                                        .with_context(|| {
+                                            format!(
+                                                "failed to apply merkle of block {} to {}",
+                                                prev_state.block_id(),
+                                                task.block_id,
+                                            )
+                                        })?;
+
+                                    // finalize store task in background
+                                    tx.send(task)?;
+                                }
+
+                                Ok::<_, anyhow::Error>(prev_state)
+                            })
+                            .await?;
                         }
 
                         // update prev state in working state

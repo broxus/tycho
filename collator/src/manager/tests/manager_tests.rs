@@ -4350,6 +4350,10 @@ impl StateNodeAdapter for TestStateNodeAdapter {
         res.ok_or_else(|| anyhow!("state not found for mc block {}", block_id.as_short_id()))
     }
 
+    fn load_cell(&self, _hash: &HashBytes, _epoch: u32) -> Result<Cell> {
+        unreachable!()
+    }
+
     fn load_last_applied_mc_block_id(&self) -> Result<BlockId> {
         unreachable!()
     }

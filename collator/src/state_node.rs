@@ -65,6 +65,8 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
     /// Return master or shard state on specified block from node local state
     async fn load_state(&self, ref_by_mc_seqno: u32, block_id: &BlockId)
     -> Result<ShardStateStuff>;
+    /// TEMP
+    fn load_cell(&self, hash: &HashBytes, epoch: u32) -> Result<Cell>;
     /// Store shard state root in the storage.
     /// Returns `true` when state was updated in storage.
     async fn store_state_root(
@@ -211,6 +213,15 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
             .context("failed to load state for node state adapter")?;
 
         Ok(state)
+    }
+
+    fn load_cell(&self, hash: &HashBytes, epoch: u32) -> Result<Cell> {
+        let res = self
+            .storage
+            .shard_state_storage()
+            .cell_storage()
+            .load_cell(hash, epoch)?;
+        Ok(Cell::from(res as Arc<_>))
     }
 
     async fn store_state_root(

@@ -1374,6 +1374,22 @@ impl CellImpl for StorageCell {
         Some(Cell::from(self.reference_raw(index)?.clone() as Arc<_>))
     }
 
+    fn reference_repr_hash(&self, index: u8) -> Option<HashBytes> {
+        if index > 3 || index >= self.descriptor.reference_count() {
+            return None;
+        }
+
+        let state = &self.reference_states[index as usize];
+        let slot = self.reference_data[index as usize].get();
+
+        let current_state = state.load(Ordering::Acquire);
+        if current_state == Self::REF_STORAGE {
+            return Some(unsafe { &(*slot).storage_cell }.repr_hash);
+        }
+
+        Some(unsafe { (*slot).hash })
+    }
+
     fn virtualize(&self) -> &DynCell {
         VirtualCellWrapper::wrap(self)
     }
