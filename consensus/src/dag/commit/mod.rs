@@ -286,6 +286,7 @@ impl Committer {
                 .filter(|r| *r > conf.genesis_round)
                 .map(|r| r.prev()),
             anchor: next.anchor,
+            proof_key: next.proof.key(),
             history: committed,
         })
     }

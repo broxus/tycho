@@ -13,9 +13,7 @@ use tycho_util::futures::JoinTask;
 use crate::mempool::StateUpdateContext;
 use crate::mempool::impls::common::cache::Cache;
 use crate::mempool::impls::common::v_set_adapter::VSetAdapter;
-use crate::mempool::impls::single_node_impl::anchor_handler::{
-    ANCHOR_ID_STEP, SingleNodeAnchorHandler,
-};
+use crate::mempool::impls::single_node_impl::anchor_handler::SingleNodeAnchorHandler;
 use crate::tracing_targets;
 
 pub struct MempoolAdapterSingleNodeImpl {
@@ -59,7 +57,7 @@ impl MempoolAdapterSingleNodeImpl {
 
         let timeout = merged_conf.conf.consensus.broadcast_retry_millis.get() as u64
             * merged_conf.conf.consensus.min_sign_attempts.get() as u64
-            * ANCHOR_ID_STEP as u64;
+            * WAVE_ROUNDS as u64;
 
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(timeout));
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);

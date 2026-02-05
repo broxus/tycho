@@ -385,6 +385,7 @@ impl Dumper {
                 &consensus_config,
                 mc_state_extra.consensus_info.genesis_info,
             )
+            .await
             .context("Failed to load dumped anchors")?;
 
         let dst_dir = self.output_dir.path().join("mempool");

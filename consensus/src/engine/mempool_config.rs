@@ -37,6 +37,11 @@ pub struct MempoolMergedConfig {
 }
 
 impl MempoolMergedConfig {
+    pub fn node_config(&self) -> &MempoolNodeConfig {
+        _ = self;
+        NodeConfig::get()
+    }
+
     pub(crate) fn genesis_author(&self) -> PeerId {
         let key_pair = KeyPair::from(&SecretKey::from_bytes(self.overlay_id.0));
         key_pair.public_key.into()
