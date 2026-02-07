@@ -110,8 +110,9 @@ fn make_network(
     let peer_info = keys
         .iter()
         .zip(bind_addresses.iter())
-        .map(|((_, key_pair), addr)| Arc::new(make_peer_info(key_pair, vec![addr.clone()])))
+        .map(|((_, key_pair), addr)| make_peer_info(key_pair, vec![addr.clone()]))
         .collect::<Vec<_>>();
+    let peer_info = Arc::new(peer_info);
 
     let merged_conf = default_test_config();
     let dht_config = DhtConfig {
@@ -165,22 +166,18 @@ fn make_network(
                         let mempool_db = MempoolDb::open(ctx).expect("open db");
 
                         let net_args = {
-                            let (dht_client, peer_resolver, overlay_service) = from_validator(
+                            let (network, peer_resolver, overlay_service) = from_validator(
                                 bind_address,
                                 &secret_key,
                                 None::<Address>,
+                                &peer_info,
                                 dht_config,
                                 None::<PeerResolverConfig>,
                                 None::<OverlayConfig>,
                                 NetworkConfig::default(),
                             );
-                            for info in peer_info {
-                                if info.id != peer_id {
-                                    dht_client.add_peer(info).expect("add peer to dht client");
-                                }
-                            }
                             let moderator = Moderator::new(
-                                dht_client.network(),
+                                &network,
                                 mempool_db.clone(),
                                 ModeratorConfig::test_default(),
                                 "engine example",
@@ -189,7 +186,7 @@ fn make_network(
 
                             EngineNetworkArgs {
                                 key_pair,
-                                network: dht_client.network().clone(),
+                                network,
                                 peer_resolver: peer_resolver.clone(),
                                 overlay_service: overlay_service.clone(),
                                 moderator,

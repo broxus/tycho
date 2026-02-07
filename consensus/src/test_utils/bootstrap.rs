@@ -2,8 +2,8 @@ use std::num::NonZeroU16;
 
 use tycho_crypto::ed25519::{KeyPair, PublicKey, SecretKey};
 use tycho_network::{
-    Address, DhtClient, DhtConfig, DhtService, Network, NetworkConfig, OverlayConfig,
-    OverlayService, PeerId, PeerInfo, PeerResolver, PeerResolverConfig, Router, ToSocket,
+    Address, DhtConfig, DhtService, Network, NetworkConfig, OverlayConfig, OverlayService, PeerId,
+    PeerInfo, PeerResolver, PeerResolverConfig, Router, ToSocket,
 };
 use tycho_types::models::{ConsensusConfig, GenesisInfo};
 use tycho_util::time::now_sec;
@@ -56,15 +56,17 @@ pub fn make_peer_info(keypair: &KeyPair, address_list: Vec<Address>) -> PeerInfo
     peer_info
 }
 
+#[allow(clippy::too_many_arguments, reason = "NodeConfig not available")]
 pub fn from_validator<T: ToSocket, A: Into<Address>>(
     bind_address: T,
     secret_key: &SecretKey,
     remote_addr: Option<A>,
+    bootstrap_peers: &[PeerInfo],
     dht_config: DhtConfig,
     peer_resolver_config: Option<PeerResolverConfig>,
     overlay_config: Option<OverlayConfig>,
     network_config: NetworkConfig,
-) -> (DhtClient, PeerResolver, OverlayService) {
+) -> (Network, PeerResolver, OverlayService) {
     let local_id = PeerId::from(PublicKey::from(secret_key));
 
     let (dht_tasks, dht_service) = DhtService::builder(local_id)
@@ -99,12 +101,16 @@ pub fn from_validator<T: ToSocket, A: Into<Address>>(
     }
     let peer_resolver = peer_resolver_builder.build(&network);
 
-    dht_tasks.spawn_without_bootstrap(&network);
+    let added_peers = dht_tasks
+        .spawn(&network, bootstrap_peers)
+        .expect("spawn dht tasks");
+    assert_eq!(
+        added_peers + 1,
+        bootstrap_peers.len(),
+        "dht is expected to add all bootstrap peers except local"
+    );
+
     overlay_tasks.spawn(&network);
 
-    (
-        dht_service.make_client(&network),
-        peer_resolver,
-        overlay_service,
-    )
+    (network, peer_resolver, overlay_service)
 }

@@ -215,11 +215,12 @@ impl Mempool {
 
             let local_addr = SocketAddr::from((node_config.local_ip, node_config.port));
 
-            let (dht_client, peer_resolver, overlay_service) =
+            let (network, peer_resolver, overlay_service) =
                 tycho_consensus::test_utils::from_validator(
                     local_addr,
                     &keys.as_secret(),
                     Some(public_addr),
+                    &global_config.bootstrap_peers,
                     node_config.dht.clone(),
                     Some(node_config.peer_resolver.clone()),
                     Some(node_config.overlay.clone()),
@@ -229,14 +230,8 @@ impl Mempool {
             let key_pair = Arc::new(ed25519::KeyPair::from(&keys.as_secret()));
             let local_id: PeerId = key_pair.public_key.into();
 
-            let mut peer_count = 0usize;
-            for peer in global_config.bootstrap_peers {
-                let is_new = dht_client.add_peer(Arc::new(peer))?;
-                peer_count += is_new as usize;
-            }
-
             let moderator = Moderator::new(
-                dht_client.network(),
+                &network,
                 mempool_db.clone(),
                 node_config.mempool.moderator,
                 crate::version_string(),
@@ -246,13 +241,13 @@ impl Mempool {
                 %local_id,
                 %local_addr,
                 %public_addr,
-                bootstrap_peers = peer_count,
+                bootstrap_peers = global_config.bootstrap_peers.len(),
                 "initialized network"
             );
 
             EngineNetworkArgs {
                 key_pair,
-                network: dht_client.network().clone(),
+                network,
                 peer_resolver,
                 overlay_service,
                 moderator,
