@@ -50,7 +50,6 @@ pub struct ShardStateStorage {
     shard_split_depth: u8,
     new_cells_threshold: usize,
     store_shard_state_step: NonZeroU8,
-    states_cache_force_reload_interval: NonZeroU8,
 }
 
 impl ShardStateStorage {
@@ -77,7 +76,6 @@ impl ShardStateStorage {
             shard_split_depth: config.shard_split_depth,
             new_cells_threshold: config.max_new_cells_threshold,
             store_shard_state_step: config.store_shard_state_step,
-            states_cache_force_reload_interval: config.states_cache_force_reload_interval,
             gc_lock: Default::default(),
             min_ref_mc_state: MinRefMcStateTracker::new(),
             max_new_mc_cell_count: AtomicUsize::new(0),
@@ -137,10 +135,6 @@ impl ShardStateStorage {
         root_cell: Cell,
         hint: StoreStateHint,
     ) -> Result<StoreStateStatus> {
-        // NOTE: Cache is populated for all states (not just skipped) because
-        // FORCE_RELOAD clearing must run unconditionally.
-        self.cache_shard_state_root(handle.id(), &root_cell)?;
-
         if handle.has_state() {
             return Ok(StoreStateStatus::Exist);
         }
@@ -176,6 +170,9 @@ impl ShardStateStorage {
                 metrics::counter!("tycho_storage_shard_state_skipped").increment(1);
 
                 drop(guard);
+
+                // NOTE: Cache is populated for SKIPPED states
+                self.cache_shard_state_root(handle.id(), &root_cell)?;
 
                 self.block_handle_storage
                     .set_has_virtual_shard_state(handle);
@@ -267,6 +264,15 @@ impl ShardStateStorage {
         };
 
         count.fetch_max(new_cell_count, Ordering::Release);
+
+        // Clear cache when shard state is stored to ensure clean states on next load
+        if !block_id.is_masterchain()
+            && status.is_stored()
+            && let Some(mut shard_cache) = self.shard_states_cache.get_mut(&block_id.shard)
+        {
+            let old = std::mem::take(&mut *shard_cache);
+            Reclaimer::instance().drop(old);
+        }
 
         Ok(status)
     }
@@ -651,18 +657,6 @@ impl ShardStateStorage {
 
     fn cache_shard_state_root(&self, block_id: &BlockId, state_root: &Cell) -> Result<()> {
         if block_id.is_masterchain() {
-            return Ok(());
-        }
-
-        // Force reload: clear cache and skip insertion
-        if block_id
-            .seqno
-            .is_multiple_of(self.states_cache_force_reload_interval.get() as u32)
-        {
-            if let Some(mut shard_states) = self.shard_states_cache.get_mut(&block_id.shard) {
-                let old = std::mem::take(&mut *shard_states);
-                Reclaimer::instance().drop(old);
-            }
             return Ok(());
         }
 
