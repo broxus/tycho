@@ -565,11 +565,7 @@ impl StarterInner {
             handle_storage.set_block_committed(&handle);
 
             persistent_states
-                .store_shard_state(
-                    mc_block_id.seqno,
-                    &handle,
-                    state.ref_mc_state_handle().clone(),
-                )
+                .store_shard_state(mc_block_id.seqno, &handle)
                 .await?;
 
             tracing::debug!(%block_id, "imported persistent shard state");
@@ -587,11 +583,7 @@ impl StarterInner {
 
         // TODO: Somehow save the original file.
         persistent_states
-            .store_shard_state(
-                mc_block_id.seqno,
-                &handle,
-                mc_zerostate.ref_mc_state_handle().clone(),
-            )
+            .store_shard_state(mc_block_id.seqno, &handle)
             .await?;
 
         tracing::info!("imported zerostates");
@@ -773,7 +765,7 @@ impl StarterInner {
     ) -> Result<(BlockHandle, ShardStateStuff)> {
         enum StoreZeroStateFrom {
             File(FileBuilder),
-            State(ShardStateStuff),
+            State,
         }
 
         let shard_states = self.storage.shard_state_storage();
@@ -809,14 +801,10 @@ impl StarterInner {
                             .await
                     }
                     // Possibly slow full state traversal
-                    StoreZeroStateFrom::State(state) => {
+                    StoreZeroStateFrom::State => {
                         // Store zerostate as is
                         persistent_states
-                            .store_shard_state(
-                                mc_seqno,
-                                &block_handle,
-                                state.ref_mc_state_handle().clone(),
-                            )
+                            .store_shard_state(mc_seqno, &block_handle)
                             .await
                     }
                 }
@@ -837,7 +825,7 @@ impl StarterInner {
                 let from = if state_file.exists() {
                     StoreZeroStateFrom::File(state_file)
                 } else {
-                    StoreZeroStateFrom::State(state.clone())
+                    StoreZeroStateFrom::State
                 };
                 try_save_persistent(handle, from)
                     .await

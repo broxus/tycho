@@ -14,7 +14,6 @@ use tokio::sync::{Notify, Semaphore, mpsc};
 use tokio::time::Instant;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::queue::QueueStateHeader;
-use tycho_block_util::state::RefMcStateHandle;
 use tycho_storage::fs::Dir;
 use tycho_types::models::{BlockId, PrevBlockRef};
 use tycho_util::fs::MappedFile;
@@ -129,7 +128,9 @@ impl PersistentStateStorage {
     #[tracing::instrument(skip_all)]
     pub async fn preload(&self) -> Result<()> {
         self.preload_handles_queue()?;
-        self.preload_states().await
+        self.preload_states().await?;
+        self.resume_pending_persistent_states().await?;
+        Ok(())
     }
 
     fn preload_handles_queue(&self) -> Result<()> {
@@ -354,16 +355,15 @@ impl PersistentStateStorage {
     }
 
     #[tracing::instrument(skip_all, fields(mc_seqno, block_id = %handle.id()))]
-    pub async fn store_shard_state(
-        &self,
-        mc_seqno: u32,
-        handle: &BlockHandle,
-        tracker_handle: RefMcStateHandle,
-    ) -> Result<()> {
+    pub async fn store_shard_state(&self, mc_seqno: u32, handle: &BlockHandle) -> Result<()> {
         if self
             .try_reuse_persistent_state(mc_seqno, handle, PersistentStateKind::Shard)
             .await?
         {
+            self.inner.block_handles.set_skip_states_gc_finished(handle);
+            self.inner
+                .node_state
+                .remove_pending_persistent_state(mc_seqno, handle.id());
             return Ok(());
         }
 
@@ -372,29 +372,27 @@ impl PersistentStateStorage {
             cancelled.cancel();
         }
 
-        let handle = handle.clone();
+        let handle_clone = handle.clone();
         let this = self.inner.clone();
         let cancelled = cancelled.clone();
         let span = tracing::Span::current();
 
-        let state = tokio::task::spawn_blocking(move || {
+        let state_result = tokio::task::spawn_blocking(move || {
             let _span = span.enter();
 
             let guard = scopeguard::guard((), |_| {
                 tracing::warn!("cancelled");
             });
 
-            // NOTE: Ensure that the tracker handle will outlive the state writer.
-            let _tracker_handle = tracker_handle;
-
-            let root_hash = this.shard_states.load_state_root_hash(handle.id())?;
+            let root_hash = this.shard_states.load_state_root_hash(handle_clone.id())?;
 
             let states_dir = this.prepare_persistent_states_dir(mc_seqno)?;
 
-            let cell_writer = ShardStateWriter::new(&this.cells_db, &states_dir, handle.id());
+            let cell_writer = ShardStateWriter::new(&this.cells_db, &states_dir, handle_clone.id());
             match cell_writer.write(&root_hash, Some(&cancelled)) {
                 Ok(_) => {
-                    this.block_handles.set_has_persistent_shard_state(&handle);
+                    this.block_handles
+                        .set_has_persistent_shard_state(&handle_clone);
                     tracing::info!("persistent shard state saved");
                 }
                 Err(e) => {
@@ -403,15 +401,25 @@ impl PersistentStateStorage {
                 }
             }
 
-            let state = this.cache_state(mc_seqno, handle.id(), PersistentStateKind::Shard)?;
+            let state =
+                this.cache_state(mc_seqno, handle_clone.id(), PersistentStateKind::Shard)?;
 
             scopeguard::ScopeGuard::into_inner(guard);
             Ok::<_, anyhow::Error>(state)
         })
-        .await??;
+        .await?;
 
-        self.notify_with_persistent_state(&state).await;
-        Ok(())
+        match state_result {
+            Ok(state) => {
+                self.inner.block_handles.set_skip_states_gc_finished(handle);
+                self.inner
+                    .node_state
+                    .remove_pending_persistent_state(mc_seqno, handle.id());
+                self.notify_with_persistent_state(&state).await;
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
     }
 
     #[tracing::instrument(skip_all, fields(mc_seqno, block_id = %handle.id()))]
@@ -487,6 +495,14 @@ impl PersistentStateStorage {
 
         let mut tail_len = top_block.block().out_msg_queue_updates.tail_len as usize;
 
+        self.inner.block_handles.set_skip_blocks_gc(handle);
+        self.inner
+            .node_state
+            .add_pending_persistent_queue_state(mc_seqno, handle.id());
+
+        let mut skip_blocks_handles = Vec::new();
+        skip_blocks_handles.push(handle.clone());
+
         while tail_len > 0 {
             let queue_diff = this.blocks.load_queue_diff(&top_block_handle).await?;
             let top_block_info = top_block.load_info()?;
@@ -509,6 +525,12 @@ impl PersistentStateStorage {
             let Some(prev_block_handle) = this.block_handles.load_handle(&prev_block_id) else {
                 anyhow::bail!("prev block handle not found for: {prev_block_id}");
             };
+
+            self.inner
+                .block_handles
+                .set_skip_blocks_gc(&prev_block_handle);
+            skip_blocks_handles.push(prev_block_handle.clone());
+
             let prev_block = this.blocks.load_block_data(&prev_block_handle).await?;
 
             top_block_handle = prev_block_handle;
@@ -527,7 +549,7 @@ impl PersistentStateStorage {
             cancelled.cancel();
         }
 
-        let handle = handle.clone();
+        let handle_clone = handle.clone();
         let cancelled = cancelled.clone();
         let span = tracing::Span::current();
 
@@ -539,11 +561,12 @@ impl PersistentStateStorage {
             });
 
             let states_dir = this.prepare_persistent_states_dir(mc_seqno)?;
-            match QueueStateWriter::new(&states_dir, handle.id(), state, messages)
+            match QueueStateWriter::new(&states_dir, handle_clone.id(), state, messages)
                 .write(Some(&cancelled))
             {
                 Ok(()) => {
-                    this.block_handles.set_has_persistent_queue_state(&handle);
+                    this.block_handles
+                        .set_has_persistent_queue_state(&handle_clone);
                     tracing::info!("persistent queue state saved");
                 }
                 Err(e) => {
@@ -551,12 +574,22 @@ impl PersistentStateStorage {
                 }
             }
 
-            let state = this.cache_state(mc_seqno, handle.id(), PersistentStateKind::Queue)?;
+            let state =
+                this.cache_state(mc_seqno, handle_clone.id(), PersistentStateKind::Queue)?;
 
             scopeguard::ScopeGuard::into_inner(guard);
             Ok::<_, anyhow::Error>(state)
         })
         .await??;
+
+        for handle in skip_blocks_handles {
+            self.inner
+                .block_handles
+                .set_skip_blocks_gc_finished(&handle);
+        }
+        self.inner
+            .node_state
+            .remove_pending_persistent_queue_state(mc_seqno, handle.id());
 
         self.notify_with_persistent_state(&state).await;
         Ok(())
@@ -747,6 +780,113 @@ impl PersistentStateStorage {
 
         self.notify_with_persistent_state(&state).await;
         Ok(true)
+    }
+
+    async fn finish_skip_blocks_gc_for_queue_tail(&self, handle: &BlockHandle) -> Result<()> {
+        let mut block_handle = handle.clone();
+        let mut block = self.inner.blocks.load_block_data(&block_handle).await?;
+        let shard_ident = handle.id().shard;
+        let mut tail_len = block.block().out_msg_queue_updates.tail_len as usize;
+
+        self.inner
+            .block_handles
+            .set_skip_blocks_gc_finished(&block_handle);
+
+        while tail_len > 1 {
+            let block_info = block.load_info()?;
+            let prev_block_id = match block_info.load_prev_ref()? {
+                PrevBlockRef::Single(block_ref) => block_ref.as_block_id(shard_ident),
+                PrevBlockRef::AfterMerge { .. } => anyhow::bail!("merge not supported yet"),
+            };
+
+            let Some(prev_block_handle) = self.inner.block_handles.load_handle(&prev_block_id)
+            else {
+                anyhow::bail!("prev block handle not found for: {prev_block_id}");
+            };
+
+            self.inner
+                .block_handles
+                .set_skip_blocks_gc_finished(&prev_block_handle);
+
+            block_handle = prev_block_handle;
+            block = self.inner.blocks.load_block_data(&block_handle).await?;
+            tail_len -= 1;
+        }
+
+        Ok(())
+    }
+
+    pub async fn resume_pending_persistent_states(&self) -> Result<()> {
+        let pending_shard_state = self.inner.node_state.load_pending_shard_states();
+        let pending_queue = self.inner.node_state.load_pending_queue_states();
+
+        if pending_shard_state.is_empty() && pending_queue.is_empty() {
+            return Ok(());
+        }
+
+        let this = self.clone();
+        tokio::spawn(async move {
+            for (mc_seqno, block_id) in pending_shard_state {
+                let Some(handle) = this.inner.block_handles.load_handle(&block_id) else {
+                    tracing::warn!(%block_id, "pending shard state handle not found");
+                    continue; //TODO: err?
+                };
+
+                if handle.has_persistent_shard_state() {
+                    this.inner
+                        .block_handles
+                        .set_skip_states_gc_finished(&handle);
+                    this.inner
+                        .node_state
+                        .remove_pending_persistent_state(mc_seqno, handle.id());
+                    continue;
+                }
+
+                let _tracker = this
+                    .inner
+                    .shard_states
+                    .min_ref_mc_state()
+                    .insert_seqno(mc_seqno);
+                if let Err(e) = this.store_shard_state(mc_seqno, &handle).await {
+                    tracing::error!(%block_id, mc_seqno, "failed to resume shard state: {e:?}");
+                }
+            }
+
+            for (mc_seqno, block_id) in pending_queue {
+                let Some(handle) = this.inner.block_handles.load_handle(&block_id) else {
+                    tracing::warn!(%block_id, "pending queue state handle not found");
+                    continue;
+                };
+
+                if handle.has_persistent_queue_state() {
+                    if let Err(e) = this.finish_skip_blocks_gc_for_queue_tail(&handle).await {
+                        tracing::error!(
+                            %block_id,
+                            mc_seqno,
+                            "failed to finish queue gc flags for pending queue state: {e:?}"
+                        );
+                        continue;
+                    }
+                    this.inner
+                        .node_state
+                        .remove_pending_persistent_queue_state(mc_seqno, handle.id());
+                    continue;
+                }
+
+                match this.inner.blocks.load_block_data(&handle).await {
+                    Ok(block) => {
+                        if let Err(e) = this.store_queue_state(mc_seqno, &handle, block).await {
+                            tracing::error!(%block_id, mc_seqno, "failed to resume queue state: {e:?}");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(%block_id, mc_seqno, "failed to load block for queue state: {e:?}");
+                    }
+                }
+            }
+        });
+
+        Ok(())
     }
 
     async fn notify_with_persistent_state(&self, state: &PersistentState) {

@@ -491,6 +491,15 @@ impl ShardStateStorage {
                 continue;
             }
 
+            // skip block marked by SKIP_GC flag
+            if let Some(handle) = self.block_handle_storage.load_handle(&block_id)
+                && handle.skip_states_gc()
+            {
+                tracing::info!(block_id=%block_id, "skipping states GC since it flagged by SKIP_STATES_GC");
+                iter.next();
+                continue;
+            }
+
             alloc.reset();
 
             let guard = {
