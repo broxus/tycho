@@ -1,8 +1,9 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use futures_util::future::BoxFuture;
+use tokio::sync::OnceCell;
 use tokio::task::JoinHandle;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::dict::split_aug_dict_raw;
@@ -14,7 +15,7 @@ use tycho_util::sync::rayon_run;
 use crate::block_strider::{
     BlockSaver, BlockSubscriber, BlockSubscriberContext, StateSubscriber, StateSubscriberContext,
 };
-use crate::storage::{BlockHandle, CoreStorage, StoreStateHint};
+use crate::storage::{BlockConnection, BlockHandle, CoreStorage, StoreStateHint};
 
 #[repr(transparent)]
 pub struct ShardStateApplier<S> {
@@ -48,6 +49,8 @@ where
 
                 store_persistent_states,
                 last_key_block_utime: AtomicU32::new(last_key_block_utime),
+
+                resume_pending_persistent_states: Default::default(),
                 prev_state_task: Default::default(),
             }),
         }
@@ -65,6 +68,17 @@ where
         cx: &BlockSubscriberContext,
     ) -> Result<StateApplierPrepared> {
         let _histogram = HistogramGuard::begin("tycho_core_state_applier_prepare_block_time");
+
+        self.inner
+            .resume_pending_persistent_states
+            .get_or_try_init(async move || {
+                let mut guard = self.inner.prev_state_task.lock().await;
+                anyhow::ensure!(guard.is_none(), "already creating persistent state");
+                let resume = self.resume_pending_persistent_states().await?;
+                *guard = resume;
+                Ok::<_, anyhow::Error>(())
+            })
+            .await?;
 
         let handle = self.inner.block_saver.save_block(cx).await?;
 
@@ -252,20 +266,45 @@ where
                     task.join().await?;
                 }
 
-                let block = cx.block.clone();
+                let mc_block_stuff = cx.block.clone();
                 let inner = self.inner.clone();
-                let state_handle = cx.state.ref_mc_state_handle().clone();
+                let deps = inner.begin_persistent_state_store(&mc_block_stuff).await?;
 
                 *prev_task = Some(StorePersistentStateTask {
                     mc_seqno: cx.mc_block_id.seqno,
                     handle: Some(tokio::spawn(async move {
-                        inner.save_persistent_states(block, state_handle).await
+                        inner.save_persistent_states(mc_block_stuff, deps).await
                     })),
                 });
             }
         }
 
         Ok(())
+    }
+
+    async fn resume_pending_persistent_states(&self) -> Result<Option<StorePersistentStateTask>> {
+        let node_state = self.inner.storage.node_state();
+        let blocks = self.inner.storage.block_storage();
+        let block_handles = self.inner.storage.block_handle_storage();
+
+        let Some(block_id) = node_state.load_pending_persistent_state_id() else {
+            return Ok(None);
+        };
+
+        let Some(handle) = block_handles.load_handle(&block_id) else {
+            bail!("block handle not found {}", block_id);
+        };
+
+        let mc_block_stuff = blocks.load_block_data(&handle).await?;
+        let inner = self.inner.clone();
+        let deps = inner.begin_persistent_state_store(&mc_block_stuff).await?;
+
+        Ok(Some(StorePersistentStateTask {
+            mc_seqno: block_id.seqno,
+            handle: Some(tokio::spawn(async move {
+                inner.save_persistent_states(mc_block_stuff, deps).await
+            })),
+        }))
     }
 }
 
@@ -318,6 +357,11 @@ impl RefMcStateHandles {
     }
 }
 
+struct StorePersistentStateDeps {
+    pub state_gc_handles: Vec<BlockHandle>,
+    pub blocks_gc_handles: Vec<BlockHandle>,
+}
+
 struct Inner<S> {
     storage: CoreStorage,
     state_subscriber: S,
@@ -325,29 +369,124 @@ struct Inner<S> {
 
     store_persistent_states: bool,
     last_key_block_utime: AtomicU32,
+
+    resume_pending_persistent_states: OnceCell<()>,
     prev_state_task: tokio::sync::Mutex<Option<StorePersistentStateTask>>,
 }
 
 impl<S> Inner<S> {
+    async fn prepare_persistent_queue_diffs_for_shard(
+        &self,
+        top_block_handle: &BlockHandle,
+    ) -> Result<Vec<BlockHandle>> {
+        let blocks = self.storage.block_storage();
+        let block_handles = self.storage.block_handle_storage();
+        let block_connections = self.storage.block_connection_storage();
+
+        // NOTE: The `tail_len` in block is not if fact the length of "tail",
+        // it also includes the block diff itself, so we substract 1 here.
+        let Some(tail_len) = blocks
+            .load_block_data(top_block_handle)
+            .await?
+            .as_ref()
+            .out_msg_queue_updates
+            .tail_len
+            .checked_sub(1)
+        else {
+            anyhow::bail!("invalid blocktail len");
+        };
+
+        // top block itself
+        block_handles.set_skip_blocks_gc(top_block_handle);
+        let mut skip_blocks_handles = vec![top_block_handle.clone()];
+
+        // all required blocks
+        let mut block_id = *top_block_handle.id();
+        for _ in 0..tail_len {
+            // TODO: support BlockConnection::Prev2 in the future once split/merge is enabled
+            let Some(prev_block_id) =
+                block_connections.load_connection(&block_id, BlockConnection::Prev1)
+            else {
+                bail!("prev block connection not found for: {block_id}");
+            };
+
+            let Some(prev_block_handle) = block_handles.load_handle(&prev_block_id) else {
+                bail!("prev block handle not found for: {prev_block_id}");
+            };
+
+            block_handles.set_skip_blocks_gc(&prev_block_handle);
+            skip_blocks_handles.push(prev_block_handle);
+
+            block_id = prev_block_id;
+        }
+
+        Ok(skip_blocks_handles)
+    }
+
+    async fn begin_persistent_state_store(
+        &self,
+        mc_block: &BlockStuff,
+    ) -> Result<StorePersistentStateDeps> {
+        let block_handles = self.storage.block_handle_storage();
+        let node_state = self.storage.node_state();
+
+        let mc_block_id = mc_block.id();
+        let extra = mc_block.load_custom()?;
+
+        let Some(mc_block_handle) = block_handles.load_handle(mc_block_id) else {
+            return Err(anyhow!("mc block handle does not exist {}", mc_block_id));
+        };
+
+        node_state.set_pending_persistent_state_id(mc_block_id);
+
+        let mut state_gc_handles = Vec::new();
+        let mut blocks_gc_handles = Vec::new();
+
+        for entry in extra.shards.latest_blocks() {
+            let block_id = entry?;
+            let Some(block_handle) = block_handles.load_handle(&block_id) else {
+                bail!("top shard block handle not found: {block_id}");
+            };
+
+            let queue_deps = self
+                .prepare_persistent_queue_diffs_for_shard(&block_handle)
+                .await?;
+            blocks_gc_handles.extend_from_slice(&queue_deps);
+
+            block_handles.set_skip_states_gc(&block_handle);
+            state_gc_handles.push(block_handle);
+        }
+
+        let queue_deps = self
+            .prepare_persistent_queue_diffs_for_shard(&mc_block_handle)
+            .await?;
+        blocks_gc_handles.extend_from_slice(&queue_deps);
+
+        block_handles.set_skip_states_gc(&mc_block_handle);
+        state_gc_handles.push(mc_block_handle);
+
+        Ok(StorePersistentStateDeps {
+            state_gc_handles,
+            blocks_gc_handles,
+        })
+    }
+
     async fn save_persistent_states(
         &self,
         mc_block: BlockStuff,
-        mc_state_handle: RefMcStateHandle,
+        deps: StorePersistentStateDeps,
     ) -> Result<()> {
+        let node_state = self.storage.node_state();
         let block_handles = self.storage.block_handle_storage();
 
         let Some(mc_block_handle) = block_handles.load_handle(mc_block.id()) else {
-            anyhow::bail!("masterchain block handle not found: {}", mc_block.id());
+            bail!("masterchain block handle not found: {}", mc_block.id());
         };
         block_handles.set_block_persistent(&mc_block_handle);
 
         let (state_result, queue_result) = tokio::join!(
-            self.save_persistent_shard_states(
-                mc_block_handle.clone(),
-                mc_block.clone(),
-                mc_state_handle
-            ),
-            self.save_persistent_queue_states(mc_block_handle.clone(), mc_block),
+            self.save_persistent_shard_states(&mc_block_handle, &mc_block),
+            self.save_persistent_queue_states(&mc_block_handle, &mc_block),
         );
         state_result?;
         queue_result?;
@@ -360,20 +499,28 @@ impl<S> Inner<S> {
         metrics::counter!("tycho_core_ps_subscriber_saved_persistent_states_count").increment(1);
         tracing::debug!("saved persistent state for {}", mc_block_handle.id());
 
+        for handle in deps.state_gc_handles {
+            block_handles.set_skip_states_gc_finished(&handle);
+        }
+        for handle in deps.blocks_gc_handles {
+            block_handles.set_skip_blocks_gc_finished(&handle);
+        }
+
+        node_state.reset_pending_persistent_state_id();
         Ok(())
     }
 
     async fn save_persistent_shard_states(
         &self,
-        mc_block_handle: BlockHandle,
-        mc_block: BlockStuff,
-        mc_state_handle: RefMcStateHandle,
+        mc_block_handle: &BlockHandle,
+        mc_block: &BlockStuff,
     ) -> Result<()> {
         let block_handles = self.storage.block_handle_storage();
         let persistent_states = self.storage.persistent_state_storage();
         let state_storage = self.storage.shard_state_storage();
 
         let mc_seqno = mc_block_handle.id().seqno;
+
         for entry in mc_block.load_custom()?.shards.latest_blocks() {
             let block_id = entry?;
             let Some(block_handle) = block_handles.load_handle(&block_id) else {
@@ -400,7 +547,7 @@ impl<S> Inner<S> {
             //       only do this in the first part of the `save_persistent_queue_states`.
 
             persistent_states
-                .store_shard_state(mc_seqno, &block_handle, mc_state_handle.clone())
+                .store_shard_state(mc_seqno, &block_handle)
                 .await?;
         }
 
@@ -408,7 +555,7 @@ impl<S> Inner<S> {
         //       the handle will live long enough. And this way we don't mislead
         //       other nodes with the incomplete set of persistent states.
         persistent_states
-            .store_shard_state(mc_seqno, &mc_block_handle, mc_state_handle)
+            .store_shard_state(mc_seqno, mc_block_handle)
             .await?;
 
         Ok(())
@@ -416,8 +563,8 @@ impl<S> Inner<S> {
 
     async fn save_persistent_queue_states(
         &self,
-        mc_block_handle: BlockHandle,
-        mc_block: BlockStuff,
+        mc_block_handle: &BlockHandle,
+        mc_block: &BlockStuff,
     ) -> Result<()> {
         let blocks = self.storage.block_storage();
         let block_handles = self.storage.block_handle_storage();
@@ -448,7 +595,7 @@ impl<S> Inner<S> {
         }
 
         persistent_states
-            .store_queue_state(mc_seqno, &mc_block_handle, mc_block)
+            .store_queue_state(mc_seqno, mc_block_handle, mc_block.clone())
             .await?;
 
         Ok(())

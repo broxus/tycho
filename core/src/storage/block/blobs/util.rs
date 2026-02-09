@@ -39,18 +39,29 @@ pub fn remove_blocks(
     blocks_iter.seek_to_first();
 
     let block_handles_readopts = db.block_handles.new_read_config();
-    let is_persistent = |root_hash: &[u8; 32]| -> Result<bool> {
+    let skip_blocks_gc = |root_hash: &[u8; 32]| -> Result<bool> {
         const FLAGS: u64 = ((BlockFlags::IS_KEY_BLOCK.bits()
             | BlockFlags::IS_PERSISTENT.bits()
             | BlockFlags::IS_ZEROSTATE.bits()) as u64)
             << 32;
+
+        const SKIP_BLOCKS_GC: u64 = (BlockFlags::SKIP_BLOCKS_GC.bits() as u64) << 32;
+        const SKIP_BLOCKS_GC_FINISHED: u64 =
+            (BlockFlags::SKIP_BLOCKS_GC_FINISHED.bits() as u64) << 32;
 
         let Some(value) =
             raw.get_pinned_cf_opt(&block_handles_cf, root_hash, &block_handles_readopts)?
         else {
             return Ok(false);
         };
-        Ok(value.as_ref().get_u64_le() & FLAGS != 0)
+
+        let flags = value.as_ref().get_u64_le();
+
+        let skip_keyblocks = flags & FLAGS != 0;
+        let skip_pending_during_gc =
+            flags & SKIP_BLOCKS_GC != 0 && flags & SKIP_BLOCKS_GC_FINISHED == 0;
+
+        Ok(skip_keyblocks || skip_pending_during_gc)
     };
 
     let mut key_buffer = [0u8; PackageEntryKey::SIZE_HINT];
@@ -141,12 +152,12 @@ pub fn remove_blocks(
         let root_hash: &[u8; 32] = key[16..48].try_into().unwrap();
         let is_masterchain = block_id.shard.is_masterchain();
 
-        // Don't gc latest blocks, key blocks or persistent blocks
+        // Don't gc latest blocks, key blocks or persistent blocks or blocks with skip gc flag
         if block_id.seqno == 0
             || is_masterchain && block_id.seqno >= mc_seqno
             || !is_masterchain
                 && shard_heights.contains_shard_seqno(&block_id.shard, block_id.seqno)
-            || is_persistent(root_hash)?
+            || skip_blocks_gc(root_hash)?
         {
             // Remove the current range
             if let Some((from, to)) = current_range.take() {
