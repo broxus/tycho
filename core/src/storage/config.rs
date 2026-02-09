@@ -41,11 +41,6 @@ pub struct CoreStorageConfig {
     /// Default: `500_000` cells
     pub max_new_cells_threshold: usize,
 
-    /// Force reload interval for shard state cache.
-    ///
-    /// Default: `10` blocks
-    pub states_cache_force_reload_interval: NonZeroU8,
-
     /// Archives storage config.
     ///
     /// Archives are disabled if this field is `None`.
@@ -100,7 +95,6 @@ impl Default for CoreStorageConfig {
             shard_split_depth: 5,
             store_shard_state_step: NonZeroU8::new(5).unwrap(),
             max_new_cells_threshold: 500_000,
-            states_cache_force_reload_interval: NonZeroU8::new(10).unwrap(),
             archives_gc: Some(ArchivesGcConfig::default()),
             states_gc: Some(StatesGcConfig::default()),
             blocks_gc: Some(BlocksGcConfig::default()),
