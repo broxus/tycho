@@ -15,12 +15,10 @@ use tycho_control::ControlClient;
 use tycho_core::node::NodeKeys;
 use tycho_crypto::ed25519;
 use tycho_network::PeerId;
-use tycho_types::abi::{
-    AbiType, AbiValue, AbiVersion, FromAbi, IntoAbi, WithAbiType, extend_signature_with_id,
-};
+use tycho_types::abi::{AbiType, AbiValue, AbiVersion, FromAbi, IntoAbi, WithAbiType};
 use tycho_types::models::{
-    Account, AccountState, BlockchainConfig, ExtInMsgInfo, GlobalCapability, MsgInfo, OwnedMessage,
-    StateInit, StdAddr, ValidatorStakeParams,
+    Account, AccountState, AutoSignatureContext, BlockchainConfig, ExtInMsgInfo, MsgInfo,
+    OwnedMessage, StateInit, StdAddr, ValidatorStakeParams,
 };
 use tycho_types::prelude::*;
 use tycho_util::cli::logger::init_logger_simple;
@@ -399,7 +397,7 @@ impl CmdOnce {
         self.control.rt(args, move |client| async move {
             let config = client.get_blockchain_config().await?;
             let price_factor = config.compute_price_factor(true)?;
-            let wallet = Wallet::new(&client, &simple.as_secret(), config.signature_id);
+            let wallet = Wallet::new(&client, &simple.as_secret(), config.signature_context);
 
             config.check_stake(*stake)?;
             let stake_factor = config.compute_stake_factor(stake_factor)?;
@@ -443,7 +441,7 @@ impl CmdOnce {
                     stake: stake_diff,
                     stake_factor,
                     price_factor,
-                    signature_id: config.signature_id,
+                    signature_context: config.signature_context,
                 });
                 wallet
                     .transfer(internal, self.transfer.into_params(price_factor))
@@ -508,7 +506,7 @@ impl CmdRecover {
         self.control.rt(args, move |client| async move {
             let config = client.get_blockchain_config().await?;
             let price_factor = config.compute_price_factor(true)?;
-            let wallet = Wallet::new(&client, &simple.as_secret(), config.signature_id);
+            let wallet = Wallet::new(&client, &simple.as_secret(), config.signature_context);
 
             // Find reward
             let (_, elector_data) = client.get_elector_data(&config.elector_addr).await?;
@@ -597,7 +595,7 @@ impl CmdWithdraw {
         self.control.rt(args, move |client| async move {
             let config = client.get_blockchain_config().await?;
             let price_factor = config.compute_price_factor(true)?;
-            let wallet = Wallet::new(&client, &simple.as_secret(), config.signature_id);
+            let wallet = Wallet::new(&client, &simple.as_secret(), config.signature_context);
 
             let amount = match self.amount {
                 None => Amount::All,
@@ -696,11 +694,11 @@ impl CmdVote {
                 validator_idx,
                 &self.hash,
                 &node_keys,
-                res.signature_id,
+                res.signature_context,
             );
 
             let price_factor = res.compute_price_factor(true)?;
-            let wallet = Wallet::new(&client, &simple.as_secret(), res.signature_id);
+            let wallet = Wallet::new(&client, &simple.as_secret(), res.signature_context);
 
             let internal = InternalMessage {
                 to: config_address,
@@ -739,7 +737,7 @@ struct ElectorMessage<'a> {
     stake: u128,
     stake_factor: u32,
     price_factor: u64,
-    signature_id: Option<i32>,
+    signature_context: AutoSignatureContext,
 }
 
 impl ElectionsContext<'_> {
@@ -752,7 +750,7 @@ impl ElectionsContext<'_> {
             stake,
             stake_factor,
             price_factor,
-            signature_id,
+            signature_context,
         } = ctx;
 
         let adnl_addr = HashBytes(node_keys.public_key.to_bytes());
@@ -767,7 +765,7 @@ impl ElectionsContext<'_> {
                 &adnl_addr,
             );
 
-            let data_to_sign = extend_signature_with_id(&data_to_sign, signature_id);
+            let data_to_sign = signature_context.apply(&data_to_sign);
             node_keys.sign_raw(&data_to_sign).to_vec()
         };
 
@@ -824,7 +822,11 @@ impl SimpleValidatorParams {
         ctx.config.check_stake(*self.stake_per_round)?;
         let price_factor = ctx.config.compute_price_factor(true)?;
         let stake_factor = ctx.config.compute_stake_factor(self.stake_factor)?;
-        let wallet = Wallet::new(ctx.client, &self.wallet_secret, ctx.config.signature_id);
+        let wallet = Wallet::new(
+            ctx.client,
+            &self.wallet_secret,
+            ctx.config.signature_context,
+        );
 
         // Try to recover tokens
         if ctx.recover_stake
@@ -871,7 +873,7 @@ impl SimpleValidatorParams {
             stake: *self.stake_per_round,
             stake_factor,
             price_factor,
-            signature_id: ctx.config.signature_id,
+            signature_context: ctx.config.signature_context,
         });
         wallet
             .transfer(message, TransferParams::reliable(price_factor))
@@ -923,11 +925,15 @@ struct Wallet {
     address: StdAddr,
     secret: ed25519_dalek::SigningKey,
     public: ed25519_dalek::VerifyingKey,
-    signature_id: Option<i32>,
+    signature_context: AutoSignatureContext,
 }
 
 impl Wallet {
-    fn new(client: &Client, secret: &ed25519::SecretKey, signature_id: Option<i32>) -> Self {
+    fn new(
+        client: &Client,
+        secret: &ed25519::SecretKey,
+        signature_context: AutoSignatureContext,
+    ) -> Self {
         let address = wallet::compute_address(-1, &ed25519::PublicKey::from(secret));
 
         let secret = ed25519_dalek::SigningKey::from_bytes(secret.as_bytes());
@@ -938,7 +944,7 @@ impl Wallet {
             address,
             secret,
             public,
-            signature_id,
+            signature_context,
         }
     }
 
@@ -1045,14 +1051,21 @@ impl Wallet {
 
         let now_ms = now_millis();
         let expire_at = (now_ms / 1000) as u32 + ttl;
-        let body = wallet::methods::send_transaction()
-            .encode_external(&inputs)
-            .with_address(&self.address)
-            .with_time(now_ms)
-            .with_expire_at(expire_at)
-            .with_pubkey(&self.public)
-            .build_input()?
-            .sign(&self.secret, self.signature_id)?;
+        let body = {
+            let body = wallet::methods::send_transaction()
+                .encode_external(&inputs)
+                .with_address(&self.address)
+                .with_time(now_ms)
+                .with_expire_at(expire_at)
+                .with_pubkey(&self.public)
+                .build_input()?;
+
+            // TODO: Make sign accept signature context.
+            let signature = self
+                .signature_context
+                .sign(&self.secret, body.hash.as_slice());
+            body.with_signature(&signature)?
+        };
 
         let message = OwnedMessage {
             info: MsgInfo::ExtIn(ExtInMsgInfo {
@@ -1353,7 +1366,7 @@ struct Timings {
 
 struct ParsedBlockchainConfig {
     elector_addr: StdAddr,
-    signature_id: Option<i32>,
+    signature_context: AutoSignatureContext,
     stake_params: ValidatorStakeParams,
     config: BlockchainConfig,
 }
@@ -1362,16 +1375,16 @@ impl ParsedBlockchainConfig {
     fn new(global_id: i32, config: BlockchainConfig) -> Result<Self> {
         let elector_addr = StdAddr::new(-1, config.get_elector_address()?);
         let version = config.get_global_version()?;
-        let signature_id = version
-            .capabilities
-            .contains(GlobalCapability::CapSignatureWithId)
-            .then_some(global_id);
+        let signature_context = AutoSignatureContext {
+            global_id,
+            capabilities: version.capabilities,
+        };
 
         let stake_params = config.get_validator_stake_params()?;
 
         Ok(Self {
             elector_addr,
-            signature_id,
+            signature_context,
             stake_params,
             config,
         })

@@ -77,6 +77,8 @@ impl<'a> Phase<PrepareState<'a>> {
                     signature_with_id: capabilities
                         .contains(GlobalCapability::CapSignatureWithId)
                         .then_some(self.state.mc_data.global_id),
+                    enable_signature_domains: capabilities
+                        .contains(GlobalCapability::CapSignatureDomain),
                     ..Default::default()
                 },
             }),
