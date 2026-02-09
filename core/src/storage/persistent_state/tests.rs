@@ -77,9 +77,8 @@ async fn persistent_shard_state() -> Result<()> {
     // Write persistent state to file
     assert!(persistent_states.load_oldest_known_handle().is_none());
 
-    persistent_states
-        .store_shard_state(0, &handle, zerostate.ref_mc_state_handle().clone())
-        .await?;
+    storage.block_handle_storage().set_skip_states_gc(&handle);
+    persistent_states.store_shard_state(0, &handle).await?;
 
     // Check if state exists
     let exist = persistent_states.state_exists(zerostate.block_id(), PersistentStateKind::Shard);
@@ -127,12 +126,9 @@ async fn persistent_shard_state() -> Result<()> {
 
     // Reuse persistent state for a different block
     let new_mc_seqno = 123123;
+    storage.block_handle_storage().set_skip_states_gc(&handle);
     persistent_states
-        .store_shard_state(
-            new_mc_seqno,
-            &handle,
-            zerostate.ref_mc_state_handle().clone(),
-        )
+        .store_shard_state(new_mc_seqno, &handle)
         .await?;
 
     // Check if state exists

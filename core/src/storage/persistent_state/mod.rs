@@ -14,7 +14,6 @@ use tokio::sync::{Notify, Semaphore, mpsc};
 use tokio::time::Instant;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::queue::QueueStateHeader;
-use tycho_block_util::state::RefMcStateHandle;
 use tycho_storage::fs::Dir;
 use tycho_types::models::{BlockId, PrevBlockRef};
 use tycho_util::fs::MappedFile;
@@ -129,7 +128,8 @@ impl PersistentStateStorage {
     #[tracing::instrument(skip_all)]
     pub async fn preload(&self) -> Result<()> {
         self.preload_handles_queue()?;
-        self.preload_states().await
+        self.preload_states().await?;
+        Ok(())
     }
 
     fn preload_handles_queue(&self) -> Result<()> {
@@ -354,12 +354,7 @@ impl PersistentStateStorage {
     }
 
     #[tracing::instrument(skip_all, fields(mc_seqno, block_id = %handle.id()))]
-    pub async fn store_shard_state(
-        &self,
-        mc_seqno: u32,
-        handle: &BlockHandle,
-        tracker_handle: RefMcStateHandle,
-    ) -> Result<()> {
+    pub async fn store_shard_state(&self, mc_seqno: u32, handle: &BlockHandle) -> Result<()> {
         if self
             .try_reuse_persistent_state(mc_seqno, handle, PersistentStateKind::Shard)
             .await?
@@ -383,9 +378,6 @@ impl PersistentStateStorage {
             let guard = scopeguard::guard((), |_| {
                 tracing::warn!("cancelled");
             });
-
-            // NOTE: Ensure that the tracker handle will outlive the state writer.
-            let _tracker_handle = tracker_handle;
 
             let root_hash = this.shard_states.load_state_root_hash(handle.id())?;
 
@@ -486,7 +478,6 @@ impl PersistentStateStorage {
         let mut top_block = block;
 
         let mut tail_len = top_block.block().out_msg_queue_updates.tail_len as usize;
-
         while tail_len > 0 {
             let queue_diff = this.blocks.load_queue_diff(&top_block_handle).await?;
             let top_block_info = top_block.load_info()?;
@@ -528,6 +519,7 @@ impl PersistentStateStorage {
         }
 
         let handle = handle.clone();
+
         let cancelled = cancelled.clone();
         let span = tracing::Span::current();
 
@@ -557,7 +549,6 @@ impl PersistentStateStorage {
             Ok::<_, anyhow::Error>(state)
         })
         .await??;
-
         self.notify_with_persistent_state(&state).await;
         Ok(())
     }

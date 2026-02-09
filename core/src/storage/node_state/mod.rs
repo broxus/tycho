@@ -157,6 +157,22 @@ impl NodeStateStorage {
         Some(bytes)
     }
 
+    pub fn load_pending_persistent_state_id(&self) -> Option<BlockId> {
+        let value = self.db.state.get(PENDING_PERSISTENT_STATE).unwrap()?;
+        Some(read_block_id_le(&value))
+    }
+
+    pub fn set_pending_persistent_state_id(&self, mc_block_id: &BlockId) {
+        self.db
+            .state
+            .insert(PENDING_PERSISTENT_STATE, write_block_id_le(mc_block_id))
+            .unwrap();
+    }
+
+    pub fn reset_pending_persistent_state_id(&self) {
+        self.db.state.remove(PENDING_PERSISTENT_STATE).unwrap();
+    }
+
     #[inline(always)]
     fn store_block_id(&self, (cache, key): &BlockIdCache, block_id: &BlockId) {
         let node_states = &self.db.state;
@@ -190,3 +206,4 @@ const INIT_MC_BLOCK_ID: &[u8] = b"init_mc_block";
 const INSTANCE_ID: &[u8] = b"instance_id";
 const ZEROSTATE_ID: &[u8] = b"zerostate_id";
 const ZEROSTATE_PROOF: &[u8] = b"zerostate_proof";
+const PENDING_PERSISTENT_STATE: &[u8] = b"pending_persistent_state";

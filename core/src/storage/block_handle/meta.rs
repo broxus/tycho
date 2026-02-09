@@ -136,6 +136,12 @@ bitflags::bitflags! {
 
         const HAS_VIRTUAL_STATE = 1 << 17;
 
+        const SKIP_STATES_GC = 1 << 18;
+        const SKIP_STATES_GC_FINISHED = 1 << 19;
+
+        const SKIP_BLOCKS_GC = 1 << 20;
+        const SKIP_BLOCKS_GC_FINISHED = 1 << 21;
+
         // Composite flags
         const HAS_ALL_BLOCK_PARTS =
             Self::HAS_DATA.bits() | Self::HAS_PROOF.bits() | Self::HAS_QUEUE_DIFF.bits();

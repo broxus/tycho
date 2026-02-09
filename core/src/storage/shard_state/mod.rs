@@ -452,70 +452,83 @@ impl ShardStateStorage {
             return Ok(());
         };
 
-        tracing::info!(
-            target_block_id = %top_blocks.mc_block,
-            "started states GC",
-        );
+        let target_block_id = top_blocks.mc_block;
+        tracing::info!(%target_block_id, "started states GC");
+
         let started_at = Instant::now();
+        let block_handle_storage = self.block_handle_storage.clone();
+        let cell_storage = self.cell_storage.clone();
+        let cells_db = self.cells_db.clone();
+        let gc_lock = self.gc_lock.clone();
+        let shard_split_depth = self.shard_split_depth;
 
-        let raw = self.cells_db.rocksdb();
+        let (removed_states, removed_cells) = tokio::task::spawn_blocking(move || {
+            let raw = cells_db.rocksdb();
 
-        // Manually get required column factory and r/w options
-        let snapshot = raw.snapshot();
-        let shard_states_cf = self.cells_db.shard_states.get_unbounded_cf();
-        let mut states_read_options = self.cells_db.shard_states.new_read_config();
-        states_read_options.set_snapshot(&snapshot);
+            // Manually get required column factory and r/w options
+            let snapshot = raw.snapshot();
+            let shard_states_cf = cells_db.shard_states.get_unbounded_cf();
+            let mut states_read_options = cells_db.shard_states.new_read_config();
+            states_read_options.set_snapshot(&snapshot);
 
-        let mut alloc = bumpalo_herd::Herd::new();
+            let mut alloc = bumpalo_herd::Herd::new();
 
-        // Create iterator
-        let mut iter = raw.raw_iterator_cf_opt(&shard_states_cf.bound(), states_read_options);
-        iter.seek_to_first();
+            // Create iterator
+            let mut iter = raw.raw_iterator_cf_opt(&shard_states_cf.bound(), states_read_options);
+            iter.seek_to_first();
 
-        // Iterate all states and remove outdated
-        let mut removed_states = 0usize;
-        let mut removed_cells = 0usize;
-        loop {
-            let _hist = HistogramGuard::begin("tycho_storage_state_gc_time_high");
-            let (key, value) = match iter.item() {
-                Some(item) => item,
-                None => match iter.status() {
-                    Ok(()) => break,
-                    Err(e) => return Err(e.into()),
-                },
-            };
+            // Iterate all states and remove outdated
+            let mut removed_states = 0usize;
+            let mut removed_cells = 0usize;
 
-            let block_id = BlockId::from_slice(key);
-            let root_hash = HashBytes::from_slice(&value[0..32]);
+            loop {
+                let _hist = HistogramGuard::begin("tycho_storage_state_gc_time_high");
+                let (key, value) = match iter.item() {
+                    Some(item) => item,
+                    None => match iter.status() {
+                        Ok(()) => break,
+                        Err(e) => return Err(e.into()),
+                    },
+                };
 
-            // Skip blocks from zero state and top blocks.
-            // NOTE: We intentionally don't skip hardforked zerostates (seqno > 0),
-            // because we don't really need to keep them. For proof checker we
-            // use zerostate proof which is stored separately, and for serving the
-            // state we use a persistent state (where we don't remove these states).
-            if block_id.seqno == 0
-                || top_blocks.contains_shard_seqno(&block_id.shard, block_id.seqno)
-            {
-                iter.next();
-                continue;
-            }
+                let block_id = BlockId::from_slice(key);
+                let root_hash = HashBytes::from_slice(&value[0..32]);
 
-            alloc.reset();
+                // Skip blocks from zero state and top blocks.
+                // NOTE: We intentionally don't skip hardforked zerostates (seqno > 0),
+                // because we don't really need to keep them. For proof checker we
+                // use zerostate proof which is stored separately, and for serving the
+                // state we use a persistent state (where we don't remove these states).
+                if block_id.seqno == 0
+                    || top_blocks.contains_shard_seqno(&block_id.shard, block_id.seqno)
+                {
+                    iter.next();
+                    continue;
+                }
 
-            let guard = {
-                let _h = HistogramGuard::begin("tycho_storage_cell_gc_lock_remove_time_high");
-                self.gc_lock.clone().lock_owned().await
-            };
+                // skip block marked by SKIP_GC flag
+                if let Some(handle) = block_handle_storage.load_handle(&block_id)
+                    && handle.skip_states_gc()
+                {
+                    tracing::debug!(
+                        block_id = %block_id,
+                        "skipping states GC since it flagged by SKIP_STATES_GC"
+                    );
+                    iter.next();
+                    continue;
+                }
 
-            let db = self.cells_db.clone();
-            let cell_storage = self.cell_storage.clone();
-            let key = key.to_vec();
-            let shard_split_depth = self.shard_split_depth;
-            let (total, inner_alloc) = tokio::task::spawn_blocking(move || {
+                alloc.reset();
+
+                let guard = {
+                    let _h = HistogramGuard::begin("tycho_storage_cell_gc_lock_remove_time_high");
+                    gc_lock.blocking_lock()
+                };
+
                 let in_mem_remove =
                     HistogramGuard::begin("tycho_storage_cell_in_mem_remove_time_high");
 
-                let (stats, mut batch) = if block_id.is_masterchain() {
+                let (total, mut batch) = if block_id.is_masterchain() {
                     cell_storage.remove_cell(alloc.get().as_bump(), &root_hash)?
                 } else {
                     // NOTE: We use epoch `0` here so that cells of old states
@@ -530,39 +543,38 @@ impl ShardStateStorage {
 
                 in_mem_remove.finish();
 
-                batch.delete_cf(&db.shard_states.get_unbounded_cf().bound(), key);
-                db.raw()
+                batch.delete_cf(&cells_db.shard_states.get_unbounded_cf().bound(), key);
+                cells_db
+                    .raw()
                     .rocksdb()
-                    .write_opt(batch, db.cells.write_config())?;
+                    .write_opt(batch, cells_db.cells.write_config())?;
 
                 // NOTE: Ensure that guard is dropped only after writing the batch.
                 drop(guard);
 
-                Ok::<_, anyhow::Error>((stats, alloc))
-            })
-            .await??;
+                removed_cells += total;
+                tracing::debug!(removed_cells = total, %block_id);
 
-            removed_cells += total;
-            alloc = inner_alloc; // Reuse allocation without passing alloc by ref
+                removed_states += 1;
+                iter.next();
 
-            tracing::debug!(removed_cells = total, %block_id);
-
-            removed_states += 1;
-            iter.next();
-
-            metrics::counter!("tycho_storage_state_gc_count").increment(1);
-            metrics::counter!("tycho_storage_state_gc_cells_count").increment(1);
-            if block_id.is_masterchain() {
-                metrics::gauge!("tycho_gc_states_seqno").set(block_id.seqno as f64);
+                metrics::counter!("tycho_storage_state_gc_count").increment(1);
+                metrics::counter!("tycho_storage_state_gc_cells_count").increment(1);
+                if block_id.is_masterchain() {
+                    metrics::gauge!("tycho_gc_states_seqno").set(block_id.seqno as f64);
+                }
+                tracing::debug!(removed_states, removed_cells, %block_id, "removed state");
             }
-            tracing::debug!(removed_states, removed_cells, %block_id, "removed state");
-        }
+
+            Ok::<_, anyhow::Error>((removed_states, removed_cells))
+        })
+        .await??;
 
         // Done
         tracing::info!(
             removed_states,
             removed_cells,
-            block_id = %top_blocks.mc_block,
+            block_id = %target_block_id,
             elapsed_sec = started_at.elapsed().as_secs_f64(),
             "finished states GC",
         );
@@ -761,4 +773,114 @@ impl StoreStateStatus {
 struct ShardAccumulator {
     new_cells: usize,
     blocks: FastHashSet<u32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::Result;
+    use tycho_block_util::archive::WithArchiveData;
+    use tycho_block_util::block::BlockStuff;
+    use tycho_block_util::state::ShardStateStuff;
+    use tycho_storage::StorageContext;
+    use tycho_types::boc::BocRepr;
+    use tycho_types::cell::{CellBuilder, Lazy};
+    use tycho_types::models::{
+        BlockExtra, BlockId, BlockInfo, McBlockExtra, ShardHashes, ShardIdent, ShardStateUnsplit,
+    };
+
+    use crate::storage::{CoreStorage, CoreStorageConfig, NewBlockMeta};
+
+    #[tokio::test]
+    async fn states_gc_skip_lifecycle() -> Result<()> {
+        let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
+        let storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
+
+        let handles = storage.block_handle_storage();
+        let blocks = storage.block_storage();
+        let states = storage.shard_state_storage();
+
+        let target = 10u32;
+        let prev = target - 1;
+
+        let top = BlockStuff::new_with(ShardIdent::MASTERCHAIN, target, |block| {
+            let info = BlockInfo {
+                shard: ShardIdent::MASTERCHAIN,
+                seqno: target,
+                min_ref_mc_seqno: target,
+                ..Default::default()
+            };
+            block.info = Lazy::new(&info).unwrap();
+
+            let extra = BlockExtra {
+                custom: Some(
+                    Lazy::new(&McBlockExtra {
+                        shards: ShardHashes::default(),
+                        ..Default::default()
+                    })
+                    .unwrap(),
+                ),
+                ..Default::default()
+            };
+            block.extra = Lazy::new(&extra).unwrap();
+        });
+        let top_id = *top.id();
+
+        let data = BocRepr::encode_rayon(top.as_ref()).unwrap();
+        let top = WithArchiveData::new(top, data);
+
+        let stored = blocks
+            .store_block_data(&top, &top.archive_data, NewBlockMeta {
+                is_key_block: false,
+                gen_utime: 0,
+                ref_by_mc_seqno: target,
+            })
+            .await?;
+        let handle = stored.handle;
+
+        let prev_id = *BlockStuff::new_empty(ShardIdent::MASTERCHAIN, prev).id();
+
+        let make_state = |id: BlockId| -> Result<ShardStateStuff> {
+            let state = ShardStateUnsplit {
+                shard_ident: id.shard,
+                seqno: id.seqno,
+                min_ref_mc_seqno: target,
+                ..Default::default()
+            };
+
+            let root = CellBuilder::build_from(&state)?;
+            let handle = states.min_ref_mc_state().insert_untracked();
+            ShardStateStuff::from_state_and_root(&id, Box::new(state), root, handle)
+        };
+
+        let top_state = make_state(top_id)?;
+        states
+            .store_state(&handle, &top_state, Default::default())
+            .await?;
+
+        let prev_state = make_state(prev_id)?;
+        let (handle, _) = handles.create_or_load_handle(&prev_id, NewBlockMeta {
+            is_key_block: false,
+            gen_utime: 0,
+            ref_by_mc_seqno: prev,
+        });
+        states
+            .store_state(&handle, &prev_state, Default::default())
+            .await?;
+
+        handles.set_skip_states_gc(&handle);
+        assert!(handle.skip_states_gc());
+
+        states.remove_outdated_states(target).await?;
+        assert!(states.contains_state(&prev_id)?);
+        assert!(states.contains_state(&top_id)?);
+
+        handles.set_skip_states_gc_finished(&handle);
+        assert!(!handle.skip_states_gc());
+
+        states.remove_outdated_states(target).await?;
+        assert!(!states.contains_state(&prev_id)?);
+        assert!(states.contains_state(&top_id)?);
+
+        Ok(())
+    }
 }

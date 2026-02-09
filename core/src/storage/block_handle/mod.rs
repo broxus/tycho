@@ -28,6 +28,42 @@ impl BlockHandleStorage {
         }
     }
 
+    pub fn set_skip_states_gc(&self, handle: &BlockHandle) -> bool {
+        let updated = handle.meta().add_flags(BlockFlags::SKIP_STATES_GC);
+        if updated {
+            self.store_handle(handle, false);
+            tracing::debug!(block_id = %handle.id(), "skip states gc was set");
+        }
+        updated
+    }
+
+    pub fn set_skip_states_gc_finished(&self, handle: &BlockHandle) -> bool {
+        let updated = handle.meta().add_flags(BlockFlags::SKIP_STATES_GC_FINISHED);
+        if updated {
+            self.store_handle(handle, false);
+            tracing::debug!(block_id = %handle.id(), "skip states gc was finished");
+        }
+        updated
+    }
+
+    pub fn set_skip_blocks_gc(&self, handle: &BlockHandle) -> bool {
+        let updated = handle.meta().add_flags(BlockFlags::SKIP_BLOCKS_GC);
+        if updated {
+            self.store_handle(handle, false);
+            tracing::debug!(block_id = %handle.id(), "skip blocks gc was set");
+        }
+        updated
+    }
+
+    pub fn set_skip_blocks_gc_finished(&self, handle: &BlockHandle) -> bool {
+        let updated = handle.meta().add_flags(BlockFlags::SKIP_BLOCKS_GC_FINISHED);
+        if updated {
+            self.store_handle(handle, false);
+            tracing::debug!(block_id = %handle.id(), "skip blocks gc was finished");
+        }
+        updated
+    }
+
     pub fn set_block_committed(&self, handle: &BlockHandle) -> bool {
         let updated = handle.meta().add_flags(BlockFlags::IS_COMMITTED);
         if updated {

@@ -571,6 +571,7 @@ mod tests {
 
     use blobs::*;
     use tycho_block_util::archive::{ArchiveEntryType, WithArchiveData};
+    use tycho_block_util::block::ShardHeights;
     use tycho_storage::StorageContext;
     use tycho_types::prelude::*;
     use tycho_util::FastHashMap;
@@ -807,6 +808,44 @@ mod tests {
             mc_blocks_removed: 0,
             total_blocks_removed: 0,
         });
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn blocks_gc_skip_lifecycle() -> Result<()> {
+        let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
+        let storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
+
+        let handles = storage.block_handle_storage();
+        let blob_storage = storage.block_storage().blob_storage.clone();
+
+        let id = BlockId {
+            shard: ShardIdent::MASTERCHAIN,
+            seqno: 1,
+            root_hash: HashBytes(rand::random()),
+            file_hash: HashBytes(rand::random()),
+        };
+
+        let (handle, _) = handles.create_or_load_handle(&id, NewBlockMeta {
+            is_key_block: false,
+            gen_utime: 0,
+            ref_by_mc_seqno: id.seqno,
+        });
+
+        handles.set_skip_blocks_gc(&handle);
+        assert!(handle.skip_blocks_gc());
+
+        blobs::remove_blocks(&blob_storage, None, 100, ShardHeights::default(), None)?;
+        assert!(handles.load_handle(&id).is_some());
+
+        handles.set_skip_blocks_gc_finished(&handle);
+        assert!(!handle.skip_blocks_gc());
+
+        drop(handle);
+
+        blobs::remove_blocks(&blob_storage, None, 100, ShardHeights::default(), None)?;
+        assert!(handles.load_handle(&id).is_none());
 
         Ok(())
     }

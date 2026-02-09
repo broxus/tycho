@@ -11,7 +11,9 @@ use tokio::sync::mpsc;
 use tycho_block_util::archive::{ArchiveData, WithArchiveData};
 use tycho_block_util::block::{BlockProofStuff, BlockProofStuffAug, BlockStuff};
 use tycho_block_util::queue::QueueDiffStuff;
-use tycho_block_util::state::{ShardStateStuff, check_zerostate_proof, prepare_master_state_proof};
+use tycho_block_util::state::{
+    RefMcStateHandle, ShardStateStuff, check_zerostate_proof, prepare_master_state_proof,
+};
 use tycho_storage::fs::FileBuilder;
 use tycho_types::models::*;
 use tycho_types::prelude::*;
@@ -564,12 +566,10 @@ impl StarterInner {
             handle_storage.set_has_shard_state(&handle);
             handle_storage.set_block_committed(&handle);
 
+            let _handle = state.ref_mc_state_handle().clone();
+
             persistent_states
-                .store_shard_state(
-                    mc_block_id.seqno,
-                    &handle,
-                    state.ref_mc_state_handle().clone(),
-                )
+                .store_shard_state(mc_block_id.seqno, &handle)
                 .await?;
 
             tracing::debug!(%block_id, "imported persistent shard state");
@@ -585,13 +585,11 @@ impl StarterInner {
         handle_storage.set_has_shard_state(&handle);
         handle_storage.set_block_committed(&handle);
 
+        let _mc_handle = mc_zerostate.ref_mc_state_handle().clone();
+
         // TODO: Somehow save the original file.
         persistent_states
-            .store_shard_state(
-                mc_block_id.seqno,
-                &handle,
-                mc_zerostate.ref_mc_state_handle().clone(),
-            )
+            .store_shard_state(mc_block_id.seqno, &handle)
             .await?;
 
         tracing::info!("imported zerostates");
@@ -773,7 +771,7 @@ impl StarterInner {
     ) -> Result<(BlockHandle, ShardStateStuff)> {
         enum StoreZeroStateFrom {
             File(FileBuilder),
-            State(ShardStateStuff),
+            State(RefMcStateHandle),
         }
 
         let shard_states = self.storage.shard_state_storage();
@@ -809,14 +807,10 @@ impl StarterInner {
                             .await
                     }
                     // Possibly slow full state traversal
-                    StoreZeroStateFrom::State(state) => {
+                    StoreZeroStateFrom::State(_handle) => {
                         // Store zerostate as is
                         persistent_states
-                            .store_shard_state(
-                                mc_seqno,
-                                &block_handle,
-                                state.ref_mc_state_handle().clone(),
-                            )
+                            .store_shard_state(mc_seqno, &block_handle)
                             .await
                     }
                 }
@@ -837,7 +831,7 @@ impl StarterInner {
                 let from = if state_file.exists() {
                     StoreZeroStateFrom::File(state_file)
                 } else {
-                    StoreZeroStateFrom::State(state.clone())
+                    StoreZeroStateFrom::State(state.ref_mc_state_handle().clone())
                 };
                 try_save_persistent(handle, from)
                     .await

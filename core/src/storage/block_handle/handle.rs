@@ -80,6 +80,18 @@ impl BlockHandle {
         self.inner.meta.flags().contains(BlockFlags::IS_ZEROSTATE) || self.inner.id.seqno == 0
     }
 
+    pub fn skip_states_gc(&self) -> bool {
+        let flags = self.inner.meta.flags();
+        flags.contains(BlockFlags::SKIP_STATES_GC)
+            && !flags.contains(BlockFlags::SKIP_STATES_GC_FINISHED)
+    }
+
+    pub fn skip_blocks_gc(&self) -> bool {
+        let flags = self.inner.meta.flags();
+        flags.contains(BlockFlags::SKIP_BLOCKS_GC)
+            && !flags.contains(BlockFlags::SKIP_BLOCKS_GC_FINISHED)
+    }
+
     pub fn has_data(&self) -> bool {
         const MASK: u32 = BlockFlags::HAS_DATA.bits() | BlockFlags::IS_REMOVED.bits();
         let flags = self.inner.meta.flags();
