@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
-use tycho_types::models::{MsgInfo, ShardIdent};
+use tycho_types::models::ShardIdent;
 
 use super::MessagesReaderMetrics;
 use super::internals_reader::InternalsPartitionReader;
@@ -297,14 +297,12 @@ impl<V: InternalMessageValue> InternalsPartitionReader<'_, V> {
 
                     // add message to buffer
                     res.metrics.add_to_message_groups_timer.start();
-                    state.buffer.add_message(ParsedMessage::new(
-                        MsgInfo::Int(msg.message.info().clone()),
-                        true,
+                    state.buffer.add_message(ParsedMessage::from_int(
+                        msg.message.info().clone(),
                         msg.message.cell().clone(),
-                        None,
+                        true,
                         Some(block_seqno),
                         Some(msg.source == for_shard_id),
-                        None,
                     ));
                     res.metrics
                         .add_to_msgs_groups_ops_count

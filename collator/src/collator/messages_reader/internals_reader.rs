@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow, ensure};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, get_short_addr_string};
 use tycho_types::cell::HashBytes;
-use tycho_types::models::{BlockIdShort, MsgInfo, ShardIdent};
+use tycho_types::models::{BlockIdShort, ShardIdent};
 use tycho_util::FastHashSet;
 
 use crate::collator::error::CollatorError;
@@ -156,12 +156,12 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
 
         if let Some(remaning_msgs_stats) = &self.remaning_msgs_stats {
             tracing::trace!(target: tracing_targets::COLLATOR,
-                            partition_id = %self.partition_id,
-                            remaning_msgs_stats = ?DebugIter(remaning_msgs_stats.statistics().iter().map(|(addr, count)|
-            (get_short_addr_string(addr), count)
-                            )),
-                            "internals partition reader remaning_msgs_stats on finalize",
-                        );
+                partition_id = %self.partition_id,
+                remaning_msgs_stats =
+                ?DebugIter(remaning_msgs_stats.statistics().iter().map(|(addr, count)|
+                    (get_short_addr_string(addr), count))),
+                "internals partition reader remaning_msgs_stats on finalize",
+            );
         }
 
         self.cleanup_redundant_range_readers();
@@ -257,7 +257,8 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
 
         self.range_readers.retain(|&seqno, _| seqno == last_seqno);
         self.reader_state
-            .retain_ranges(|&seqno, _| seqno == last_seqno);
+            .ranges
+            .retain(|&seqno, _| seqno == last_seqno);
         Ok(())
     }
 
@@ -385,13 +386,12 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
             )
         };
 
-        if self.reader_state.ranges.contains_key(&seqno) {
+        if self.reader_state.ranges.insert(seqno, state) {
             panic!(
                 "internals range reader state should not already exist (for_shard_id: {}, seqno: {})",
                 self.for_shard_id, self.block_seqno,
             )
         }
-        self.reader_state.ranges.insert(seqno, state);
 
         self.all_ranges_fully_read = false;
         Ok(seqno)
@@ -599,12 +599,7 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
                 };
 
                 // get reader state read stats (it should be already loaded on range reader creation)
-                let read_stats = reader_state.read_stats.inner_mut().unwrap_or_else(||
-                    panic!(
-                        "internals range reader state read stats should exist (for_shard_id: {}, seqno: {}, block_seqno: {})",
-                        self.for_shard_id, seqno, self.block_seqno,
-                    )
-                );
+                // let read_stats = reader_state.get_read_stats_mut()?;
 
                 'read_range: loop {
                     // stop reading if buffer is full
@@ -653,14 +648,12 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
 
                     match iterator.next(false)? {
                         Some(int_msg) => {
-                            let msg = ParsedMessage::new(
-                                MsgInfo::Int(int_msg.item.message.info().clone()),
-                                true,
+                            let msg = ParsedMessage::from_int(
+                                int_msg.item.message.info().clone(),
                                 int_msg.item.message.cell().clone(),
-                                None,
+                                true,
                                 None,
                                 Some(int_msg.item.source == self.for_shard_id),
-                                None,
                             );
 
                             metrics.add_to_message_groups_timer.start();
@@ -673,7 +666,7 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
                             metrics.read_existing_msgs_count += 1;
 
                             // update read messages statistics in range reader
-                            read_stats.increment_for_account(
+                            reader_state.get_read_stats_mut()?.increment_for_account(
                                 int_msg.item.message.destination().clone(),
                                 1,
                             );
@@ -1096,12 +1089,7 @@ fn create_existing_range_reader<V: InternalMessageValue>(
                 "reduce cumulative remaning_msgs_stats by read_stats from range reader",
             );
 
-            for (account_addr, count) in range_reader_state
-                .read_stats
-                .inner_mut()
-                .unwrap()
-                .statistics()
-            {
+            for (account_addr, count) in range_reader_state.get_read_stats_mut()?.statistics() {
                 remaining_msgs_stats.decrement_for_account(account_addr.clone(), count);
             }
         }

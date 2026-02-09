@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use anyhow::{Context, Result};
 use tycho_types::models::{IntAddr, ShardIdent};
 use tycho_util::transactional::option::TransactionalOption;
 use tycho_util::transactional::value::TransactionalValue;
@@ -69,5 +70,12 @@ impl InternalsRangeReaderState {
         }
 
         res
+    }
+
+    #[inline]
+    pub fn get_read_stats_mut(&mut self) -> Result<&mut QueueStatistics> {
+        self.read_stats
+            .inner_mut()
+            .context("internals range reader state: read_stats is not loaded")
     }
 }

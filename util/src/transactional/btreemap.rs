@@ -57,6 +57,21 @@ impl<K: Ord + Clone, V: Transactional> TransactionalBTreeMap<K, V> {
         true
     }
 
+    pub fn retain<F>(&mut self, mut f: F)
+    where
+        F: FnMut(&K, &mut V) -> bool,
+    {
+        let to_remove: Vec<K> = self
+            .inner
+            .iter_mut()
+            .filter_map(|(k, v)| (!f(k, v)).then(|| k.clone()))
+            .collect();
+
+        for k in to_remove {
+            let _ = self.remove(&k);
+        }
+    }
+
     pub fn get(&self, key: &K) -> Option<&V> {
         self.inner.get(key)
     }
