@@ -146,14 +146,11 @@ impl ExecutorWrapper {
                 layout: None,
             })?;
 
-            ParsedMessage::new(
+            ParsedMessage::from_new(
                 info,
-                true,
                 cell,
-                Some(special_origin),
-                Some(collation_data.block_id_short.seqno),
-                None,
-                None,
+                special_origin,
+                collation_data.block_id_short.seqno,
             )
         };
 

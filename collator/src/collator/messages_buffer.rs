@@ -31,6 +31,10 @@ impl AccountEntry {
         self.new_val.as_ref()
     }
 
+    fn is_empty(&self) -> bool {
+        self.new_val.as_ref().is_none_or(|v| v.is_empty())
+    }
+
     fn current_mut(&mut self) -> Option<&mut VecDeque<ParsedMessage>> {
         self.new_val.as_mut()
     }
@@ -104,11 +108,8 @@ impl Transactional for MessagesBuffer {
 }
 
 impl MessagesBuffer {
-    fn backup_account(&mut self, account_id: &HashBytes) {
-        if self.in_tx()
-            && let Some(entry) = self.msgs.get_mut(account_id)
-            && entry.old_val.is_none()
-        {
+    fn backup_entry(entry: &mut AccountEntry, in_tx: bool) {
+        if in_tx && entry.old_val.is_none() {
             entry.old_val = entry.new_val.clone();
         }
     }
@@ -167,7 +168,7 @@ impl MessagesBuffer {
         };
         let account_id = dst.as_std().map(|a| a.address).unwrap_or_default();
 
-        self.backup_account(&account_id);
+        let in_tx = self.in_tx();
 
         match self.msgs.entry(account_id) {
             indexmap::map::Entry::Vacant(vacant) => {
@@ -179,23 +180,27 @@ impl MessagesBuffer {
             }
             indexmap::map::Entry::Occupied(mut occupied) => {
                 let entry = occupied.get_mut();
+                Self::backup_entry(entry, in_tx);
+
                 if let Some(msgs) = entry.current_mut() {
                     msgs.push_back(msg);
                 } else {
                     entry.new_val = Some([msg].into());
                 }
             }
-        };
+        }
     }
 
     pub fn remove_int_messages_by_accounts(
         &mut self,
         addresses_to_remove: &FastHashSet<HashBytes>,
     ) {
-        for addr in addresses_to_remove {
-            self.backup_account(addr);
+        let in_tx = self.in_tx();
 
+        for addr in addresses_to_remove {
             if let Some(entry) = self.msgs.get_mut(addr) {
+                Self::backup_entry(entry, in_tx);
+
                 if let Some(msgs) = entry.current() {
                     self.int_count -= msgs.len();
                 }
@@ -284,10 +289,7 @@ impl MessagesBuffer {
                     buf_account_idx += 1;
 
                     // skip removed accounts or accounts without messages
-                    let Some(account_msgs) = entry.current() else {
-                        continue;
-                    };
-                    if account_msgs.is_empty() {
+                    if entry.is_empty() {
                         continue;
                     }
 
@@ -415,10 +417,7 @@ impl MessagesBuffer {
                     buf_account_idx += 1;
 
                     // skip removed accounts or accounts without messages
-                    let Some(account_msgs) = entry.current() else {
-                        continue;
-                    };
-                    if account_msgs.is_empty() {
+                    if entry.is_empty() {
                         continue;
                     }
 
@@ -461,10 +460,7 @@ impl MessagesBuffer {
                 buf_account_idx += 1;
 
                 // skip removed accounts or accounts without messages
-                let Some(account_msgs) = entry.current() else {
-                    continue;
-                };
-                if account_msgs.is_empty() {
+                if entry.is_empty() {
                     continue;
                 }
 
@@ -548,9 +544,11 @@ impl MessagesBuffer {
         let mut ext_skipped_count = 0;
 
         let mut should_add_account_to_slot_index = false;
-        self.backup_account(&account_id);
+
+        let in_tx = self.in_tx();
 
         if let Some(entry) = self.msgs.get_mut(&account_id) {
+            Self::backup_entry(entry, in_tx);
             let Some(account_msgs) = entry.current_mut() else {
                 return res;
             };
@@ -664,20 +662,21 @@ impl MessagesBuffer {
             return;
         }
 
-        self.backup_account(account_id);
+        let in_tx = self.in_tx();
 
-        if let Some(entry) = self.msgs.get_mut(account_id)
-            && let Some(account_msgs) = entry.current_mut()
-        {
-            account_msgs.retain(|msg| {
-                let skip = filter.should_skip(msg);
-                debug_assert!(
-                    !skip || msg.info().is_external_in(),
-                    "we should only skip external messages"
-                );
-                self.ext_count -= skip as usize;
-                !skip
-            });
+        if let Some(entry) = self.msgs.get_mut(account_id) {
+            Self::backup_entry(entry, in_tx);
+            if let Some(account_msgs) = entry.current_mut() {
+                account_msgs.retain(|msg| {
+                    let skip = filter.should_skip(msg);
+                    debug_assert!(
+                        !skip || msg.info().is_external_in(),
+                        "we should only skip external messages"
+                    );
+                    self.ext_count -= skip as usize;
+                    !skip
+                });
+            }
         }
     }
 }
@@ -1147,15 +1146,7 @@ mod transaction_tests {
             dst: IntAddr::Std(StdAddr::new(0, account_id)),
             ..Default::default()
         };
-        ParsedMessage::new(
-            MsgInfo::Int(msg),
-            false,
-            Cell::default(),
-            None,
-            None,
-            None,
-            None,
-        )
+        ParsedMessage::from_int(msg, Cell::default(), false, None, None)
     }
 
     // Helper to create a test external message
@@ -1164,15 +1155,7 @@ mod transaction_tests {
             dst: IntAddr::Std(StdAddr::new(0, account_id)),
             ..Default::default()
         };
-        ParsedMessage::new(
-            MsgInfo::ExtIn(msg),
-            false,
-            Cell::default(),
-            None,
-            None,
-            None,
-            Some(chain_time),
-        )
+        ParsedMessage::from_ext(msg, Cell::default(), false, chain_time)
     }
 
     // ==================== BASIC TRANSACTION TESTS ====================

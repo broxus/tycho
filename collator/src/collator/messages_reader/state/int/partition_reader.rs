@@ -24,23 +24,6 @@ pub struct InternalsPartitionReaderState {
 }
 
 impl InternalsPartitionReaderState {
-    pub fn retain_ranges<F>(&mut self, mut f: F)
-    where
-        F: FnMut(&BlockSeqno, &mut InternalsRangeReaderState) -> bool,
-    {
-        let mut to_remove: Vec<BlockSeqno> = Vec::new();
-
-        for (k, v) in self.ranges.iter_mut() {
-            if !f(k, v) {
-                to_remove.push(*k);
-            }
-        }
-
-        for k in to_remove {
-            self.ranges.remove(&k);
-        }
-    }
-
     pub fn with_prev_and_current<F, R>(
         &mut self,
         key: BlockSeqno,

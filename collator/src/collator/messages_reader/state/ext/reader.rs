@@ -40,21 +40,4 @@ impl ExternalsReaderState {
             .get(&par_id)
             .with_context(|| format!("externals reader state not exists for partition {par_id}"))
     }
-
-    pub fn retain_ranges<F>(&mut self, mut f: F)
-    where
-        F: FnMut(&BlockSeqno, &mut ExternalsRangeReaderState) -> bool,
-    {
-        let mut to_remove: Vec<BlockSeqno> = Vec::new();
-
-        for (k, v) in self.ranges.iter_mut() {
-            if !f(k, v) {
-                to_remove.push(*k);
-            }
-        }
-
-        for k in to_remove {
-            assert!(self.ranges.remove(&k), "range {k} should exist for removal");
-        }
-    }
 }

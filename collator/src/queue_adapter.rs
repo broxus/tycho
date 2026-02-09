@@ -7,7 +7,7 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::internal_queue::iterator::{QueueIterator, QueueIteratorImpl};
-use crate::internal_queue::queue::{Queue, QueueImpl};
+use crate::internal_queue::queue::{PendingQueueDiff, Queue, QueueImpl};
 use crate::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
 use crate::internal_queue::state::storage::QueueStateStdImpl;
 use crate::internal_queue::types::diff::{DiffZone, QueueDiffWithMessages};
@@ -19,7 +19,6 @@ use crate::internal_queue::types::stats::{
 };
 use crate::storage::models::DiffInfo;
 use crate::storage::snapshot::AccountStatistics;
-use crate::storage::transaction::InternalQueueTransaction;
 use crate::tracing_targets;
 use crate::types::{DebugDisplayOpt, DebugIter, TopBlockIdUpdated};
 
@@ -56,7 +55,7 @@ where
         diff_hash: &HashBytes,
         statistics: DiffStatistics,
         check_sequence: Option<DiffZone>,
-    ) -> Result<Option<InternalQueueTransaction>>;
+    ) -> Result<Option<PendingQueueDiff>>;
 
     /// Apply diff by storing it to the queue uncommitted zone (waiting for the operation to complete)
     fn apply_diff(
@@ -185,7 +184,7 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         diff_hash: &HashBytes,
         statistics: DiffStatistics,
         check_sequence: Option<DiffZone>,
-    ) -> Result<Option<InternalQueueTransaction>> {
+    ) -> Result<Option<PendingQueueDiff>> {
         let start_time = std::time::Instant::now();
 
         tracing::debug!(target: tracing_targets::MQ_ADAPTER,

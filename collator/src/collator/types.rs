@@ -18,11 +18,11 @@ use tycho_types::dict::{self, Dict};
 use tycho_types::merkle::MerkleBuildResult;
 use tycho_types::models::{
     AccountBlocks, AccountState, BlockId, BlockIdShort, BlockInfo, BlockLimits, BlockParamLimits,
-    BlockRef, BlockchainConfig, CollationConfig, CurrencyCollection, HashUpdate, ImportFees, InMsg,
-    InMsgDescr, IntMsgInfo, LibDescr, MsgInfo, MsgsExecutionParams, OptionalAccount, OutMsg,
-    OutMsgDescr, OwnedMessage, PrevBlockRef, ShardAccount, ShardAccounts, ShardDescription,
-    ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull, ShardStateUnsplit, SpecialFlags,
-    StateInit, StdAddr, Transaction, ValueFlow,
+    BlockRef, BlockchainConfig, CollationConfig, CurrencyCollection, ExtInMsgInfo, HashUpdate,
+    ImportFees, InMsg, InMsgDescr, IntMsgInfo, LibDescr, MsgInfo, MsgsExecutionParams,
+    OptionalAccount, OutMsg, OutMsgDescr, OwnedMessage, PrevBlockRef, ShardAccount, ShardAccounts,
+    ShardDescription, ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull, ShardStateUnsplit,
+    SpecialFlags, StateInit, StdAddr, Transaction, ValueFlow,
 };
 use tycho_types::num::Tokens;
 use tycho_util::{FastHashMap, FastHashSet};
@@ -1106,23 +1106,58 @@ pub struct ParsedMessageInner {
 pub struct ParsedMessage(Arc<ParsedMessageInner>);
 
 impl ParsedMessage {
-    pub fn new(
-        info: MsgInfo,
-        dst_in_current_shard: bool,
+    /// Creates a new parsed internal message.
+    pub fn from_int(
+        info: IntMsgInfo,
         cell: Cell,
-        special_origin: Option<SpecialOrigin>,
+        dst_in_current_shard: bool,
         block_seqno: Option<BlockSeqno>,
         from_same_shard: Option<bool>,
-        ext_msg_chain_time: Option<u64>,
+    ) -> Self {
+        Self(Arc::new(ParsedMessageInner {
+            info: MsgInfo::Int(info),
+            dst_in_current_shard,
+            cell,
+            special_origin: None,
+            block_seqno,
+            from_same_shard,
+            ext_msg_chain_time: None,
+        }))
+    }
+
+    /// Creates a new parsed external message.
+    pub fn from_ext(
+        info: ExtInMsgInfo,
+        cell: Cell,
+        dst_in_current_shard: bool,
+        chain_time: u64,
+    ) -> Self {
+        Self(Arc::new(ParsedMessageInner {
+            info: MsgInfo::ExtIn(info),
+            dst_in_current_shard,
+            cell,
+            special_origin: None,
+            block_seqno: None,
+            from_same_shard: None,
+            ext_msg_chain_time: Some(chain_time),
+        }))
+    }
+
+    /// Creates a new message with special origin.
+    pub fn from_new(
+        info: MsgInfo,
+        cell: Cell,
+        special_origin: SpecialOrigin,
+        block_seqno: BlockSeqno,
     ) -> Self {
         Self(Arc::new(ParsedMessageInner {
             info,
-            dst_in_current_shard,
+            dst_in_current_shard: true,
             cell,
-            special_origin,
-            block_seqno,
-            from_same_shard,
-            ext_msg_chain_time,
+            special_origin: Some(special_origin),
+            block_seqno: Some(block_seqno),
+            from_same_shard: None,
+            ext_msg_chain_time: None,
         }))
     }
 

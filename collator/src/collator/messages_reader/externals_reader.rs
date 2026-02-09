@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, VecDeque};
 use anyhow::{Context, Result};
 use tycho_block_util::queue::{QueuePartitionIdx, get_short_addr_string, get_short_hash_string};
 use tycho_types::cell::HashBytes;
-use tycho_types::models::{IntAddr, MsgInfo, ShardIdent};
+use tycho_types::models::{IntAddr, ShardIdent};
 use tycho_util::FastHashSet;
 
 use super::{
@@ -267,7 +267,8 @@ impl<'a, 'b> ExternalsReader<'a, 'b> {
 
         // Remove all ranges except the last one
         self.reader_state
-            .retain_ranges(|&seqno, _| seqno == last_seqno);
+            .ranges
+            .retain(|&seqno, _| seqno == last_seqno);
         Ok(())
     }
 
@@ -1152,14 +1153,11 @@ fn read_externals_into_buffers(
                             ))?;
                         reader_state_by_partition
                             .buffer
-                            .add_message(ParsedMessage::new(
-                                MsgInfo::ExtIn(ext_msg.info.clone()),
-                                true,
+                            .add_message(ParsedMessage::from_ext(
+                                ext_msg.info.clone(),
                                 ext_msg.cell.clone(),
-                                None,
-                                None,
-                                None,
-                                Some(anchor.chain_time),
+                                true,
+                                anchor.chain_time,
                             ));
                         par_metrics
                             .add_to_msgs_groups_ops_count

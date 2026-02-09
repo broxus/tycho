@@ -129,6 +129,9 @@ impl<'a, 'b, V: InternalMessageValue> MessagesReader<'a, 'b, V> {
         } = cx.reader_state;
 
         if let Some(params) = cx.cumulative_stats_calc_params {
+            // if cumulative statistics are already present, then we should
+            // enrich it using a diff from the previous master block and diffs
+            // from another shard between the previous master block and previous master block - 1
             if cx.is_first_block_after_prev_master {
                 let partitions = params
                     .all_shards_processed_to_by_partitions
@@ -228,9 +231,6 @@ impl<'a, 'b, V: InternalMessageValue> MessagesReader<'a, 'b, V> {
 
         internals_reader_state.ensure_partition(MAIN_PARTITION_ID);
         internals_reader_state.ensure_partition(LP_PARTITION_ID);
-
-        // let (partition_reader_states, internal_queue_statistics) =
-        //     internals_reader_state.tx_partitions_and_cumulative_stats_mut();
 
         let InternalsReaderState {
             partitions: partition_reader_states,
