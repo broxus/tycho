@@ -1374,6 +1374,66 @@ impl CellImpl for StorageCell {
         Some(Cell::from(self.reference_raw(index)?.clone() as Arc<_>))
     }
 
+    fn reference_repr_hash(&self, index: u8) -> Option<HashBytes> {
+        if index > 3 || index >= self.descriptor.reference_count() {
+            return None;
+        }
+
+        let state = &self.reference_states[index as usize];
+        let slot = self.reference_data[index as usize].get();
+
+        // See https://github.com/Amanieu/seqlock/blob/b72653fd9c38141da7e588a97a1b654239f5d4df/src/lib.rs#L117-L150
+        loop {
+            let state_before = state.load(Ordering::Acquire);
+            match state_before {
+                Self::REF_STORAGE => {
+                    // SAFETY: `REF_STORAGE` is the final state and is not going to change,
+                    // so it is safe to assume that the slot is now a loaded storage cell.
+                    return Some(unsafe { &(*slot).storage_cell }.repr_hash);
+                }
+                Self::REF_RUNNING => {
+                    // Wait until the running operation is complete.
+                    let key = state as *const AtomicU8 as usize;
+                    unsafe {
+                        parking_lot_core::park(
+                            key,
+                            || state.load(Ordering::Relaxed) == Self::REF_RUNNING,
+                            || (),
+                            |_, _| (),
+                            parking_lot_core::DEFAULT_PARK_TOKEN,
+                            None,
+                        );
+                    }
+                    continue;
+                }
+                // Otherwise we are (were) at the `REF_EMPTY` state.
+                _ => {}
+            }
+
+            // See https://github.com/rust-lang/rfcs/pull/3301
+            // This "works" "fine", but is technically undefined behavior.
+
+            // We need to use a volatile read here because the data may be
+            // concurrently modified by a writer. We also use MaybeUninit in
+            // case we read the data in the middle of a modification.
+            let slot = unsafe {
+                std::ptr::read_volatile(slot.cast::<MaybeUninit<StorageCellReferenceData>>())
+            };
+
+            // Make sure the state_after read occurs after reading the data.
+            // What we ideally want is a load(Release), but the Release
+            // ordering is not available on loads.
+            std::sync::atomic::fence(Ordering::Acquire);
+
+            // If the state is the same then the data wasn't modified
+            // while we were reading it, and can be returned.
+            let state_after = state.load(Ordering::Relaxed);
+            if state_before == state_after {
+                return Some(unsafe { slot.assume_init().hash });
+            }
+        }
+    }
+
     fn virtualize(&self) -> &DynCell {
         VirtualCellWrapper::wrap(self)
     }
@@ -1727,6 +1787,13 @@ mod tests {
             for level in 0..4 {
                 assert_eq!(loaded.hash(level), root.hash(level));
                 assert_eq!(loaded.depth(level), root.depth(level));
+            }
+
+            let loaded = Cell::from(loaded);
+            for (root_child_hash, loaded_child_hash) in
+                std::iter::zip(root.reference_repr_hashes(), loaded.reference_repr_hashes())
+            {
+                assert_eq!(root_child_hash, loaded_child_hash);
             }
         }
 

@@ -644,8 +644,7 @@ impl SessionState {
                 block_id = %block.block_id,
                 ?data,
                 ?signature,
-                "signature is invalid from peer {}",
-                ValidationError::InvalidSignature
+                "signature is invalid",
             );
             // TODO: Store that the signature is invalid to avoid further checks on retries
             // TODO: Collect statistics on invalid signatures to slash the malicious validator
