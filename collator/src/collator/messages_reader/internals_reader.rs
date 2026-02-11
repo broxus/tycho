@@ -598,9 +598,6 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
                     )));
                 };
 
-                // get reader state read stats (it should be already loaded on range reader creation)
-                // let read_stats = reader_state.get_read_stats_mut()?;
-
                 'read_range: loop {
                     // stop reading if buffer is full
                     // or we can already fill required slots

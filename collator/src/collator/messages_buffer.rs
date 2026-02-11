@@ -548,12 +548,13 @@ impl MessagesBuffer {
         let in_tx = self.in_tx();
 
         if let Some(entry) = self.msgs.get_mut(&account_id) {
+            res.ops_count.saturating_add_assign(1);
+
             Self::backup_entry(entry, in_tx);
+
             let Some(account_msgs) = entry.current_mut() else {
                 return res;
             };
-
-            res.ops_count.saturating_add_assign(1);
 
             amount = account_msgs.len().min(slot_cx.remaning_capacity);
 
