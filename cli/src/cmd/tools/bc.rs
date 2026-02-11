@@ -8,11 +8,10 @@ use reqwest::Url;
 use serde::Serialize;
 use tycho_block_util::config::{apply_price_factor, compute_gas_price_factor};
 use tycho_crypto::ed25519;
-use tycho_types::abi::extend_signature_with_id;
 use tycho_types::boc::Boc;
 use tycho_types::models::{
-    Account, AccountState, BlockchainConfigParams, ConfigParam11, ExtInMsgInfo, GlobalCapability,
-    MsgInfo, OwnedMessage, StdAddr, ValidatorSet,
+    Account, AccountState, BlockchainConfigParams, ConfigParam11, ExtInMsgInfo, MsgInfo,
+    OwnedMessage, SignatureContext, StdAddr, ValidatorSet,
 };
 use tycho_types::num::Tokens;
 use tycho_types::prelude::*;
@@ -741,11 +740,11 @@ impl CmdGenProposalVote {
             ..
         } = client.get_config().await?;
 
-        let global_version = blockchain_config.get_global_version()?;
-        let signature_id = global_version
-            .capabilities
-            .contains(GlobalCapability::CapSignatureWithId)
-            .then_some(global_id);
+        let global = blockchain_config.get_global_version()?;
+        let signature_context = SignatureContext {
+            global_id,
+            capabilities: global.capabilities,
+        };
 
         let (config_account, _) = client
             .get_account(&StdAddr::new(-1, blockchain_config.address))
@@ -766,7 +765,7 @@ impl CmdGenProposalVote {
             validator_idx,
             &self.hash,
             &keypair,
-            signature_id,
+            signature_context,
         );
 
         print_json(serde_json::json!({
@@ -825,15 +824,15 @@ pub(crate) async fn send_config_action_ext(
     let res = client.get_config().await?;
     let config_addr = StdAddr::new(-1, res.config.address);
 
-    let global_version = res.config.get_global_version()?;
-    let signature_id = global_version
-        .capabilities
-        .contains(GlobalCapability::CapSignatureWithId)
-        .then_some(res.global_id);
+    let global = res.config.get_global_version()?;
+    let signature_context = SignatureContext {
+        global_id: res.global_id,
+        capabilities: global.capabilities,
+    };
 
     let seqno = prepare_action(client, &config_addr, &keypair.public_key).await?;
     let (message, expire_at) =
-        create_message(seqno, &config_addr, action, keypair, signature_id, ttl)?;
+        create_message(seqno, &config_addr, action, keypair, signature_context, ttl)?;
 
     let message_cell = CellBuilder::build_from(message)?;
     client.send_message(message_cell.as_ref()).await?;
@@ -884,7 +883,7 @@ fn create_message(
     config_addr: &StdAddr,
     action: Action,
     keypair: &ed25519::KeyPair,
-    signature_id: Option<i32>,
+    signature_context: SignatureContext,
     ttl: u32,
 ) -> Result<(Box<OwnedMessage>, u32)> {
     let (action, data) = action.build().context("Failed to build action")?;
@@ -899,7 +898,7 @@ fn create_message(
     builder.store_builder(&data)?; // action data
 
     let hash = *builder.clone().build()?.repr_hash();
-    let data = extend_signature_with_id(hash.as_slice(), signature_id);
+    let data = signature_context.apply(hash.as_slice());
     let signature = keypair.sign_raw(&data);
     builder.prepend_raw(&signature, 512)?;
 

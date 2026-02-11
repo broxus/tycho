@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -25,7 +24,8 @@ use tycho_network::{
 };
 use tycho_types::cell::Lazy;
 use tycho_types::models::{
-    AccountState, DepthBalanceInfo, Message, OptionalAccount, ShardAccount, ShardIdent, StdAddr,
+    AccountState, DepthBalanceInfo, Message, OptionalAccount, ShardAccount, ShardIdent,
+    SignatureContext, StdAddr,
 };
 use tycho_types::num::Tokens;
 use tycho_types::prelude::*;
@@ -856,7 +856,11 @@ impl proto::ControlServer for ControlServer {
             &req.address,
             &req.adnl_addr,
         );
-        let data = extend_signature_with_id(&data, req.signature_id);
+        let data = SignatureContext {
+            global_id: req.global_id,
+            capabilities: req.capabilities.into(),
+        }
+        .apply(&data);
         let signature = keypair.sign_raw(&data);
 
         Ok(proto::ElectionsPayloadResponse {
@@ -1007,18 +1011,6 @@ fn empty_shard_account() -> &'static ShardAccount {
         last_trans_hash: HashBytes::ZERO,
         last_trans_lt: 0,
     })
-}
-
-fn extend_signature_with_id(data: &[u8], signature_id: Option<i32>) -> Cow<'_, [u8]> {
-    match signature_id {
-        Some(signature_id) => {
-            let mut result = Vec::with_capacity(4 + data.len());
-            result.extend_from_slice(&signature_id.to_be_bytes());
-            result.extend_from_slice(data);
-            Cow::Owned(result)
-        }
-        None => Cow::Borrowed(data),
-    }
 }
 
 fn map_peer_info(info: &tycho_network::PeerInfo) -> proto::PeerInfo {

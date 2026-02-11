@@ -4,11 +4,10 @@ use anyhow::Result;
 use serde::Serialize;
 use tycho_collator::types::IntAdrExt;
 use tycho_crypto::ed25519;
-use tycho_types::abi::extend_signature_with_id;
 use tycho_types::cell::RefsIter;
 use tycho_types::models::{
     Account, AccountState, BlockchainConfig, BlockchainConfigParams, ConfigProposalSetup,
-    ValidatorSet,
+    SignatureContext, ValidatorSet,
 };
 use tycho_types::num::Tokens;
 use tycho_types::prelude::*;
@@ -110,7 +109,7 @@ impl ConfigContract<'_> {
         validator_idx: u16,
         proposal_hash: &HashBytes,
         keypair: &ed25519::KeyPair,
-        signature_id: Option<i32>,
+        signature_context: SignatureContext,
     ) -> Cell {
         const TAG: u32 = 0x566f7465;
         const SIGNED_VOTE_TAG: u32 = 0x566f7445;
@@ -121,7 +120,7 @@ impl ConfigContract<'_> {
         to_sign.extend_from_slice(proposal_hash.as_slice());
 
         let signature = {
-            let to_sign = extend_signature_with_id(&to_sign, signature_id);
+            let to_sign = signature_context.apply(&to_sign);
             keypair.sign_raw(&to_sign)
         };
 

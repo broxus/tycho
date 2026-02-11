@@ -269,7 +269,8 @@ pub struct ElectionsPayloadRequest {
     pub stake_factor: u32,
     pub public_key: HashBytes,
     pub adnl_addr: HashBytes,
-    pub signature_id: Option<i32>,
+    pub global_id: i32,
+    pub capabilities: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

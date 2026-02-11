@@ -4377,7 +4377,7 @@ dependencies = [
 [[package]]
 name = "tycho-types"
 version = "0.3.2"
-source = "git+https://github.com/broxus/tycho-types.git?rev=852e5b4160122ef35605500763ffc4a48b7c2aed#852e5b4160122ef35605500763ffc4a48b7c2aed"
+source = "git+https://github.com/broxus/tycho-types.git?rev=1a7bfbf2b2cbf336e58314b4c22f0e8b9805d1b8#1a7bfbf2b2cbf336e58314b4c22f0e8b9805d1b8"
 dependencies = [
  "ahash",
  "anyhow",
@@ -4395,6 +4395,8 @@ dependencies = [
  "rayon",
  "scc",
  "serde",
+ "serde_json",
+ "serde_path_to_error",
  "sha2",
  "smallvec",
  "thiserror 2.0.12",
@@ -4408,7 +4410,7 @@ dependencies = [
 [[package]]
 name = "tycho-types-abi-proc"
 version = "0.3.0"
-source = "git+https://github.com/broxus/tycho-types.git?rev=852e5b4160122ef35605500763ffc4a48b7c2aed#852e5b4160122ef35605500763ffc4a48b7c2aed"
+source = "git+https://github.com/broxus/tycho-types.git?rev=1a7bfbf2b2cbf336e58314b4c22f0e8b9805d1b8#1a7bfbf2b2cbf336e58314b4c22f0e8b9805d1b8"
 dependencies = [
  "anyhow",
  "proc-macro2",
@@ -4419,7 +4421,7 @@ dependencies = [
 [[package]]
 name = "tycho-types-proc"
 version = "0.3.0"
-source = "git+https://github.com/broxus/tycho-types.git?rev=852e5b4160122ef35605500763ffc4a48b7c2aed#852e5b4160122ef35605500763ffc4a48b7c2aed"
+source = "git+https://github.com/broxus/tycho-types.git?rev=1a7bfbf2b2cbf336e58314b4c22f0e8b9805d1b8#1a7bfbf2b2cbf336e58314b4c22f0e8b9805d1b8"
 dependencies = [
  "proc-macro2",
  "quote",
