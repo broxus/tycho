@@ -135,9 +135,9 @@ tracing-stackdriver = "0.10.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 triomphe = "0.1.11"
 tycho-crypto = { version = "0.4", features = ["tl-proto", "serde", "rand9"] }
-tycho-executor = "0.3.2"
+tycho-executor = "0.3.3"
 tycho-types = { version = "0.3.2", features = ["tycho", "stats"] }
-tycho-vm = "0.3.2"
+tycho-vm = "0.3.3"
 uuid = "1.18.1"
 walkdir = "2.5.0"
 weedb = "0.6.0"

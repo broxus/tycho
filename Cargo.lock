@@ -1070,7 +1070,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "778e2ac28f6c47af28e4907f13ffd1e1ddbd400980a9abd7c8df189bf578a5ad"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2630,7 +2630,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2945,7 +2945,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3388,7 +3388,7 @@ dependencies = [
  "getrandom 0.3.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4137,9 +4137,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-executor"
-version = "0.3.2"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "737e032f9c6b68cdfe1a3433b151bca08dd81f66745a875e9d981fc6f5fdb2fb"
+checksum = "a4ba91906bc028e800c91e232dfee409b5503e102f91d7931701d5b0d717e846"
 dependencies = [
  "ahash",
  "anyhow",
@@ -4428,9 +4428,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-vm"
-version = "0.3.2"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7b4ae1dade385e5fbdca14e0439b1b7b518be19076324669785f4ef04d9e093"
+checksum = "bef4b5767addc9c546991fe85519684444814527f317a3bd80a852b501250d71"
 dependencies = [
  "ahash",
  "anyhow",
@@ -4450,9 +4450,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-vm-proc"
-version = "0.3.2"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e79fcef10732b88d30b15c517bbfa7f7bef240934a27f70261aacff8a8e57b3a"
+checksum = "6aac25f611eb7ab6031a0a3c0ea14884989a7280073bb154b431a991f9adb779"
 dependencies = [
  "darling",
  "proc-macro2",
@@ -4754,7 +4754,7 @@ version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf221c93e13a30d793f7645a0e7762c55d169dbb0a49671918a2319d289b10bb"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
