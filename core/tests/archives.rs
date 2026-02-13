@@ -186,7 +186,7 @@ async fn prepare_storage(config: StorageConfig, zerostate: ShardStateStuff) -> R
 
     let shard_states = storage.shard_state_storage();
     shard_states
-        .store_state(&handle, &zerostate, Default::default())
+        .store_state_ignore_cache(&handle, &zerostate, Default::default())
         .await?;
 
     let global_id = zerostate.state().global_id;
@@ -231,143 +231,167 @@ async fn prepare_storage(config: StorageConfig, zerostate: ShardStateStuff) -> R
 
         storage
             .shard_state_storage()
-            .store_state(&handle, &state, Default::default())
+            .store_state_ignore_cache(&handle, &state, Default::default())
             .await?;
     }
 
     Ok(storage)
 }
 
-#[tokio::test]
-async fn archives() -> Result<()> {
+#[test]
+fn archives() -> Result<()> {
     tycho_util::test::init_logger("archives", "debug");
 
     // Prepare directory
     let tmp_dir = tempfile::tempdir()?;
 
-    // Init storage
     let config = StorageConfig::new_potato(tmp_dir.path());
 
     let zerostate_file = "zerostate.boc";
     let zerostate_data = utils::read_file(zerostate_file)?;
     let zerostate = utils::parse_zerostate(&zerostate_data)
         .with_context(|| format!("Failed to parse zerostate {}", zerostate_file))?;
-    let zerostate_block_id = *zerostate.block_id();
-    let storage = prepare_storage(config.clone(), zerostate.clone()).await?;
 
-    // Init state applier
-    let state_subscriber = DummySubscriber;
+    let fut = async {
+        scopeguard::defer! {
+            tracing::info!("first future dropped");
+        }
 
-    let state_applier = ShardStateApplier::new(storage.clone(), state_subscriber);
+        // Init storage
+        let zerostate_block_id = *zerostate.block_id();
+        let storage = prepare_storage(config.clone(), zerostate.clone()).await?;
 
-    // Archive provider
-    let first_archive_file = "archive_1.bin";
-    let first_archive_data = utils::read_file(first_archive_file)?;
-    let first_archive = Arc::new(
-        utils::parse_archive(&first_archive_data)
-            .with_context(|| format!("Failed to parse archive {}", first_archive_file))?,
-    );
+        // Init state applier
+        let state_subscriber = DummySubscriber;
 
-    // Next archive provider
-    let next_archive_file = "archive_2.bin";
-    let next_archive_data = utils::read_file(next_archive_file)?;
-    let next_archive = Arc::new(
-        utils::parse_archive(&next_archive_data)
-            .with_context(|| format!("Failed to parse archive {}", next_archive_file))?,
-    );
+        let state_applier = ShardStateApplier::new(storage.clone(), state_subscriber);
 
-    // Last archive provider
-    let last_archive_file = "archive_3.bin";
-    let last_archive_data = utils::read_file(last_archive_file)?;
-    let last_archive = Arc::new(
-        utils::parse_archive(&last_archive_data)
-            .with_context(|| format!("Failed to parse archive {}", last_archive_file))?,
-    );
+        // Archive provider
+        let first_archive_file = "archive_1.bin";
+        let first_archive_data = utils::read_file(first_archive_file)?;
+        let first_archive = Arc::new(
+            utils::parse_archive(&first_archive_data)
+                .with_context(|| format!("Failed to parse archive {}", first_archive_file))?,
+        );
 
-    let mut first_provider_archives = ArchivesSet::new();
-    first_provider_archives.insert(1, first_archive.clone());
+        // Next archive provider
+        let next_archive_file = "archive_2.bin";
+        let next_archive_data = utils::read_file(next_archive_file)?;
+        let next_archive = Arc::new(
+            utils::parse_archive(&next_archive_data)
+                .with_context(|| format!("Failed to parse archive {}", next_archive_file))?,
+        );
 
-    let archive_provider = ArchiveProvider {
-        archives: parking_lot::Mutex::new(first_provider_archives),
-        proof_checker: ProofChecker::new(storage.clone()),
+        // Last archive provider
+        let last_archive_file = "archive_3.bin";
+        let last_archive_data = utils::read_file(last_archive_file)?;
+        let last_archive = Arc::new(
+            utils::parse_archive(&last_archive_data)
+                .with_context(|| format!("Failed to parse archive {}", last_archive_file))?,
+        );
+
+        let mut first_provider_archives = ArchivesSet::new();
+        first_provider_archives.insert(1, first_archive.clone());
+
+        let archive_provider = ArchiveProvider {
+            archives: parking_lot::Mutex::new(first_provider_archives),
+            proof_checker: ProofChecker::new(storage.clone()),
+        };
+
+        let mut next_provider_archives = ArchivesSet::new();
+        next_provider_archives.insert(1, first_archive);
+        next_provider_archives.insert(101, next_archive.clone());
+
+        let next_archive_provider = ArchiveProvider {
+            archives: parking_lot::Mutex::new(next_provider_archives),
+            proof_checker: ProofChecker::new(storage.clone()),
+        };
+
+        let mut last_provider_archives = ArchivesSet::new();
+        last_provider_archives.insert(101, next_archive);
+        last_provider_archives.insert(201, last_archive);
+
+        let last_archive_provider = ArchiveProvider {
+            archives: parking_lot::Mutex::new(last_provider_archives),
+            proof_checker: ProofChecker::new(storage.clone()),
+        };
+
+        // Strider state
+        let strider_state = PersistentBlockStriderState::new(zerostate_block_id, storage.clone());
+
+        // Init block strider
+        let block_strider = BlockStrider::builder()
+            .with_provider(
+                archive_provider
+                    .chain(next_archive_provider)
+                    .chain(last_archive_provider),
+            )
+            .with_state(strider_state)
+            .with_block_subscriber(state_applier)
+            .build();
+
+        block_strider.run().await?;
+
+        let archive_id = storage.block_storage().get_archive_id(1);
+
+        let ArchiveId::Found(archive_id) = archive_id else {
+            anyhow::bail!("archive not found")
+        };
+
+        // Check that archive exists and has a valid size
+        let archive_size = storage
+            .block_storage()
+            .get_archive_size(archive_id)?
+            .unwrap();
+        assert!(archive_size > 0, "Archive should have content");
+
+        // Get the compressed archive data from storage
+        let stored_archive_data = storage
+            .block_storage()
+            .get_archive_compressed_full(archive_id)
+            .await?
+            .expect("archive should exist");
+
+        // Decompress the stored archive and compare with the original
+        let decompressed_stored = zstd_decompress_simple(&stored_archive_data)?;
+
+        // Compare the decompressed content
+        let original_decompressed = zstd_decompress_simple(&first_archive_data)?;
+        assert_eq!(
+            original_decompressed, decompressed_stored,
+            "Archive content should match after decompression"
+        );
+
+        let mut archive_reader = storage
+            .block_storage()
+            .get_archive_reader(archive_id)?
+            .expect("archive reader should exist");
+        let mut read_data = Vec::new();
+        archive_reader.read_to_end(&mut read_data)?;
+        assert_eq!(read_data.as_slice(), stored_archive_data.as_ref());
+
+        let all_blocks = test_pagination(storage.clone()).await?;
+        test_orphaned_metadata_cleanup_initial(storage, all_blocks).await
     };
+    let meta = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(fut)?;
 
-    let mut next_provider_archives = ArchivesSet::new();
-    next_provider_archives.insert(1, first_archive);
-    next_provider_archives.insert(101, next_archive.clone());
+    // FIXME: remove these crimes
+    std::thread::sleep(std::time::Duration::from_secs(1));
 
-    let next_archive_provider = ArchiveProvider {
-        archives: parking_lot::Mutex::new(next_provider_archives),
-        proof_checker: ProofChecker::new(storage.clone()),
-    };
+    // Reopen storage
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async move {
+            tracing::info!("second future started");
 
-    let mut last_provider_archives = ArchivesSet::new();
-    last_provider_archives.insert(101, next_archive);
-    last_provider_archives.insert(201, last_archive);
-
-    let last_archive_provider = ArchiveProvider {
-        archives: parking_lot::Mutex::new(last_provider_archives),
-        proof_checker: ProofChecker::new(storage.clone()),
-    };
-
-    // Strider state
-    let strider_state = PersistentBlockStriderState::new(zerostate_block_id, storage.clone());
-
-    // Init block strider
-    let block_strider = BlockStrider::builder()
-        .with_provider(
-            archive_provider
-                .chain(next_archive_provider)
-                .chain(last_archive_provider),
-        )
-        .with_state(strider_state)
-        .with_block_subscriber(state_applier)
-        .build();
-
-    block_strider.run().await?;
-
-    let archive_id = storage.block_storage().get_archive_id(1);
-
-    let ArchiveId::Found(archive_id) = archive_id else {
-        anyhow::bail!("archive not found")
-    };
-
-    // Check that archive exists and has a valid size
-    let archive_size = storage
-        .block_storage()
-        .get_archive_size(archive_id)?
-        .unwrap();
-    assert!(archive_size > 0, "Archive should have content");
-
-    // Get the compressed archive data from storage
-    let stored_archive_data = storage
-        .block_storage()
-        .get_archive_compressed_full(archive_id)
-        .await?
-        .expect("archive should exist");
-
-    // Decompress the stored archive and compare with the original
-    let decompressed_stored = zstd_decompress_simple(&stored_archive_data)?;
-
-    // Compare the decompressed content
-    let original_decompressed = zstd_decompress_simple(&first_archive_data)?;
-    assert_eq!(
-        original_decompressed, decompressed_stored,
-        "Archive content should match after decompression"
-    );
-
-    let mut archive_reader = storage
-        .block_storage()
-        .get_archive_reader(archive_id)?
-        .expect("archive reader should exist");
-    let mut read_data = Vec::new();
-    archive_reader.read_to_end(&mut read_data)?;
-    assert_eq!(read_data.as_slice(), stored_archive_data.as_ref());
-
-    let all_blocks = test_pagination(storage.clone()).await?;
-    test_orphaned_metadata_cleanup(storage, all_blocks, config, zerostate).await?;
-
-    Ok(())
+            test_orphaned_metadata_cleanup_reopen(config, zerostate, meta).await
+        })
 }
 
 async fn test_pagination(storage: CoreStorage) -> Result<Vec<BlockId>> {
@@ -448,12 +472,17 @@ async fn test_pagination(storage: CoreStorage) -> Result<Vec<BlockId>> {
     Ok(all_blocks)
 }
 
-async fn test_orphaned_metadata_cleanup(
+struct CollectedMetadata {
+    blocks_with_all_deleted: Vec<BlockId>,
+    blocks_with_block_deleted: Vec<BlockId>,
+    blocks_with_proof_deleted: Vec<BlockId>,
+    blocks_with_flags_removed: Vec<BlockId>,
+}
+
+async fn test_orphaned_metadata_cleanup_initial(
     storage: CoreStorage,
     blocks: Vec<BlockId>,
-    config: StorageConfig,
-    zerostate: ShardStateStuff,
-) -> Result<()> {
+) -> Result<CollectedMetadata> {
     assert_eq!(
         storage.open_stats().orphaned_flags_count,
         0,
@@ -532,12 +561,23 @@ async fn test_orphaned_metadata_cleanup(
         tracing::info!(root_hash = ?block_id.root_hash, "Removed flags but kept data in CAS");
     }
 
-    let total_orphaned_cleaned = blocks_with_all_deleted.len()
-        + blocks_with_block_deleted.len()
-        + blocks_with_proof_deleted.len();
-    let total_orphaned_restored = blocks_with_flags_removed.len();
+    Ok(CollectedMetadata {
+        blocks_with_all_deleted,
+        blocks_with_block_deleted,
+        blocks_with_proof_deleted,
+        blocks_with_flags_removed,
+    })
+}
 
-    drop(storage);
+async fn test_orphaned_metadata_cleanup_reopen(
+    config: StorageConfig,
+    zerostate: ShardStateStuff,
+    meta: CollectedMetadata,
+) -> Result<()> {
+    let total_orphaned_cleaned = meta.blocks_with_all_deleted.len()
+        + meta.blocks_with_block_deleted.len()
+        + meta.blocks_with_proof_deleted.len();
+    let total_orphaned_restored = meta.blocks_with_flags_removed.len();
 
     // Cleanup should happen on reopen
     let storage = prepare_storage(config, zerostate).await?;
@@ -556,7 +596,7 @@ async fn test_orphaned_metadata_cleanup(
     let meta_store = &storage.db().block_handles;
 
     // Check blocks with all components deleted
-    for block_id in &blocks_with_all_deleted {
+    for block_id in meta.blocks_with_all_deleted {
         let meta = meta_store
             .get(block_id.root_hash)?
             .expect("Metadata should still exist");
@@ -578,7 +618,7 @@ async fn test_orphaned_metadata_cleanup(
     }
 
     // Check blocks with only block data deleted
-    for block_id in &blocks_with_block_deleted {
+    for block_id in meta.blocks_with_block_deleted {
         let meta = meta_store
             .get(block_id.root_hash)?
             .expect("Metadata should still exist");
@@ -600,7 +640,7 @@ async fn test_orphaned_metadata_cleanup(
     }
 
     // Check blocks with only proof deleted
-    for block_id in &blocks_with_proof_deleted {
+    for block_id in meta.blocks_with_proof_deleted {
         let meta = meta_store
             .get(block_id.root_hash)?
             .expect("Metadata should still exist");
@@ -622,7 +662,7 @@ async fn test_orphaned_metadata_cleanup(
     }
 
     // check fkd up meta
-    for block_id in &blocks_with_flags_removed {
+    for block_id in meta.blocks_with_flags_removed {
         let meta = meta_store
             .get(block_id.root_hash)?
             .expect("Metadata should still exist");

@@ -244,9 +244,15 @@ impl ShardStateHandler {
             },
         );
 
+        let ref_mc_state_handle = self
+            .storage
+            .shard_state_storage()
+            .min_ref_mc_state()
+            .insert_seqno(0);
+
         self.storage
             .shard_state_storage()
-            .store_state_root(&handle, root, Default::default())
+            .store_state_root_ignore_cache(&handle, root, ref_mc_state_handle, Default::default())
             .await?;
 
         let cancelled = CancellationFlag::new();

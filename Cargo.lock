@@ -3333,9 +3333,9 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "syn"
-version = "2.0.104"
+version = "2.0.115"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17b6f705963418cdb9927482fa304bc562ece2fdd4f616084c50b7023b435a40"
+checksum = "6e614ed320ac28113fa64972c4262d5dbc89deacdfd00c34a3e4cea073243c12"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4142,6 +4142,7 @@ dependencies = [
  "futures-util",
  "governor",
  "humantime",
+ "indexmap",
  "metrics",
  "moka",
  "object_store",
@@ -4150,6 +4151,7 @@ dependencies = [
  "pin-project-lite",
  "quick_cache",
  "rand 0.9.2",
+ "rayon",
  "scopeguard",
  "serde",
  "sha2",
@@ -4377,7 +4379,7 @@ dependencies = [
 [[package]]
 name = "tycho-types"
 version = "0.3.2"
-source = "git+https://github.com/broxus/tycho-types.git?rev=1a7bfbf2b2cbf336e58314b4c22f0e8b9805d1b8#1a7bfbf2b2cbf336e58314b4c22f0e8b9805d1b8"
+source = "git+https://github.com/broxus/tycho-types.git?rev=70fe4c44a136c17d1dd2d679fd62c059382a82a3#70fe4c44a136c17d1dd2d679fd62c059382a82a3"
 dependencies = [
  "ahash",
  "anyhow",
@@ -4410,7 +4412,7 @@ dependencies = [
 [[package]]
 name = "tycho-types-abi-proc"
 version = "0.3.0"
-source = "git+https://github.com/broxus/tycho-types.git?rev=1a7bfbf2b2cbf336e58314b4c22f0e8b9805d1b8#1a7bfbf2b2cbf336e58314b4c22f0e8b9805d1b8"
+source = "git+https://github.com/broxus/tycho-types.git?rev=70fe4c44a136c17d1dd2d679fd62c059382a82a3#70fe4c44a136c17d1dd2d679fd62c059382a82a3"
 dependencies = [
  "anyhow",
  "proc-macro2",
@@ -4421,7 +4423,7 @@ dependencies = [
 [[package]]
 name = "tycho-types-proc"
 version = "0.3.0"
-source = "git+https://github.com/broxus/tycho-types.git?rev=1a7bfbf2b2cbf336e58314b4c22f0e8b9805d1b8#1a7bfbf2b2cbf336e58314b4c22f0e8b9805d1b8"
+source = "git+https://github.com/broxus/tycho-types.git?rev=70fe4c44a136c17d1dd2d679fd62c059382a82a3#70fe4c44a136c17d1dd2d679fd62c059382a82a3"
 dependencies = [
  "proc-macro2",
  "quote",
