@@ -238,13 +238,23 @@ impl MempoolAdapterStdImpl {
             engine_stop_tx,
         );
 
-        let mut anchors_task = StdAnchorHandler::new(&merged_conf.conf.consensus, anchors_rx)
-            .run(self.cache.clone(), self.mempool_db.clone(), commit_finished)
-            .boxed();
+        let mut anchors_task = StdAnchorHandler::new(
+            anchors_rx,
+            commit_finished,
+            &self.cache,
+            &merged_conf.conf.consensus,
+        )
+        .run(self.mempool_db.clone())
+        .boxed();
 
         tokio::spawn(async move {
             tokio::select! {
-                () = &mut anchors_task => {}, // just poll
+                handler_result = &mut anchors_task => match handler_result {
+                    Err(error) => tracing::warn!(
+                        target: tracing_targets::MEMPOOL_ADAPTER,
+                        "Mempool anchor handler stopped: {error}"
+                    )
+                },
                 engine_result = &mut engine_stop_rx => match engine_result {
                     Ok(()) => tracing::info!(
                         target: tracing_targets::MEMPOOL_ADAPTER,

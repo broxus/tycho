@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use tycho_network::PeerId;
 use tycho_util::metrics::HistogramGuard;
 
-use crate::dag::{DagFront, DagRound, KeyGroup, Verifier};
+use crate::dag::{DagFront, DagRound, KeyGroup, Verifier, VerifyError};
 use crate::effects::{
     AltFormat, Cancelled, Ctx, EngineCtx, RoundCtx, Task, TaskResult, TaskTracker,
 };
@@ -21,9 +21,8 @@ use crate::engine::lifecycle::{EngineBinding, EngineError, EngineNetwork, FixHis
 use crate::engine::round_task::RoundTaskReady;
 use crate::engine::round_watch::{RoundWatch, RoundWatcher, TopKnownAnchor};
 use crate::engine::{ConsensusConfigExt, MempoolMergedConfig};
-use crate::models::{
-    DagPoint, MempoolOutput, Point, PointRestore, PointRestoreSelect, PointStatusStoredRef, Round,
-};
+use crate::models::point_status::PointStatusStored;
+use crate::models::{DagPoint, MempoolOutput, Point, PointRestore, Round};
 use crate::storage::{DbCleaner, MempoolStore};
 
 pub type EngineResult<T> = std::result::Result<T, EngineError>;
@@ -87,14 +86,14 @@ impl Engine {
             &net.peer_schedule,
             &round_ctx,
         );
-        let committer_run = CommitterTask::new(committer, conf);
+        let committer_run = CommitterTask::new(committer, &bind.top_known_anchor, conf);
 
         let init_task = engine_ctx.task().spawn_blocking({
             let store = store.clone();
             let overlay_id = merged_conf.overlay_id;
             move || {
                 store.init_storage(&overlay_id);
-                store.insert_point(&genesis, PointStatusStoredRef::Exists);
+                store.insert_point(&genesis, &PointStatusStored::Found(Default::default()));
                 fix_history // just pass further
             }
         });
@@ -175,7 +174,7 @@ impl Engine {
                 &self.round_task.state.peer_schedule,
                 &round_ctx,
             );
-            _ = committer.drop_upto(
+            committer.drop_upto(
                 (top_known_anchor - conf.consensus.replay_anchor_rounds()).max(conf.genesis_round),
                 conf,
             );
@@ -226,7 +225,7 @@ impl Engine {
                 .iter()
                 .filter_map(|dp| dp.trusted()) // will repeat valid only, but choose top round
                 .min_by_key(|info| info.time()) // in case of a fork after db deletion
-                .map(|info| info.id());
+                .map(|info| *info.id());
             if let Some(last_id) = earliest {
                 tracing::info!(
                     parent: round_ctx.span(),
@@ -261,12 +260,16 @@ impl Engine {
                 (last.info().round().next(), Some((last, prev)))
             }
         };
+
+        let committer = self.committer_run.ready_mut().await?.expect("ready");
         (self.dag).fill_to_top(
             new_top_round,
-            Some(self.committer_run.ready_mut().await?.expect("ready")),
+            Some(committer),
             &self.round_task.state.peer_schedule,
             &round_ctx,
         );
+        // don't notify collator of new bottom: it requests TKA or later, and we've handled genesis
+        committer.full_history_bottom_reset();
 
         self.round_task.state.consensus_round.set_max(new_top_round);
 
@@ -284,6 +287,8 @@ impl Engine {
             let peer_schedule = self.round_task.state.peer_schedule.clone();
             let round_ctx = round_ctx.clone();
             move || {
+                use rayon::prelude::{IntoParallelIterator, ParallelIterator};
+
                 let _guard = round_ctx.span().enter();
                 if fix_history.0 {
                     store.reset_statuses(&range);
@@ -291,30 +296,31 @@ impl Engine {
                 let restores = store.load_restore(&range);
                 let (need_verify, ready): (Vec<_>, Vec<_>) =
                     restores.into_iter().partition_map(|r| match r {
-                        PointRestoreSelect::NeedsVerify(key) => Either::Left(key),
-                        PointRestoreSelect::Ready(ready) => Either::Right(ready),
+                        PointRestore::Found(info, status) => Either::Left((info, status)),
+                        ready => Either::Right(ready),
                     });
                 let verified = need_verify
-                    .chunks(1000) // seems enough for any case
-                    .flat_map(|keys| {
-                        use rayon::prelude::{IntoParallelIterator, ParallelIterator};
-                        store
-                            .multi_get_info(keys) // assume load result is sorted
-                            .into_par_iter()
-                            .map(|info| {
-                                if Verifier::verify(&info, &peer_schedule, round_ctx.conf()).is_ok()
-                                {
-                                    // return back as they were, now with prev_proof filled
-                                    PointRestore::Exists(info)
-                                } else {
-                                    PointRestore::IllFormed(info.id(), Default::default())
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                    });
+                    .into_par_iter()
+                    .map(|(info, status)| {
+                        match Verifier::verify(&info, &peer_schedule, round_ctx.conf()) {
+                            Ok(()) => PointRestore::Found(info, status),
+                            Err(VerifyError::IllFormed(_)) => {
+                                PointRestore::IllFormed(*info.id(), Default::default())
+                            }
+                            Err(VerifyError::Fail(error)) => {
+                                tracing::debug!(
+                                    parent: round_ctx.span(),
+                                    %error,
+                                    "preload points verify failed"
+                                );
+                                PointRestore::IllFormed(*info.id(), Default::default())
+                            }
+                        }
+                    })
+                    .collect::<Vec<_>>();
 
                 let mut map = BTreeMap::<(Round, _), Vec<PointRestore>>::new();
-                for pre in verified.chain(ready) {
+                for pre in verified.into_iter().chain(ready) {
                     let entry = map.entry((pre.round(), pre.restore_order_asc()));
                     entry.or_default().push(pre);
                 }
@@ -361,8 +367,6 @@ impl Engine {
         );
         let db_clean_task: Task<Never> = self.db_cleaner.run(&round_ctx);
 
-        // Boxed for just not to move a Copy to other thread by mistake
-        let mut full_history_bottom: Box<Option<Round>> = Box::new(None);
         let mut is_paused = true;
         loop {
             let _round_duration = HistogramGuard::begin("tycho_mempool_engine_round_time");
@@ -411,11 +415,8 @@ impl Engine {
                     Ok(pause_at) => next_round.min(pause_at),
                     Err(collator_sync) => {
                         collator_sync.await?;
-                        let committer_update = self.committer_run.update_task(
-                            full_history_bottom.take(),
-                            self.anchors_tx.clone(),
-                            &round_ctx,
-                        );
+                        let committer_update =
+                            self.committer_run.update_task(&self.anchors_tx, &round_ctx);
                         committer_update.await?;
                         continue;
                     }
@@ -427,12 +428,12 @@ impl Engine {
 
                 round_ctx = RoundCtx::new(&self.ctx, dag_top_round.prev());
 
-                *full_history_bottom = full_history_bottom.or(self.dag.fill_to_top(
+                self.dag.fill_to_top(
                     dag_top_round,
                     self.committer_run.ready_mut().await?,
                     &self.round_task.state.peer_schedule,
                     &round_ctx,
-                ));
+                );
 
                 assert!(
                     dag_top_round <= next_round,
@@ -461,11 +462,7 @@ impl Engine {
             loop {
                 tokio::select! {
                     _ = self.committer_run.interval.tick() => {
-                        self.committer_run.update_task(
-                            full_history_bottom.take(),
-                            self.anchors_tx.clone(),
-                            &round_ctx,
-                        ).await?;
+                        self.committer_run.update_task(&self.anchors_tx, &round_ctx).await?;
                     },
                     round_task = &mut round_task_run => {
                         self.round_task = round_task?;

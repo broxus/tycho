@@ -2,29 +2,29 @@ use std::pin::Pin;
 use std::sync::{Arc, LazyLock};
 use std::task::{Context, Poll};
 
-use ahash::HashMapExt;
 use futures_util::future::{BoxFuture, Either};
 use futures_util::{FutureExt, future};
 use tokio::sync::{mpsc, oneshot};
 use tycho_crypto::ed25519::KeyPair;
 use tycho_network::PeerId;
-use tycho_util::FastHashMap;
 use tycho_util::futures::{Shared, WeakShared};
 use tycho_util::sync::OnceTake;
 
 use crate::dag::dag_location::InclusionState;
-use crate::dag::{DagRound, IllFormedReason, InvalidReason, ValidateResult, Verifier};
+use crate::dag::{
+    DagRound, IllFormedReason, InvalidDependency, InvalidReason, ValidateResult, Verifier,
+};
 use crate::effects::{
     AltFormat, Cancelled, Ctx, DownloadCtx, RoundCtx, SpawnLimit, Task, TaskResult, ValidateCtx,
 };
 use crate::engine::NodeConfig;
 use crate::intercom::{DownloadResult, Downloader};
+use crate::models::point_status::*;
 use crate::models::{
     AnchorStageRole, Cert, CertDirectDeps, DagPoint, Digest, Point, PointId, PointInfo,
-    PointRestore, PointStatusIllFormed, PointStatusNotFound, PointStatusStored,
-    PointStatusStoredRef, PointStatusValidated, WeakCert,
+    PointRestore, WeakCert,
 };
-use crate::storage::{AnchorFlags, MempoolStore};
+use crate::storage::MempoolStore;
 
 static LIMIT: LazyLock<SpawnLimit> =
     LazyLock::new(|| SpawnLimit::new(NodeConfig::get().max_blocking_tasks.get() as usize));
@@ -97,9 +97,8 @@ impl DagPointFuture {
             let full_fn = move || {
                 let _span = round_ctx.span().enter();
 
-                let mut status = Self::new_validated_status(role, &cert);
-                status.is_valid = true;
-                state.acquire(&point.info().id(), &mut status); // only after persisted
+                let mut status = Self::new_valid_status(role, &cert);
+                state.acquire(point.info().id(), &mut status); // only after persisted
 
                 assert!(
                     status.is_first_valid,
@@ -108,7 +107,7 @@ impl DagPointFuture {
 
                 let dag_point = DagPoint::new_valid(point.info().clone(), cert, &status);
 
-                store.insert_point(&point, PointStatusStoredRef::Validated(&status));
+                store.insert_point(&point, &PointStatusStored::Valid(status));
                 state.resolve(&dag_point);
 
                 let signed =
@@ -152,10 +151,10 @@ impl DagPointFuture {
                 let id = point.info().id();
 
                 let mut status = PointStatusIllFormed::default();
-                state.acquire(&id, &mut status); // only after persisted
+                state.acquire(id, &mut status); // only after persisted
 
-                let dag_point = DagPoint::new_ill_formed(id, cert, &status, reason);
-                store.insert_point(&point, PointStatusStoredRef::IllFormed(&status));
+                let dag_point = DagPoint::new_ill_formed(*id, cert, &status, reason);
+                store.insert_point(&point, &PointStatusStored::IllFormed(status));
 
                 state.resolve(&dag_point);
                 dag_point
@@ -191,8 +190,8 @@ impl DagPointFuture {
         let task = round_ctx.task().spawn(async move {
             let store_fn = {
                 let store = store.clone();
-                let status_ref = PointStatusStoredRef::Exists;
-                move || store.insert_point(&point, status_ref)
+                let status = PointStatusStored::Found(Default::default());
+                move || store.insert_point(&point, &status)
             };
             let store_task = LIMIT.spawn_blocking(validate_ctx.task(), store_fn).await;
 
@@ -212,7 +211,7 @@ impl DagPointFuture {
                 Self::acquire_validated(&state, info, role, cert, validated, &validate_ctx);
 
             let store_fn = move || {
-                store.set_status(&dag_point.key(), status.as_ref());
+                store.set_status(&dag_point.key(), &status, dag_point.prev_digest());
                 state.resolve(&dag_point);
                 dag_point
             };
@@ -275,8 +274,8 @@ impl DagPointFuture {
 
                     let store_fn = {
                         let store = store.clone();
-                        let status_ref = PointStatusStoredRef::Exists;
-                        move || store.insert_point(&point, status_ref)
+                        let status = PointStatusStored::Found(Default::default());
+                        move || store.insert_point(&point, &status)
                     };
                     let store_task = LIMIT.spawn_blocking(into_round_ctx.task(), store_fn).await;
 
@@ -300,7 +299,7 @@ impl DagPointFuture {
 
                     let store_fn = move || {
                         let _guard = ctx.span().enter();
-                        store.set_status(&dag_point.key(), status.as_ref());
+                        store.set_status(&dag_point.key(), &status, dag_point.prev_digest());
                         state.resolve(&dag_point);
                         dag_point
                     };
@@ -315,8 +314,7 @@ impl DagPointFuture {
 
                     let store_fn = move || {
                         let _guard = ctx.span().enter();
-                        let status_ref = PointStatusStoredRef::IllFormed(&status);
-                        store.insert_point(&point, status_ref);
+                        store.insert_point(&point, &PointStatusStored::IllFormed(status));
                         state.resolve(&dag_point);
                         dag_point
                     };
@@ -326,7 +324,7 @@ impl DagPointFuture {
                 DownloadResult::NotFound => {
                     let mut status = PointStatusNotFound {
                         is_first_resolved: false,
-                        is_certified: false,
+                        has_proof: false,
                         author: point_id.author,
                     };
                     state.acquire(&point_id, &mut status);
@@ -335,8 +333,8 @@ impl DagPointFuture {
 
                     let store_fn = move || {
                         let _guard = ctx.span().enter();
-                        let status_ref = PointStatusStoredRef::NotFound(&status);
-                        store.set_status(&point_id.key(), status_ref);
+                        let status = PointStatusStored::NotFound(status);
+                        store.set_status(&point_id.key(), &status, dag_point.prev_digest());
                         state.resolve(&dag_point);
                         dag_point
                     };
@@ -367,13 +365,17 @@ impl DagPointFuture {
         let cert_clone = cert.clone();
 
         if let Some((includes, witness)) = match &point_restore {
-            PointRestore::Validated(info, _) => Some((info.includes(), info.witness())),
-            PointRestore::IllFormed(_, _) // will not certify its dependencies, can be certified
-            | PointRestore::Exists(_) | PointRestore::NotFound(_, _) => None,
+            PointRestore::Valid(info, _)
+            | PointRestore::TransInvalid(info, _)
+            | PointRestore::Invalid(info, _) => Some((info.includes(), info.witness())),
+            // deps for `Found` are set in `validate()`
+            PointRestore::IllFormed(_, _)
+            | PointRestore::NotFound(_, _)
+            | PointRestore::Found(_, _) => None,
         } {
             let mut cert_deps = CertDirectDeps {
-                includes: FastHashMap::with_capacity(point_dag_round.peer_count().full()),
-                witness: FastHashMap::with_capacity(point_dag_round.peer_count().full()),
+                includes: Vec::with_capacity(includes.len()),
+                witness: Vec::with_capacity(witness.len()),
             };
             if let Some(r_1) = point_dag_round.prev().upgrade() {
                 cert_deps.includes.extend(r_1.select(|(peer, loc)| {
@@ -391,40 +393,49 @@ impl DagPointFuture {
             }
             cert.set_deps(cert_deps);
         }
-        if match &point_restore {
-            PointRestore::Exists(_) => false,
-            PointRestore::Validated(_, status) => status.is_certified,
-            PointRestore::IllFormed(_, status) => status.is_certified,
-            PointRestore::NotFound(_, status) => status.is_certified,
-        } {
-            cert.certify();
+        if point_restore.has_proof() {
+            cert.certify(round_ctx.conf());
         }
+
+        // ignore committed status flag to repeat commit after reboot
 
         // keep this section sync so that call site may not wait for each result to resolve
         let validate_or_restore = match point_restore {
-            PointRestore::Exists(info) => Either::Left(info),
-            PointRestore::Validated(info, status) => {
-                let dag_point = if status.is_valid {
-                    DagPoint::new_valid(info, cert, &status)
-                } else {
-                    DagPoint::new_invalid(info, cert, &status, InvalidReason::AfterLoadFromDb {
+            PointRestore::Valid(info, status) => {
+                let dag_point = DagPoint::new_valid(info, cert, &status);
+                state.acquire_restore(dag_point.id(), &status);
+                Either::Right(dag_point)
+            }
+            PointRestore::TransInvalid(info, status) => {
+                let root_cause = InvalidDependency {
+                    link: status.root_cause.clone(),
+                    reason: InvalidReason::AfterLoadFromDb {
                         no_dag_round: status.no_dag_round,
-                    })
+                    },
                 };
-                state.acquire_restore(&dag_point.id(), &status);
+                let dag_point = DagPoint::new_trans_invalid(info, cert, &status, root_cause);
+                Either::Right(dag_point)
+            }
+            PointRestore::Invalid(info, status) => {
+                let reason = InvalidReason::AfterLoadFromDb {
+                    no_dag_round: status.no_dag_round,
+                };
+                let dag_point = DagPoint::new_invalid(info, cert, &status, reason);
+                state.acquire_restore(dag_point.id(), &status);
                 Either::Right(dag_point)
             }
             PointRestore::IllFormed(id, status) => {
                 let dag_point =
                     DagPoint::new_ill_formed(id, cert, &status, IllFormedReason::AfterLoadFromDb);
-                state.acquire_restore(&dag_point.id(), &status);
+                state.acquire_restore(dag_point.id(), &status);
                 Either::Right(dag_point)
             }
             PointRestore::NotFound(key, status) => {
                 let dag_point = DagPoint::new_not_found(key, cert, &status);
-                state.acquire_restore(&dag_point.id(), &status);
+                state.acquire_restore(dag_point.id(), &status);
                 Either::Right(dag_point)
             }
+            PointRestore::Found(info, _) => Either::Left(info),
         };
 
         match validate_or_restore {
@@ -455,7 +466,7 @@ impl DagPointFuture {
 
                     let store_fn = move || {
                         let _guard = ctx.span().enter();
-                        store.set_status(&dag_point.key(), status.as_ref());
+                        store.set_status(&dag_point.key(), &status, dag_point.prev_digest());
                         state.resolve(&dag_point);
                         dag_point
                     };
@@ -491,46 +502,75 @@ impl DagPointFuture {
         let id = info.id();
         match validated {
             ValidateResult::Valid => {
-                let mut status = Self::new_validated_status(role, &cert);
-                status.is_valid = true;
-                state.acquire(&id, &mut status);
+                let mut status = Self::new_valid_status(role, &cert);
+                state.acquire(id, &mut status);
                 (
                     DagPoint::new_valid(info, cert, &status),
-                    PointStatusStored::Validated(status),
+                    PointStatusStored::Valid(status),
+                )
+            }
+            ValidateResult::TransInvalid(inv_dep) => {
+                let mut status = Self::new_trans_invalid_status(role, &cert, &inv_dep);
+                state.acquire(id, &mut status);
+                (
+                    DagPoint::new_trans_invalid(info, cert, &status, inv_dep),
+                    PointStatusStored::TransInvalid(status),
                 )
             }
             ValidateResult::Invalid(reason) => {
-                let mut status = Self::new_validated_status(role, &cert);
-                status.no_dag_round = reason.no_dag_round();
-                state.acquire(&id, &mut status);
+                let mut status = PointStatusInvalid {
+                    is_first_resolved: false,
+                    has_proof: cert.has_proof(),
+                    no_dag_round: reason.no_dag_round(),
+                };
+                state.acquire(id, &mut status);
                 (
                     DagPoint::new_invalid(info, cert, &status, reason),
-                    PointStatusStored::Validated(status),
+                    PointStatusStored::Invalid(status),
                 )
             }
             ValidateResult::IllFormed(reason) => {
                 let mut status = PointStatusIllFormed {
-                    is_certified: cert.is_certified(),
+                    has_proof: cert.has_proof(),
                     ..Default::default()
                 };
-                state.acquire(&id, &mut status);
+                state.acquire(id, &mut status);
                 (
-                    DagPoint::new_ill_formed(id, cert, &status, reason),
+                    DagPoint::new_ill_formed(*id, cert, &status, reason),
                     PointStatusStored::IllFormed(status),
                 )
             }
         }
     }
 
-    fn new_validated_status(role: Option<AnchorStageRole>, cert: &Cert) -> PointStatusValidated {
-        PointStatusValidated {
-            is_certified: cert.is_certified(),
+    fn new_valid_status(role: Option<AnchorStageRole>, cert: &Cert) -> PointStatusValid {
+        PointStatusValid {
+            has_proof: cert.has_proof(),
             anchor_flags: match role {
                 None => AnchorFlags::empty(),
                 Some(AnchorStageRole::Proof) => AnchorFlags::Proof,
                 Some(AnchorStageRole::Trigger) => AnchorFlags::Trigger,
             },
             ..Default::default()
+        }
+    }
+
+    fn new_trans_invalid_status(
+        role: Option<AnchorStageRole>,
+        cert: &Cert,
+        inv_dep: &InvalidDependency,
+    ) -> PointStatusTransInvalid {
+        PointStatusTransInvalid {
+            is_first_resolved: false,
+            has_proof: cert.has_proof(),
+            no_dag_round: inv_dep.reason.no_dag_round(),
+            anchor_flags: match role {
+                None => AnchorFlags::empty(),
+                Some(AnchorStageRole::Proof) => AnchorFlags::Proof,
+                Some(AnchorStageRole::Trigger) => AnchorFlags::Trigger,
+            },
+            committed: None,
+            root_cause: inv_dep.link.clone(),
         }
     }
 

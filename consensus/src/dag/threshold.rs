@@ -283,8 +283,9 @@ mod test {
 
     use super::*;
     use crate::dag::threshold::Threshold;
+    use crate::models::point_status::PointStatusValid;
     use crate::models::{
-        Cert, DagPoint, Link, PeerCount, Point, PointData, PointStatusValidated, UnixTime,
+        AnchorLink, Cert, ChainedAnchorProof, DagPoint, PeerCount, Point, PointData, UnixTime,
     };
     use crate::test_utils::default_test_config;
 
@@ -387,10 +388,7 @@ mod test {
     }
 
     fn new_valid_point(round: Round, now: UnixTime, conf: &MempoolConfig) -> DagPoint {
-        let status = PointStatusValidated {
-            is_valid: true,
-            ..Default::default()
-        };
+        let status = PointStatusValid::default();
         let keypair = rand::random::<KeyPair>();
 
         let delay = UnixTime::from_millis(rand::random_range(1000..8000));
@@ -404,8 +402,9 @@ mod test {
                 includes: Default::default(),
                 witness: Default::default(),
                 evidence: Default::default(),
-                anchor_trigger: Link::ToSelf,
-                anchor_proof: Link::ToSelf,
+                chained_anchor_proof: ChainedAnchorProof::Inapplicable,
+                anchor_trigger: AnchorLink::ToSelf,
+                anchor_proof: AnchorLink::ToSelf,
                 time: now + delay,
                 anchor_time: UnixTime::now(),
             },

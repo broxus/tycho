@@ -9,10 +9,11 @@ use tycho_network::PeerId;
 use tycho_types::models::ConsensusConfig;
 use tycho_util::metrics::HistogramGuard;
 
+use crate::dag::AnchorStage;
 use crate::engine::MempoolConfig;
 use crate::models::point::proto_utils::{PointBodyWrite, PointRawRead, PointRead, PointWrite};
 use crate::models::point::{Digest, PointData, Signature};
-use crate::models::{PointInfo, Round};
+use crate::models::{PointId, PointInfo, Round};
 
 #[derive(Debug, thiserror::Error)]
 pub enum PointIntegrityError {
@@ -31,6 +32,8 @@ pub enum StructureIssue {
     AuthorInMap(PointMap),
     #[error("bad {0:?} link through {1:?} map")]
     Link(AnchorStageRole, PointMap),
+    #[error("bad chained proof through {0:?} map")]
+    ChainedProof(PointMap),
     #[error("Evidence map contains bad signature")]
     EvidenceSig,
 }
@@ -103,25 +106,22 @@ impl Point {
 
         let body_offset = 4 + Digest::MAX_TL_BYTES + Signature::MAX_TL_BYTES;
 
-        let digest = Digest::new(&serialized[body_offset..]);
-        let signature = Signature::new(local_keypair, &digest);
+        let id = PointId {
+            digest: Digest::new(&serialized[body_offset..]),
+            author,
+            round,
+        };
 
-        serialized[4..4 + Digest::MAX_TL_BYTES].copy_from_slice(digest.inner());
+        let signature = Signature::new(local_keypair, &id.digest);
+
+        serialized[4..4 + Digest::MAX_TL_BYTES].copy_from_slice(id.digest.inner());
         serialized[4 + Digest::MAX_TL_BYTES..body_offset].copy_from_slice(signature.inner());
 
         let payload_len = u32::try_from(payload.len()).unwrap_or(u32::MAX);
         let payload_bytes =
             u32::try_from(payload.iter().fold(0, |acc, b| acc + b.len())).unwrap_or(u32::MAX);
 
-        let info = PointInfo::new(
-            digest,
-            signature,
-            author,
-            round,
-            payload_len,
-            payload_bytes,
-            data,
-        );
+        let info = PointInfo::new(id, signature, payload_len, payload_bytes, data);
 
         Self {
             serialized: Arc::new(serialized),
@@ -130,18 +130,33 @@ impl Point {
     }
 
     pub fn from_bytes(serialized: Vec<u8>) -> Result<Self, TlError> {
+        const ROUND_RANGE: std::ops::Range<Round> = {
+            let min = AnchorStage::align_genesis(0);
+            let max = Round(u32::MAX - min.0);
+            min..max
+        };
+
         let slice = &mut &serialized[..];
         let read = PointRead::read_from(slice)?;
 
-        let payload_len = u32::try_from(read.body.payload.len()).unwrap_or(u32::MAX);
+        if !ROUND_RANGE.contains(&read.body.round) {
+            return Err(TlError::InvalidData);
+        }
+
+        let payload_len = u32::try_from(read.body.payload.len()).or(Err(TlError::InvalidData))?;
+
         let payload_bytes = u32::try_from(read.body.payload.iter().fold(0, |acc, b| acc + b.len()))
-            .unwrap_or(u32::MAX);
+            .or(Err(TlError::InvalidData))?;
+
+        let id = PointId {
+            digest: read.digest,
+            author: read.body.author,
+            round: read.body.round,
+        };
 
         let info = PointInfo::new(
-            read.digest,
+            id,
             read.signature,
-            read.body.author,
-            read.body.round,
             payload_len,
             payload_bytes,
             read.body.data,
@@ -196,25 +211,24 @@ impl Point {
 }
 
 #[cfg(test)]
-#[allow(dead_code, reason = "false positives")]
 pub mod test_point {
 
     use bytes::Bytes;
-    use rand::RngCore;
+    use rand::prelude::IndexedRandom;
     use tycho_crypto::ed25519::SecretKey;
     use tycho_util::FastHashMap;
 
     use super::*;
-    use crate::models::{Link, PointId, Round, Through, UnixTime};
+    use crate::models::{
+        AnchorLink, ChainedAnchorProof, IndirectLink, PointId, Round, Through, UnixTime,
+    };
 
     pub const PEERS: usize = 100;
 
     pub const MSG_BYTES: usize = 64 * 1024;
 
     pub fn new_key_pair() -> KeyPair {
-        let mut secret_bytes: [u8; 32] = [0; 32];
-        rand::rng().fill_bytes(&mut secret_bytes);
-        KeyPair::from(&SecretKey::from_bytes(secret_bytes))
+        KeyPair::from(&SecretKey::from_bytes(rand::random()))
     }
 
     pub fn payload(conf: &MempoolConfig) -> Vec<Bytes> {
@@ -222,63 +236,67 @@ pub mod test_point {
         let mut payload = Vec::with_capacity(msg_count);
         let mut bytes = vec![0; MSG_BYTES];
         for _ in 0..msg_count {
-            rand::rng().fill_bytes(bytes.as_mut_slice());
+            bytes.fill_with(rand::random);
             payload.push(Bytes::copy_from_slice(&bytes));
         }
         payload
     }
 
     pub fn prev_point_data() -> (Digest, Vec<(PeerId, Signature)>) {
-        let mut buf = [0; Digest::MAX_TL_BYTES];
-        rand::rng().fill_bytes(&mut buf);
-        let digest = Digest::wrap(&buf);
+        let digest = Digest::random();
         let mut evidence = Vec::with_capacity(PEERS);
         for _ in 0..PEERS {
             let key_pair = new_key_pair();
-            let sig = Signature::new(&key_pair, digest);
+            let sig = Signature::new(&key_pair, &digest);
             let peer_id = PeerId::from(key_pair.public_key);
             evidence.push((peer_id, sig));
         }
-        (*digest, evidence)
+        (digest, evidence)
     }
 
     pub fn point(key_pair: &KeyPair, payload: &[Bytes], conf: &MempoolConfig) -> Point {
-        let prev_digest = Digest::new(&[42]);
-        let mut includes = FastHashMap::default();
-        includes.insert(PeerId::from(key_pair.public_key), prev_digest);
-        let mut evidence = FastHashMap::default();
-        let mut buf = [0; Digest::MAX_TL_BYTES];
-        for i in 0..PEERS {
-            let key_pair = new_key_pair();
-            let peer_id = PeerId::from(key_pair.public_key);
-            if i > 0 {
-                rand::rng().fill_bytes(&mut buf);
-                includes.insert(peer_id, *Digest::wrap(&buf));
-            }
-            evidence.insert(peer_id, Signature::new(&key_pair, &prev_digest));
-        }
         let author = PeerId::from(key_pair.public_key);
+        let peers: [KeyPair; PEERS - 1] = std::array::from_fn(|_| new_key_pair());
+
+        let one_of_peers = || PeerId::from(peers.choose(&mut rand::rng()).unwrap().public_key);
+
+        let mut includes = FastHashMap::default();
+        let mut evidence = FastHashMap::default();
+
+        let prev_digest = Digest::random();
+        includes.insert(author, prev_digest);
+
+        for peer_kp in &peers {
+            let peer_id = PeerId::from(peer_kp.public_key);
+            includes.insert(peer_id, Digest::random());
+            evidence.insert(peer_id, Signature::new(peer_kp, &prev_digest));
+        }
+
         let round = Round(rand::random_range(10..u32::MAX - 10));
         let anchor_time = UnixTime::now();
-        let data = PointData {
-            time: anchor_time.next(),
-            includes,
-            witness: FastHashMap::from_iter([
-                (PeerId([1; 32]), Digest::new(&[1])),
-                (PeerId([2; 32]), Digest::new(&[2])),
-            ]),
-            evidence,
-            anchor_trigger: Link::Direct(Through::Witness(PeerId([1; 32]))),
-            anchor_proof: Link::Indirect {
-                to: PointId {
-                    author: PeerId([122; 32]),
-                    round: round - 6_u32,
-                    digest: Digest::new(&[2]),
-                },
-                path: Through::Witness(PeerId([2; 32])),
+
+        let indirect_link = |round: Round| IndirectLink {
+            to: PointId {
+                author: PeerId(rand::random()),
+                round,
+                digest: Digest::random(),
             },
+            path: Through::Includes(one_of_peers()),
+        };
+
+        let data = PointData {
+            includes,
+            witness: FastHashMap::from_iter(std::array::from_fn::<_, { PEERS / 3 }, _>(|_| {
+                (PeerId(rand::random()), Digest::random())
+            })),
+            evidence,
+            chained_anchor_proof: ChainedAnchorProof::Chained(indirect_link(round - 8_u32)),
+            anchor_trigger: AnchorLink::Indirect(indirect_link(round - 7_u32)),
+            anchor_proof: AnchorLink::Indirect(indirect_link(round - 6_u32)),
+            time: anchor_time.next(),
             anchor_time,
         };
+
         Point::new(key_pair, author, round, payload, data, conf)
     }
 }

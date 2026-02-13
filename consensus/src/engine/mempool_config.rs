@@ -8,7 +8,7 @@ use tycho_network::{OverlayId, PeerId};
 use tycho_types::models::{ConsensusConfig, GenesisInfo};
 
 use crate::dag::AnchorStage;
-use crate::models::{Link, Point, PointData, Round, UnixTime};
+use crate::models::{AnchorLink, ChainedAnchorProof, Point, PointData, Round, UnixTime};
 
 // replace with `ArcSwapOption` + copy on get() if need to change in runtime
 static NODE_CONFIG: OnceLock<MempoolNodeConfig> = OnceLock::new();
@@ -37,6 +37,11 @@ pub struct MempoolMergedConfig {
 }
 
 impl MempoolMergedConfig {
+    pub fn node_config(&self) -> &MempoolNodeConfig {
+        _ = self;
+        NodeConfig::get()
+    }
+
     pub(crate) fn genesis_author(&self) -> PeerId {
         let key_pair = KeyPair::from(&SecretKey::from_bytes(self.overlay_id.0));
         key_pair.public_key.into()
@@ -55,8 +60,9 @@ impl MempoolMergedConfig {
                 includes: Default::default(),
                 witness: Default::default(),
                 evidence: Default::default(),
-                anchor_trigger: Link::ToSelf,
-                anchor_proof: Link::ToSelf,
+                chained_anchor_proof: ChainedAnchorProof::Inapplicable,
+                anchor_trigger: AnchorLink::ToSelf,
+                anchor_proof: AnchorLink::ToSelf,
                 anchor_time: millis,
             },
             &self.conf,

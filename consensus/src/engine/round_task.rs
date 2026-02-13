@@ -16,7 +16,7 @@ use crate::intercom::{
     Broadcaster, BroadcasterSignal, Collector, CollectorStatus, Dispatcher, Downloader,
     PeerSchedule, Responder,
 };
-use crate::models::{Cert, Link, Point, PointInfo};
+use crate::models::{AnchorLink, Cert, Point, PointInfo};
 use crate::storage::MempoolStore;
 
 pub struct RoundTaskState {
@@ -72,7 +72,7 @@ impl RoundTaskReady {
                 responder: net.responder.clone(),
                 downloader,
             },
-            collector: Collector::new(consensus_round.receiver()),
+            collector: Collector::new(consensus_round.receiver(), bind.top_known_anchor.receiver()),
             last_own_point: None,
             prev_broadcast: None,
         }
@@ -306,6 +306,10 @@ impl RoundTaskReady {
             );
             match validate.await? {
                 ValidateResult::Valid => Ok(()),
+                ValidateResult::TransInvalid(reason) => {
+                    let _guard = round_ctx.span().enter();
+                    panic!("trans Invalid own point: {reason:?} {point:?}")
+                }
                 ValidateResult::Invalid(reason) => {
                     let _guard = round_ctx.span().enter();
                     panic!("Invalid own point: {reason} {point:?}")
@@ -375,8 +379,8 @@ impl RoundCtx {
                     digest = display(own_info.digest().alt()),
                     externals,
                     payload_bytes,
-                    is_proof = (own_info.anchor_proof() == &Link::ToSelf).then_some(true),
-                    is_trigger = (own_info.anchor_trigger() == &Link::ToSelf).then_some(true),
+                    is_proof = (own_info.anchor_proof() == &AnchorLink::ToSelf).then_some(true),
+                    is_trigger = (own_info.anchor_trigger() == &AnchorLink::ToSelf).then_some(true),
                     "produced point"
                 );
                 tracing::debug!(

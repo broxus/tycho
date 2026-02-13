@@ -89,17 +89,27 @@ impl<'a> Display for AltFmt<'a, PointKey> {
     }
 }
 
+#[cfg(any(test, feature = "test"))]
+impl PointKey {
+    pub fn random() -> Self {
+        Self::new(Round(rand::random()), Digest::random())
+    }
+    pub fn bytes(&self) -> Vec<u8> {
+        let mut buf: [u8; Self::MAX_TL_BYTES] = [0; _];
+        self.fill(&mut buf);
+        buf.to_vec()
+    }
+}
+
 #[cfg(test)]
 mod test {
-    use std::array;
-
     use anyhow::{Context, Result};
 
     use super::*;
 
     #[test]
     fn test() -> Result<()> {
-        let key = PointKey::new(Round(1), *Digest::wrap(&array::from_fn(|i| i as u8)));
+        let key = PointKey::random();
         let kvec = tl_proto::serialize(key);
 
         let key_2 = PointKey::read_from(&mut &kvec[..])?;

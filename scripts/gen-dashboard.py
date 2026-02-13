@@ -2920,6 +2920,7 @@ def mempool_stats() -> RowPanel:
         counter_with_defaults("skipped_rounds", "Skipped rounds"),
         counter_with_defaults("valid_points", "Valid points"),
         counter_with_defaults("equivocated", "Equivocated points"),
+        counter_with_defaults("trans_invalid_points", "Transitional invalid points"),
         counter_with_defaults("invalid_points", "Invalid points"),
         counter_with_defaults("ill_formed_points", "Ill-formed points"),
         counter_with_defaults("references_skipped", "References skipped"),
