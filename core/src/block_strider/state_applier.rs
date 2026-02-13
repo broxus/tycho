@@ -6,11 +6,8 @@ use futures_util::future::BoxFuture;
 use tokio::sync::OnceCell;
 use tokio::task::JoinHandle;
 use tycho_block_util::block::BlockStuff;
-use tycho_block_util::dict::split_aug_dict_raw;
-use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
-use tycho_types::cell::{Cell, HashBytes};
+use tycho_block_util::state::ShardStateStuff;
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::sync::rayon_run;
 
 use crate::block_strider::{
     BlockSaver, BlockSubscriber, BlockSubscriberContext, StateSubscriber, StateSubscriberContext,
@@ -88,12 +85,13 @@ where
             "preparing block",
         );
 
-        let state_storage = self.inner.storage.shard_state_storage();
+        let states = self.inner.storage.shard_state_storage();
+        let block_handles = self.inner.storage.block_handle_storage();
 
         // Load/Apply state
         let state = if handle.has_state() || handle.has_virtual_state() {
-            // Fast path when state is already applied or was skipped for not `is_top_block`
-            state_storage
+            // Fast path when state is already applied.
+            states
                 .load_state(handle.ref_by_mc_seqno(), handle.id())
                 .await
                 .context("failed to load applied shard state")?
@@ -103,56 +101,26 @@ where
                 .block
                 .construct_prev_id()
                 .context("failed to construct prev id")?;
+            anyhow::ensure!(
+                prev_id_alt.is_none(),
+                "split/merge is not supported for now"
+            );
 
-            let (prev_root_cell, handles, old_split_at) = {
-                // NOTE: Use zero epoch here since we don't need to reuse these states.
-                let prev_state = state_storage
-                    .load_state(0, &prev_id)
-                    .await
-                    .context("failed to load prev shard state")?;
-
-                let old_split_at = split_aug_dict_raw(prev_state.state().load_accounts()?, 5)?
-                    .into_keys()
-                    .collect::<ahash::HashSet<_>>();
-
-                match &prev_id_alt {
-                    Some(prev_id) => {
-                        // NOTE: Use zero epoch here since we don't need to reuse these states.
-                        let prev_state_alt = state_storage
-                            .load_state(0, prev_id)
-                            .await
-                            .context("failed to load alt prev shard state")?;
-
-                        let cell = ShardStateStuff::construct_split_root(
-                            prev_state.root_cell().clone(),
-                            prev_state_alt.root_cell().clone(),
-                        )?;
-                        let left_handle = prev_state.ref_mc_state_handle().clone();
-                        let right_handle = prev_state_alt.ref_mc_state_handle().clone();
-                        (
-                            cell,
-                            RefMcStateHandles::Split(left_handle, right_handle),
-                            old_split_at,
-                        )
-                    }
-                    None => {
-                        let cell = prev_state.root_cell().clone();
-                        let handle = prev_state.ref_mc_state_handle().clone();
-                        (cell, RefMcStateHandles::Single(handle), old_split_at)
-                    }
-                }
+            let Some(prev_handle) = block_handles.load_handle(&prev_id) else {
+                anyhow::bail!("block handle not found for: {prev_id}");
             };
 
-            // Apply state
-            self.compute_and_store_state_update(
-                &cx.block,
-                cx.is_top_block,
-                &handle,
-                prev_root_cell,
-                old_split_at,
-                handles.min_safe_handle().clone(),
-            )
-            .await?
+            let merkle_update = cx.block.as_ref().state_update.load()?;
+            let hint = StoreStateHint {
+                block_data_size: cx.block.data_size(),
+                new_cell_count: None, // unknown
+                is_top_block: Some(cx.is_top_block),
+            };
+
+            states
+                .begin_store_next_state(&prev_handle, &handle, &merkle_update, None, hint, None)?
+                .wait_reload()
+                .await?
         };
 
         Ok(StateApplierPrepared { state })
@@ -195,49 +163,6 @@ where
         } else {
             subscriber_fut.await
         }
-    }
-
-    async fn compute_and_store_state_update(
-        &self,
-        block: &BlockStuff,
-        is_top_block: bool,
-        handle: &BlockHandle,
-        prev_root: Cell,
-        split_at: ahash::HashSet<HashBytes>,
-        ref_mc_state_handle: RefMcStateHandle,
-    ) -> Result<ShardStateStuff> {
-        let labels = [("workchain", block.id().shard.workchain().to_string())];
-        let _histogram =
-            HistogramGuard::begin_with_labels("tycho_core_apply_block_time_high", &labels);
-
-        let update = block
-            .as_ref()
-            .load_state_update()
-            .context("Failed to load state update")?;
-
-        let apply_in_mem = HistogramGuard::begin("tycho_core_apply_block_in_mem_time_high");
-
-        let result = rayon_run(move || update.par_apply_with_stats(&prev_root, &split_at))
-            .await
-            .context("Failed to apply state update")?;
-
-        apply_in_mem.finish();
-
-        let state_storage = self.inner.storage.shard_state_storage();
-
-        let new_state = ShardStateStuff::from_root(block.id(), result.cell, ref_mc_state_handle)
-            .context("Failed to create new state")?;
-
-        state_storage
-            .store_state(handle, &new_state, StoreStateHint {
-                block_data_size: block.data_size(),
-                new_cell_count: result.stats.new_cells_count,
-                is_top_block: Some(is_top_block),
-            })
-            .await
-            .context("Failed to store new state")?;
-
-        Ok(new_state)
     }
 
     async fn try_save_persistent_states(&self, cx: &StateSubscriberContext) -> Result<()> {
@@ -341,20 +266,6 @@ where
 
 pub struct StateApplierPrepared {
     state: ShardStateStuff,
-}
-
-enum RefMcStateHandles {
-    Split(RefMcStateHandle, RefMcStateHandle),
-    Single(RefMcStateHandle),
-}
-
-impl RefMcStateHandles {
-    fn min_safe_handle(&self) -> &RefMcStateHandle {
-        match self {
-            Self::Split(left, right) => left.min_safe(right),
-            Self::Single(handle) => handle,
-        }
-    }
 }
 
 struct StorePersistentStateDeps {
@@ -528,14 +439,14 @@ impl<S> Inner<S> {
             };
 
             // Ensure skipped state is stored in DB before saving persistent state.
-            if block_handle.has_virtual_state() {
+            if !block_handle.has_state() {
                 let state = state_storage
                     .load_state(mc_seqno, &block_id)
                     .await
                     .context("failed to load skipped shard state for persistent save")?;
 
                 state_storage
-                    .store_state(&block_handle, &state, StoreStateHint {
+                    .store_state_ignore_cache(&block_handle, &state, StoreStateHint {
                         is_top_block: Some(true),
                         ..Default::default()
                     })
@@ -554,11 +465,11 @@ impl<S> Inner<S> {
         // NOTE: We intentionally store the masterchain state last to ensure that
         //       the handle will live long enough. And this way we don't mislead
         //       other nodes with the incomplete set of persistent states.
+        // NOTE: Masterchain states are always stored directly so there is no
+        //       need to explicitly store them once more.
         persistent_states
             .store_shard_state(mc_seqno, mc_block_handle)
-            .await?;
-
-        Ok(())
+            .await
     }
 
     async fn save_persistent_queue_states(

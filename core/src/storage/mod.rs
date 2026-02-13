@@ -28,8 +28,8 @@ pub use self::persistent_state::{
     ShardStateWriter,
 };
 pub use self::shard_state::{
-    CachedStateUpdate, ShardStateStorage, ShardStateStorageError, ShardStateStorageMetrics,
-    StoreStateHint, StoreStateStatus, split_shard_accounts,
+    BlockInfoForApply, InitiatedStoreState, LoadStateHint, ShardStateStorage,
+    ShardStateStorageMetrics, StateNotFound, StoreStateHint, split_shard_accounts,
 };
 
 pub mod tables;
@@ -153,7 +153,7 @@ impl CoreStorage {
         &self.inner.block_connection_storage
     }
 
-    pub fn shard_state_storage(&self) -> &ShardStateStorage {
+    pub fn shard_state_storage(&self) -> &Arc<ShardStateStorage> {
         &self.inner.shard_state_storage
     }
 

@@ -11,7 +11,7 @@ use tycho_block_util::dict::RelaxedAugDict;
 use tycho_block_util::queue::{QueueDiffStuff, QueueKey, QueuePartitionIdx};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_core::global_config::ZerostateId;
-use tycho_core::storage::{BlockHandle, NewBlockMeta, StoreStateHint, StoreStateStatus};
+use tycho_core::storage::{BlockHandle, LoadStateHint, NewBlockMeta, StoreStateHint};
 use tycho_types::boc::Boc;
 use tycho_types::cell::{Cell, CellBuilder, CellFamily, HashBytes, Lazy};
 use tycho_types::merkle::MerkleUpdate;
@@ -39,7 +39,7 @@ use crate::manager::{
     CollatedBlockInfo, CollationStatus, GlobalCapabilitiesExt, McBlockSubgraphExtract,
 };
 use crate::queue_adapter::MessageQueueAdapter;
-use crate::state_node::{CollatorSyncContext, StateNodeAdapter};
+use crate::state_node::{CollatorSyncContext, InitiatedStoreState, StateNodeAdapter};
 use crate::test_utils::{create_test_queue_adapter, try_init_test_tracing};
 use crate::types::processed_upto::{
     InternalsProcessedUptoStuff, Lt, ProcessedUptoInfoStuff, ProcessedUptoPartitionStuff,
@@ -4341,6 +4341,7 @@ impl StateNodeAdapter for TestStateNodeAdapter {
         &self,
         _ref_by_mc_seqno: u32,
         block_id: &BlockId,
+        _: LoadStateHint,
     ) -> Result<ShardStateStuff> {
         let res = self.storage.get(&block_id.shard).and_then(|s| {
             s.get(&block_id.seqno)
@@ -4353,13 +4354,15 @@ impl StateNodeAdapter for TestStateNodeAdapter {
     fn load_last_applied_mc_block_id(&self) -> Result<BlockId> {
         unreachable!()
     }
-    async fn store_state_root(
+    async fn begin_store_next_state(
         &self,
+        _prev_block_id: &BlockId,
         _block_id: &BlockId,
         _meta: NewBlockMeta,
-        _state_root: Cell,
+        _merkle_update: &MerkleUpdate,
+        _state: ShardStateStuff,
         _hint: StoreStateHint,
-    ) -> Result<StoreStateStatus> {
+    ) -> Result<Box<dyn InitiatedStoreState>> {
         unreachable!()
     }
     async fn load_block_by_handle(&self, _handle: &BlockHandle) -> Result<Option<BlockStuff>> {
