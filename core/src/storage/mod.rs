@@ -28,7 +28,7 @@ pub use self::persistent_state::{
     ShardStateWriter,
 };
 pub use self::shard_state::{
-    CachedStateUpdate, ShardStateStorage, ShardStateStorageError, ShardStateStorageMetrics,
+    LoadStateHint, ShardStateStorage, ShardStateStorageError, ShardStateStorageMetrics,
     StoreStateHint, StoreStateStatus, split_shard_accounts,
 };
 

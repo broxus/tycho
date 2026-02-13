@@ -10,8 +10,8 @@ use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_core::global_config::ZerostateId;
 use tycho_core::storage::{
-    BlockHandle, CachedStateUpdate, CoreStorage, MaybeExistingHandle, NewBlockMeta, StoreStateHint,
-    StoreStateStatus,
+    BlockHandle, CachedStateUpdate, CoreStorage, LoadStateHint, MaybeExistingHandle, NewBlockMeta,
+    StoreStateHint, StoreStateStatus,
 };
 use tycho_network::PeerId;
 use tycho_types::boc::BocRepr;
@@ -64,17 +64,23 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
     /// Return id of last master block that was applied to node local state
     fn load_last_applied_mc_block_id(&self) -> Result<BlockId>;
     /// Return master or shard state on specified block from node local state
-    async fn load_state(&self, ref_by_mc_seqno: u32, block_id: &BlockId)
-    -> Result<ShardStateStuff>;
+    async fn load_state(
+        &self,
+        ref_by_mc_seqno: u32,
+        block_id: &BlockId,
+        hint: LoadStateHint,
+    ) -> Result<ShardStateStuff>;
     /// Store shard state root in the storage.
     /// Returns `true` when state was updated in storage.
-    async fn store_state_root(
+    async fn store_next_state(
         &self,
+        prev_handle: &BlockHandle,
         block_id: &BlockId,
         meta: NewBlockMeta,
-        state_root: Cell,
+        merkle_update: &MerkleUpdate,
+        state: ShardStateStuff,
         hint: StoreStateHint,
-    ) -> Result<StoreStateStatus>;
+    ) -> Result<ShardStateStuff>;
     /// Return block by its id from node local state
     async fn load_block(&self, block_id: &BlockId) -> Result<Option<BlockStuff>>;
     /// Return block by its handle from node local state
@@ -227,13 +233,15 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         Ok(state)
     }
 
-    async fn store_state_root(
+    async fn store_next_state(
         &self,
+        prev_handle: &BlockHandle,
         block_id: &BlockId,
         meta: NewBlockMeta,
-        state_root: Cell,
+        merkle_update: &MerkleUpdate,
+        state: ShardStateStuff,
         hint: StoreStateHint,
-    ) -> Result<StoreStateStatus> {
+    ) -> Result<ShardStateStuff> {
         let labels = [("workchain", block_id.shard.workchain().to_string())];
         let _histogram = HistogramGuard::begin_with_labels(
             "tycho_collator_state_store_state_root_time_high",
@@ -242,24 +250,23 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
 
         tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Store state root: {}", block_id.as_short_id());
 
-        let (handle, _) = self
+        let (next_handle, _) = self
             .storage
             .block_handle_storage()
             .create_or_load_handle(block_id, meta);
 
-        let status = self
+        let state = self
             .storage
             .shard_state_storage()
-            .store_state_root(&handle, state_root, hint)
+            .store_next_state(prev_handle, &next_handle, merkle_update, Some(state), hint)
             .await?;
 
-        if status.is_stored() {
-            self.last_stored_state_seqno
-                .lock()
-                .insert(block_id.shard, block_id.seqno);
-        }
+        // TODO: Update only for directly stored?
+        self.last_stored_state_seqno
+            .lock()
+            .insert(block_id.shard, block_id.seqno);
 
-        Ok(status)
+        Ok(state)
     }
 
     async fn load_block(&self, block_id: &BlockId) -> Result<Option<BlockStuff>> {

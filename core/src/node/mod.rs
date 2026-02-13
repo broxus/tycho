@@ -199,7 +199,7 @@ impl NodeBase {
         let mc_state = self
             .core_storage
             .shard_state_storage()
-            .load_state(block_id.seqno, block_id)
+            .load_state(block_id.seqno, block_id, LoadStateHint::default())
             .await
             .context("update_validator_set_from_shard_state failed to load state")?;
 

@@ -8,7 +8,7 @@ use phase::{ActualState, Phase};
 use prepare::PrepareState;
 use tycho_block_util::config::{apply_price_factor, compute_gas_price_factor};
 use tycho_block_util::queue::{QueueDiffStuff, QueueKey, SerializedQueueDiff};
-use tycho_block_util::state::RefMcStateHandle;
+use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_core::global_config::ZerostateId;
 use tycho_core::storage::{NewBlockMeta, StoreStateHint};
 use tycho_types::models::*;
@@ -1030,6 +1030,13 @@ impl CollatorStdImpl {
             resume_collation_elapsed,
         } = ctx;
 
+        let new_ovservable_state = ShardStateStuff::from_state_and_root(
+            &block_id,
+            finalized.new_observable_state,
+            finalized.new_state_root.clone(),
+            ref_mc_state_handle.clone(),
+        )?;
+
         let block_id = *finalized.block_candidate.block.id();
         let is_key_block = finalized.block_candidate.is_key_block;
         let store_new_state_task = JoinTask::new({
@@ -1039,7 +1046,17 @@ impl CollatorStdImpl {
                 ref_by_mc_seqno: finalized.block_candidate.ref_by_mc_seqno,
             };
             let adapter = self.state_node_adapter.clone();
-            let new_state_root = finalized.new_state_root.clone();
+
+            // TODO: Consider split/merge.
+            let prev_block_id = finalized
+                .block_candidate
+                .prev_blocks_ids
+                .get(0)
+                .context("no prev block id")?;
+            let prev_handle = adapter
+                .load_block_handle(prev_block_id)
+                .await?
+                .context("no prev block handle found")?;
 
             let hint = StoreStateHint {
                 block_data_size: finalized.block_candidate.block.data_size(),
@@ -1052,9 +1069,19 @@ impl CollatorStdImpl {
                 finalized.block_candidate.block.data.clone(),
             )?;
 
+            let merkle_update = finalized.merkle_build.update.clone();
+            let new_ovservable_state = new_ovservable_state.clone();
+
             async move {
                 adapter
-                    .store_state_root(&block_id, meta, new_state_root, hint)
+                    .store_next_state(
+                        &prev_handle,
+                        &block_id,
+                        meta,
+                        &merkle_update,
+                        new_ovservable_state,
+                        hint,
+                    )
                     .await
             }
         });
@@ -1098,9 +1125,7 @@ impl CollatorStdImpl {
 
             // spawn update PrevData and working state
             self.prepare_working_state_update(
-                block_id,
-                finalized.new_observable_state,
-                finalized.new_state_root,
+                new_ovservable_state,
                 finalized.merkle_build.update,
                 store_new_state_task,
                 new_queue_diff_hash,

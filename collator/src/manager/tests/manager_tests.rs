@@ -4353,13 +4353,15 @@ impl StateNodeAdapter for TestStateNodeAdapter {
     fn load_last_applied_mc_block_id(&self) -> Result<BlockId> {
         unreachable!()
     }
-    async fn store_state_root(
+    async fn store_next_state(
         &self,
+        _prev_handle: &BlockHandle,
         _block_id: &BlockId,
         _meta: NewBlockMeta,
-        _state_root: Cell,
+        _merkle_update: &MerkleUpdate,
+        _state: ShardStateStuff,
         _hint: StoreStateHint,
-    ) -> Result<StoreStateStatus> {
+    ) -> Result<ShardStateStuff> {
         unreachable!()
     }
     async fn load_block_by_handle(&self, _handle: &BlockHandle) -> Result<Option<BlockStuff>> {
