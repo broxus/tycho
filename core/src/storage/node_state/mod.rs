@@ -3,10 +3,11 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
 use bytes::Bytes;
+use parking_lot::RwLock;
 use tycho_storage::kv::InstanceId;
 use tycho_types::models::*;
 use tycho_types::prelude::*;
-use tycho_util::FastHasherState;
+use tycho_util::{FastHashSet, FastHasherState};
 use weedb::rocksdb;
 
 use super::CoreDb;
@@ -20,6 +21,9 @@ pub struct NodeStateStorage {
     zerostate_id: ArcSwapOption<ZerostateId>,
     zerostate_proof: ArcSwapOption<Cell>,
     zerostate_proof_bytes: ArcSwapOption<Bytes>,
+
+    pending_persistent_states: RwLock<FastHashSet<(u32, BlockId)>>,
+    pending_persistent_queues: RwLock<FastHashSet<(u32, BlockId)>>,
 }
 
 pub enum NodeSyncState {
@@ -29,6 +33,11 @@ pub enum NodeSyncState {
 
 impl NodeStateStorage {
     pub fn new(db: CoreDb) -> Self {
+        let pending_persistent_states =
+            Self::load_pending_from_db(&db, PENDING_PERSISTENT_STATE_PREFIX);
+        let pending_perstistent_queues =
+            Self::load_pending_from_db(&db, PENDING_PERSISTENT_QUEUE_PREFIX);
+
         let this = Self {
             db,
             last_mc_block_id: (Default::default(), LAST_MC_BLOCK_ID),
@@ -36,6 +45,8 @@ impl NodeStateStorage {
             zerostate_id: Default::default(),
             zerostate_proof: Default::default(),
             zerostate_proof_bytes: Default::default(),
+            pending_persistent_states: RwLock::new(pending_persistent_states),
+            pending_persistent_queues: RwLock::new(pending_perstistent_queues),
         };
 
         let state = &this.db.state;
@@ -157,6 +168,78 @@ impl NodeStateStorage {
         Some(bytes)
     }
 
+    fn pending_key(prefix: &[u8], mc_seqno: u32, block_id: &BlockId) -> Vec<u8> {
+        let mut key = Vec::with_capacity(prefix.len() + 4 + 80);
+        key.extend_from_slice(prefix);
+        key.extend_from_slice(&mc_seqno.to_le_bytes());
+        key.extend_from_slice(&write_block_id_le(block_id));
+        key
+    }
+
+    fn load_pending_from_db(db: &CoreDb, prefix: &[u8]) -> FastHashSet<(u32, BlockId)> {
+        let mut out = FastHashSet::default();
+        let mut iter = db.state.prefix_iterator(prefix);
+        while let Some((key, _value)) = iter.item() {
+            if !key.starts_with(prefix) {
+                break;
+            }
+            let offset = prefix.len();
+            let mc_seqno = u32::from_le_bytes(key[offset..offset + 4].try_into().unwrap());
+            let block_id = read_block_id_le(&key[offset + 4..offset + 4 + 80]);
+            out.insert((mc_seqno, block_id));
+            iter.next();
+        }
+        out
+    }
+
+    pub fn add_pending_persistent_state(&self, mc_seqno: u32, block_id: &BlockId) {
+        let key = Self::pending_key(PENDING_PERSISTENT_STATE_PREFIX, mc_seqno, block_id);
+        self.db.state.insert(key, []).unwrap();
+        self.pending_persistent_states
+            .write()
+            .insert((mc_seqno, *block_id));
+    }
+
+    pub fn remove_pending_persistent_state(&self, mc_seqno: u32, block_id: &BlockId) {
+        let key = Self::pending_key(PENDING_PERSISTENT_STATE_PREFIX, mc_seqno, block_id);
+        self.db.state.remove(key).unwrap();
+        self.pending_persistent_states
+            .write()
+            .remove(&(mc_seqno, *block_id));
+    }
+
+    pub fn add_pending_persistent_queue_state(&self, mc_seqno: u32, block_id: &BlockId) {
+        let key = Self::pending_key(PENDING_PERSISTENT_QUEUE_PREFIX, mc_seqno, block_id);
+        self.db.state.insert(key, []).unwrap();
+        self.pending_persistent_queues
+            .write()
+            .insert((mc_seqno, *block_id));
+    }
+
+    pub fn remove_pending_persistent_queue_state(&self, mc_seqno: u32, block_id: &BlockId) {
+        let key = Self::pending_key(PENDING_PERSISTENT_QUEUE_PREFIX, mc_seqno, block_id);
+        self.db.state.remove(key).unwrap();
+        self.pending_persistent_queues
+            .write()
+            .remove(&(mc_seqno, *block_id));
+    }
+
+    pub fn load_pending_shard_states(&self) -> Vec<(u32, BlockId)> {
+        self.pending_persistent_states
+            .read()
+            .iter()
+            .copied()
+            .collect()
+    }
+
+    pub fn load_pending_queue_states(&self) -> Vec<(u32, BlockId)> {
+        self.pending_persistent_queues
+            .read()
+            .iter()
+            .copied()
+            .collect()
+    }
+
     #[inline(always)]
     fn store_block_id(&self, (cache, key): &BlockIdCache, block_id: &BlockId) {
         let node_states = &self.db.state;
@@ -190,3 +273,5 @@ const INIT_MC_BLOCK_ID: &[u8] = b"init_mc_block";
 const INSTANCE_ID: &[u8] = b"instance_id";
 const ZEROSTATE_ID: &[u8] = b"zerostate_id";
 const ZEROSTATE_PROOF: &[u8] = b"zerostate_proof";
+const PENDING_PERSISTENT_STATE_PREFIX: &[u8] = b"pending_persistent_state/";
+const PENDING_PERSISTENT_QUEUE_PREFIX: &[u8] = b"pending_persistent_queue/";

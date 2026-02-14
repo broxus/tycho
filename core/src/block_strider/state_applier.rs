@@ -372,8 +372,27 @@ impl<S> Inner<S> {
         let block_handles = self.storage.block_handle_storage();
         let persistent_states = self.storage.persistent_state_storage();
         let state_storage = self.storage.shard_state_storage();
+        let node_state = self.storage.node_state();
 
         let mc_seqno = mc_block_handle.id().seqno;
+        let extra = mc_block.load_custom()?;
+        drop(mc_state_handle);
+
+        // We have to set skip GC flag for all block handles in prior to persistent state creation
+        {
+            for entry in extra.shards.latest_blocks() {
+                let block_id = entry?;
+                let Some(block_handle) = block_handles.load_handle(&block_id) else {
+                    anyhow::bail!("top shard block handle not found: {block_id}");
+                };
+                block_handles.set_skip_states_gc(&block_handle);
+                node_state.add_pending_persistent_state(mc_seqno, block_handle.id());
+            }
+
+            block_handles.set_skip_states_gc(&mc_block_handle);
+            node_state.add_pending_persistent_state(mc_seqno, mc_block_handle.id());
+        }
+
         for entry in mc_block.load_custom()?.shards.latest_blocks() {
             let block_id = entry?;
             let Some(block_handle) = block_handles.load_handle(&block_id) else {
@@ -400,7 +419,7 @@ impl<S> Inner<S> {
             //       only do this in the first part of the `save_persistent_queue_states`.
 
             persistent_states
-                .store_shard_state(mc_seqno, &block_handle, mc_state_handle.clone())
+                .store_shard_state(mc_seqno, &block_handle)
                 .await?;
         }
 
@@ -408,7 +427,7 @@ impl<S> Inner<S> {
         //       the handle will live long enough. And this way we don't mislead
         //       other nodes with the incomplete set of persistent states.
         persistent_states
-            .store_shard_state(mc_seqno, &mc_block_handle, mc_state_handle)
+            .store_shard_state(mc_seqno, &mc_block_handle)
             .await?;
 
         Ok(())
