@@ -2711,6 +2711,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rc-analyze"
+version = "0.3.5"
+dependencies = [
+ "anyhow",
+ "clap",
+ "tycho-storage",
+ "tycho-util",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"

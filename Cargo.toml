@@ -18,6 +18,7 @@ members = [
     "gen-protos",
     "light-node",
     "network",
+    "rc-analyze",
     "rpc",
     "simulator",
     "storage",

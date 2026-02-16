@@ -1,0 +1,22 @@
+[package]
+name = "rc-analyze"
+description = "Analyze COPS v2 refcount operation logs"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "rc-analyze"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+tycho-storage = { workspace = true }
+tycho-util = { workspace = true }
+
+[lints]
+workspace = true
