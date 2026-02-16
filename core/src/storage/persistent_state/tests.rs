@@ -81,6 +81,7 @@ async fn persistent_shard_state() -> Result<()> {
     // Write persistent state to file
     assert!(persistent_states.load_oldest_known_handle().is_none());
 
+    storage.block_handle_storage().set_skip_states_gc(&handle);
     persistent_states.store_shard_state(0, &handle).await?;
 
     // Check if state exists
@@ -130,26 +131,9 @@ async fn persistent_shard_state() -> Result<()> {
     // Reuse persistent state for a different block
     let new_mc_seqno = 123123;
     storage.block_handle_storage().set_skip_states_gc(&handle);
-    storage
-        .node_state()
-        .add_pending_persistent_state(new_mc_seqno, handle.id());
-    assert!(
-        storage
-            .node_state()
-            .load_pending_shard_states()
-            .contains(&(new_mc_seqno, *handle.id()))
-    );
-
     persistent_states
         .store_shard_state(new_mc_seqno, &handle)
         .await?;
-    assert!(!handle.skip_states_gc());
-    assert!(
-        !storage
-            .node_state()
-            .load_pending_shard_states()
-            .contains(&(new_mc_seqno, *handle.id()))
-    );
 
     // Check if state exists
     let exist = persistent_states.state_exists(zerostate.block_id(), PersistentStateKind::Shard);
@@ -273,7 +257,7 @@ async fn resume_pending_queue_state_clears_tail_gc_flags() -> Result<()> {
     block_handles.set_skip_blocks_gc(&prev_handle);
     block_handles.set_has_persistent_queue_state(&top_handle);
 
-    node_state.add_pending_persistent_queue_state(2, top_handle.id());
+    node_state.add_pending_persistent_queue_state(2, &[*top_handle.id()]);
 
     assert!(top_handle.skip_blocks_gc());
     assert!(prev_handle.skip_blocks_gc());

@@ -1,13 +1,14 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use futures_util::future::BoxFuture;
 use tokio::task::JoinHandle;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::dict::split_aug_dict_raw;
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_types::cell::{Cell, HashBytes};
+use tycho_types::models::{BlockId, PrevBlockRef};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
 
@@ -252,14 +253,20 @@ where
                     task.join().await?;
                 }
 
-                let block = cx.block.clone();
+                let mc_block_stuff = cx.block.clone();
                 let inner = self.inner.clone();
                 let state_handle = cx.state.ref_mc_state_handle().clone();
+                inner.set_skip_persistent_state_gc(&mc_block_stuff)?;
+                inner.set_skip_persistent_queue_gc(&mc_block_stuff).await?;
+                drop(state_handle);
 
                 *prev_task = Some(StorePersistentStateTask {
                     mc_seqno: cx.mc_block_id.seqno,
                     handle: Some(tokio::spawn(async move {
-                        inner.save_persistent_states(block, state_handle).await
+                        inner.save_persistent_states(mc_block_stuff.clone()).await?;
+                        inner.set_persistent_state_skip_gc_finished(&mc_block_stuff)?;
+                        inner.set_persistent_queue_skip_gc_finished(&mc_block_stuff)?;
+                        Ok(())
                     })),
                 });
             }
@@ -329,11 +336,150 @@ struct Inner<S> {
 }
 
 impl<S> Inner<S> {
-    async fn save_persistent_states(
+    fn set_skip_persistent_state_gc(&self, mc_block: &BlockStuff) -> Result<()> {
+        let block_handles = self.storage.block_handle_storage();
+        let node_state = self.storage.node_state();
+
+        let mc_block_id = mc_block.id();
+        let extra = mc_block.load_custom()?;
+
+        let Some(mc_block_handle) = block_handles.load_handle(mc_block_id) else {
+            return Err(anyhow!("mc block handle does not exist {}", mc_block_id));
+        };
+
+        let mut blocks = Vec::new();
+
+        for entry in extra.shards.latest_blocks() {
+            let block_id = entry?;
+            let Some(block_handle) = block_handles.load_handle(&block_id) else {
+                anyhow::bail!("top shard block handle not found: {block_id}");
+            };
+            blocks.push(*block_handle.id());
+            block_handles.set_skip_states_gc(&block_handle);
+        }
+
+        blocks.push(*mc_block_handle.id());
+        block_handles.set_skip_states_gc(&mc_block_handle);
+        node_state.add_pending_persistent_states(mc_block_id.seqno, &blocks);
+
+        Ok(())
+    }
+
+    async fn set_skip_persistent_queue_gc(&self, mc_block: &BlockStuff) -> Result<()> {
+        let node_state = self.storage.node_state();
+        let mut blocks = Vec::new();
+
+        for entry in mc_block.load_custom()?.shards.latest_blocks() {
+            let block_id = entry?;
+            let mc_queue = self
+                .set_skip_persistent_queue_gc_for_shard(&block_id)
+                .await?;
+            blocks.extend_from_slice(&mc_queue);
+        }
+
+        let mc_queue = self
+            .set_skip_persistent_queue_gc_for_shard(mc_block.id())
+            .await?;
+        blocks.extend_from_slice(&mc_queue);
+
+        node_state.add_pending_persistent_queue_state(
+            mc_block.id().seqno,
+            &blocks.iter().map(|x| *x.id()).collect::<Vec<_>>(),
+        );
+        Ok(())
+    }
+
+    async fn set_skip_persistent_queue_gc_for_shard(
         &self,
-        mc_block: BlockStuff,
-        mc_state_handle: RefMcStateHandle,
-    ) -> Result<()> {
+        block_id: &BlockId,
+    ) -> Result<Vec<BlockHandle>> {
+        let block_handles = self.storage.block_handle_storage();
+        let blocks = self.storage.block_storage();
+
+        let Some(handle) = block_handles.load_handle(block_id) else {
+            bail!("failed to load mc block handle {}", block_id);
+        };
+        let block_stuff = blocks.load_block_data(&handle).await?;
+
+        let shard_ident = handle.id().shard;
+
+        let mut top_block = block_stuff;
+        let mut tail_len = top_block.block().out_msg_queue_updates.tail_len as usize;
+
+        // top block itself
+        block_handles.set_skip_blocks_gc(&handle);
+
+        let mut skip_blocks_handles = Vec::new();
+        skip_blocks_handles.push(handle);
+
+        while tail_len > 0 {
+            if tail_len == 1 {
+                break;
+            }
+
+            let top_block_info = top_block.load_info()?;
+
+            let prev_block_id = match top_block_info.load_prev_ref()? {
+                PrevBlockRef::Single(block_ref) => block_ref.as_block_id(shard_ident),
+                PrevBlockRef::AfterMerge { .. } => anyhow::bail!("merge not supported yet"),
+            };
+
+            let Some(prev_block_handle) = block_handles.load_handle(&prev_block_id) else {
+                bail!("prev block handle not found for: {prev_block_id}");
+            };
+
+            // child blocks
+            block_handles.set_skip_blocks_gc(&prev_block_handle);
+            skip_blocks_handles.push(prev_block_handle.clone());
+
+            let prev_block = blocks.load_block_data(&prev_block_handle).await?;
+
+            top_block = prev_block;
+            tail_len -= 1;
+        }
+        Ok(skip_blocks_handles)
+    }
+
+    fn set_persistent_state_skip_gc_finished(&self, mc_block: &BlockStuff) -> Result<()> {
+        let mc_seqno = mc_block.id().seqno;
+
+        let node_state = self.storage.node_state();
+        let block_handles = self.storage.block_handle_storage();
+        let Some(states) = node_state.get_pending_persistent_states(mc_seqno) else {
+            return Ok(());
+        };
+
+        for b in states {
+            let Some(handle) = block_handles.load_handle(&b) else {
+                bail!("block handle does not exist {}", b);
+            };
+            block_handles.set_skip_states_gc_finished(&handle);
+        }
+        node_state.remove_pending_persistent_states(mc_seqno);
+
+        Ok(())
+    }
+
+    fn set_persistent_queue_skip_gc_finished(&self, mc_block: &BlockStuff) -> Result<()> {
+        let mc_seqno = mc_block.id().seqno;
+
+        let node_state = self.storage.node_state();
+        let block_handles = self.storage.block_handle_storage();
+        let Some(states) = node_state.get_pending_persistent_queues(mc_seqno) else {
+            return Ok(());
+        };
+
+        for b in states {
+            let Some(handle) = block_handles.load_handle(&b) else {
+                bail!("block handle does not exist {}", b);
+            };
+            block_handles.set_skip_blocks_gc_finished(&handle);
+        }
+        node_state.remove_pending_persistent_queue_state(mc_seqno);
+
+        Ok(())
+    }
+    async fn save_persistent_states(&self, mc_block: BlockStuff) -> Result<()> {
         let block_handles = self.storage.block_handle_storage();
 
         let Some(mc_block_handle) = block_handles.load_handle(mc_block.id()) else {
@@ -342,11 +488,7 @@ impl<S> Inner<S> {
         block_handles.set_block_persistent(&mc_block_handle);
 
         let (state_result, queue_result) = tokio::join!(
-            self.save_persistent_shard_states(
-                mc_block_handle.clone(),
-                mc_block.clone(),
-                mc_state_handle
-            ),
+            self.save_persistent_shard_states(mc_block_handle.clone(), mc_block.clone(),),
             self.save_persistent_queue_states(mc_block_handle.clone(), mc_block),
         );
         state_result?;
@@ -367,31 +509,12 @@ impl<S> Inner<S> {
         &self,
         mc_block_handle: BlockHandle,
         mc_block: BlockStuff,
-        mc_state_handle: RefMcStateHandle,
     ) -> Result<()> {
         let block_handles = self.storage.block_handle_storage();
         let persistent_states = self.storage.persistent_state_storage();
         let state_storage = self.storage.shard_state_storage();
-        let node_state = self.storage.node_state();
 
         let mc_seqno = mc_block_handle.id().seqno;
-        let extra = mc_block.load_custom()?;
-        drop(mc_state_handle);
-
-        // We have to set skip GC flag for all block handles in prior to persistent state creation
-        {
-            for entry in extra.shards.latest_blocks() {
-                let block_id = entry?;
-                let Some(block_handle) = block_handles.load_handle(&block_id) else {
-                    anyhow::bail!("top shard block handle not found: {block_id}");
-                };
-                block_handles.set_skip_states_gc(&block_handle);
-                node_state.add_pending_persistent_state(mc_seqno, block_handle.id());
-            }
-
-            block_handles.set_skip_states_gc(&mc_block_handle);
-            node_state.add_pending_persistent_state(mc_seqno, mc_block_handle.id());
-        }
 
         for entry in mc_block.load_custom()?.shards.latest_blocks() {
             let block_id = entry?;

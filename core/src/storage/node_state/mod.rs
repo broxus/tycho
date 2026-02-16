@@ -7,7 +7,7 @@ use parking_lot::RwLock;
 use tycho_storage::kv::InstanceId;
 use tycho_types::models::*;
 use tycho_types::prelude::*;
-use tycho_util::{FastHashSet, FastHasherState};
+use tycho_util::{FastHashMap, FastHasherState};
 use weedb::rocksdb;
 
 use super::CoreDb;
@@ -22,8 +22,8 @@ pub struct NodeStateStorage {
     zerostate_proof: ArcSwapOption<Cell>,
     zerostate_proof_bytes: ArcSwapOption<Bytes>,
 
-    pending_persistent_states: RwLock<FastHashSet<(u32, BlockId)>>,
-    pending_persistent_queues: RwLock<FastHashSet<(u32, BlockId)>>,
+    pending_persistent_states: RwLock<FastHashMap<u32, Vec<BlockId>>>,
+    pending_persistent_queues: RwLock<FastHashMap<u32, Vec<BlockId>>>,
 }
 
 pub enum NodeSyncState {
@@ -168,75 +168,103 @@ impl NodeStateStorage {
         Some(bytes)
     }
 
-    fn pending_key(prefix: &[u8], mc_seqno: u32, block_id: &BlockId) -> Vec<u8> {
-        let mut key = Vec::with_capacity(prefix.len() + 4 + 80);
+    fn pending_key(prefix: &[u8], mc_seqno: u32) -> Vec<u8> {
+        let mut key = Vec::with_capacity(prefix.len() + 4);
         key.extend_from_slice(prefix);
         key.extend_from_slice(&mc_seqno.to_le_bytes());
-        key.extend_from_slice(&write_block_id_le(block_id));
+
         key
     }
 
-    fn load_pending_from_db(db: &CoreDb, prefix: &[u8]) -> FastHashSet<(u32, BlockId)> {
-        let mut out = FastHashSet::default();
+    fn load_pending_from_db(db: &CoreDb, prefix: &[u8]) -> FastHashMap<u32, Vec<BlockId>> {
+        let mut out = FastHashMap::default();
         let mut iter = db.state.prefix_iterator(prefix);
-        while let Some((key, _value)) = iter.item() {
+
+        while let Some((key, value)) = iter.item() {
             if !key.starts_with(prefix) {
                 break;
             }
             let offset = prefix.len();
             let mc_seqno = u32::from_le_bytes(key[offset..offset + 4].try_into().unwrap());
-            let block_id = read_block_id_le(&key[offset + 4..offset + 4 + 80]);
-            out.insert((mc_seqno, block_id));
+
+            let mut value_offset = 0usize;
+            let mut blocks = Vec::new();
+            while value.is_empty() {
+                let block_id = read_block_id_le(&value[value_offset..value_offset + 80]);
+                blocks.push(block_id);
+                value_offset += 80;
+            }
+            out.insert(mc_seqno, blocks);
+
             iter.next();
         }
         out
     }
 
-    pub fn add_pending_persistent_state(&self, mc_seqno: u32, block_id: &BlockId) {
-        let key = Self::pending_key(PENDING_PERSISTENT_STATE_PREFIX, mc_seqno, block_id);
-        self.db.state.insert(key, []).unwrap();
+    pub fn get_pending_persistent_states(&self, mc_seqno: u32) -> Option<Vec<BlockId>> {
+        self.pending_persistent_states
+            .read()
+            .get(&mc_seqno)
+            .cloned()
+    }
+
+    pub fn get_pending_persistent_queues(&self, mc_seqno: u32) -> Option<Vec<BlockId>> {
+        self.pending_persistent_queues
+            .read()
+            .get(&mc_seqno)
+            .cloned()
+    }
+
+    pub fn add_pending_persistent_states(&self, mc_seqno: u32, block_ids: &[BlockId]) {
+        let key = Self::pending_key(PENDING_PERSISTENT_STATE_PREFIX, mc_seqno);
+        let mut value = Vec::with_capacity(80 * block_ids.len());
+        for block_id in block_ids {
+            value.extend_from_slice(&write_block_id_le(block_id));
+        }
+
+        self.db.state.insert(key, value).unwrap();
         self.pending_persistent_states
             .write()
-            .insert((mc_seqno, *block_id));
+            .insert(mc_seqno, block_ids.to_vec());
     }
 
-    pub fn remove_pending_persistent_state(&self, mc_seqno: u32, block_id: &BlockId) {
-        let key = Self::pending_key(PENDING_PERSISTENT_STATE_PREFIX, mc_seqno, block_id);
+    pub fn remove_pending_persistent_states(&self, mc_seqno: u32) {
+        let key = Self::pending_key(PENDING_PERSISTENT_STATE_PREFIX, mc_seqno);
         self.db.state.remove(key).unwrap();
-        self.pending_persistent_states
-            .write()
-            .remove(&(mc_seqno, *block_id));
+        self.pending_persistent_states.write().remove(&mc_seqno);
     }
 
-    pub fn add_pending_persistent_queue_state(&self, mc_seqno: u32, block_id: &BlockId) {
-        let key = Self::pending_key(PENDING_PERSISTENT_QUEUE_PREFIX, mc_seqno, block_id);
-        self.db.state.insert(key, []).unwrap();
+    pub fn add_pending_persistent_queue_state(&self, mc_seqno: u32, block_ids: &[BlockId]) {
+        let key = Self::pending_key(PENDING_PERSISTENT_QUEUE_PREFIX, mc_seqno);
+        let mut value = Vec::with_capacity(80 * block_ids.len());
+        for block_id in block_ids {
+            value.extend_from_slice(&write_block_id_le(block_id));
+        }
+        self.db.state.insert(key, value).unwrap();
         self.pending_persistent_queues
             .write()
-            .insert((mc_seqno, *block_id));
+            .insert(mc_seqno, block_ids.to_vec());
     }
 
-    pub fn remove_pending_persistent_queue_state(&self, mc_seqno: u32, block_id: &BlockId) {
-        let key = Self::pending_key(PENDING_PERSISTENT_QUEUE_PREFIX, mc_seqno, block_id);
+    pub fn remove_pending_persistent_queue_state(&self, mc_seqno: u32) {
+        let key = Self::pending_key(PENDING_PERSISTENT_QUEUE_PREFIX, mc_seqno);
         self.db.state.remove(key).unwrap();
-        self.pending_persistent_queues
-            .write()
-            .remove(&(mc_seqno, *block_id));
+        self.pending_persistent_queues.write().remove(&mc_seqno);
     }
 
-    pub fn load_pending_shard_states(&self) -> Vec<(u32, BlockId)> {
+    pub fn load_pending_shard_states(&self) -> Vec<(u32, Vec<BlockId>)> {
         self.pending_persistent_states
             .read()
             .iter()
-            .copied()
+            .map(|(mc_seqno, block_ids)| (*mc_seqno, block_ids.clone()))
             .collect()
     }
 
-    pub fn load_pending_queue_states(&self) -> Vec<(u32, BlockId)> {
+    pub fn load_pending_queue_states(&self) -> Vec<(u32, Vec<BlockId>)> {
         self.pending_persistent_queues
             .read()
             .iter()
-            .copied()
+            .map(|(mc_seqno, block_ids)| (*mc_seqno, block_ids.clone()))
             .collect()
     }
 
