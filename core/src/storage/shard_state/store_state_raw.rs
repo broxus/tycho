@@ -208,8 +208,10 @@ impl StoreStateContext {
         let root_hash = ctx.entries_buffer.repr_hash();
         ctx.final_check(root_hash)?;
 
-        self.cell_storage
-            .apply_temp_cell(HashBytes::wrap(root_hash))?;
+        self.cell_storage.apply_temp_cell_with_ctx(
+            HashBytes::wrap(root_hash),
+            Some(block_id.into()),
+        )?;
         ctx.clear_temp_cells(&self.cells_db)?;
 
         let shard_state_key = block_id.to_vec();

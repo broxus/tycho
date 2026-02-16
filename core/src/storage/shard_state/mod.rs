@@ -155,19 +155,21 @@ impl ShardStateStorage {
             let in_mem_store = HistogramGuard::begin("tycho_storage_cell_in_mem_store_time_high");
 
             let new_cell_count = if block_id.is_masterchain() {
-                cell_storage.store_cell(
+                cell_storage.store_cell_with_ctx(
                     &mut batch,
                     root_cell.as_ref(),
                     estimated_merkle_update_size,
+                    Some((&block_id).into()),
                 )?
             } else {
                 let split_at = split_shard_accounts(&root_cell, accounts_split_depth)?;
 
-                cell_storage.store_cell_mt(
+                cell_storage.store_cell_mt_with_ctx(
                     root_cell.as_ref(),
                     &mut batch,
                     split_at,
                     estimated_merkle_update_size,
+                    Some((&block_id).into()),
                 )?
             };
 
@@ -353,7 +355,11 @@ impl ShardStateStorage {
                     HistogramGuard::begin("tycho_storage_cell_in_mem_remove_time_high");
 
                 let (stats, mut batch) = if block_id.is_masterchain() {
-                    cell_storage.remove_cell(alloc.get().as_bump(), &root_hash)?
+                    cell_storage.remove_cell_with_ctx(
+                        alloc.get().as_bump(),
+                        &root_hash,
+                        Some((&block_id).into()),
+                    )?
                 } else {
                     // NOTE: We use epoch `0` here so that cells of old states
                     // will not be used by recent loads.
@@ -362,7 +368,12 @@ impl ShardStateStorage {
                     let split_at = split_shard_accounts(&root_cell, accounts_split_depth)?
                         .into_keys()
                         .collect::<FastHashSet<HashBytes>>();
-                    cell_storage.remove_cell_mt(&alloc, &root_hash, split_at)?
+                    cell_storage.remove_cell_mt_with_ctx(
+                        &alloc,
+                        &root_hash,
+                        split_at,
+                        Some((&block_id).into()),
+                    )?
                 };
 
                 in_mem_remove.finish();
