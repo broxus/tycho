@@ -22,9 +22,7 @@ use weedb::rocksdb;
 
 use self::cell_storage::*;
 use self::store_state_raw::StoreStateContext;
-use super::{
-    BlockFlags, BlockHandle, BlockHandleStorage, BlockStorage, CellsDb, CoreStorageConfig,
-};
+use super::{BlockHandle, BlockHandleStorage, BlockStorage, CellsDb, CoreStorageConfig};
 
 mod cell_storage;
 mod entries_buffer;
@@ -240,11 +238,9 @@ impl ShardStateStorage {
 
             hist.finish();
 
-            let mut updated = handle.meta().add_flags(BlockFlags::HAS_STATE);
-            updated |= handle.meta().remove_flags(BlockFlags::HAS_VIRTUAL_STATE);
+            let updated = block_handle_storage.set_has_shard_state(&handle);
 
             let status = if updated {
-                block_handle_storage.store_handle(&handle, false);
                 StoreStateStatus::Stored
             } else {
                 StoreStateStatus::Exist
