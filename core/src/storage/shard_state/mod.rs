@@ -391,6 +391,13 @@ impl ShardStateStorage {
                             block_id.as_short_id(),
                         ))?;
 
+                    // If handle has state flag but state no longer in storage (removed by GC)
+                    anyhow::ensure!(
+                        !handle.has_state(),
+                        "state for block {} was removed by GC",
+                        current_block_id.as_short_id(),
+                    );
+
                     ref_by_mc_seqno = ref_by_mc_seqno.min(handle.meta().ref_by_mc_seqno());
 
                     let block = self.block_storage.load_block_data(&handle).await?;
