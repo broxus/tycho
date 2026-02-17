@@ -43,7 +43,7 @@ pub struct ShardStateStorage {
 
     accumulated_per_shard: parking_lot::Mutex<FastHashMap<ShardIdent, ShardAccumulator>>,
 
-    shard_states_cache: FastDashMap<ShardIdent, FastHashMap<u32, ShardStateStuff>>,
+    shard_states_cache: FastDashMap<ShardIdent, FastHashMap<HashBytes, ShardStateStuff>>,
 
     shard_split_depth: u8,
     new_cells_threshold: usize,
@@ -676,7 +676,7 @@ impl ShardStateStorage {
         self.shard_states_cache
             .entry(block_id.shard)
             .or_default()
-            .insert(block_id.seqno, state);
+            .insert(block_id.root_hash, state);
 
         Ok(())
     }
@@ -684,7 +684,7 @@ impl ShardStateStorage {
     fn get_cached_shard_state(&self, block_id: &BlockId) -> Option<ShardStateStuff> {
         self.shard_states_cache
             .get(&block_id.shard)
-            .and_then(|states| states.get(&block_id.seqno).cloned())
+            .and_then(|states| states.get(&block_id.root_hash).cloned())
     }
 }
 
