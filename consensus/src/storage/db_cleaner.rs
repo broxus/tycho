@@ -5,7 +5,8 @@ use futures_util::never::Never;
 use crate::effects::{Cancelled, Ctx, RoundCtx, Task};
 use crate::engine::round_watch::{Commit, Consensus, RoundWatcher, TopKnownAnchor};
 use crate::engine::{ConsensusConfigExt, MempoolConfig, NodeConfig};
-use crate::models::{PointKey, Round};
+use crate::models::{PointKey, Round, UnixTime};
+use crate::moderator::JournalTtl;
 use crate::storage::MempoolDb;
 
 pub struct DbCleaner {
@@ -13,6 +14,7 @@ pub struct DbCleaner {
     top_known_anchor: RoundWatcher<TopKnownAnchor>,
     commit_finished: RoundWatcher<Commit>,
     consensus_round: RoundWatcher<Consensus>,
+    event_journal_ttl: JournalTtl,
 }
 
 impl DbCleaner {
@@ -21,12 +23,14 @@ impl DbCleaner {
         top_known_anchor: RoundWatcher<TopKnownAnchor>,
         commit_finished: RoundWatcher<Commit>,
         consensus_round: RoundWatcher<Consensus>,
+        event_journal_ttl: JournalTtl,
     ) -> Self {
         Self {
             mempool_db,
             top_known_anchor,
             commit_finished,
             consensus_round,
+            event_journal_ttl,
         }
     }
 
@@ -116,6 +120,16 @@ impl DbCleaner {
                                 );
                             }
                         }
+                        let upto_time = UnixTime::now() - self.event_journal_ttl.0.to_time();
+                        match db.clean_events(UnixTime::from_millis(0) .. upto_time) {
+                            Ok(()) => {}
+                            Err(e) => {
+                                metrics::gauge!(DB_CLEAN_ERRORS, "kind" => "events").increment(1);
+                                tracing::error!(
+                                    "delete range of mempool events before time {upto_time} failed: {e}",
+                                );
+                            }
+                        };
                         match db.wait_for_compact() {
                             Ok(()) => {}
                             Err(e) => {
