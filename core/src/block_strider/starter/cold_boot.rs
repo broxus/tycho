@@ -585,6 +585,8 @@ impl StarterInner {
         handle_storage.set_has_shard_state(&handle);
         handle_storage.set_block_committed(&handle);
 
+        let _mc_handle = mc_zerostate.ref_mc_state_handle().clone();
+
         // TODO: Somehow save the original file.
         persistent_states
             .store_shard_state(mc_block_id.seqno, &handle)

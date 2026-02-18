@@ -1,10 +1,7 @@
 use std::collections::BTreeSet;
-use std::time::Duration;
 
 use anyhow::Result;
 use bytesize::ByteSize;
-use tycho_block_util::archive::WithArchiveData;
-use tycho_block_util::block::BlockStuff;
 use tycho_block_util::queue::{
     QueueDiffStuff, QueueKey, QueueStateHeader, RouterAddr, RouterPartitions,
 };
@@ -13,9 +10,8 @@ use tycho_storage::{StorageConfig, StorageContext};
 use tycho_types::boc::Boc;
 use tycho_types::cell::{Cell, CellBuilder, CellSlice, HashBytes, Lazy};
 use tycho_types::models::{
-    BlockId, BlockInfo, BlockRef, CurrencyCollection, IntAddr, IntMsgInfo, IntermediateAddr,
-    Message, MsgEnvelope, MsgInfo, OutMsg, OutMsgDescr, OutMsgNew, OutMsgQueueUpdates, ShardIdent,
-    StdAddr,
+    BlockId, CurrencyCollection, IntAddr, IntMsgInfo, IntermediateAddr, Message, MsgEnvelope,
+    MsgInfo, OutMsg, OutMsgDescr, OutMsgNew, OutMsgQueueUpdates, ShardIdent, StdAddr,
 };
 use tycho_types::num::Tokens;
 use tycho_util::FastHashSet;
@@ -188,86 +184,6 @@ async fn persistent_shard_state() -> Result<()> {
         .clone();
     assert_eq!(new_cached.mc_seqno, new_mc_seqno);
     assert_eq!(new_cached.file.as_slice(), new_file);
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn resume_pending_queue_state_clears_tail_gc_flags() -> Result<()> {
-    tycho_util::test::init_logger("resume_pending_queue_state_clears_tail_gc_flags", "debug");
-
-    let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
-    let storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
-
-    let block_storage = storage.block_storage();
-    let block_handles = storage.block_handle_storage();
-    let node_state = storage.node_state();
-    let persistent_states = storage.persistent_state_storage();
-
-    let shard = ShardIdent::MASTERCHAIN;
-
-    let prev_block = BlockStuff::new_with(shard, 1, |block| {
-        block.out_msg_queue_updates.tail_len = 1;
-    });
-    let prev_block = {
-        let data = Boc::encode(prev_block.root_cell());
-        WithArchiveData::new(prev_block, data)
-    };
-    let prev_block_meta = NewBlockMeta {
-        is_key_block: false,
-        gen_utime: 0,
-        ref_by_mc_seqno: 1,
-    };
-    let prev_store = block_storage
-        .store_block_data(&prev_block, &prev_block.archive_data, prev_block_meta)
-        .await?;
-
-    let top_block = BlockStuff::new_with(shard, 2, |block| {
-        block.out_msg_queue_updates.tail_len = 2;
-        let mut info = BlockInfo {
-            shard,
-            seqno: 2,
-            ..Default::default()
-        };
-        info.set_prev_ref_single(&BlockRef {
-            end_lt: 0,
-            seqno: prev_block.id().seqno,
-            root_hash: prev_block.id().root_hash,
-            file_hash: prev_block.id().file_hash,
-        });
-        block.info = Lazy::new(&info).unwrap();
-    });
-    let top_block = {
-        let data = Boc::encode(top_block.root_cell());
-        WithArchiveData::new(top_block, data)
-    };
-    let top_block_meta = NewBlockMeta {
-        is_key_block: false,
-        gen_utime: 0,
-        ref_by_mc_seqno: 2,
-    };
-    let top_store = block_storage
-        .store_block_data(&top_block, &top_block.archive_data, top_block_meta)
-        .await?;
-
-    let prev_handle = prev_store.handle;
-    let top_handle = top_store.handle;
-
-    block_handles.set_skip_blocks_gc(&top_handle);
-    block_handles.set_skip_blocks_gc(&prev_handle);
-    block_handles.set_has_persistent_queue_state(&top_handle);
-
-    node_state.add_pending_persistent_queue_state(2, &[*top_handle.id()]);
-
-    assert!(top_handle.skip_blocks_gc());
-    assert!(prev_handle.skip_blocks_gc());
-
-    persistent_states.resume_pending_persistent_states().await?;
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    assert!(node_state.load_pending_queue_states().is_empty());
-    assert!(!top_handle.skip_blocks_gc());
-    assert!(!prev_handle.skip_blocks_gc());
 
     Ok(())
 }

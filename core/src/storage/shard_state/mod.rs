@@ -516,7 +516,7 @@ impl ShardStateStorage {
 
                 let guard = {
                     let _h = HistogramGuard::begin("tycho_storage_cell_gc_lock_remove_time_high");
-                    gc_lock.clone().blocking_lock_owned()
+                    gc_lock.blocking_lock()
                 };
 
                 let in_mem_remove =
