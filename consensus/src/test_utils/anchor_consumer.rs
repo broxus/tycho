@@ -70,6 +70,7 @@ impl AnchorConsumer {
             MempoolOutput::NextAnchor(anchor_data) => {
                 let round = anchor_data.anchor.round();
                 tracing::info!("committed anchor {}", round.0);
+                metrics::gauge!("tycho_mempool_last_anchor_round").set(round.0);
                 tycho_util::mem::Reclaimer::instance().drop(anchor_data);
                 round
             }
@@ -114,13 +115,12 @@ impl AnchorConsumer {
             }
         };
 
-        let anchor_id = anchor.id();
-
-        let anchor_round = anchor.round();
+        let anchor_id = *anchor.id();
+        metrics::gauge!("tycho_mempool_last_anchor_round").set(anchor_id.round.0);
 
         // get last previous anchor round and check if we don't have previous
         for (prev_anchor_round, committers) in (self.anchors.iter())
-            .filter(|(prev_anchor_round, _)| **prev_anchor_round < anchor_round)
+            .filter(|(prev_anchor_round, _)| **prev_anchor_round < anchor_id.round)
         {
             assert!(
                 committers.get(&peer_id).is_some(),
@@ -131,7 +131,7 @@ impl AnchorConsumer {
             );
         }
 
-        match self.anchors.entry(anchor_round) {
+        match self.anchors.entry(anchor_id.round) {
             Entry::Occupied(mut stored_anchor) => {
                 let committers = stored_anchor.get_mut();
                 assert!(
@@ -139,7 +139,7 @@ impl AnchorConsumer {
                     "Broken test: we can't store {} committers for total {} peers at round {}",
                     committers.len(),
                     self.streams.len(),
-                    anchor_round.0,
+                    anchor_id.round.0,
                 );
                 assert!(
                     committers.get(&peer_id).is_none(),
@@ -158,27 +158,28 @@ impl AnchorConsumer {
             }
         }
 
-        match self.history.get(&anchor_round) {
+        match self.history.get(&anchor_id.round) {
             Some(stored_history) => {
                 assert_eq!(
                     stored_history.len(),
                     history.len(),
                     "Commited points size differs for {} at round: {}",
                     peer_id.alt(),
-                    anchor_round.0,
+                    anchor_id.round.0,
                 );
 
                 for (left, right) in stored_history.iter().zip(history.iter()) {
                     assert_eq!(
                         &left.digest,
                         right.digest(),
-                        "Points are not equal or order is different for round {anchor_round:?}"
+                        "Points are not equal or order is different for round {}",
+                        anchor_id.round.0
                     );
                 }
             }
             None => {
-                let point_refs = history.iter().map(|x| x.id()).collect::<Vec<_>>();
-                self.history.insert(anchor_round, point_refs);
+                let point_refs = history.iter().map(|x| *x.id()).collect::<Vec<_>>();
+                self.history.insert(anchor_id.round, point_refs);
             }
         }
 
@@ -227,7 +228,7 @@ impl AnchorConsumer {
         tracing::debug!("Anchor hashmap len: {}", self.anchors.len());
         tracing::trace!("History hashmap len: {}", self.history.len());
 
-        self.commit_finished.set_max(anchor_round);
+        self.commit_finished.set_max(anchor_id.round);
         if let Some(top_common_anchor) = common_anchors.last() {
             self.top_known_anchor.set_max_raw(*top_common_anchor);
             tracing::info!(

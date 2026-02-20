@@ -9,10 +9,11 @@ use tycho_network::PeerId;
 use tycho_types::models::ConsensusConfig;
 use tycho_util::metrics::HistogramGuard;
 
+use crate::dag::AnchorStage;
 use crate::engine::MempoolConfig;
 use crate::models::point::proto_utils::{PointBodyWrite, PointRawRead, PointRead, PointWrite};
 use crate::models::point::{Digest, PointData, Signature};
-use crate::models::{PointInfo, Round};
+use crate::models::{PointId, PointInfo, Round};
 
 #[derive(Debug, thiserror::Error)]
 pub enum PointIntegrityError {
@@ -26,13 +27,17 @@ pub enum PointIntegrityError {
 }
 
 #[derive(Debug, Copy, Clone, thiserror::Error)]
+#[error("Evidence map contains bad signature")]
+pub struct EvidenceSigError;
+
+#[derive(Debug, Copy, Clone, thiserror::Error)]
 pub enum StructureIssue {
     #[error("{0:?} map must not contain author")]
     AuthorInMap(PointMap),
     #[error("bad {0:?} link through {1:?} map")]
     Link(AnchorStageRole, PointMap),
-    #[error("Evidence map contains bad signature")]
-    EvidenceSig,
+    #[error("bad chained proof through {0:?} map")]
+    ChainedProof(PointMap),
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -62,7 +67,7 @@ impl Debug for Point {
 }
 
 pub type ParseResult =
-    Result<Result<Result<Point, (Point, StructureIssue)>, PointIntegrityError>, TlError>;
+    Result<Result<Result<Point, (Point, EvidenceSigError)>, PointIntegrityError>, TlError>;
 
 impl Point {
     pub fn max_byte_size(consensus_config: &ConsensusConfig) -> usize {
@@ -103,25 +108,22 @@ impl Point {
 
         let body_offset = 4 + Digest::MAX_TL_BYTES + Signature::MAX_TL_BYTES;
 
-        let digest = Digest::new(&serialized[body_offset..]);
-        let signature = Signature::new(local_keypair, &digest);
+        let id = PointId {
+            digest: Digest::new(&serialized[body_offset..]),
+            author,
+            round,
+        };
 
-        serialized[4..4 + Digest::MAX_TL_BYTES].copy_from_slice(digest.inner());
+        let signature = Signature::new(local_keypair, &id.digest);
+
+        serialized[4..4 + Digest::MAX_TL_BYTES].copy_from_slice(id.digest.inner());
         serialized[4 + Digest::MAX_TL_BYTES..body_offset].copy_from_slice(signature.inner());
 
         let payload_len = u32::try_from(payload.len()).unwrap_or(u32::MAX);
         let payload_bytes =
             u32::try_from(payload.iter().fold(0, |acc, b| acc + b.len())).unwrap_or(u32::MAX);
 
-        let info = PointInfo::new(
-            digest,
-            signature,
-            author,
-            round,
-            payload_len,
-            payload_bytes,
-            data,
-        );
+        let info = PointInfo::new(id, signature, payload_len, payload_bytes, data);
 
         Self {
             serialized: Arc::new(serialized),
@@ -130,18 +132,33 @@ impl Point {
     }
 
     pub fn from_bytes(serialized: Vec<u8>) -> Result<Self, TlError> {
+        const ROUND_RANGE: std::ops::Range<Round> = {
+            let min = AnchorStage::align_genesis(0);
+            let max = Round(u32::MAX - min.0);
+            min..max
+        };
+
         let slice = &mut &serialized[..];
         let read = PointRead::read_from(slice)?;
 
-        let payload_len = u32::try_from(read.body.payload.len()).unwrap_or(u32::MAX);
+        if !ROUND_RANGE.contains(&read.body.round) {
+            return Err(TlError::InvalidData);
+        }
+
+        let payload_len = u32::try_from(read.body.payload.len()).or(Err(TlError::InvalidData))?;
+
         let payload_bytes = u32::try_from(read.body.payload.iter().fold(0, |acc, b| acc + b.len()))
-            .unwrap_or(u32::MAX);
+            .or(Err(TlError::InvalidData))?;
+
+        let id = PointId {
+            digest: read.digest,
+            author: read.body.author,
+            round: read.body.round,
+        };
 
         let info = PointInfo::new(
-            read.digest,
+            id,
             read.signature,
-            read.body.author,
-            read.body.round,
             payload_len,
             payload_bytes,
             read.body.data,
@@ -168,9 +185,9 @@ impl Point {
 
         let point = Self::from_bytes(serialized)?;
 
-        Ok(Ok(match point.info().check_structure() {
+        Ok(Ok(match point.info().check_evidence() {
             Ok(()) => Ok(point),
-            Err(issue) => Err((point, issue)),
+            Err(err) => Err((point, err)),
         }))
     }
 
@@ -204,7 +221,9 @@ pub mod test_point {
     use tycho_util::FastHashMap;
 
     use super::*;
-    use crate::models::{Link, PointId, Round, Through, UnixTime};
+    use crate::models::{
+        AnchorLink, ChainedAnchorProof, IndirectLink, PointId, Round, Through, UnixTime,
+    };
 
     pub const PEERS: usize = 100;
 
@@ -258,7 +277,7 @@ pub mod test_point {
         let round = Round(rand::random_range(10..u32::MAX - 10));
         let anchor_time = UnixTime::now();
 
-        let indirect_link = |round: Round| Link::Indirect {
+        let indirect_link = |round: Round| IndirectLink {
             to: PointId {
                 author: PeerId(rand::random()),
                 round,
@@ -273,8 +292,9 @@ pub mod test_point {
                 (PeerId(rand::random()), Digest::random())
             })),
             evidence,
-            anchor_trigger: indirect_link(round - 7_u32),
-            anchor_proof: indirect_link(round - 6_u32),
+            chained_anchor_proof: ChainedAnchorProof::Chained(indirect_link(round - 8_u32)),
+            anchor_trigger: AnchorLink::Indirect(indirect_link(round - 7_u32)),
+            anchor_proof: AnchorLink::Indirect(indirect_link(round - 6_u32)),
             time: anchor_time.next(),
             anchor_time,
         };

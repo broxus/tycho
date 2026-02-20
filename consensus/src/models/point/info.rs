@@ -6,8 +6,8 @@ use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
 use crate::models::{
-    AnchorStageRole, Digest, Link, PointData, PointId, PointKey, Round, Signature, StructureIssue,
-    UnixTime,
+    AnchorLink, AnchorStageRole, ChainedAnchorProof, Digest, EvidenceSigError, IndirectLink,
+    PointData, PointId, PointKey, Round, Signature, StructureIssue, UnixTime,
 };
 
 #[derive(Clone, TlRead, TlWrite)]
@@ -18,10 +18,8 @@ pub struct PointInfo(Arc<PointInfoInner>);
 #[derive(TlWrite, TlRead)]
 #[cfg_attr(test, derive(PartialEq))]
 struct PointInfoInner {
-    digest: Digest,
+    id: PointId,
     signature: Signature,
-    author: PeerId,
-    round: Round,
     payload_len: u32,
     payload_bytes: u32,
     data: PointData,
@@ -42,43 +40,35 @@ impl Debug for PointInfo {
 }
 
 impl PointInfo {
-    pub const MAX_BYTE_SIZE: usize = {
-        // 4 bytes of PointInfo tag
-        // 32 bytes of Digest
-        // 64 bytes of Signature
-        // 32 bytes of Author
-        // 4 bytes for round, payload len and bytes
-        // point data max_size_hint
-
-        4 + Digest::MAX_TL_BYTES
-            + Signature::MAX_TL_BYTES
-            + PeerId::MAX_TL_BYTES
-            + (4 + 4 + 4)
-            + PointData::MAX_BYTE_SIZE
-    };
+    pub const MAX_BYTE_SIZE: usize =
+        4 + PointId::MAX_TL_BYTES + Signature::MAX_TL_BYTES + 4 + 4 + PointData::MAX_BYTE_SIZE;
 
     pub(super) fn new(
-        digest: Digest,
+        id: PointId,
         signature: Signature,
-        author: PeerId,
-        round: Round,
         payload_len: u32,
         payload_bytes: u32,
         data: PointData,
     ) -> Self {
         Self(Arc::new(PointInfoInner {
-            digest,
+            id,
             signature,
-            author,
-            round,
             payload_len,
             payload_bytes,
             data,
         }))
     }
 
+    pub fn id(&self) -> &PointId {
+        &self.0.id
+    }
+
+    pub fn key(&self) -> PointKey {
+        PointKey::new(self.round(), *self.digest())
+    }
+
     pub fn digest(&self) -> &Digest {
-        &self.0.digest
+        &self.0.id.digest
     }
 
     pub fn signature(&self) -> &Signature {
@@ -86,11 +76,11 @@ impl PointInfo {
     }
 
     pub fn author(&self) -> &PeerId {
-        &self.0.author
+        &self.0.id.author
     }
 
     pub fn round(&self) -> Round {
-        self.0.round
+        self.0.id.round
     }
 
     pub fn payload_len(&self) -> u32 {
@@ -116,11 +106,11 @@ impl PointInfo {
         &(self.0.data).evidence
     }
 
-    pub fn anchor_trigger(&self) -> &Link {
+    pub fn anchor_trigger(&self) -> &AnchorLink {
         &(self.0.data).anchor_trigger
     }
 
-    pub fn anchor_proof(&self) -> &Link {
+    pub fn anchor_proof(&self) -> &AnchorLink {
         &(self.0.data).anchor_proof
     }
 
@@ -133,58 +123,62 @@ impl PointInfo {
     }
 
     pub fn prev_digest(&self) -> Option<&Digest> {
-        (self.0.data).includes.get(&self.0.author)
-    }
-
-    pub(super) fn check_structure(&self) -> Result<(), StructureIssue> {
-        (self.0.data).check_maps(self.author(), self.round())?;
-        self.prev_digest()
-            .is_none_or(|prev_proof| {
-                (self.evidence().iter()).all(|(peer, sig)| sig.verifies(peer, prev_proof))
-            })
-            .then_some(())
-            .ok_or(StructureIssue::EvidenceSig)
-    }
-
-    pub fn id(&self) -> PointId {
-        PointId {
-            author: self.0.author,
-            round: self.0.round,
-            digest: self.0.digest,
-        }
+        (self.0.data).includes.get(self.author())
     }
 
     pub fn prev_id(&self) -> Option<PointId> {
         Some(PointId {
-            author: self.0.author,
-            round: self.0.round.prev(),
+            author: *self.author(),
+            round: self.round().prev(),
             digest: *self.prev_digest()?,
         })
     }
 
-    pub fn key(&self) -> PointKey {
-        PointKey::new(self.round(), *self.digest())
+    pub fn check_evidence(&self) -> Result<(), EvidenceSigError> {
+        let is_ok = self.prev_digest().is_none_or(|prev_proof| {
+            (self.evidence().iter()).all(|(peer, sig)| sig.verifies(peer, prev_proof))
+        });
+        if is_ok { Ok(()) } else { Err(EvidenceSigError) }
     }
 
-    pub fn anchor_link(&self, link_field: AnchorStageRole) -> &Link {
+    pub fn check_structure(&self) -> Result<(), StructureIssue> {
+        (self.0.data).check_maps(self.author(), self.round())
+    }
+
+    pub fn anchor_link(&self, link_field: AnchorStageRole) -> &AnchorLink {
         (self.0.data).anchor_link(link_field)
     }
 
     pub fn anchor_round(&self, link_field: AnchorStageRole) -> Round {
-        (self.0.data).anchor_round(link_field, self.0.round)
+        (self.0.data).anchor_round(link_field, self.round())
+    }
+
+    pub fn chained_anchor_proof(&self) -> Option<&IndirectLink> {
+        match &self.0.data.chained_anchor_proof {
+            ChainedAnchorProof::Inapplicable => None,
+            ChainedAnchorProof::Chained(link) => Some(link),
+        }
+    }
+
+    pub fn chained_proof_to_through(&self) -> Option<(PointId, PointId)> {
+        self.chained_anchor_proof().map(|link| {
+            let through = (self.0.data.through_id(&link.path, self.round()))
+                .expect("Coding error: usage of ill-formed point");
+            (link.to, through)
+        })
     }
 
     /// the final destination of an anchor link
     pub fn anchor_id(&self, link_field: AnchorStageRole) -> PointId {
         (self.0.data)
-            .anchor_id(link_field, self.0.round)
-            .unwrap_or_else(|| self.id())
+            .anchor_id(link_field, self.round())
+            .unwrap_or_else(|| *self.id())
     }
 
     /// next point in path from `&self` to the anchor
-    pub fn anchor_link_id(&self, link_field: AnchorStageRole) -> PointId {
+    pub fn anchor_link_through(&self, link_field: AnchorStageRole) -> PointId {
         (self.0.data)
-            .anchor_link_id(link_field, self.0.round)
-            .unwrap_or_else(|| self.id())
+            .anchor_link_id(link_field, self.round())
+            .unwrap_or_else(|| *self.id())
     }
 }

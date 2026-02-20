@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use tycho_network::PeerId;
 use tycho_util::metrics::HistogramGuard;
 
-use crate::dag::{DagFront, DagRound, KeyGroup, Verifier};
+use crate::dag::{DagFront, DagRound, KeyGroup, Verifier, VerifyError};
 use crate::effects::{
     AltFormat, Cancelled, Ctx, EngineCtx, RoundCtx, Task, TaskResult, TaskTracker,
 };
@@ -21,9 +21,8 @@ use crate::engine::lifecycle::{EngineBinding, EngineError, EngineNetwork, FixHis
 use crate::engine::round_task::RoundTaskReady;
 use crate::engine::round_watch::{RoundWatch, RoundWatcher, TopKnownAnchor};
 use crate::engine::{ConsensusConfigExt, MempoolMergedConfig};
-use crate::models::{
-    DagPoint, MempoolOutput, Point, PointRestore, PointRestoreSelect, PointStatusStoredRef, Round,
-};
+use crate::models::point_status::{PointStatusIllFormed, PointStatusStored};
+use crate::models::{DagPoint, MempoolOutput, Point, PointRestore, Round};
 use crate::storage::{DbCleaner, MempoolStore};
 
 pub type EngineResult<T> = std::result::Result<T, EngineError>;
@@ -53,7 +52,7 @@ impl Engine {
         Point::parse(genesis.serialized().to_vec())
             .expect("parse genesis: point tl serde is broken")
             .expect("parse genesis: integrity check is broken")
-            .expect("parse genesis: structure check is broken");
+            .expect("parse genesis: evidence check failed");
         Verifier::verify(genesis.info(), &net.peer_schedule, conf)
             .expect("failed to verify genesis");
 
@@ -94,7 +93,7 @@ impl Engine {
             let overlay_id = merged_conf.overlay_id;
             move || {
                 store.init_storage(&overlay_id);
-                store.insert_point(&genesis, PointStatusStoredRef::Exists);
+                store.insert_point(&genesis, &PointStatusStored::Found(Default::default()));
                 fix_history // just pass further
             }
         });
@@ -226,7 +225,7 @@ impl Engine {
                 .iter()
                 .filter_map(|dp| dp.trusted()) // will repeat valid only, but choose top round
                 .min_by_key(|info| info.time()) // in case of a fork after db deletion
-                .map(|info| info.id());
+                .map(|info| *info.id());
             if let Some(last_id) = earliest {
                 tracing::info!(
                     parent: round_ctx.span(),
@@ -288,6 +287,8 @@ impl Engine {
             let peer_schedule = self.round_task.state.peer_schedule.clone();
             let round_ctx = round_ctx.clone();
             move || {
+                use rayon::prelude::{IntoParallelIterator, ParallelIterator};
+
                 let _guard = round_ctx.span().enter();
                 if fix_history.0 {
                     store.reset_statuses(&range);
@@ -295,30 +296,37 @@ impl Engine {
                 let restores = store.load_restore(&range);
                 let (need_verify, ready): (Vec<_>, Vec<_>) =
                     restores.into_iter().partition_map(|r| match r {
-                        PointRestoreSelect::NeedsVerify(key) => Either::Left(key),
-                        PointRestoreSelect::Ready(ready) => Either::Right(ready),
+                        PointRestore::Found(info, status) => Either::Left((info, status)),
+                        ready => Either::Right(ready),
                     });
                 let verified = need_verify
-                    .chunks(1000) // seems enough for any case
-                    .flat_map(|keys| {
-                        use rayon::prelude::{IntoParallelIterator, ParallelIterator};
-                        store
-                            .multi_get_info(keys) // assume load result is sorted
-                            .into_par_iter()
-                            .map(|info| {
-                                if Verifier::verify(&info, &peer_schedule, round_ctx.conf()).is_ok()
-                                {
-                                    // return back as they were, now with prev_proof filled
-                                    PointRestore::Exists(info)
-                                } else {
-                                    PointRestore::IllFormed(info.id(), Default::default())
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                    });
+                    .into_par_iter()
+                    .map(|(info, status)| {
+                        let mut ill_status = PointStatusIllFormed {
+                            is_first_resolved: false,
+                            has_proof: status.has_proof,
+                            is_reason_final: false,
+                        };
+                        match Verifier::verify(&info, &peer_schedule, round_ctx.conf()) {
+                            Ok(()) => PointRestore::Found(info, status),
+                            Err(VerifyError::IllFormed(reason)) => {
+                                ill_status.is_reason_final = reason.is_final();
+                                PointRestore::IllFormed(*info.id(), ill_status)
+                            }
+                            Err(VerifyError::Fail(error)) => {
+                                tracing::debug!(
+                                    parent: round_ctx.span(),
+                                    %error,
+                                    "preload points verify failed"
+                                );
+                                PointRestore::IllFormed(*info.id(), ill_status)
+                            }
+                        }
+                    })
+                    .collect::<Vec<_>>();
 
                 let mut map = BTreeMap::<(Round, _), Vec<PointRestore>>::new();
-                for pre in verified.chain(ready) {
+                for pre in verified.into_iter().chain(ready) {
                     let entry = map.entry((pre.round(), pre.restore_order_asc()));
                     entry.or_default().push(pre);
                 }
@@ -482,8 +490,9 @@ fn collator_feedback(
     let top_known_anchor = top_known_anchor_recv.get();
     // For example in `max_consensus_lag_rounds` comments this results to `217` of `8..=217`
     let pause_at = top_known_anchor + round_ctx.conf().consensus.max_consensus_lag_rounds.get();
-    // Note pause bound is inclusive with `>=` because new vset may be unknown for next dag top
-    //  (the next after next engine round), while vset switch round is exactly pause bound + 1
+    // Note pause bound is inclusive (`>=`): engine must not advance beyond `TKA + lag`.
+    // Collator may schedule vset changes from a newer processed-to anchor than this node's current
+    // `top_known_anchor`, so the switch round may be > current `pause_at + 1` until TKA catches up.
     if old_dag_top_round >= pause_at {
         if !*is_paused {
             tracing::info!(

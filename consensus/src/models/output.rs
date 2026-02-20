@@ -2,9 +2,10 @@ use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
 use crate::effects::{AltFmt, AltFormat};
-use crate::models::{MempoolPeerStats, PointInfo, Round};
+use crate::models::{MempoolPeerStats, PointInfo, PointKey, Round};
 
 pub struct AnchorData {
+    pub proof_key: PointKey,
     pub anchor: PointInfo,
     // first anchor after Genesis is not linked to previous one
     pub prev_anchor: Option<Round>,

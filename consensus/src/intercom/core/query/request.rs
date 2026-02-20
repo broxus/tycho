@@ -3,7 +3,7 @@ use tl_proto::{RawBytes, TlError, TlRead, TlWrite};
 use tycho_network::PrefixedRequest;
 
 use crate::intercom::Dispatcher;
-use crate::models::{Point, PointId, Round, StructureIssue};
+use crate::models::{EvidenceSigError, Point, PointId, Round};
 
 #[derive(Copy, Clone, Debug, PartialEq, TlRead, TlWrite)]
 #[tl(boxed, scheme = "proto.tl")]
@@ -17,7 +17,7 @@ pub enum QueryRequestTag {
 }
 
 pub enum QueryRequest {
-    Broadcast(Point, Option<StructureIssue>),
+    Broadcast(Point, Option<EvidenceSigError>),
     Signature(Round),
     Download(PointId),
 }

@@ -1,11 +1,9 @@
 use std::cmp;
 
-use ahash::HashMapExt;
-use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
+use futures_util::{FutureExt, StreamExt};
 use tracing::Instrument;
 use tycho_network::PeerId;
-use tycho_util::FastHashMap;
 use tycho_util::metrics::HistogramGuard;
 
 use crate::dag::dag_location::DagLocation;
@@ -15,8 +13,9 @@ use crate::effects::{AltFormat, Ctx, TaskResult, ValidateCtx};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{
-    AnchorStageRole, Cert, CertDirectDeps, DagPoint, Digest, Link, PeerCount, PointId, PointInfo,
-    PointMap, Round, StructureIssue, UnixTime,
+    AnchorLink, AnchorStageRole, Cert, CertDirectDeps, DagPoint, Digest, EvidenceSigError,
+    IndirectLink, PeerCount, PointId, PointInfo, PointMap, Round, StructureIssue, Through,
+    UnixTime,
 };
 use crate::storage::MempoolStore;
 // Note on equivocation.
@@ -44,6 +43,7 @@ pub enum VerifyError {
 pub enum ValidateResult {
     IllFormed(IllFormedReason),
     Invalid(InvalidReason),
+    TransInvalid(InvalidDependency),
     Valid,
 }
 
@@ -57,8 +57,11 @@ pub enum VerifyFailReason {
 
 #[derive(thiserror::Error, Debug, Clone)]
 pub enum IllFormedReason {
-    #[error("ill-formed after load from DB")]
-    AfterLoadFromDb,
+    /// Flag is preserved across restarts, because only non-final are subjects to `FixHistory`
+    #[error("ill-formed after load from DB, is_final={}", .is_final)]
+    AfterLoadFromDb { is_final: bool },
+    #[error("{0}")]
+    EvidenceSigError(EvidenceSigError),
     #[error("structure issue: {0}")]
     Structure(StructureIssue),
     #[error("point before genesis cannot exist in this overlay")]
@@ -79,6 +82,9 @@ pub enum IllFormedReason {
     AnchorTime,
     #[error("anchor stage role {0:?}")]
     SelfAnchorStage(AnchorStageRole),
+    /// `false` for "must NOT have used chained proof"
+    #[error("must{} have used chained proof", .0.then_some("").unwrap_or(" not"))]
+    ChainedProofMustUse(bool),
     // Errors below are thrown from `validate()` because they require DagRound
     #[error("self link")]
     SelfLink,
@@ -88,8 +94,8 @@ pub enum IllFormedReason {
 
 #[derive(thiserror::Error, Debug, Clone)]
 pub enum InvalidReason {
-    #[error("invalid after load from DB, no_dag_round={no_dag_round}")]
-    AfterLoadFromDb { no_dag_round: bool },
+    #[error("after load from DB ({} dag round)", if *has_dag_round { "has" } else { "no" })]
+    AfterLoadFromDb { has_dag_round: bool },
     #[error("cannot validate point, no {0:?} round in DAG")]
     NoRoundInDag(PointMap),
     #[error("cannot validate point, dependency was dropped with its round")]
@@ -110,47 +116,47 @@ pub enum InvalidReason {
     NewerAnchorInDependency((AnchorStageRole, PointId)),
     #[error("anchor {:?} link leads to other destination through {:?}", .0.0, .0.1.alt())]
     AnchorLinkBadPath((AnchorStageRole, PointId)),
-    #[error("dependency {}{}", .0, .1.as_ref().map(|p| format!("; indirect through {:?}", p.alt())).unwrap_or_default())]
-    Dependency(Box<InvalidRootCause>, Option<PointId>),
+    #[error("chained proof link leads to other destination through {:?}", .0.alt())]
+    ChainedProofBadPath(PointId),
+    #[error("newer proof to chain in dependency {:?}", .0.alt())]
+    NewerProofToChainInDependency(PointId),
+    #[error("dependency ill-formed {:?}: {}", .0.0.alt(), .0.1)]
+    DepIllFormed((PointId, IllFormedReason)),
+    #[error("dependency not found {:?}", .0.alt())]
+    DepNotFound(PointId),
 }
 
-impl InvalidReason {
-    /// root cause is because of no dag round: such points should not be a ban reason
-    pub fn no_dag_round(&self) -> bool {
+impl IllFormedReason {
+    pub fn is_final(&self) -> bool {
         match self {
-            Self::AfterLoadFromDb { no_dag_round } => *no_dag_round,
-            Self::NoRoundInDag(_) | Self::DependencyRoundDropped => true,
-            InvalidReason::Dependency(cause, _) => match &**cause {
-                InvalidRootCause::Invalid(_, reason) => match reason {
-                    Self::AfterLoadFromDb { no_dag_round } => *no_dag_round,
-                    Self::NoRoundInDag(_) | Self::DependencyRoundDropped => true,
-                    _ => false,
-                },
-                _ => false,
-            },
+            IllFormedReason::AfterLoadFromDb { is_final } => *is_final,
+            IllFormedReason::EvidenceSigError(_) => true,
             _ => false,
         }
     }
 }
 
-#[derive(thiserror::Error, Debug, Clone)]
-pub enum InvalidRootCause {
-    #[error("{:?} invalid: {}", .0.alt(), 0.1)]
-    Invalid(PointId, InvalidReason),
-    #[error("{:?} ill-formed: {}", .0.alt(), 0.1)]
-    IllFormed(PointId, IllFormedReason),
-    #[error("{:?} not found", .0.alt())]
-    NotFound(PointId),
+impl InvalidReason {
+    /// root cause is because of no dag round: such points should not be a ban reason
+    pub fn has_dag_round(&self) -> bool {
+        match self {
+            Self::AfterLoadFromDb { has_dag_round } => *has_dag_round,
+            Self::NoRoundInDag(_) | Self::DependencyRoundDropped => false,
+            _ => true,
+        }
+    }
 }
 
-impl InvalidRootCause {
-    #[allow(unused)]
-    pub fn point_id(&self) -> &PointId {
-        match self {
-            InvalidRootCause::Invalid(point_id, _)
-            | InvalidRootCause::IllFormed(point_id, _)
-            | InvalidRootCause::NotFound(point_id) => point_id,
-        }
+#[derive(Clone)]
+pub struct InvalidDependency {
+    pub link: IndirectLink,
+    pub reason: InvalidReason,
+}
+
+impl std::fmt::Debug for InvalidDependency {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid dependency link {:?}: ", self.link.alt())?;
+        std::fmt::Display::fmt(&self.reason, f)
     }
 }
 
@@ -164,7 +170,7 @@ impl Verifier {
         peer_schedule: &PeerSchedule,
         conf: &MempoolConfig,
     ) -> Result<(), VerifyError> {
-        let result = Self::verify_impl(info, peer_schedule, conf).map_or(Ok(()), Err);
+        let result = Self::verify_impl(info, peer_schedule, conf);
 
         ValidateCtx::verified(&result);
         result
@@ -174,8 +180,8 @@ impl Verifier {
     ///
     /// We do not require the whole `Point` to avoid OOM as during sync Dag can grow large.
     pub async fn validate(
-        info: PointInfo,   // @ r+0
-        r_0: WeakDagRound, // r+0
+        info: PointInfo,        // @ r+0
+        r_0_weak: WeakDagRound, // r+0
         downloader: Downloader,
         store: MempoolStore,
         cert: Cert,
@@ -198,7 +204,7 @@ impl Verifier {
             cmp::Ordering::Greater => {} // peer usage is already verified
         }
 
-        let Some(r_0) = r_0.upgrade() else {
+        let Some(r_0) = r_0_weak.upgrade() else {
             // have to decide between ill-formed and invalid
             if let Some(reason) = Self::check_links(&info, None, peer_schedule, ctx.conf()) {
                 return ctx.validated(&cert, ValidateResult::IllFormed(reason));
@@ -222,15 +228,13 @@ impl Verifier {
         };
         let r_2_opt = r_1.prev().upgrade();
 
-        let (mut deps_and_prev, cert_deps) =
+        let (mut deps_and_prev, cert_deps, prev_point_cert) =
             Self::spawn_direct_deps(&info, &r_1, r_2_opt.as_ref(), &downloader, &store, &ctx);
 
-        if let Some(prev_digest) = info.prev_digest() {
+        // move strong prev point cert: don't hold it across await
+        if let Some(prev_point_cert) = prev_point_cert {
             // point well-formedness is enough to act as a carrier for the majority of signatures
-            let weak_cert =
-                (cert_deps.includes.get(prev_digest)).expect("prev cert must be included");
-            let cert = weak_cert.upgrade().expect("we hold a strong ref to round");
-            cert.certify();
+            prev_point_cert.certify(ctx.conf());
         }
         cert.set_deps(cert_deps);
 
@@ -250,17 +254,23 @@ impl Verifier {
         );
 
         let is_valid_fut =
-            Self::is_valid(info, deps_and_prev, ctx.conf()).instrument(entered_span.exit());
+            Self::check_valid(&info, deps_and_prev, ctx.conf()).instrument(entered_span.exit());
 
         // drop strong links before await
         drop(r_0);
         drop(r_1);
         drop(r_2_opt);
 
-        ctx.validated(&cert, match is_valid_fut.await? {
-            Some(reason) => ValidateResult::Invalid(reason),
-            None => ValidateResult::Valid,
-        })
+        let valid_result = match is_valid_fut.await? {
+            ValidateResult::TransInvalid(inv_dep) => {
+                Self::check_indirect_links(&info, inv_dep, &r_0_weak, &downloader, &store, &ctx)
+                    .instrument(ctx.span().clone())
+                    .await?
+            }
+            other => other,
+        };
+
+        ctx.validated(&cert, valid_result)
     }
 
     fn check_links(
@@ -282,15 +292,17 @@ impl Verifier {
                     || info.anchor_round(AnchorStageRole::Proof) == info.round().prev()
                 {
                     // must link to own point if it did not skip rounds
-                    info.prev_digest().is_some() == (info.anchor_link(stage.role) == &Link::ToSelf)
+                    info.prev_digest().is_some()
+                        == (info.anchor_link(stage.role) == &AnchorLink::ToSelf)
                 } else {
                     // skipped either candidate of Proof, but may have prev point
-                    info.anchor_link(stage.role) != &Link::ToSelf
+                    info.anchor_link(stage.role) != &AnchorLink::ToSelf
                 }
             }
             // others must not pretend to be leaders
             Some(_) | None => {
-                info.anchor_proof() != &Link::ToSelf && info.anchor_trigger() != &Link::ToSelf
+                info.anchor_proof() != &AnchorLink::ToSelf
+                    && info.anchor_trigger() != &AnchorLink::ToSelf
             }
         };
         if !is_self_link_ok {
@@ -345,44 +357,59 @@ impl Verifier {
         downloader: &Downloader,
         store: &MempoolStore,
         ctx: &ValidateCtx,
-    ) -> (FuturesUnordered<WeakDagPointFuture>, CertDirectDeps) {
+    ) -> (
+        FuturesUnordered<WeakDagPointFuture>,
+        CertDirectDeps,
+        Option<Cert>,
+    ) {
         let direct_deps = FuturesUnordered::new();
+
+        let mut prev_point_cert = None;
 
         // allocate a bit more so it's unlikely to grow during certify procedure
         let mut cert_deps = CertDirectDeps {
-            includes: FastHashMap::with_capacity(r_1.peer_count().full()),
-            witness: FastHashMap::with_capacity(r_1.peer_count().full()),
+            includes: Vec::with_capacity(info.includes().len()),
+            witness: Vec::with_capacity(info.witness().len()),
         };
 
+        let point_author = info.author();
+
+        // populate witness before includes: their round is less
+        if let Some(r_2) = r_2_opt {
+            for (author, digest) in info.witness() {
+                let (dep, cert) =
+                    r_2.add_dependency(author, digest, point_author, downloader, store, ctx);
+
+                cert_deps.witness.push((*digest, cert));
+                direct_deps.push(dep);
+            }
+        }
+
         // integrity check passed, so includes contain author's prev point proof
-        let includes = (info.includes().iter()).map(|(author, digest)| (r_1, true, author, digest));
-
-        let witness = r_2_opt.into_iter().flat_map(|r_2| {
-            (info.witness().iter()).map(move |(author, digest)| (r_2, false, author, digest))
-        });
-
-        for (dag_round, is_includes, author, digest) in includes.chain(witness) {
+        for (author, digest) in info.includes() {
             let (dep, cert) =
-                dag_round.add_dependency(author, digest, info.author(), downloader, store, ctx);
+                r_1.add_dependency(author, digest, point_author, downloader, store, ctx);
 
-            if is_includes {
-                cert_deps.includes.insert(*digest, cert);
-            } else {
-                cert_deps.witness.insert(*digest, cert);
+            if author == point_author
+                && let Some(prev_digest) = info.prev_digest()
+                && digest == prev_digest
+            {
+                prev_point_cert = cert.upgrade();
             }
 
+            cert_deps.includes.push((*digest, cert));
             direct_deps.push(dep);
         }
 
-        (direct_deps, cert_deps)
+        (direct_deps, cert_deps, prev_point_cert)
     }
 
     /// check only direct dependencies and location for previous point (let it jump over round)
-    async fn is_valid(
-        info: PointInfo,
+    async fn check_valid(
+        info: &PointInfo,
         mut deps_and_prev: FuturesUnordered<WeakDagPointFuture>,
         conf: &MempoolConfig,
-    ) -> TaskResult<Option<InvalidReason>> {
+    ) -> TaskResult<ValidateResult> {
         // point is well-formed if we got here, so point.proof matches point.includes
         let prev_digest_in_point = info.prev_digest();
         let prev_round = info.round().prev();
@@ -394,17 +421,26 @@ impl Verifier {
         // until the current peer makes a gap in its far outdated DAG.
         let anchor_trigger_id = info.anchor_id(AnchorStageRole::Trigger);
         let anchor_proof_id = info.anchor_id(AnchorStageRole::Proof);
-        let anchor_trigger_link_id = info.anchor_link_id(AnchorStageRole::Trigger);
-        let anchor_proof_link_id = info.anchor_link_id(AnchorStageRole::Proof);
-
+        let anchor_trigger_through = info.anchor_link_through(AnchorStageRole::Trigger);
+        let anchor_proof_through = info.anchor_link_through(AnchorStageRole::Proof);
+        let chained_proof_to_through = info.chained_proof_to_through();
         let max_allowed_dep_time =
             info.time() + UnixTime::from_millis(conf.consensus.clock_skew_millis.get() as _);
 
+        let mut invalid_reason = None;
+        let mut latest_invalid_dep = None;
+
+        // join all dependencies despite the reason to invalidate the point is found
         while let Some(task_result) = deps_and_prev.next().await {
             let Some(dag_point) = task_result? else {
-                return Ok(Some(InvalidReason::DependencyRoundDropped));
+                if invalid_reason.is_none() {
+                    invalid_reason = Some(InvalidReason::DependencyRoundDropped);
+                }
+                break;
             };
-            if dag_point.round() == prev_round && dag_point.author() == info.author() {
+            let dep_id = *dag_point.id();
+
+            let is_prev_point = if dep_id.round == prev_round && dep_id.author == info.author() {
                 match prev_digest_in_point {
                     Some(prev_digest_in_point) if prev_digest_in_point == dag_point.digest() => {
                         // we validate a point that is a well-formed certificate for the previous,
@@ -413,101 +449,259 @@ impl Verifier {
                             dag_point.is_certified(),
                             "prev point was not marked as certified, Cert is broken"
                         );
-                        let proven = match Self::check_dependency_valid(&dag_point) {
-                            Ok(proven) => proven,
-                            Err(reason) => return Ok(Some(reason)),
-                        };
-                        if let Some(reason) = Self::is_proof_ok(&info, proven) {
-                            return Ok(Some(reason));
-                        }
+                        true
                     }
                     Some(_) | None => {
                         match dag_point {
                             DagPoint::Valid(valid) => {
-                                // a requirement to reference the first resolved is reproducible
-                                if valid.is_first_valid() {
-                                    return Ok(Some(InvalidReason::MustHaveReferencedPrevPoint(
-                                        valid.info().id(),
-                                    )));
+                                // a requirement to reference the first resolved is reproducible;
+                                // if the current point is certifying, then it's prev point
+                                // is supported by majority, and we can't invalidate the current
+                                if prev_digest_in_point.is_none() && valid.is_first_valid() {
+                                    invalid_reason =
+                                        Some(InvalidReason::MustHaveReferencedPrevPoint(dep_id));
                                 } // else: will not throw err only when first valid is referenced
                             }
-                            bad @ (DagPoint::Invalid(_) | DagPoint::IllFormed(_)) => {
-                                return Ok(Some(InvalidReason::MustHaveSkippedRound(bad.id())));
+                            DagPoint::TransInvalid(_)
+                            | DagPoint::Invalid(_)
+                            | DagPoint::IllFormed(_) => {
+                                invalid_reason = Some(InvalidReason::MustHaveSkippedRound(dep_id));
                             }
                             DagPoint::NotFound(not_found) => {
                                 if not_found.is_certified() {
-                                    return Ok(Some(InvalidReason::MustHaveReferencedPrevPoint(
-                                        *not_found.id(),
-                                    )));
+                                    invalid_reason =
+                                        Some(InvalidReason::MustHaveReferencedPrevPoint(dep_id));
                                 } // else: skip, because it may be some other point's dependency
                             }
                         }
+                        continue; // it's not among point dependencies
                     }
                 }
             } else {
-                let dep = match Self::check_dependency_valid(&dag_point) {
-                    Ok(dep) => dep,
-                    Err(reason) => return Ok(Some(reason)),
-                };
-                if dep.time() > max_allowed_dep_time {
-                    // dependency time may exceed those in point only by a small value from config
-                    return Ok(Some(InvalidReason::DependencyTimeTooFarInFuture(dep.id())));
-                }
-                for (anchor_role, anchor_role_round) in [
-                    (AnchorStageRole::Trigger, anchor_trigger_id.round),
-                    (AnchorStageRole::Proof, anchor_proof_id.round),
-                ] {
-                    if dep.anchor_round(anchor_role) > anchor_role_round {
-                        let tuple = (anchor_role, dep.id());
-                        return Ok(Some(InvalidReason::NewerAnchorInDependency(tuple)));
-                    }
-                }
+                false
+            };
 
-                let dep_id = dep.id();
-                if dep_id == anchor_trigger_link_id
-                    && dep.anchor_id(AnchorStageRole::Trigger) != anchor_trigger_id
+            let dep =
+                match Self::dependency(&mut latest_invalid_dep, &dag_point, None, prev_round, conf)
                 {
-                    let tuple = (AnchorStageRole::Trigger, dep_id);
-                    return Ok(Some(InvalidReason::AnchorLinkBadPath(tuple)));
+                    Ok(dep) => dep,
+                    Err(reason) => {
+                        invalid_reason = Some(reason);
+                        continue; // invalidating deps (ill and not found) are not checked against
+                    }
+                };
+
+            if is_prev_point && let Some(reason) = Self::is_proof_ok(info, dep) {
+                invalid_reason = Some(reason);
+            }
+
+            if dep.time() > max_allowed_dep_time {
+                // dependency time may exceed those in point only by a small value from config
+                invalid_reason = Some(InvalidReason::DependencyTimeTooFarInFuture(dep_id));
+            }
+
+            for (anchor_role, anchor_role_round) in [
+                (AnchorStageRole::Trigger, anchor_trigger_id.round),
+                (AnchorStageRole::Proof, anchor_proof_id.round),
+            ] {
+                if dep.anchor_round(anchor_role) > anchor_role_round {
+                    let tuple = (anchor_role, dep_id);
+                    invalid_reason = Some(InvalidReason::NewerAnchorInDependency(tuple));
                 }
-                if dep_id == anchor_proof_link_id {
-                    if dep.anchor_id(AnchorStageRole::Proof) != anchor_proof_id {
-                        let tuple = (AnchorStageRole::Proof, dep_id);
-                        return Ok(Some(InvalidReason::AnchorLinkBadPath(tuple)));
-                    }
-                    if dep.anchor_time() != info.anchor_time() {
-                        // anchor candidate's time is not inherited from its proof
-                        return Ok(Some(InvalidReason::AnchorTimeNotInheritedFromProof(dep_id)));
-                    }
+            }
+
+            if dep_id == anchor_trigger_through
+                && dep.anchor_id(AnchorStageRole::Trigger) != anchor_trigger_id
+            {
+                let tuple = (AnchorStageRole::Trigger, dep_id);
+                invalid_reason = Some(InvalidReason::AnchorLinkBadPath(tuple));
+            }
+
+            if dep_id == anchor_proof_through {
+                if dep.anchor_id(AnchorStageRole::Proof) != anchor_proof_id {
+                    let tuple = (AnchorStageRole::Proof, dep_id);
+                    invalid_reason = Some(InvalidReason::AnchorLinkBadPath(tuple));
+                }
+                if dep.anchor_time() != info.anchor_time() {
+                    // anchor candidate's time is not inherited from its proof
+                    invalid_reason = Some(InvalidReason::AnchorTimeNotInheritedFromProof(dep_id));
+                }
+            }
+
+            // "chained" and "proof through" branches are mutually exclusive
+            // because point struct allows "chained" value only if "proof through"==Link::ToSelf
+
+            if let Some((to, through)) = chained_proof_to_through {
+                let dep_anchor_proof_id = dep.anchor_id(AnchorStageRole::Proof);
+                if dep_id == through && dep_anchor_proof_id != to {
+                    invalid_reason = Some(InvalidReason::ChainedProofBadPath(dep_id));
+                }
+                if dep_anchor_proof_id.round > to.round {
+                    invalid_reason = Some(InvalidReason::NewerProofToChainInDependency(dep_id));
                 }
             }
         }
-        Ok(None)
+
+        Ok(if let Some(invalid) = invalid_reason {
+            ValidateResult::Invalid(invalid)
+        } else if let Some(inv_dep) = latest_invalid_dep {
+            ValidateResult::TransInvalid(inv_dep)
+        } else {
+            ValidateResult::Valid
+        })
     }
 
-    /// keeps root cause acros dep tree for [`InvalidReason::no_dag_round`]
-    fn check_dependency_valid(dag_point: &DagPoint) -> Result<&PointInfo, InvalidReason> {
-        match dag_point {
-            DagPoint::Valid(valid) => Ok(valid.info()),
-            DagPoint::Invalid(invalid) if invalid.is_certified() => Ok(invalid.info()),
-            DagPoint::Invalid(invalid) => Err(match invalid.reason() {
-                InvalidReason::Dependency(root_cause, _) => {
-                    InvalidReason::Dependency(root_cause.clone(), Some(invalid.info().id()))
-                }
-                other => {
-                    let cause = InvalidRootCause::Invalid(invalid.info().id(), other.clone());
-                    InvalidReason::Dependency(Box::new(cause), None)
-                }
-            }),
-            DagPoint::IllFormed(ill) => {
-                let cause = InvalidRootCause::IllFormed(*ill.id(), ill.reason().clone());
-                Err(InvalidReason::Dependency(Box::new(cause), None))
-            }
-            DagPoint::NotFound(not_found) => {
-                let cause = InvalidRootCause::NotFound(*not_found.id());
-                Err(InvalidReason::Dependency(Box::new(cause), None))
+    async fn check_indirect_links(
+        info: &PointInfo, // @ r+0
+        direct_invalid_dep: InvalidDependency,
+        r_0: &WeakDagRound, // r+0
+        downloader: &Downloader,
+        store: &MempoolStore,
+        ctx: &ValidateCtx,
+    ) -> TaskResult<ValidateResult> {
+        let anchor_trigger_link = match info.anchor_trigger() {
+            AnchorLink::Indirect(link) => Some(link),
+            AnchorLink::ToSelf | AnchorLink::Direct(_) => None,
+        };
+        let anchor_proof_link = match info.anchor_proof() {
+            AnchorLink::Indirect(link) => Some(link),
+            AnchorLink::ToSelf | AnchorLink::Direct(_) => None,
+        };
+        let chained_proof_link = info.chained_anchor_proof();
+
+        let mut rev_sorted = [anchor_trigger_link, anchor_proof_link, chained_proof_link];
+        rev_sorted.sort_unstable_by_key(|id_opt| id_opt.map(|link| cmp::Reverse(link.to.round)));
+
+        let mut linked_deps = FuturesUnordered::new();
+        let mut last_scanned_round = r_0.upgrade();
+        for maybe_link in rev_sorted {
+            let Some(link) = maybe_link else {
+                continue;
+            };
+            let Some(dag_round) = last_scanned_round.as_ref() else {
+                break; // ok when too long ago
+            };
+            if dag_round.round() == link.to.round {
+                let (fut, _) = dag_round.add_dependency(
+                    &link.to.author,
+                    &link.to.digest,
+                    info.author(),
+                    downloader,
+                    store,
+                    ctx,
+                );
+                linked_deps.push(fut.map(|res| res.map(|opt| opt.map(|dp| (dp, &link.path)))));
+            } else {
+                last_scanned_round = dag_round.scan(link.to.round);
             }
         }
+        drop(last_scanned_round);
+
+        let prev_round = info.round().prev();
+        let max_allowed_dep_time =
+            info.time() + UnixTime::from_millis(ctx.conf().consensus.clock_skew_millis.get() as _);
+        let mut invalid_reason = None;
+        let mut latest_invalid_dep = Some(direct_invalid_dep);
+
+        while let Some(task_result) = linked_deps.next().await {
+            let Some((dag_point, through)) = task_result? else {
+                continue; // one old link doesn't mean others are unreachable
+            };
+            let dep_id = *dag_point.id();
+
+            let dep = match Self::dependency(
+                &mut latest_invalid_dep,
+                &dag_point,
+                Some(through),
+                prev_round,
+                ctx.conf(),
+            ) {
+                Ok(dep) => dep,
+                Err(reason) => {
+                    invalid_reason = Some(reason);
+                    continue; // invalidating deps (ill and not found) are not checked against
+                }
+            };
+
+            if dep.time() > max_allowed_dep_time {
+                // dependency time may exceed those in point only by a small value from config
+                invalid_reason = Some(InvalidReason::DependencyTimeTooFarInFuture(dep_id));
+            }
+
+            if let Some(anchor_proof_link) = anchor_proof_link
+                && dep_id == anchor_proof_link.to
+                && dep.anchor_time() != info.anchor_time()
+            {
+                // anchor candidate's time is not inherited from its proof
+                invalid_reason = Some(InvalidReason::AnchorTimeNotInheritedFromProof(dep_id));
+            }
+        }
+
+        Ok(if let Some(invalid) = invalid_reason {
+            ValidateResult::Invalid(invalid)
+        } else {
+            ValidateResult::TransInvalid(latest_invalid_dep.expect("must be init with prev result"))
+        })
+    }
+
+    /// an equivalent to [`DagPoint::trusted`] that also breaks a chain of trans invalid points
+    fn dependency<'a>(
+        inv_dep: &mut Option<InvalidDependency>,
+        dag_point: &'a DagPoint,
+        indirect_through: Option<&Through>,
+        prev_round: Round,
+        conf: &MempoolConfig,
+    ) -> Result<&'a PointInfo, InvalidReason> {
+        let (inv_info, root_cause_id, reason) = match dag_point {
+            DagPoint::Valid(valid) => return Ok(valid.info()),
+            DagPoint::Invalid(invalid) if invalid.is_certified() => return Ok(invalid.info()),
+            DagPoint::TransInvalid(invalid) if invalid.is_certified() => return Ok(invalid.info()),
+            DagPoint::Invalid(invalid) => (invalid.info(), invalid.info().id(), invalid.reason()),
+            DagPoint::TransInvalid(invalid) => {
+                // for example, with config value 20 and oldest invalid point at round 0,
+                // points at rounds 1..=20 will be transitionally invalidated
+                // and point at round 21 will become valid again
+                let root = invalid.root_cause();
+                let last_invalid = root.link.to.round + conf.consensus.commit_history_rounds.get();
+                if prev_round >= last_invalid {
+                    return Ok(invalid.info());
+                }
+                (invalid.info(), &root.link.to, &root.reason)
+            }
+            DagPoint::IllFormed(ill) => {
+                let tuple = (*ill.id(), ill.reason().clone());
+                return Err(InvalidReason::DepIllFormed(tuple));
+            }
+            DagPoint::NotFound(not_found) => {
+                return Err(InvalidReason::DepNotFound(*not_found.id()));
+            }
+        };
+
+        // newer round takes priority; at equal rounds `has_dag_round` takes priority;
+        // no order within (round, has_dag_round) group: let every cause a chance to be propagated
+        if (inv_dep.as_ref()).is_none_or(|old| {
+            old.link.to.round < root_cause_id.round
+                || (old.link.to.round == root_cause_id.round
+                    && !old.reason.has_dag_round()
+                    && reason.has_dag_round())
+        }) {
+            *inv_dep = Some(InvalidDependency {
+                reason: reason.clone(),
+                link: IndirectLink {
+                    to: *root_cause_id,
+                    path: indirect_through.cloned().unwrap_or_else(|| {
+                        if dag_point.round() == prev_round {
+                            Through::Includes(*dag_point.author())
+                        } else {
+                            Through::Witness(*dag_point.author())
+                        }
+                    }),
+                },
+            });
+        };
+
+        // an (in)direct invalid dependency has to be checked against, but not invalidating one
+        Ok(inv_info)
     }
 
     /// blame author and every dependent point's author
@@ -515,7 +709,7 @@ impl Verifier {
         info: &PointInfo, // @ r+0
         peer_schedule: &PeerSchedule,
         conf: &MempoolConfig,
-    ) -> Option<VerifyError> {
+    ) -> Result<(), VerifyError> {
         fn peer_count_genesis(len: usize, round: Round) -> Result<PeerCount, Round> {
             if len == PeerCount::GENESIS.full() {
                 Ok(PeerCount::GENESIS)
@@ -524,12 +718,16 @@ impl Verifier {
             }
         }
 
+        info.check_structure()
+            .map_err(IllFormedReason::Structure)
+            .map_err(VerifyError::IllFormed)?;
+
         let (
             same_round_peers, // @ r+0
             includes_peers,   // @ r-1
             witness_peers,    // @ r-2
         ) = match (info.round() - conf.genesis_round.prev().0).0 {
-            0 => return Some(VerifyError::IllFormed(IllFormedReason::BeforeGenesis)),
+            0 => return Err(VerifyError::IllFormed(IllFormedReason::BeforeGenesis)),
             1 => {
                 let a = peer_schedule.atomic().peers_for(info.round()).clone();
                 ((peer_count_genesis(a.len(), info.round()), a), None, None)
@@ -565,12 +763,12 @@ impl Verifier {
 
         // point belongs to current genesis
         if let Some(reason) = Self::links_across_genesis(info, conf) {
-            return Some(VerifyError::IllFormed(reason));
+            return Err(VerifyError::IllFormed(reason));
         }
 
         // check only now, as config seems up to date
         if let Some(reason) = Self::is_well_formed(info, conf) {
-            return Some(VerifyError::IllFormed(reason));
+            return Err(VerifyError::IllFormed(reason));
         }
 
         // Every point producer @ r-1 must prove its delivery to 2/3 signers @ r+0
@@ -579,18 +777,18 @@ impl Verifier {
             (Err(round), scheduled) => {
                 let len = scheduled.len();
                 let reason = VerifyFailReason::Uninit((len, round, PointMap::Evidence));
-                return Some(VerifyError::Fail(reason));
+                return Err(VerifyError::Fail(reason));
             }
             (Ok(total), scheduled) => {
                 if !scheduled.contains(info.author()) {
                     let reason = VerifyFailReason::UnknownAuthor;
-                    return Some(VerifyError::Fail(reason));
+                    return Err(VerifyError::Fail(reason));
                 }
                 let evidence = &info.evidence();
                 if !evidence.is_empty() {
                     if total == PeerCount::GENESIS {
                         let reason = IllFormedReason::MustBeEmpty(PointMap::Evidence);
-                        return Some(VerifyError::IllFormed(reason));
+                        return Err(VerifyError::IllFormed(reason));
                     }
                     let unknown = evidence
                         .keys()
@@ -599,12 +797,12 @@ impl Verifier {
                         .collect::<Vec<_>>();
                     if !unknown.is_empty() {
                         let reason = IllFormedReason::UnknownPeers((unknown, PointMap::Evidence));
-                        return Some(VerifyError::IllFormed(reason));
+                        return Err(VerifyError::IllFormed(reason));
                     }
                     let len = evidence.len();
                     if len < total.majority_of_others() {
                         let reason = IllFormedReason::LackOfPeers((len, total, PointMap::Evidence));
-                        return Some(VerifyError::IllFormed(reason));
+                        return Err(VerifyError::IllFormed(reason));
                     }
                 }
             }
@@ -614,12 +812,12 @@ impl Verifier {
             Some((Err(round), scheduled)) => {
                 let len = scheduled.len();
                 let reason = VerifyFailReason::Uninit((len, round, PointMap::Includes));
-                return Some(VerifyError::Fail(reason));
+                return Err(VerifyError::Fail(reason));
             }
             None => {
                 if !info.includes().is_empty() {
                     let reason = IllFormedReason::MustBeEmpty(PointMap::Includes);
-                    return Some(VerifyError::IllFormed(reason));
+                    return Err(VerifyError::IllFormed(reason));
                 }
             }
             Some((Ok(total), scheduled)) => {
@@ -631,12 +829,12 @@ impl Verifier {
                     .collect::<Vec<_>>();
                 if !unknown.is_empty() {
                     let reason = IllFormedReason::UnknownPeers((unknown, PointMap::Includes));
-                    return Some(VerifyError::IllFormed(reason));
+                    return Err(VerifyError::IllFormed(reason));
                 }
                 let len = includes.len();
                 if len < total.majority() {
                     let reason = IllFormedReason::LackOfPeers((len, total, PointMap::Includes));
-                    return Some(VerifyError::IllFormed(reason));
+                    return Err(VerifyError::IllFormed(reason));
                 }
             }
         }
@@ -645,12 +843,12 @@ impl Verifier {
             Some((Err(round), scheduled)) => {
                 let len = scheduled.len();
                 let reason = VerifyFailReason::Uninit((len, round, PointMap::Witness));
-                return Some(VerifyError::Fail(reason));
+                return Err(VerifyError::Fail(reason));
             }
             None => {
                 if !info.witness().is_empty() {
                     let reason = IllFormedReason::MustBeEmpty(PointMap::Witness);
-                    return Some(VerifyError::IllFormed(reason));
+                    return Err(VerifyError::IllFormed(reason));
                 }
             }
             Some((Ok(_), scheduled)) => {
@@ -662,13 +860,13 @@ impl Verifier {
                         .collect::<Vec<_>>();
                     if !unknown.is_empty() {
                         let reason = IllFormedReason::UnknownPeers((unknown, PointMap::Witness));
-                        return Some(VerifyError::IllFormed(reason));
+                        return Err(VerifyError::IllFormed(reason));
                     }
                 }
             }
         }
 
-        None
+        Ok(())
     }
 
     fn links_across_genesis(info: &PointInfo, conf: &MempoolConfig) -> Option<IllFormedReason> {
@@ -687,7 +885,10 @@ impl Verifier {
                 // no indirect links over genesis tombstone
                 Some(IllFormedReason::LinksSameRound)
             }
-            _ => None, // to validate dependencies
+            _ => info
+                .chained_anchor_proof()
+                .filter(|link| link.to.round < conf.genesis_round)
+                .map(|_| IllFormedReason::LinksAcrossGenesis),
         }
     }
 
@@ -700,11 +901,14 @@ impl Verifier {
                 return Some(IllFormedReason::TooLargePayload(info.payload_bytes()));
             }
             // evidence map is required to be empty during other peer sets checks
-            if info.anchor_proof() != &Link::ToSelf {
+            if info.anchor_proof() != &AnchorLink::ToSelf {
                 return Some(IllFormedReason::SelfAnchorStage(AnchorStageRole::Proof));
             }
-            if info.anchor_trigger() != &Link::ToSelf {
+            if info.anchor_trigger() != &AnchorLink::ToSelf {
                 return Some(IllFormedReason::SelfAnchorStage(AnchorStageRole::Trigger));
+            }
+            if info.chained_anchor_proof().is_some() {
+                return Some(IllFormedReason::ChainedProofMustUse(false));
             }
             if info.time() != info.anchor_time() {
                 return Some(IllFormedReason::AnchorTime);
@@ -716,12 +920,16 @@ impl Verifier {
             // leader must maintain its chain of proofs,
             // while others must link to previous points (checked at the end of this method)
             if info.evidence().is_empty() {
-                if info.anchor_proof() == &Link::ToSelf {
+                if info.anchor_proof() == &AnchorLink::ToSelf {
                     return Some(IllFormedReason::SelfAnchorStage(AnchorStageRole::Proof));
                 }
-                if info.anchor_trigger() == &Link::ToSelf {
+                if info.anchor_trigger() == &AnchorLink::ToSelf {
                     return Some(IllFormedReason::SelfAnchorStage(AnchorStageRole::Trigger));
                 }
+            }
+            let must_use_chained_proof = info.anchor_proof() == &AnchorLink::ToSelf;
+            if info.chained_anchor_proof().is_some() != must_use_chained_proof {
+                return Some(IllFormedReason::ChainedProofMustUse(must_use_chained_proof));
             }
             if info.time() <= info.anchor_time() {
                 // point time must be greater than anchor time
@@ -756,12 +964,12 @@ impl Verifier {
         );
         if info.time() <= proven.time() {
             // time must be increasing by the same author until it stops referencing previous points
-            return Some(InvalidReason::TimeNotGreaterThanInPrevPoint(proven.id()));
+            return Some(InvalidReason::TimeNotGreaterThanInPrevPoint(*proven.id()));
         }
-        if info.anchor_proof() == &Link::ToSelf && info.anchor_time() != proven.time() {
+        if info.anchor_proof() == &AnchorLink::ToSelf && info.anchor_time() != proven.time() {
             // anchor proof must inherit its candidate's time
             return Some(InvalidReason::AnchorProofDoesntInheritAnchorTime(
-                proven.id(),
+                *proven.id(),
             ));
         }
         None
@@ -795,6 +1003,7 @@ impl ValidateCtx {
             DagPoint::NotFound(_) => "not_found",
             DagPoint::IllFormed(_) => "ill_formed",
             DagPoint::Invalid(_) => "invalid",
+            DagPoint::TransInvalid(_) => "trans_invalid",
             DagPoint::Valid(_) => {
                 metrics::counter!("tycho_mempool_points_resolved_ok", ORD => ord).increment(1);
                 return;
@@ -821,6 +1030,15 @@ impl ValidateCtx {
                     is_certified = cert.is_certified(),
                     result = "invalid",
                     reason = display(reason),
+                    "validated",
+                );
+            }
+            ValidateResult::TransInvalid(reason) => {
+                tracing::warn!(
+                    parent: self.span(),
+                    is_certified = cert.is_certified(),
+                    result = "trans invalid",
+                    reason = debug(reason),
                     "validated",
                 );
             }

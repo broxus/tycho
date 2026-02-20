@@ -5,23 +5,24 @@ consensus.pointData
     includes:(vector consensus.peerDigestPair)
     witness:(vector consensus.peerDigestPair)
     evidence:(vector consensus.peerSignaturePair)
-    anchor_trigger:point.Link
-    anchor_proof:point.Link
+    chained_anchor_proof:consensus.chainedAnchorProof
+    anchor_trigger:consensus.anchorLink
+    anchor_proof:consensus.anchorLink
     time:int
     anchor_time:int
     = consensus.PointData;
 
 consensus.pointBody
-    author:int256
+    author:transport.PeerId
     round:int
     payload:(vector bytes)
-    pointData:consensus.pointData
+    data:consensus.pointData
     = consensus.PointBody;
 
 consensus.pointId
-    author:int256
     round:int
     digest:int256
+    author:transport.PeerId
     = consensus.PointId;
 
 consensus.point
@@ -31,12 +32,10 @@ consensus.point
     = consensus.PointInner;
 
 consensus.pointInfo
-    digest:int256
+    id:consensus.pointId
     signature:bytes
-    author:int256
-    round:int
-    payloadLen:int
-    payloadBytes:int
+    payload_len:int
+    payload_bytes:int
     data:consensus.pointData
     = consensus.PointInfo;
 
@@ -44,7 +43,7 @@ consensus.pointInfo
 * Representation of BTreeMap<PeerId, Digest>
 */
 consensus.peerDigestPair
-    peer:int256
+    peer:transport.PeerId
     digest:int256
     = consensus.PeerDigestPair;
 
@@ -52,22 +51,36 @@ consensus.peerDigestPair
 * Representation of BTreeMap<PeerId, Signature>
 */
 consensus.peerSignaturePair
-    peer:int256
+    peer:transport.PeerId
     signature:bytes
     = consensus.PeerSignaturePair;
 
 /**
-* Representation of Link enum
+* Representation of Anchor Link enum
 */
-point.link.to_self                                                  = point.Link;
-point.link.direct       x:link.through                              = point.Link;
-point.link.indirect     to:consensus.pointId path:link.through      = point.Link;
+consensus.anchorLink.to_self                                            = consensus.AnchorLink;
+consensus.anchorLink.direct       x:consensus.link.through              = consensus.AnchorLink;
+consensus.anchorLink.indirect     x:consensus.link.indirect             = consensus.AnchorLink;
+
+/**
+* Representation of Anchor Proof Chain
+*/
+consensus.chainedAnchorProof.inapplicable                               = consensus.ChainedAnchorProof;
+consensus.chainedAnchorProof.chained       x:consensus.link.indirect    = consensus.ChainedAnchorProof;
+
+/**
+* Representation of Indirect Link
+*/
+consensus.link.indirect
+    to:consensus.pointId
+    path:consensus.link.through
+    = consensus.link.Indirect;
 
 /**
 * Representation of Through enum
 */
-link.through.witness    x:int256 = link.Through;
-link.through.includes   x:int256 = link.Through;
+consensus.link.through.includes   x:transport.PeerId                    = consensus.link.Through;
+consensus.link.through.witness    x:transport.PeerId                    = consensus.link.Through;
 
 /*
 * Representation of DownloadResponse

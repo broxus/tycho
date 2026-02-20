@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
+use tycho_consensus::prelude::WAVE_ROUNDS;
 use tycho_network::PeerId;
 use tycho_types::models::ConsensusConfig;
 use tycho_util::time::{MonotonicClock, now_millis};
@@ -10,8 +11,6 @@ use crate::mempool::impls::common::cache::Cache;
 use crate::mempool::impls::common::parser::{Parser, ParserOutput};
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
 use crate::tracing_targets;
-
-pub const ANCHOR_ID_STEP: u32 = 4;
 
 pub struct SingleNodeAnchorHandler {
     cache: Arc<Cache>,
@@ -27,7 +26,7 @@ impl SingleNodeAnchorHandler {
         top_processed_to_anchor_id: MempoolAnchorId,
         config: &ConsensusConfig,
     ) -> Self {
-        let prev_anchor_id = top_processed_to_anchor_id.saturating_sub(ANCHOR_ID_STEP);
+        let prev_anchor_id = top_processed_to_anchor_id.saturating_sub(WAVE_ROUNDS);
         Self {
             cache,
             parser: Parser::new(config.deduplicate_rounds),
@@ -38,7 +37,7 @@ impl SingleNodeAnchorHandler {
 
     pub async fn handle(mut self, payloads: Vec<Bytes>) -> Self {
         let prev_anchor_id = self.prev_anchor_id.take();
-        let anchor_id = prev_anchor_id.unwrap_or(1) + ANCHOR_ID_STEP;
+        let anchor_id = prev_anchor_id.unwrap_or(1) + WAVE_ROUNDS;
         metrics::gauge!("tycho_mempool_last_anchor_round").set(anchor_id);
 
         let chain_time = MonotonicClock::now_millis();
