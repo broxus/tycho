@@ -188,6 +188,7 @@ impl DagPointFuture {
                     let status = PointStatusStored::IllFormed(PointStatusIllFormed {
                         is_first_resolved: false,
                         has_proof: false,
+                        is_reason_final: true,
                     });
                     Err((sig_err.to_string(), status))
                 }
@@ -246,7 +247,11 @@ impl DagPointFuture {
                 let _span = round_ctx.span().enter();
                 let id = point.info().id();
 
-                let mut status = PointStatusIllFormed::default();
+                let mut status = PointStatusIllFormed {
+                    is_first_resolved: false,
+                    has_proof: false,
+                    is_reason_final: reason.is_final(),
+                };
                 state.acquire(id, &mut status); // only after persisted
 
                 let dag_point = DagPoint::new_ill_formed(*id, cert, &status, reason);
@@ -403,7 +408,11 @@ impl DagPointFuture {
                     nested.await.await
                 }
                 DownloadResult::IllFormed(point, reason) => {
-                    let mut status = PointStatusIllFormed::default();
+                    let mut status = PointStatusIllFormed {
+                        is_first_resolved: false,
+                        has_proof: cert.has_proof(),
+                        is_reason_final: reason.is_final(),
+                    };
                     state.acquire(&point_id, &mut status);
                     let dag_point = DagPoint::new_ill_formed(point_id, cert, &status, reason);
                     let ctx = into_round_ctx.clone();
@@ -424,7 +433,7 @@ impl DagPointFuture {
                         author: point_id.author,
                     };
                     state.acquire(&point_id, &mut status);
-                    let dag_point = DagPoint::new_not_found(point_id.key(), cert, &status);
+                    let dag_point = DagPoint::new_not_found(point_id, cert, &status);
                     let ctx = into_round_ctx.clone();
 
                     let store_fn = move || {
@@ -479,39 +488,46 @@ impl DagPointFuture {
 
         // keep this section sync so that call site may not wait for each result to resolve
         let validate_or_restore = match point_restore {
-            PointRestore::Valid(info, status) => {
+            PointRestore::Valid(info, mut status) => {
+                state.acquire_restore(info.id(), &mut status);
                 let dag_point = DagPoint::new_valid(info, cert, &status);
-                state.acquire_restore(dag_point.id(), &status);
                 Either::Right(dag_point)
             }
-            PointRestore::TransInvalid(info, status) => {
+            PointRestore::TransInvalid(info, mut status) => {
                 let root_cause = InvalidDependency {
                     link: status.root_cause.clone(),
                     reason: InvalidReason::AfterLoadFromDb {
                         has_dag_round: status.has_dag_round,
                     },
                 };
+                state.acquire_restore(info.id(), &mut status);
                 let dag_point = DagPoint::new_trans_invalid(info, cert, &status, root_cause);
-                state.acquire_restore(dag_point.id(), &status);
                 Either::Right(dag_point)
             }
-            PointRestore::Invalid(info, status) => {
+            PointRestore::Invalid(info, mut status) => {
                 let reason = InvalidReason::AfterLoadFromDb {
                     has_dag_round: status.has_dag_round,
                 };
+                state.acquire_restore(info.id(), &mut status);
                 let dag_point = DagPoint::new_invalid(info, cert, &status, reason);
-                state.acquire_restore(dag_point.id(), &status);
                 Either::Right(dag_point)
             }
-            PointRestore::IllFormed(id, status) => {
-                let dag_point =
-                    DagPoint::new_ill_formed(id, cert, &status, IllFormedReason::AfterLoadFromDb);
-                state.acquire_restore(dag_point.id(), &status);
+            PointRestore::IllFormed(id, mut status) => {
+                let reason = IllFormedReason::AfterLoadFromDb {
+                    is_final: status.is_reason_final,
+                };
+                state.acquire_restore(&id, &mut status);
+                let dag_point = DagPoint::new_ill_formed(id, cert, &status, reason);
                 Either::Right(dag_point)
             }
-            PointRestore::NotFound(key, status) => {
-                let dag_point = DagPoint::new_not_found(key, cert, &status);
-                state.acquire_restore(dag_point.id(), &status);
+            PointRestore::NotFound(key, mut status) => {
+                let id = PointId {
+                    author: status.author,
+                    round: key.round,
+                    digest: key.digest,
+                };
+                state.acquire_restore(&id, &mut status);
+                let dag_point = DagPoint::new_not_found(id, cert, &status);
                 Either::Right(dag_point)
             }
             PointRestore::Found(info, _) => Either::Left(info),
@@ -608,8 +624,9 @@ impl DagPointFuture {
             }
             ValidateResult::IllFormed(reason) => {
                 let mut status = PointStatusIllFormed {
+                    is_first_resolved: false,
                     has_proof: cert.has_proof(),
-                    ..Default::default()
+                    is_reason_final: reason.is_final(),
                 };
                 state.acquire(id, &mut status);
                 (

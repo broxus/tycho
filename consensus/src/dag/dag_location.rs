@@ -136,33 +136,54 @@ impl InclusionState {
         );
     }
 
+    /// Requires `first_valid` status to be restored first, as they are kept across
+    /// [`FixHistoryFlag(true)`](crate::engine::lifecycle::FixHistoryFlag)
+    /// see [`crate::models::PointRestore::restore_order_asc`]
+    /// and [`crate::storage::MempoolStore::reset_statuses`].
     /// NOTE must be called sequentially: races are not permitted during restore
-    pub fn acquire_restore<T: PointStatus>(&self, id: &PointId, status: &T) {
-        if status.is_first_resolved() {
-            let resolved = self.0.resolved.get_or_init(|| {
-                if T::is_valid() {
-                    FirstResolved::Valid(id.digest, OnceLock::new())
-                } else {
-                    FirstResolved::NotValid(id.digest)
-                }
-            });
-            match resolved {
-                FirstResolved::Valid(first, _) | FirstResolved::NotValid(first)
-                    if id.digest == *first => {}
-                _ => panic!(
-                    "{:?} {status} was not restored as first_resolved: already acquired {:?}",
-                    id.alt(),
-                    resolved.alt(),
-                ),
+    pub fn acquire_restore<T: PointStatus>(&self, id: &PointId, status: &mut T) {
+        // `first_resolved` status is not stored in DB and relies solely on restore order
+        let resolved = self.0.resolved.get_or_init(|| {
+            status.set_first_resolved();
+            if T::is_valid() {
+                FirstResolved::Valid(id.digest, OnceLock::new())
+            } else {
+                FirstResolved::NotValid(id.digest)
             }
-        }
-        if status.is_first_valid() {
+        });
+
+        // Note Before restart `first_valid` may not have been `first_resolved` so dag location was
+        //   closed and such `first_valid` could not be signed but only included. But after restart
+        //   it may be signed - that doesn't break guarantees because it will be included anyway.
+        //   Such behaviour is needed for both
+        //   * FixHistory: if we keep `first_resolved` flag in DB, more than one point
+        //       may become first resolved, driven by `first_valid` flag
+        //   * Network restart after stall: when some nodes may be offline
+        //        to sign a fork is more desirable than to continue the stall
+        //   * * in such case node may sign broadcasts that it won't include - though it's
+        //       a misbehaviour in general, it has some threshold to not cause a ban of the node
+        let first_valid = if status.is_first_valid() {
             assert!(
                 T::is_valid(),
                 "{:?} {status} is not valid but has first_valid flag",
                 id.alt()
             );
-            let first = self.0.valid.0.get_or_init(|| id.digest);
+            assert!(
+                status.is_first_resolved(),
+                "{:?} {status} was not restored as first_resolved: already acquired {:?}",
+                id.alt(),
+                resolved.alt(),
+            );
+            Some(self.0.valid.0.get_or_init(|| id.digest))
+        } else if T::is_valid() && status.is_first_resolved() {
+            Some(self.0.valid.0.get_or_init(|| {
+                status.set_first_valid();
+                id.digest
+            }))
+        } else {
+            None
+        };
+        if let Some(first) = first_valid {
             assert_eq!(
                 id.digest,
                 *first,

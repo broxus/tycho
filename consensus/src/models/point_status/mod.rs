@@ -36,7 +36,7 @@ bitflags::bitflags! {
         // Found=true + Resolved=true => other statuses for existing points
         const Found = 0b_1 << 15;
         const Resolved = 0b_1 << 14;
-        const FirstResolved = 0b_1 << 13;
+
         const WellFormed = 0b_1 << 12;
         // Resolved=false + Committable=true => `Committable` status to merge anchor flags and round
         const Committable = 0b_1 << 11;
@@ -46,6 +46,7 @@ bitflags::bitflags! {
         // next byte is merged with `byte_or`
 
         const HasProof = 0b_1 << 5; // may be the only flag (for merge), even without stored point
+        const IllFormedReasonFinal = 0b_1 << 4;
         const InvalidHasDagRound = 0b_1 << 2;
     }
 }
@@ -65,6 +66,7 @@ bitflags::bitflags! {
 
 pub trait PointStatus: std::fmt::Display {
     fn set_first_resolved(&mut self);
+    /// Not stored in DB: used inflight to determine first valid
     fn is_first_resolved(&self) -> bool;
     fn is_valid() -> bool {
         false

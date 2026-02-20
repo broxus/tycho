@@ -413,7 +413,16 @@ impl MempoolStoreImpl for MempoolDb {
             let (k, v) = kv.context("status iter next")?;
             let flags =
                 PointStatusStored::read_flags(&v).with_context(|| PointKey::format_loose(&k))?;
-            if flags.contains(StatusFlags::Found) {
+            // preserve `NotFound` status: reset only for found, which are:
+            if flags.contains(StatusFlags::Found) && {
+                // .. either `IllFormed` -> `Valid` transitions based on updated `PeerSchedule`
+                (!flags.contains(StatusFlags::WellFormed)
+                    && !flags.contains(StatusFlags::IllFormedReasonFinal))
+                    // .. or `Invalid` -> `Valid` transitions based on history re-read
+                    // .. and also other well-formed points as a safety net for future changes
+                    || (flags.contains(StatusFlags::WellFormed)
+                        && !flags.contains(StatusFlags::FirstValid))
+            } {
                 let new_v = PointStatusFound {
                     has_proof: flags.contains(StatusFlags::HasProof),
                 };
