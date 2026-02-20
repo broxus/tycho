@@ -91,13 +91,9 @@ impl DagPoint {
         })))
     }
 
-    pub fn new_not_found(key: PointKey, cert: Cert, status: &PointStatusNotFound) -> Self {
+    pub fn new_not_found(id: PointId, cert: Cert, status: &PointStatusNotFound) -> Self {
         DagPoint::NotFound(NotFoundPoint(Arc::new(NotFoundPointInner {
-            id: PointId {
-                author: status.author,
-                round: key.round,
-                digest: key.digest,
-            },
+            id,
             is_first_resolved: status.is_first_resolved,
             cert,
         })))

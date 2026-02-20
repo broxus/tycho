@@ -48,7 +48,6 @@ impl PointStatusStore for PointStatusValid {
     fn status_flags(&self) -> StatusFlags {
         let mut flags = Self::DEFAULT_FLAGS;
 
-        flags.set(StatusFlags::FirstResolved, self.is_first_resolved);
         flags.set(StatusFlags::FirstValid, self.is_first_valid);
 
         flags.set(StatusFlags::HasProof, self.has_proof);
@@ -61,8 +60,9 @@ impl PointStatusStore for PointStatusValid {
         anyhow::ensure!(stored.len() == Self::BYTE_SIZE);
 
         Ok(Self {
+            is_first_resolved: false,
+
             is_first_valid: flags.contains(StatusFlags::FirstValid),
-            is_first_resolved: flags.contains(StatusFlags::FirstResolved),
 
             has_proof: flags.contains(StatusFlags::HasProof),
 
@@ -120,8 +120,8 @@ impl Display for PointStatusValid {
 impl super::PointStatusStoreRandom for PointStatusValid {
     fn random() -> Self {
         Self {
+            is_first_resolved: false,
             is_first_valid: rand::random(),
-            is_first_resolved: rand::random(),
             has_proof: rand::random(),
             anchor_flags: AnchorFlags::from_bits_truncate(rand::random()),
             committed: CommitHistoryPart::random_opt(),

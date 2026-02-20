@@ -42,8 +42,6 @@ impl PointStatusStore for PointStatusTransInvalid {
     fn status_flags(&self) -> StatusFlags {
         let mut flags = Self::DEFAULT_FLAGS;
 
-        flags.set(StatusFlags::FirstResolved, self.is_first_resolved);
-
         flags.set(StatusFlags::HasProof, self.has_proof);
         flags.set(StatusFlags::InvalidHasDagRound, self.has_dag_round);
 
@@ -56,7 +54,7 @@ impl PointStatusStore for PointStatusTransInvalid {
         anyhow::ensure!(stored.len() == Self::BYTE_SIZE);
 
         Ok(Self {
-            is_first_resolved: flags.contains(StatusFlags::FirstResolved),
+            is_first_resolved: false,
 
             has_proof: flags.contains(StatusFlags::HasProof),
             has_dag_round: flags.contains(StatusFlags::InvalidHasDagRound),
@@ -124,7 +122,7 @@ impl Display for PointStatusTransInvalid {
 impl super::PointStatusStoreRandom for PointStatusTransInvalid {
     fn random() -> Self {
         Self {
-            is_first_resolved: rand::random(),
+            is_first_resolved: false,
             has_proof: rand::random(),
             has_dag_round: rand::random(),
             anchor_flags: AnchorFlags::from_bits_truncate(rand::random()),
