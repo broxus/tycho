@@ -161,8 +161,9 @@ impl DagRound {
     pub fn add_local(
         &self,
         point: &Point,
-        key_pair: Option<&Arc<KeyPair>>,
-        store: &MempoolStore,
+        key_pair: Option<Arc<KeyPair>>,
+        downloader: Downloader,
+        store: MempoolStore,
         round_ctx: &RoundCtx,
     ) -> DagPointFuture {
         assert_eq!(
@@ -178,7 +179,7 @@ impl DagRound {
                 .or_insert_with(|| {
                     let role = self.leader_role(point.info().author());
                     DagPointFuture::new_local_valid(
-                        self, point, role, &loc.state, store, key_pair, round_ctx,
+                        self, point, role, key_pair, &loc.state, downloader, store, round_ctx,
                     )
                 })
                 .clone()

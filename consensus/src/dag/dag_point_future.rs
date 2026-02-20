@@ -1,6 +1,6 @@
 use std::pin::Pin;
 use std::sync::{Arc, LazyLock};
-use std::task::{Context, Poll};
+use std::task::Poll;
 
 use futures_util::future::{BoxFuture, Either};
 use futures_util::{FutureExt, future};
@@ -36,7 +36,7 @@ impl future::Future for DagPointFuture {
     type Output = TaskResult<DagPoint>;
 
     #[inline]
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
         match &mut self.0 {
             DagPointFutureType::Validate { task, .. }
             | DagPointFutureType::Download { task, .. } => match task.poll_unpin(cx) {
@@ -75,57 +75,147 @@ enum DagPointFutureType {
 impl DagPointFuture {
     /// locally created points are assumed to be valid, checked prior insertion if needed;
     /// for points of others - there are all other methods
+    #[allow(clippy::too_many_arguments)] // TODO arch: make args less granular
     pub fn new_local_valid(
         point_dag_round: &DagRound,
         point: &Point,
         role: Option<AnchorStageRole>,
+        key_pair: Option<Arc<KeyPair>>,
         state: &InclusionState,
-        store: &MempoolStore,
-        key_pair: Option<&Arc<KeyPair>>,
+        downloader: Downloader,
+        store: MempoolStore,
         round_ctx: &RoundCtx,
     ) -> Self {
         let point_dag_round = point_dag_round.downgrade();
+        let info = point.info().clone();
         let point = point.clone();
         let state = state.clone();
-        let store = store.clone();
-        let key_pair = key_pair.cloned();
-        let task_ctx = round_ctx.task();
-        let round_ctx = round_ctx.clone();
+        let validate_ctx = ValidateCtx::new(round_ctx, &info);
         let cert = Cert::default();
         let cert_clone = cert.clone();
 
-        let task = task_ctx.spawn(async move {
-            let ctx = round_ctx.clone();
-            let full_fn = move || {
-                let _span = round_ctx.span().enter();
+        let task = round_ctx.task().spawn(async move {
+            let peer_schedule = downloader.peer_schedule();
+            if let Err(error) = Verifier::verify(&info, peer_schedule, validate_ctx.conf()) {
+                let _span = validate_ctx.span().enter();
+                panic!("Failed to verify own point: {error}, {info:?}")
+            }
 
+            // out of hot path: assume `Broadcaster` is good in rejection of bad signatures
+            // and `Producer` puts signatures for the right `prev_digest` into the point
+            let check_evidence_fn = {
+                let info = info.clone();
+                move || info.check_evidence()
+            };
+            let check_evidence_task = validate_ctx.task().spawn_blocking(check_evidence_fn);
+
+            let abort_guard = scopeguard::guard((store.clone(), info.clone()), |(store, info)| {
+                let task =
+                    move || store.rollback_local_point_status(info.id(), None, info.prev_digest());
+                _ = validate_ctx.task().spawn_blocking(task);
+            });
+
+            // write as a happy path, rollback after validation if not ok
+            let store_fn = {
+                let store = store.clone();
                 let mut status = Self::new_valid_status(role, &cert);
-                state.acquire(point.info().id(), &mut status); // only after persisted
+                status.is_first_valid = true;
+                status.is_first_resolved = true;
+                move || store.insert_point(&point, &PointStatusStored::Valid(status))
+            };
+            let store_task = validate_ctx.task().spawn_blocking(store_fn);
 
-                assert!(
-                    status.is_first_valid,
-                    "local point must be first valid, got {status}"
-                );
+            // all dependencies are resolved so expect the validation to finish earlier than store
+            let validated = Verifier::validate(
+                info.clone(),
+                point_dag_round,
+                downloader,
+                store.clone(),
+                cert.clone(),
+                validate_ctx.clone(),
+            )
+            .await?;
 
-                if let Some(point_dag_round) = point_dag_round.upgrade() {
-                    cert.set_deps(Self::gather_cert_deps(&point_dag_round, point.info()));
+            let validate_local_point = || {
+                use anyhow::bail;
+                match &validated {
+                    ValidateResult::Valid => {}
+                    ValidateResult::TransInvalid(reason) => bail!("trans Invalid: {reason:?}"),
+                    ValidateResult::Invalid(reason) => bail!("Invalid: {reason}"),
+                    ValidateResult::IllFormed(reason) => bail!("Ill-formed: {reason}"),
+                }
+                let (dag_point, status) =
+                    Self::acquire_validated(&state, info.clone(), role, cert, validated);
+
+                match &status {
+                    PointStatusStored::Valid(status) if status.is_first_valid => {}
+                    _ => bail!("must be first valid, got {status}"),
                 }
 
-                let dag_point = DagPoint::new_valid(point.info().clone(), cert, &status);
-
-                store.insert_point(&point, &PointStatusStored::Valid(status));
+                // nobody knows our point yet, so we can resolve state before store is joined;
+                // this publication relies deliberately on no internal and external observers
                 state.resolve(&dag_point);
 
+                // requires to be both first resolved and first valid
                 let signed =
-                    state.sign(point.info().round(), key_pair.as_deref(), round_ctx.conf());
-                assert!(
-                    signed.as_ref().is_some_and(|sig| sig.is_ok()),
-                    "Coding or configuration error: local point cannot be signed; got {:?}",
-                    signed.as_ref().map(|r| r.as_ref().map(|s| s.alt()))
-                );
-                dag_point
+                    state.sign(dag_point.round(), key_pair.as_deref(), validate_ctx.conf());
+                if !signed.as_ref().is_some_and(|sig| sig.is_ok()) {
+                    bail!(
+                        "cannot be signed (coding or config error); got {:?}",
+                        signed.as_ref().map(|r| r.as_ref().map(|s| s.alt()))
+                    );
+                }
+                Ok(dag_point)
             };
-            LIMIT.spawn_blocking(ctx.task(), full_fn).await.await
+
+            let local_point_validated = validate_ctx.span().in_scope(validate_local_point);
+
+            let (sig_check, ()) = futures_util::try_join!(check_evidence_task, store_task)?;
+
+            let local_point_validated = match sig_check {
+                Ok(()) => match local_point_validated {
+                    Ok(dag_point) => Ok(dag_point),
+                    Err(err) => {
+                        let status = PointStatusStored::Invalid(PointStatusInvalid {
+                            is_first_resolved: false,
+                            has_proof: false,
+                            has_dag_round: true,
+                        });
+                        Err((err.to_string(), status))
+                    }
+                },
+                Err(sig_err) => {
+                    let status = PointStatusStored::IllFormed(PointStatusIllFormed {
+                        is_first_resolved: false,
+                        has_proof: false,
+                    });
+                    Err((sig_err.to_string(), status))
+                }
+            };
+
+            let dag_point = match local_point_validated {
+                Ok(dag_point) => dag_point,
+                Err((err, status)) => {
+                    let fut = validate_ctx.task().spawn_blocking({
+                        let info = info.clone();
+                        move || {
+                            store.rollback_local_point_status(
+                                info.id(),
+                                Some(&status),
+                                info.prev_digest(),
+                            );
+                        }
+                    });
+                    scopeguard::ScopeGuard::into_inner(abort_guard);
+                    fut.await?;
+                    let _span = validate_ctx.span().enter();
+                    panic!("local point {err}; {info:?}");
+                }
+            };
+
+            scopeguard::ScopeGuard::into_inner(abort_guard);
+
+            Ok(dag_point)
         });
 
         Self(DagPointFutureType::Validate {
@@ -213,8 +303,8 @@ impl DagPointFuture {
 
             store_task.await?;
 
-            let (dag_point, status) =
-                Self::acquire_validated(&state, info, role, cert, validated, &validate_ctx);
+            let (dag_point, status) = (validate_ctx.span())
+                .in_scope(|| Self::acquire_validated(&state, info, role, cert, validated));
 
             let store_fn = move || {
                 store.set_status(&dag_point.key(), &status, dag_point.prev_digest());
@@ -300,8 +390,8 @@ impl DagPointFuture {
 
                     let ctx = into_round_ctx.clone();
 
-                    let (dag_point, status) =
-                        Self::acquire_validated(&state, info, role, cert, validated, &ctx);
+                    let (dag_point, status) = (ctx.span())
+                        .in_scope(|| Self::acquire_validated(&state, info, role, cert, validated));
 
                     let store_fn = move || {
                         let _guard = ctx.span().enter();
@@ -447,10 +537,10 @@ impl DagPointFuture {
                         cert.clone(),
                         validate_ctx,
                     )
-                    .await;
-                    let (dag_point, status) = Self::acquire_validated(
-                        &state, verified, role, cert, validated?, &round_ctx,
-                    );
+                    .await?;
+                    let (dag_point, status) = round_ctx.span().in_scope(|| {
+                        Self::acquire_validated(&state, verified, role, cert, validated)
+                    });
                     let ctx = round_ctx.clone();
 
                     let store_fn = move || {
@@ -485,9 +575,7 @@ impl DagPointFuture {
         role: Option<AnchorStageRole>,
         cert: Cert,
         validated: ValidateResult,
-        ctx: &impl Ctx,
     ) -> (DagPoint, PointStatusStored) {
-        let _guard = ctx.span().enter();
         let id = info.id();
         match validated {
             ValidateResult::Valid => {
@@ -638,7 +726,7 @@ impl future::Future for WeakDagPointFuture {
     type Output = TaskResult<Option<DagPoint>>;
 
     #[inline]
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
         let polled = match &mut self.0 {
             WeakDagPointFutureInner::Task(task) => task.poll_unpin(cx),
             WeakDagPointFutureInner::Lazy(lazy) => lazy.poll_unpin(cx),

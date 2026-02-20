@@ -12,7 +12,7 @@ use weedb::rocksdb::{DBRawIterator, IteratorMode, ReadOptions, WriteBatch};
 
 use crate::effects::AltFormat;
 use crate::models::point_status::*;
-use crate::models::{Digest, Point, PointInfo, PointKey, PointRestore, Round};
+use crate::models::{Digest, Point, PointId, PointInfo, PointKey, PointRestore, Round};
 use crate::storage::MempoolDb;
 
 #[derive(Clone)]
@@ -41,6 +41,14 @@ trait MempoolStoreImpl: Send + Sync {
     fn last_round(&self) -> Result<Option<Round>>;
 
     fn reset_statuses(&self, range: &RangeInclusive<Round>) -> Result<()>;
+
+    /// Pass empty status to delete the point
+    fn rollback_local_point_status(
+        &self,
+        key: &PointKey,
+        status: Option<&PointStatusStored>,
+        prev_digest: Option<&Digest>,
+    ) -> Result<()>;
 
     fn load_restore(&self, range: &RangeInclusive<Round>) -> Result<Vec<PointRestore>>;
 
@@ -119,6 +127,18 @@ impl MempoolStore {
             .reset_statuses(range)
             .with_context(|| format!("range [{}..={}]", range.start().0, range.end().0))
             .expect("DB reset statuses");
+    }
+
+    pub fn rollback_local_point_status(
+        &self,
+        id: &PointId,
+        status: Option<&PointStatusStored>,
+        prev_digest: Option<&Digest>,
+    ) {
+        self.0
+            .rollback_local_point_status(&id.key(), status, prev_digest)
+            .with_context(|| format!("{:?}", id.alt()))
+            .expect("DB reset status");
     }
 
     pub fn load_restore(&self, range: &RangeInclusive<Round>) -> Vec<PointRestore> {
@@ -411,6 +431,60 @@ impl MempoolStoreImpl for MempoolDb {
         self.wait_for_compact()
     }
 
+    // Note: used only during local point production to rollback in case happy path failed
+    fn rollback_local_point_status(
+        &self,
+        key: &PointKey,
+        status: Option<&PointStatusStored>,
+        prev_digest: Option<&Digest>,
+    ) -> Result<()> {
+        let status_cf = self.db.points_status.cf();
+        let mut key_buf = [0; _];
+        key.fill(&mut key_buf);
+
+        // very rare call so may allocate
+
+        let mut batch = WriteBatch::default();
+        batch.delete_cf(&status_cf, &key_buf[..]);
+
+        let mut status_buf = Vec::new();
+
+        if let Some(status) = status {
+            status.write_to(&mut status_buf);
+            batch.merge_cf(&status_cf, &key_buf[..], &status_buf[..]);
+        } else {
+            let point_cf = self.db.points.cf();
+            let info_cf = self.db.points_info.cf();
+
+            batch.delete_cf(&point_cf, &key_buf[..]);
+            batch.delete_cf(&info_cf, &key_buf[..]);
+        }
+
+        if status.is_none_or(|status| !status.can_certify())
+            && let Some(digest) = prev_digest
+        {
+            let key = PointKey::new(key.round.prev(), *digest);
+            key.fill(&mut key_buf);
+
+            if let Some(prev_bytes) =
+                (self.db.points_status.get(key_buf)).context("prev point status")?
+            {
+                let mut prev_bytes = prev_bytes.to_vec();
+                let mut prev_flags =
+                    PointStatusStored::read_flags(&prev_bytes).context("prev point")?;
+                prev_flags.set(StatusFlags::HasProof, false);
+                prev_bytes[..2].copy_from_slice(&prev_flags.bits().to_be_bytes());
+
+                batch.delete_cf(&status_cf, &key_buf[..]);
+                batch.merge_cf(&status_cf, &key_buf[..], &prev_bytes[..]);
+            }
+        }
+
+        self.db.rocksdb().write(batch)?;
+
+        Ok(())
+    }
+
     fn load_restore(&self, range: &RangeInclusive<Round>) -> Result<Vec<PointRestore>> {
         fn opts(range: &RangeInclusive<Round>) -> ReadOptions {
             let mut opts = ReadOptions::default();
@@ -549,7 +623,16 @@ impl MempoolStoreImpl for () {
     }
 
     fn reset_statuses(&self, _: &RangeInclusive<Round>) -> Result<()> {
-        anyhow::bail!("should not be used in tests")
+        Ok(())
+    }
+
+    fn rollback_local_point_status(
+        &self,
+        _: &PointKey,
+        _: Option<&PointStatusStored>,
+        _: Option<&Digest>,
+    ) -> Result<()> {
+        Ok(())
     }
 
     fn load_restore(&self, _: &RangeInclusive<Round>) -> Result<Vec<PointRestore>> {

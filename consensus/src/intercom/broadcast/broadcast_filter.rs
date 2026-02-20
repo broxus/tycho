@@ -12,7 +12,7 @@ use crate::dyn_event;
 use crate::effects::{AltFormat, Ctx, RoundCtx};
 use crate::engine::{ConsensusConfigExt, NodeConfig};
 use crate::intercom::{Downloader, PeerSchedule};
-use crate::models::{Digest, PeerCount, Point, PointId, Round, StructureIssue};
+use crate::models::{Digest, EvidenceSigError, PeerCount, Point, PointId, Round};
 use crate::storage::MempoolStore;
 
 #[derive(Default)]
@@ -122,7 +122,7 @@ impl BroadcastFilter {
     pub fn add_check_threshold(
         &self,
         point: &Point,
-        maybe_issue: Option<StructureIssue>,
+        maybe_issue: Option<EvidenceSigError>,
         store: &MempoolStore,
         peer_schedule: &PeerSchedule,
         downloader: &Downloader,
@@ -136,7 +136,7 @@ impl BroadcastFilter {
         let prune_after = head.next().round() + NodeConfig::get().cache_future_broadcasts_rounds;
 
         let checked = if let Some(issue) = maybe_issue {
-            let reason = IllFormedReason::Structure(issue);
+            let reason = IllFormedReason::EvidenceSigError(issue);
             Ok(if id.round > prune_after {
                 ByAuthorItem::IllFormedPruned(id.digest, reason)
             } else {
