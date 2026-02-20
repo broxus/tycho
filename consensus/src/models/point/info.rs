@@ -6,8 +6,8 @@ use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
 use crate::models::{
-    AnchorLink, AnchorStageRole, ChainedAnchorProof, Digest, IndirectLink, PointData, PointId,
-    PointKey, Round, Signature, StructureIssue, UnixTime,
+    AnchorLink, AnchorStageRole, ChainedAnchorProof, Digest, EvidenceSigError, IndirectLink,
+    PointData, PointId, PointKey, Round, Signature, StructureIssue, UnixTime,
 };
 
 #[derive(Clone, TlRead, TlWrite)]
@@ -61,6 +61,10 @@ impl PointInfo {
 
     pub fn id(&self) -> &PointId {
         &self.0.id
+    }
+
+    pub fn key(&self) -> PointKey {
+        PointKey::new(self.round(), *self.digest())
     }
 
     pub fn digest(&self) -> &Digest {
@@ -122,16 +126,6 @@ impl PointInfo {
         (self.0.data).includes.get(self.author())
     }
 
-    pub(super) fn check_structure(&self) -> Result<(), StructureIssue> {
-        (self.0.data).check_maps(self.author(), self.round())?;
-        self.prev_digest()
-            .is_none_or(|prev_proof| {
-                (self.evidence().iter()).all(|(peer, sig)| sig.verifies(peer, prev_proof))
-            })
-            .then_some(())
-            .ok_or(StructureIssue::EvidenceSig)
-    }
-
     pub fn prev_id(&self) -> Option<PointId> {
         Some(PointId {
             author: *self.author(),
@@ -140,8 +134,15 @@ impl PointInfo {
         })
     }
 
-    pub fn key(&self) -> PointKey {
-        PointKey::new(self.round(), *self.digest())
+    pub fn check_evidence(&self) -> Result<(), EvidenceSigError> {
+        let is_ok = self.prev_digest().is_none_or(|prev_proof| {
+            (self.evidence().iter()).all(|(peer, sig)| sig.verifies(peer, prev_proof))
+        });
+        if is_ok { Ok(()) } else { Err(EvidenceSigError) }
+    }
+
+    pub fn check_structure(&self) -> Result<(), StructureIssue> {
+        (self.0.data).check_maps(self.author(), self.round())
     }
 
     pub fn anchor_link(&self, link_field: AnchorStageRole) -> &AnchorLink {

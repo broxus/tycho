@@ -13,8 +13,9 @@ use crate::effects::{AltFormat, Ctx, TaskResult, ValidateCtx};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{
-    AnchorLink, AnchorStageRole, Cert, CertDirectDeps, DagPoint, Digest, IndirectLink, PeerCount,
-    PointId, PointInfo, PointMap, Round, StructureIssue, Through, UnixTime,
+    AnchorLink, AnchorStageRole, Cert, CertDirectDeps, DagPoint, Digest, EvidenceSigError,
+    IndirectLink, PeerCount, PointId, PointInfo, PointMap, Round, StructureIssue, Through,
+    UnixTime,
 };
 use crate::storage::MempoolStore;
 // Note on equivocation.
@@ -58,6 +59,8 @@ pub enum VerifyFailReason {
 pub enum IllFormedReason {
     #[error("ill-formed after load from DB")]
     AfterLoadFromDb,
+    #[error("{0}")]
+    EvidenceSigError(EvidenceSigError),
     #[error("structure issue: {0}")]
     Structure(StructureIssue),
     #[error("point before genesis cannot exist in this overlay")]
@@ -156,7 +159,7 @@ impl Verifier {
         peer_schedule: &PeerSchedule,
         conf: &MempoolConfig,
     ) -> Result<(), VerifyError> {
-        let result = Self::verify_impl(info, peer_schedule, conf).map_or(Ok(()), Err);
+        let result = Self::verify_impl(info, peer_schedule, conf);
 
         ValidateCtx::verified(&result);
         result
@@ -695,7 +698,7 @@ impl Verifier {
         info: &PointInfo, // @ r+0
         peer_schedule: &PeerSchedule,
         conf: &MempoolConfig,
-    ) -> Option<VerifyError> {
+    ) -> Result<(), VerifyError> {
         fn peer_count_genesis(len: usize, round: Round) -> Result<PeerCount, Round> {
             if len == PeerCount::GENESIS.full() {
                 Ok(PeerCount::GENESIS)
@@ -704,12 +707,16 @@ impl Verifier {
             }
         }
 
+        info.check_structure()
+            .map_err(IllFormedReason::Structure)
+            .map_err(VerifyError::IllFormed)?;
+
         let (
             same_round_peers, // @ r+0
             includes_peers,   // @ r-1
             witness_peers,    // @ r-2
         ) = match (info.round() - conf.genesis_round.prev().0).0 {
-            0 => return Some(VerifyError::IllFormed(IllFormedReason::BeforeGenesis)),
+            0 => return Err(VerifyError::IllFormed(IllFormedReason::BeforeGenesis)),
             1 => {
                 let a = peer_schedule.atomic().peers_for(info.round()).clone();
                 ((peer_count_genesis(a.len(), info.round()), a), None, None)
@@ -745,12 +752,12 @@ impl Verifier {
 
         // point belongs to current genesis
         if let Some(reason) = Self::links_across_genesis(info, conf) {
-            return Some(VerifyError::IllFormed(reason));
+            return Err(VerifyError::IllFormed(reason));
         }
 
         // check only now, as config seems up to date
         if let Some(reason) = Self::is_well_formed(info, conf) {
-            return Some(VerifyError::IllFormed(reason));
+            return Err(VerifyError::IllFormed(reason));
         }
 
         // Every point producer @ r-1 must prove its delivery to 2/3 signers @ r+0
@@ -759,18 +766,18 @@ impl Verifier {
             (Err(round), scheduled) => {
                 let len = scheduled.len();
                 let reason = VerifyFailReason::Uninit((len, round, PointMap::Evidence));
-                return Some(VerifyError::Fail(reason));
+                return Err(VerifyError::Fail(reason));
             }
             (Ok(total), scheduled) => {
                 if !scheduled.contains(info.author()) {
                     let reason = VerifyFailReason::UnknownAuthor;
-                    return Some(VerifyError::Fail(reason));
+                    return Err(VerifyError::Fail(reason));
                 }
                 let evidence = &info.evidence();
                 if !evidence.is_empty() {
                     if total == PeerCount::GENESIS {
                         let reason = IllFormedReason::MustBeEmpty(PointMap::Evidence);
-                        return Some(VerifyError::IllFormed(reason));
+                        return Err(VerifyError::IllFormed(reason));
                     }
                     let unknown = evidence
                         .keys()
@@ -779,12 +786,12 @@ impl Verifier {
                         .collect::<Vec<_>>();
                     if !unknown.is_empty() {
                         let reason = IllFormedReason::UnknownPeers((unknown, PointMap::Evidence));
-                        return Some(VerifyError::IllFormed(reason));
+                        return Err(VerifyError::IllFormed(reason));
                     }
                     let len = evidence.len();
                     if len < total.majority_of_others() {
                         let reason = IllFormedReason::LackOfPeers((len, total, PointMap::Evidence));
-                        return Some(VerifyError::IllFormed(reason));
+                        return Err(VerifyError::IllFormed(reason));
                     }
                 }
             }
@@ -794,12 +801,12 @@ impl Verifier {
             Some((Err(round), scheduled)) => {
                 let len = scheduled.len();
                 let reason = VerifyFailReason::Uninit((len, round, PointMap::Includes));
-                return Some(VerifyError::Fail(reason));
+                return Err(VerifyError::Fail(reason));
             }
             None => {
                 if !info.includes().is_empty() {
                     let reason = IllFormedReason::MustBeEmpty(PointMap::Includes);
-                    return Some(VerifyError::IllFormed(reason));
+                    return Err(VerifyError::IllFormed(reason));
                 }
             }
             Some((Ok(total), scheduled)) => {
@@ -811,12 +818,12 @@ impl Verifier {
                     .collect::<Vec<_>>();
                 if !unknown.is_empty() {
                     let reason = IllFormedReason::UnknownPeers((unknown, PointMap::Includes));
-                    return Some(VerifyError::IllFormed(reason));
+                    return Err(VerifyError::IllFormed(reason));
                 }
                 let len = includes.len();
                 if len < total.majority() {
                     let reason = IllFormedReason::LackOfPeers((len, total, PointMap::Includes));
-                    return Some(VerifyError::IllFormed(reason));
+                    return Err(VerifyError::IllFormed(reason));
                 }
             }
         }
@@ -825,12 +832,12 @@ impl Verifier {
             Some((Err(round), scheduled)) => {
                 let len = scheduled.len();
                 let reason = VerifyFailReason::Uninit((len, round, PointMap::Witness));
-                return Some(VerifyError::Fail(reason));
+                return Err(VerifyError::Fail(reason));
             }
             None => {
                 if !info.witness().is_empty() {
                     let reason = IllFormedReason::MustBeEmpty(PointMap::Witness);
-                    return Some(VerifyError::IllFormed(reason));
+                    return Err(VerifyError::IllFormed(reason));
                 }
             }
             Some((Ok(_), scheduled)) => {
@@ -842,13 +849,13 @@ impl Verifier {
                         .collect::<Vec<_>>();
                     if !unknown.is_empty() {
                         let reason = IllFormedReason::UnknownPeers((unknown, PointMap::Witness));
-                        return Some(VerifyError::IllFormed(reason));
+                        return Err(VerifyError::IllFormed(reason));
                     }
                 }
             }
         }
 
-        None
+        Ok(())
     }
 
     fn links_across_genesis(info: &PointInfo, conf: &MempoolConfig) -> Option<IllFormedReason> {

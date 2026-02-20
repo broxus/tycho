@@ -5,10 +5,8 @@ use std::time::Instant;
 use futures_util::{FutureExt, future};
 use tokio::sync::{oneshot, watch};
 
-use crate::dag::{
-    DagHead, LastOwnPoint, ProduceError, Producer, ValidateResult, Verifier, WeakDagRound,
-};
-use crate::effects::{AltFormat, CollectCtx, Ctx, RoundCtx, Task, TaskResult, ValidateCtx};
+use crate::dag::{DagHead, LastOwnPoint, ProduceError, Producer};
+use crate::effects::{AltFormat, CollectCtx, Ctx, RoundCtx, Task, TaskResult};
 use crate::engine::input_buffer::InputBuffer;
 use crate::engine::lifecycle::{EngineBinding, EngineNetwork};
 use crate::engine::round_watch::{Consensus, RoundWatch, TopKnownAnchor};
@@ -16,7 +14,7 @@ use crate::intercom::{
     Broadcaster, BroadcasterSignal, Collector, CollectorStatus, Dispatcher, Downloader,
     PeerSchedule, Responder,
 };
-use crate::models::{AnchorLink, Cert, Point, PointInfo};
+use crate::models::{AnchorLink, Point, PointInfo};
 use crate::storage::MempoolStore;
 
 pub struct RoundTaskState {
@@ -102,6 +100,7 @@ impl RoundTaskReady {
         last_own_point: Option<Arc<LastOwnPoint>>,
         input_buffer: InputBuffer,
         store: MempoolStore,
+        downloader: Downloader,
         head: DagHead,
         mut collector_status_rx: watch::Receiver<CollectorStatus>,
         round_ctx: RoundCtx,
@@ -167,9 +166,9 @@ impl RoundTaskReady {
         //   an assert inside `.insert_exact_sign()` to catch broader range of mistakes;
         //   this is safe as any node never changes its keys until restart, after which
         //   the node does not recognise points signed with old keypair as locally created
-        let wa_keys = head.keys().to_produce.as_ref();
+        let wa_keys = head.keys().to_produce.clone();
         (head.current())
-            .add_local(&own_point, wa_keys, &store, &round_ctx)
+            .add_local(&own_point, wa_keys, downloader, store, &round_ctx)
             .await?;
         metrics::histogram!("tycho_mempool_engine_produce_time").record(task_start_time.elapsed());
         Ok(Ok(own_point))
@@ -201,6 +200,7 @@ impl RoundTaskReady {
                     self.last_own_point.clone(),
                     self.state.input_buffer.clone(),
                     self.state.store.clone(),
+                    self.state.downloader.clone(),
                     head.clone(),
                     collector_status_tx.subscribe(),
                     round_ctx.clone(),
@@ -208,27 +208,16 @@ impl RoundTaskReady {
                 .boxed(),
             };
 
-            let own_point_round = head.current().downgrade();
             let collector_status_rx = collector_status_tx.subscribe();
             let round_ctx = round_ctx.clone();
             let peer_schedule = self.state.peer_schedule.clone();
             let prev_bcast = self.prev_broadcast;
             let dispatcher = self.state.dispatcher.clone();
-            let downloader = self.state.downloader.clone();
-            let store = self.state.store.clone();
 
             async move {
                 let own_point_result = produce_point_fut.await?;
                 round_ctx.own_point(own_point_result.as_ref().map(|p| p.info()));
                 if let Ok(own_point) = own_point_result {
-                    let self_check = Self::expect_own_valid_point(
-                        own_point_round,
-                        own_point.clone(),
-                        peer_schedule.clone(),
-                        downloader,
-                        store,
-                        &round_ctx,
-                    );
                     let mut broadcaster =
                         Broadcaster::new(dispatcher, own_point, peer_schedule, &round_ctx);
                     let new_last_own_point = broadcaster
@@ -239,8 +228,6 @@ impl RoundTaskReady {
                     let round_ctx = round_ctx.clone();
                     let new_prev_bcast =
                         task_ctx.spawn(async move { broadcaster.run_continue(&round_ctx).await });
-                    // join the check, just not to miss it; it must have completed already
-                    self_check.await?;
                     Ok(Some((new_prev_bcast, new_last_own_point)))
                 } else {
                     bcaster_ready_tx.send(BroadcasterSignal::Ok).ok();
@@ -278,48 +265,6 @@ impl RoundTaskReady {
             broadcaster_run,
             collector_run,
         }
-    }
-
-    fn expect_own_valid_point(
-        point_round: WeakDagRound,
-        point: Point,
-        peer_schedule: PeerSchedule,
-        downloader: Downloader,
-        store: MempoolStore,
-        round_ctx: &RoundCtx,
-    ) -> Task<()> {
-        let task_ctx = round_ctx.task();
-        let round_ctx = round_ctx.clone();
-        task_ctx.spawn(async move {
-            if let Err(error) = Verifier::verify(point.info(), &peer_schedule, round_ctx.conf()) {
-                let _guard = round_ctx.span().enter();
-                panic!("Failed to verify own point: {error}, {point:?}")
-            }
-            let validate_ctx = ValidateCtx::new(&round_ctx, point.info());
-            let validate = Verifier::validate(
-                point.info().clone(),
-                point_round,
-                downloader,
-                store,
-                Cert::default(), // off-line check that does not affect DAG
-                validate_ctx,
-            );
-            match validate.await? {
-                ValidateResult::Valid => Ok(()),
-                ValidateResult::TransInvalid(reason) => {
-                    let _guard = round_ctx.span().enter();
-                    panic!("trans Invalid own point: {reason:?} {point:?}")
-                }
-                ValidateResult::Invalid(reason) => {
-                    let _guard = round_ctx.span().enter();
-                    panic!("Invalid own point: {reason} {point:?}")
-                }
-                ValidateResult::IllFormed(reason) => {
-                    let _guard = round_ctx.span().enter();
-                    panic!("Ill-formed own point: {reason} {point:?}")
-                }
-            }
-        })
     }
 }
 

@@ -26,7 +26,9 @@ use crate::intercom::dependency::limiter::Limiter;
 use crate::intercom::dependency::peer_queue::PeerQueue;
 use crate::intercom::peer_schedule::PeerState;
 use crate::intercom::{Dispatcher, PeerSchedule};
-use crate::models::{ParseResult, PeerCount, Point, PointId, PointIntegrityError, StructureIssue};
+use crate::models::{
+    EvidenceSigError, ParseResult, PeerCount, Point, PointId, PointIntegrityError,
+};
 
 #[derive(Clone)]
 pub struct Downloader {
@@ -56,6 +58,7 @@ impl Downloader {
         }
     }
 
+    // TODO arch: make DagPointFuture less granular
     pub fn peer_schedule(&self) -> &PeerSchedule {
         &self.inner.peer_schedule
     }
@@ -272,7 +275,7 @@ impl DownloadTask {
         // remove peer status: will not repeat request to the peer in this download task
         enum LastResponse {
             Point(Point),
-            IllFormed(Point, StructureIssue),
+            IllFormed(Point, EvidenceSigError),
             BadPoint(PointIntegrityError),
             DefinedNone,
             TlError(tl_proto::TlError),
@@ -362,7 +365,7 @@ impl DownloadTask {
                     point = debug(&point),
                     "downloaded ill-formed"
                 );
-                let reason = IllFormedReason::Structure(issue);
+                let reason = IllFormedReason::EvidenceSigError(issue);
                 Some(DownloadResult::IllFormed(point, reason))
             }
             LastResponse::Point(point) if point.info().id() != self.query.point_id() => {
