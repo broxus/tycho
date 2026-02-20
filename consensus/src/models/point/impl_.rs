@@ -27,6 +27,10 @@ pub enum PointIntegrityError {
 }
 
 #[derive(Debug, Copy, Clone, thiserror::Error)]
+#[error("Evidence map contains bad signature")]
+pub struct EvidenceSigError;
+
+#[derive(Debug, Copy, Clone, thiserror::Error)]
 pub enum StructureIssue {
     #[error("{0:?} map must not contain author")]
     AuthorInMap(PointMap),
@@ -34,8 +38,6 @@ pub enum StructureIssue {
     Link(AnchorStageRole, PointMap),
     #[error("bad chained proof through {0:?} map")]
     ChainedProof(PointMap),
-    #[error("Evidence map contains bad signature")]
-    EvidenceSig,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -65,7 +67,7 @@ impl Debug for Point {
 }
 
 pub type ParseResult =
-    Result<Result<Result<Point, (Point, StructureIssue)>, PointIntegrityError>, TlError>;
+    Result<Result<Result<Point, (Point, EvidenceSigError)>, PointIntegrityError>, TlError>;
 
 impl Point {
     pub fn max_byte_size(consensus_config: &ConsensusConfig) -> usize {
@@ -183,9 +185,9 @@ impl Point {
 
         let point = Self::from_bytes(serialized)?;
 
-        Ok(Ok(match point.info().check_structure() {
+        Ok(Ok(match point.info().check_evidence() {
             Ok(()) => Ok(point),
-            Err(issue) => Err((point, issue)),
+            Err(err) => Err((point, err)),
         }))
     }
 

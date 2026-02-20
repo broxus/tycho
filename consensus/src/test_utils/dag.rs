@@ -143,7 +143,13 @@ pub async fn populate_points<const PEER_COUNT: usize>(
 
     for point in points.values() {
         dag_round
-            .add_local(point, Some(local_keys), store, round_ctx)
+            .add_local(
+                point,
+                Some(local_keys.clone()),
+                downloader.clone(),
+                store.clone(),
+                round_ctx,
+            )
             .await
             .expect("cancelled");
     }

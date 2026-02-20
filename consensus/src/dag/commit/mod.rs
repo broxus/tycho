@@ -356,7 +356,13 @@ mod test {
 
         let genesis_round = DagRound::new_bottom(conf.genesis_round, &peer_schedule, conf);
         genesis_round
-            .add_local(&genesis, Some(local_keys), &stub_store, &round_ctx)
+            .add_local(
+                &genesis,
+                Some(local_keys.clone()),
+                stub_downloader.clone(),
+                stub_store.clone(),
+                &round_ctx,
+            )
             .await
             .expect("cannot be closed");
 
