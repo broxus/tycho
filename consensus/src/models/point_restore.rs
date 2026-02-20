@@ -21,22 +21,23 @@ pub enum PointRestore {
 }
 
 impl PointRestore {
-    /// required partial order: resolved + valid, resolved, valid, no flags, no status
+    /// required partial order: first valid, valid, resolved (any invalid or ill-formed), found;
+    /// those with `has_proof` mark gain priority in their group
     pub fn restore_order_asc(&self) -> u8 {
         /// greater value for greater priority
         fn order_desc<T: PointStatus>(status: &T) -> u8 {
             let mut priority = 2;
-            priority |= (status.is_first_resolved() as u8) << 7;
-            priority |= (status.is_first_valid() as u8) << 6;
-            priority |= (T::is_valid() as u8) << 5;
+            priority |= (status.is_first_valid() as u8) << 7;
+            priority |= (T::is_valid() as u8) << 6;
             priority
         }
+        const IS_RESOLVED: u8 = 0b_1 << 5;
         let desc = match self {
-            PointRestore::Valid(_, status) => order_desc(status),
-            PointRestore::TransInvalid(_, status) => order_desc(status),
-            PointRestore::Invalid(_, status) => order_desc(status),
-            PointRestore::IllFormed(_, status) => order_desc(status),
-            PointRestore::NotFound(_, status) => order_desc(status),
+            PointRestore::Valid(_, status) => IS_RESOLVED + order_desc(status),
+            PointRestore::TransInvalid(_, status) => IS_RESOLVED + order_desc(status),
+            PointRestore::Invalid(_, status) => IS_RESOLVED + order_desc(status),
+            PointRestore::IllFormed(_, status) => IS_RESOLVED + order_desc(status),
+            PointRestore::NotFound(_, status) => IS_RESOLVED + order_desc(status),
             PointRestore::Found(_, _) => 0,
         } + self.has_proof() as u8;
         !desc // invert priority for ascending order

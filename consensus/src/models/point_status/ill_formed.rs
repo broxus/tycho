@@ -3,12 +3,12 @@ use std::fmt::{Display, Formatter};
 use super::{PointStatus, PointStatusStore, StatusFlags};
 
 /// Must not implement neither Copy nor Clone to prevent coding errors.
-#[derive(Default)]
 #[cfg_attr(any(test, feature = "test"), derive(PartialEq))]
 pub struct PointStatusIllFormed {
     pub is_first_resolved: bool,
 
     pub has_proof: bool,
+    pub is_reason_final: bool,
 }
 
 impl PointStatus for PointStatusIllFormed {
@@ -26,9 +26,8 @@ impl PointStatusStore for PointStatusIllFormed {
     fn status_flags(&self) -> StatusFlags {
         let mut flags = Self::DEFAULT_FLAGS;
 
-        flags.set(StatusFlags::FirstResolved, self.is_first_resolved);
-
         flags.set(StatusFlags::HasProof, self.has_proof);
+        flags.set(StatusFlags::IllFormedReasonFinal, self.is_reason_final);
 
         flags
     }
@@ -43,8 +42,9 @@ impl PointStatusStore for PointStatusIllFormed {
         anyhow::ensure!(stored.len() == Self::BYTE_SIZE);
 
         Ok(Self {
-            is_first_resolved: flags.contains(StatusFlags::FirstResolved),
+            is_first_resolved: false,
             has_proof: flags.contains(StatusFlags::HasProof),
+            is_reason_final: flags.contains(StatusFlags::IllFormedReasonFinal),
         })
     }
 }
@@ -58,6 +58,9 @@ impl Display for PointStatusIllFormed {
         if self.has_proof {
             tuple.field(&"has proof");
         }
+        if self.is_reason_final {
+            tuple.field(&"reason is final");
+        }
         tuple.finish()
     }
 }
@@ -66,8 +69,9 @@ impl Display for PointStatusIllFormed {
 impl super::PointStatusStoreRandom for PointStatusIllFormed {
     fn random() -> Self {
         Self {
-            is_first_resolved: rand::random(),
+            is_first_resolved: false,
             has_proof: rand::random(),
+            is_reason_final: rand::random(),
         }
     }
 }

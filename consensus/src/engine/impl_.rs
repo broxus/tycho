@@ -21,7 +21,7 @@ use crate::engine::lifecycle::{EngineBinding, EngineError, EngineNetwork, FixHis
 use crate::engine::round_task::RoundTaskReady;
 use crate::engine::round_watch::{RoundWatch, RoundWatcher, TopKnownAnchor};
 use crate::engine::{ConsensusConfigExt, MempoolMergedConfig};
-use crate::models::point_status::PointStatusStored;
+use crate::models::point_status::{PointStatusIllFormed, PointStatusStored};
 use crate::models::{DagPoint, MempoolOutput, Point, PointRestore, Round};
 use crate::storage::{DbCleaner, MempoolStore};
 
@@ -302,10 +302,16 @@ impl Engine {
                 let verified = need_verify
                     .into_par_iter()
                     .map(|(info, status)| {
+                        let mut ill_status = PointStatusIllFormed {
+                            is_first_resolved: false,
+                            has_proof: status.has_proof,
+                            is_reason_final: false,
+                        };
                         match Verifier::verify(&info, &peer_schedule, round_ctx.conf()) {
                             Ok(()) => PointRestore::Found(info, status),
-                            Err(VerifyError::IllFormed(_)) => {
-                                PointRestore::IllFormed(*info.id(), Default::default())
+                            Err(VerifyError::IllFormed(reason)) => {
+                                ill_status.is_reason_final = reason.is_final();
+                                PointRestore::IllFormed(*info.id(), ill_status)
                             }
                             Err(VerifyError::Fail(error)) => {
                                 tracing::debug!(
@@ -313,7 +319,7 @@ impl Engine {
                                     %error,
                                     "preload points verify failed"
                                 );
-                                PointRestore::IllFormed(*info.id(), Default::default())
+                                PointRestore::IllFormed(*info.id(), ill_status)
                             }
                         }
                     })
@@ -484,8 +490,9 @@ fn collator_feedback(
     let top_known_anchor = top_known_anchor_recv.get();
     // For example in `max_consensus_lag_rounds` comments this results to `217` of `8..=217`
     let pause_at = top_known_anchor + round_ctx.conf().consensus.max_consensus_lag_rounds.get();
-    // Note pause bound is inclusive with `>=` because new vset may be unknown for next dag top
-    //  (the next after next engine round), while vset switch round is exactly pause bound + 1
+    // Note pause bound is inclusive (`>=`): engine must not advance beyond `TKA + lag`.
+    // Collator may schedule vset changes from a newer processed-to anchor than this node's current
+    // `top_known_anchor`, so the switch round may be > current `pause_at + 1` until TKA catches up.
     if old_dag_top_round >= pause_at {
         if !*is_paused {
             tracing::info!(

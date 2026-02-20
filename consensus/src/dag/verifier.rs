@@ -57,8 +57,9 @@ pub enum VerifyFailReason {
 
 #[derive(thiserror::Error, Debug, Clone)]
 pub enum IllFormedReason {
-    #[error("ill-formed after load from DB")]
-    AfterLoadFromDb,
+    /// Flag is preserved across restarts, because only non-final are subjects to `FixHistory`
+    #[error("ill-formed after load from DB, is_final={}", .is_final)]
+    AfterLoadFromDb { is_final: bool },
     #[error("{0}")]
     EvidenceSigError(EvidenceSigError),
     #[error("structure issue: {0}")]
@@ -123,6 +124,16 @@ pub enum InvalidReason {
     DepIllFormed((PointId, IllFormedReason)),
     #[error("dependency not found {:?}", .0.alt())]
     DepNotFound(PointId),
+}
+
+impl IllFormedReason {
+    pub fn is_final(&self) -> bool {
+        match self {
+            IllFormedReason::AfterLoadFromDb { is_final } => *is_final,
+            IllFormedReason::EvidenceSigError(_) => true,
+            _ => false,
+        }
+    }
 }
 
 impl InvalidReason {
