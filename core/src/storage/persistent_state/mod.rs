@@ -14,7 +14,6 @@ use tokio::sync::{Notify, Semaphore, mpsc};
 use tokio::time::Instant;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::queue::QueueStateHeader;
-use tycho_block_util::state::RefMcStateHandle;
 use tycho_storage::fs::Dir;
 use tycho_types::models::{BlockId, PrevBlockRef};
 use tycho_util::fs::MappedFile;
@@ -129,7 +128,8 @@ impl PersistentStateStorage {
     #[tracing::instrument(skip_all)]
     pub async fn preload(&self) -> Result<()> {
         self.preload_handles_queue()?;
-        self.preload_states().await
+        self.preload_states().await?;
+        Ok(())
     }
 
     fn preload_handles_queue(&self) -> Result<()> {
@@ -354,12 +354,7 @@ impl PersistentStateStorage {
     }
 
     #[tracing::instrument(skip_all, fields(mc_seqno, block_id = %handle.id()))]
-    pub async fn store_shard_state(
-        &self,
-        mc_seqno: u32,
-        handle: &BlockHandle,
-        tracker_handle: RefMcStateHandle,
-    ) -> Result<()> {
+    pub async fn store_shard_state(&self, mc_seqno: u32, handle: &BlockHandle) -> Result<()> {
         if self
             .try_reuse_persistent_state(mc_seqno, handle, PersistentStateKind::Shard)
             .await?
@@ -372,7 +367,7 @@ impl PersistentStateStorage {
             cancelled.cancel();
         }
 
-        let handle = handle.clone();
+        let handle_clone = handle.clone();
         let this = self.inner.clone();
         let cancelled = cancelled.clone();
         let span = tracing::Span::current();
@@ -384,17 +379,15 @@ impl PersistentStateStorage {
                 tracing::warn!("cancelled");
             });
 
-            // NOTE: Ensure that the tracker handle will outlive the state writer.
-            let _tracker_handle = tracker_handle;
-
-            let root_hash = this.shard_states.load_state_root_hash(handle.id())?;
+            let root_hash = this.shard_states.load_state_root_hash(handle_clone.id())?;
 
             let states_dir = this.prepare_persistent_states_dir(mc_seqno)?;
 
-            let cell_writer = ShardStateWriter::new(&this.cells_db, &states_dir, handle.id());
+            let cell_writer = ShardStateWriter::new(&this.cells_db, &states_dir, handle_clone.id());
             match cell_writer.write(&root_hash, Some(&cancelled)) {
                 Ok(_) => {
-                    this.block_handles.set_has_persistent_shard_state(&handle);
+                    this.block_handles
+                        .set_has_persistent_shard_state(&handle_clone);
                     tracing::info!("persistent shard state saved");
                 }
                 Err(e) => {
@@ -403,7 +396,8 @@ impl PersistentStateStorage {
                 }
             }
 
-            let state = this.cache_state(mc_seqno, handle.id(), PersistentStateKind::Shard)?;
+            let state =
+                this.cache_state(mc_seqno, handle_clone.id(), PersistentStateKind::Shard)?;
 
             scopeguard::ScopeGuard::into_inner(guard);
             Ok::<_, anyhow::Error>(state)
@@ -486,7 +480,6 @@ impl PersistentStateStorage {
         let mut top_block = block;
 
         let mut tail_len = top_block.block().out_msg_queue_updates.tail_len as usize;
-
         while tail_len > 0 {
             let queue_diff = this.blocks.load_queue_diff(&top_block_handle).await?;
             let top_block_info = top_block.load_info()?;
@@ -528,6 +521,7 @@ impl PersistentStateStorage {
         }
 
         let handle = handle.clone();
+
         let cancelled = cancelled.clone();
         let span = tracing::Span::current();
 
@@ -557,7 +551,6 @@ impl PersistentStateStorage {
             Ok::<_, anyhow::Error>(state)
         })
         .await??;
-
         self.notify_with_persistent_state(&state).await;
         Ok(())
     }
