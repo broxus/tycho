@@ -598,6 +598,9 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
                     )));
                 };
 
+                let mut cumulative_stats_guard =
+                    self.remaning_msgs_stats.as_ref().map(|s| s.statistics_mut());
+
                 'read_range: loop {
                     // stop reading if buffer is full
                     // or we can already fill required slots
@@ -678,8 +681,8 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
                                 );
 
                                 // and remaining cumulative stats by partition
-                                if let Some(remaning_msgs_stats) = &self.remaning_msgs_stats {
-                                    remaning_msgs_stats.decrement_for_account(
+                                if let Some(guard) = &mut cumulative_stats_guard {
+                                    guard.decrement_for_account(
                                         int_msg.item.message.destination().clone(),
                                         1,
                                     );
@@ -1086,8 +1089,9 @@ fn create_existing_range_reader<V: InternalMessageValue>(
                 "reduce cumulative remaning_msgs_stats by read_stats from range reader",
             );
 
+            let mut guard = remaining_msgs_stats.statistics_mut();
             for (account_addr, count) in range_reader_state.get_read_stats_mut()?.statistics() {
-                remaining_msgs_stats.decrement_for_account(account_addr.clone(), count);
+                guard.decrement_for_account(account_addr.clone(), count);
             }
         }
     }

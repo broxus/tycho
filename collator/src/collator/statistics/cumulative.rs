@@ -373,15 +373,16 @@ impl CumulativeStatistics {
                             }
                         });
 
+                        let mut remaning_guard = (for_shard != dst_shard)
+                            .then(|| cumulative_stats.remaning_stats.statistics_mut());
+
                         for (dest_addr, count) in diff_stats.iter() {
                             if dst_shard.contains_address(dest_addr) {
                                 cumulative_stats
                                     .initial_stats
                                     .decrement_for_account(dest_addr.clone(), *count);
-                                if for_shard != dst_shard {
-                                    cumulative_stats
-                                        .remaning_stats
-                                        .decrement_for_account(dest_addr.clone(), *count);
+                                if let Some(guard) = &mut remaning_guard {
+                                    guard.decrement_for_account(dest_addr.clone(), *count);
                                 }
                             }
                         }

@@ -146,7 +146,7 @@ impl ExecutorWrapper {
                 layout: None,
             })?;
 
-            ParsedMessage::from_new(
+            ParsedMessage::from_special(
                 info,
                 cell,
                 special_origin,

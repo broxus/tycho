@@ -1144,7 +1144,7 @@ impl ParsedMessage {
     }
 
     /// Creates a new message with special origin.
-    pub fn from_new(
+    pub fn from_special(
         info: MsgInfo,
         cell: Cell,
         special_origin: SpecialOrigin,

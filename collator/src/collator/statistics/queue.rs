@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use parking_lot::{Mutex, MutexGuard};
+use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tycho_types::models::{IntAddr, ShardIdent};
 use tycho_util::transactional::Transactional;
 
@@ -8,7 +8,7 @@ use crate::internal_queue::types::stats::{AccountStatistics, QueueStatistics, St
 
 #[derive(Debug, Clone)]
 pub struct TrackedQueueStatistics {
-    inner: Arc<Mutex<TrackedQueueStatisticsInner>>,
+    inner: Arc<RwLock<TrackedQueueStatisticsInner>>,
     track_shard: ShardIdent,
 }
 
@@ -22,18 +22,18 @@ struct TrackedQueueStatisticsInner {
 impl TrackedQueueStatistics {
     pub fn new(track_shard: ShardIdent) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(TrackedQueueStatisticsInner::default())),
+            inner: Arc::new(RwLock::new(TrackedQueueStatisticsInner::default())),
             track_shard,
         }
     }
 
     pub fn tracked_total(&self) -> u64 {
-        self.inner.lock().tracked_total
+        self.inner.read().tracked_total
     }
 
     pub fn contains(&self, account_addr: &IntAddr) -> bool {
         self.inner
-            .lock()
+            .read()
             .statistics
             .statistics()
             .contains_key(account_addr)
@@ -41,22 +41,19 @@ impl TrackedQueueStatistics {
 
     pub fn statistics(&self) -> TrackedQueueStatisticsView<'_> {
         TrackedQueueStatisticsView {
-            guard: self.inner.lock(),
+            guard: self.inner.read(),
         }
     }
 
-    pub fn decrement_for_account(&self, account_addr: IntAddr, count: u64) {
-        let is_tracked = self.track_shard.contains_address(&account_addr);
-        let mut guard = self.inner.lock();
-
-        guard.statistics.decrement_for_account(account_addr, count);
-        if is_tracked {
-            guard.tracked_total -= count;
+    pub fn statistics_mut(&self) -> TrackedQueueStatisticsWriteGuard<'_> {
+        TrackedQueueStatisticsWriteGuard {
+            guard: self.inner.write(),
+            track_shard: &self.track_shard,
         }
     }
 
     pub fn append(&self, other: &AccountStatistics) {
-        let mut guard = self.inner.lock();
+        let mut guard = self.inner.write();
 
         for (account_addr, &msgs_count) in other {
             if self.track_shard.contains_address(account_addr) {
@@ -69,28 +66,28 @@ impl TrackedQueueStatistics {
 
 impl Transactional for TrackedQueueStatistics {
     fn begin(&mut self) {
-        let mut guard = self.inner.lock();
+        let mut guard = self.inner.write();
         guard.statistics.begin();
         guard.tracked_total_snapshot = guard.tracked_total;
     }
 
     fn commit(&mut self) {
-        self.inner.lock().statistics.commit();
+        self.inner.write().statistics.commit();
     }
 
     fn rollback(&mut self) {
-        let mut guard = self.inner.lock();
+        let mut guard = self.inner.write();
         guard.statistics.rollback();
         guard.tracked_total = guard.tracked_total_snapshot;
     }
 
     fn in_tx(&self) -> bool {
-        self.inner.lock().statistics.in_tx()
+        self.inner.read().statistics.in_tx()
     }
 }
 
 pub struct TrackedQueueStatisticsView<'a> {
-    guard: MutexGuard<'a, TrackedQueueStatisticsInner>,
+    guard: RwLockReadGuard<'a, TrackedQueueStatisticsInner>,
 }
 
 impl<'a> TrackedQueueStatisticsView<'a> {
@@ -99,15 +96,32 @@ impl<'a> TrackedQueueStatisticsView<'a> {
     }
 }
 
+pub struct TrackedQueueStatisticsWriteGuard<'a> {
+    guard: RwLockWriteGuard<'a, TrackedQueueStatisticsInner>,
+    track_shard: &'a ShardIdent,
+}
+
+impl TrackedQueueStatisticsWriteGuard<'_> {
+    pub fn decrement_for_account(&mut self, account_addr: IntAddr, count: u64) {
+        let is_tracked = self.track_shard.contains_address(&account_addr);
+        self.guard
+            .statistics
+            .decrement_for_account(account_addr, count);
+        if is_tracked {
+            self.guard.tracked_total -= count;
+        }
+    }
+}
+
 #[cfg(test)]
 impl TrackedQueueStatistics {
     pub fn get(&self, account_addr: &IntAddr) -> Option<u64> {
-        self.inner.lock().statistics.statistics().get(account_addr)
+        self.inner.read().statistics.statistics().get(account_addr)
     }
 
     pub fn increment_for_account(&self, account_addr: IntAddr, count: u64) {
         let is_tracked = self.track_shard.contains_address(&account_addr);
-        let mut guard = self.inner.lock();
+        let mut guard = self.inner.write();
 
         guard.statistics.increment_for_account(account_addr, count);
         if is_tracked {
@@ -118,6 +132,14 @@ impl TrackedQueueStatistics {
 
 #[cfg(test)]
 mod tests {
+
+    impl TrackedQueueStatistics {
+        pub fn decrement_for_account(&self, account_addr: IntAddr, count: u64) {
+            self.statistics_mut()
+                .decrement_for_account(account_addr, count);
+        }
+
+    }
     use tycho_util::FastHashMap;
 
     use super::*;

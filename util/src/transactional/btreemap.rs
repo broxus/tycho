@@ -1,6 +1,8 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+use std::hash::Hash;
 
 use crate::transactional::Transactional;
+use crate::{FastHashMap, FastHashSet};
 
 pub struct TransactionalBTreeMap<K, V> {
     inner: BTreeMap<K, V>,
@@ -8,11 +10,11 @@ pub struct TransactionalBTreeMap<K, V> {
 }
 
 struct MapTx<K, V> {
-    added: BTreeSet<K>,
-    removed: BTreeMap<K, V>,
+    added: FastHashSet<K>,
+    removed: FastHashMap<K, V>,
 }
 
-impl<K: Ord + Clone, V: Transactional> TransactionalBTreeMap<K, V> {
+impl<K: Ord + Hash + Eq + Clone, V: Transactional> TransactionalBTreeMap<K, V> {
     pub fn new() -> Self {
         Self {
             inner: BTreeMap::new(),
@@ -136,15 +138,15 @@ impl<K: Ord, V> From<BTreeMap<K, V>> for TransactionalBTreeMap<K, V> {
     }
 }
 
-impl<K: Ord + Clone, V: Transactional> Transactional for TransactionalBTreeMap<K, V> {
+impl<K: Ord + Hash + Eq + Clone, V: Transactional> Transactional for TransactionalBTreeMap<K, V> {
     fn begin(&mut self) {
         debug_assert!(self.tx.is_none());
         for v in self.inner.values_mut() {
             v.begin();
         }
         self.tx = Some(MapTx {
-            added: BTreeSet::new(),
-            removed: BTreeMap::new(),
+            added: FastHashSet::default(),
+            removed: FastHashMap::default(),
         });
     }
 
