@@ -1,12 +1,14 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use ahash::HashMapExt;
 use anyhow::Result;
 use bytes::{Buf, Bytes};
 use rand::RngCore;
 use tl_proto::TlRead;
 use tokio::sync::{Notify, broadcast};
-use tycho_util::realloc_box_enum;
 use tycho_util::time::now_sec;
+use tycho_util::{FastHashMap, realloc_box_enum};
 
 pub use self::config::DhtConfig;
 pub use self::peer_resolver::{
@@ -344,6 +346,9 @@ impl DhtServiceBuilder {
             announced_peers,
             find_value_queries: Default::default(),
             peer_added: Arc::new(Default::default()),
+
+            local_info_pre_announced: AtomicBool::new(false),
+            local_info_announced_notify: Arc::new(Default::default()),
         });
 
         let background_tasks = DhtServiceBackgroundTasks {
@@ -413,6 +418,10 @@ impl DhtService {
 
     pub fn peer_added(&self) -> &Arc<Notify> {
         &self.0.peer_added
+    }
+
+    pub async fn wait_for_pre_announce(&self) {
+        self.0.wait_for_local_info_announced().await;
     }
 }
 
@@ -541,9 +550,21 @@ struct DhtInner {
     announced_peers: broadcast::Sender<Arc<PeerInfo>>,
     find_value_queries: QueryCache<Option<Box<Value>>>,
     peer_added: Arc<Notify>,
+
+    local_info_pre_announced: AtomicBool,
+    local_info_announced_notify: Arc<Notify>,
 }
 
 impl DhtInner {
+    async fn wait_for_local_info_announced(&self) {
+        let notified = self.local_info_announced_notify.notified();
+        if self.local_info_pre_announced.load(Ordering::Acquire) {
+            return;
+        }
+
+        notified.await;
+    }
+
     async fn find_value(
         &self,
         network: &Network,
@@ -574,27 +595,56 @@ impl DhtInner {
     ) -> Result<()> {
         self.storage.insert(DhtValueSource::Local, value)?;
 
-        let local_peer_info = if with_peer_info {
-            let mut node_info = self.local_peer_info.lock().unwrap();
+        let local_info = if with_peer_info {
+            let mut info = self.local_peer_info.lock().unwrap();
             Some(
-                node_info
-                    .get_or_insert_with(|| self.make_local_peer_info(network, now_sec()))
+                info.get_or_insert_with(|| self.make_local_peer_info(network, now_sec()))
                     .clone(),
             )
         } else {
             None
         };
 
-        let query = StoreValue::new(
-            network.clone(),
-            &self.routing_table.lock().unwrap(),
-            value,
-            self.config.max_k,
-            local_peer_info.as_ref(),
-        );
+        let key_hash = match value {
+            ValueRef::Peer(value) => tl_proto::hash(&value.key),
+            ValueRef::Merged(value) => tl_proto::hash(&value.key),
+        };
 
-        // NOTE: expression is intentionally split to drop the routing table guard
-        query.run().await;
+        let local_peers = {
+            let table = self.routing_table.lock().unwrap();
+            table.closest(&key_hash, self.config.max_k * 2)
+        };
+
+        let query = {
+            let table = self.routing_table.lock().unwrap();
+            Query::new(
+                network.clone(),
+                &table,
+                &key_hash,
+                self.config.max_k,
+                DhtQueryMode::Closest,
+            )
+        };
+        let lookup_peers = query.find_peers(Some(3)).await;
+
+        let mut candidates = FastHashMap::new();
+        for peer in local_peers {
+            candidates.insert(peer.id, peer);
+        }
+        for (_, peer) in lookup_peers {
+            // Ensure the peer is known so store requests can connect.
+            let _ = network.known_peers().insert(peer.clone(), false);
+            candidates.insert(peer.id, peer);
+        }
+
+        let mut chosen = candidates.into_values().collect::<Vec<_>>();
+        chosen.sort_by_key(|peer| xor_distance(&peer.id, PeerId::wrap(&key_hash)));
+        chosen.truncate(self.config.max_k);
+
+        StoreValue::new_with_peers(network.clone(), chosen, value, local_info.as_ref())
+            .run()
+            .await;
+
         Ok(())
     }
 

@@ -285,9 +285,15 @@ impl PeerResolverInner {
 
         // "Fast" path
         let mut attempts = 0usize;
+        let mut pre_announce_complete = false;
         loop {
             attempts += 1;
             let is_stale = attempts > self.config.fast_retry_count as usize;
+
+            if !pre_announce_complete {
+                self.dht_service.wait_for_pre_announce().await;
+                pre_announce_complete = true;
+            }
 
             // NOTE: Acquire network ref only during the operation.
             {

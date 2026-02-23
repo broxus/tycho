@@ -1,5 +1,6 @@
 use std::collections::hash_map;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use anyhow::Result;
 use futures_util::StreamExt;
@@ -150,7 +151,13 @@ impl DhtInner {
         value.signature = &signature;
 
         self.store_value(network, &ValueRef::Peer(value), true)
-            .await
+            .await?;
+
+        if !self.local_info_pre_announced.swap(true, Ordering::Acquire) {
+            self.local_info_announced_notify.notify_waiters();
+        }
+
+        Ok(())
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(local_id = %self.local_id))]
