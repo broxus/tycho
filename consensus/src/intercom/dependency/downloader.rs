@@ -89,12 +89,6 @@ impl Downloader {
         };
         let peer_count = PeerCount::try_from(undone_peers.len())
             .expect("validator set is unknown, must keep prev epoch's set for sync");
-        let undone_peers = undone_peers
-            .iter()
-            // query author no matter if it is scheduled for the next round or not;
-            // it won't affect 2F reliable `None` responses to break the task with `DagPoint::NotFound`:
-            // author is a depender for its point, so its `NotFound` response is not reliable
-            .chain(iter::once((&point_id.author, &author_state)));
 
         let mut interval = tokio::time::interval(Duration::from_millis(
             ctx.conf().consensus.download_retry_millis.get() as _,
@@ -111,7 +105,12 @@ impl Downloader {
             // this node is +1 to 2F; count every peer uniquely, as they may be removed and resolved
             not_found: FastHashSet::with_capacity(peer_count.majority_of_others()),
             updates,
-            undone_peers: PeerQueue::new(undone_peers),
+            // author may be out of current vset for the next to point round (signers round);
+            // we'll query him and count 2F unique `NotFound` responses across signers only
+            author_out_of_vset: !undone_peers.contains_key(&point_id.author),
+            undone_peers: PeerQueue::new(
+                (undone_peers.iter()).chain(iter::once((&point_id.author, &author_state))),
+            ),
             parse_queue: Vec::with_capacity(peer_count.reliable_minority()),
             parse_slot: futures_util::future::pending().boxed(),
             downloading: FuturesUnordered::new(),
@@ -147,6 +146,7 @@ struct DownloadTask {
 
     updates: broadcast::Receiver<(PeerId, PeerState)>,
 
+    author_out_of_vset: bool,
     undone_peers: PeerQueue,
     downloading: FuturesUnordered<BoxFuture<'static, QueryFutureOutput<Bytes>>>,
 
@@ -276,8 +276,8 @@ impl DownloadTask {
         enum LastResponse {
             Point(Point),
             IllFormed(Point, EvidenceSigError),
-            BadPoint(PointIntegrityError),
             DefinedNone,
+            BadPoint(PointIntegrityError),
             TlError(tl_proto::TlError),
         }
 
@@ -327,10 +327,18 @@ impl DownloadTask {
             out.peer_id.alt(),
         );
 
-        match last_response {
-            LastResponse::DefinedNone => {
+        let mut on_not_found = || {
+            let is_extra_author_query =
+                self.author_out_of_vset && out.peer_id == self.query.point_id().author;
+            if !is_extra_author_query {
                 self.not_found.insert(out.peer_id);
                 DownloadCtx::meter_not_found();
+            }
+        };
+
+        match last_response {
+            LastResponse::DefinedNone => {
+                on_not_found();
                 tracing::debug!(
                     peer = display(out.peer_id.alt()),
                     is_depender = (!status.is_independent).then_some(true),
@@ -339,7 +347,7 @@ impl DownloadTask {
                 None
             }
             LastResponse::TlError(tl_error) => {
-                self.not_found.insert(out.peer_id);
+                on_not_found();
                 DownloadCtx::meter_unreliable();
                 tracing::warn!(
                     result = display(&tl_error),
@@ -350,7 +358,7 @@ impl DownloadTask {
             }
             LastResponse::BadPoint(bad_point) => {
                 // reliable peer won't return unverifiable point
-                self.not_found.insert(out.peer_id);
+                on_not_found();
                 DownloadCtx::meter_unreliable();
                 tracing::error!(
                     result = display(&bad_point),
@@ -369,7 +377,7 @@ impl DownloadTask {
                 Some(DownloadResult::IllFormed(point, reason))
             }
             LastResponse::Point(point) if point.info().id() != self.query.point_id() => {
-                self.not_found.insert(out.peer_id);
+                on_not_found();
                 DownloadCtx::meter_unreliable();
                 let wrong_id = point.info().id();
                 tracing::error!(
@@ -393,10 +401,13 @@ impl DownloadTask {
                         Some(DownloadResult::IllFormed(point, reason))
                     }
                     Err(VerifyError::Fail(error)) => {
-                        panic!(
-                            "should not receive {error} for downloaded {:?}",
-                            point.info().id().alt()
-                        )
+                        tracing::error!(
+                            error = display(&error),
+                            point = debug(&point),
+                            "failed to verify downloaded point: outdated vset"
+                        );
+                        // to raise HistoryConflict and restart mempool at next block
+                        Some(DownloadResult::NotFound)
                     }
                 }
             }
@@ -428,7 +439,6 @@ impl DownloadTask {
 impl DownloadCtx {
     fn meter_unreliable() {
         metrics::counter!("tycho_mempool_download_unreliable_responses").increment(1);
-        Self::meter_not_found();
     }
 
     fn meter_not_found() {
