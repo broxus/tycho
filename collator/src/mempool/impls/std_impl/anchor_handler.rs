@@ -56,17 +56,18 @@ impl StdAnchorHandler {
         output: MempoolOutput,
     ) -> Result<Shuttle> {
         match output {
-            MempoolOutput::NextAnchor(committed) => {
-                let cache = self.cache.clone();
-                let f = move |anchor| cache.push(Arc::new(anchor));
-                return shuttle.handle(committed, f).await;
+            MempoolOutput::NextAnchor(adata) => {
+                let (output, dirty) = shuttle.handle(adata).await?;
+                if let Some(anchor) = output {
+                    self.cache.push(Arc::new(anchor));
+                }
+                return dirty.clean().await;
             }
             MempoolOutput::CommitFinished(round) => {
                 // history payloads are read from DB and marked committed, so ready to be removed
                 self.commit_finished.set_max(round);
             }
             MempoolOutput::NewStartAfterGap(anchors_full_bottom) => {
-                self.cache.reset();
                 let first_to_execute = (anchors_full_bottom + self.deduplicate_rounds).0;
 
                 shuttle.parser = Parser::new(self.deduplicate_rounds);

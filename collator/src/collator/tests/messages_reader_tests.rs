@@ -7,6 +7,7 @@ use rand::rngs::StdRng;
 use rand::seq::{IndexedRandom, SliceRandom};
 use rand::{Rng, SeedableRng};
 use tycho_block_util::queue::{QueueDiffStuff, QueueKey, QueuePartitionIdx};
+use tycho_consensus::prelude::WAVE_ROUNDS;
 use tycho_network::PeerId;
 use tycho_types::cell::{Cell, CellBuilder, CellFamily, HashBytes, Store};
 use tycho_types::dict::Dict;
@@ -1770,7 +1771,7 @@ where
     ) -> Arc<MempoolAnchor> {
         messages.shuffle(&mut self.rng);
 
-        let anchor_id = self.last_anchor_id + 4;
+        let anchor_id = self.last_anchor_id.max(1) + WAVE_ROUNDS;
         let anchor_ct = self.last_anchor_ct + self.rng.random_range(1000..=1200);
 
         let mut externals = vec![];
