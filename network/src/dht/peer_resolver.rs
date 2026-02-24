@@ -33,7 +33,7 @@ impl PeerResolverBuilder {
             inner: Arc::new(PeerResolverInner {
                 weak_network: Network::downgrade(network),
                 dht_service: self.dht_service,
-                config: Default::default(),
+                config: self.inner,
                 tasks: Default::default(),
                 semaphore,
             }),
