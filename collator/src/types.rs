@@ -358,39 +358,48 @@ pub(crate) type CollationSessionId = (ShardIdent, u32, u32);
 #[derive(Clone)]
 pub struct CollationSessionInfo {
     shard: ShardIdent,
-    /// Sequence number of the collation session
-    seqno: u32,
+    vset_switch_round: u32,
+    catchain_seqno: u32,
     collators: ValidatorSubsetInfo,
     current_collator_keypair: Option<Arc<KeyPair>>,
 }
+
+// #[derive(Clone, PartialEq, Eq)]
+// pub struct SessionId {
+//     pub vset_switch_round: u32,
+//     pub catchain_seqno: u32,
+// }
+
 impl CollationSessionInfo {
     pub fn new(
         shard: ShardIdent,
-        seqno: u32,
+        catchain_seqno: u32,
+        vset_switch_round: u32,
         collators: ValidatorSubsetInfo,
         current_collator_keypair: Option<Arc<KeyPair>>,
     ) -> Self {
         Self {
             shard,
-            seqno,
+            vset_switch_round,
+            catchain_seqno,
             collators,
             current_collator_keypair,
         }
     }
 
     pub fn id(&self) -> CollationSessionId {
-        (self.shard, self.seqno, self.collators.short_hash)
+        (self.shard, self.catchain_seqno, self.collators.short_hash)
     }
 
     pub fn get_validation_session_id(&self) -> ValidationSessionId {
-        (self.seqno, self.collators.short_hash)
+        (self.vset_switch_round, self.catchain_seqno)
     }
 
     pub fn shard(&self) -> ShardIdent {
         self.shard
     }
     pub fn seqno(&self) -> u32 {
-        self.seqno
+        self.catchain_seqno
     }
 
     pub fn collators(&self) -> &ValidatorSubsetInfo {
@@ -405,7 +414,7 @@ impl fmt::Debug for CollationSessionInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CollationSessionInfo")
             .field("shard", &self.shard)
-            .field("seqno", &self.seqno)
+            .field("catchain_seqno", &self.catchain_seqno)
             .field("collators", &self.collators)
             .field(
                 "current_collator_pubkey",

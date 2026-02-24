@@ -52,7 +52,7 @@ pub struct ValidatorNetworkContext {
     pub zerostate_id: BlockId,
 }
 
-/// (seqno, subset `short_hash`)
+/// (`vset_switch_round`, `catchain_seqno`)
 pub type ValidationSessionId = (u32, u32);
 
 pub trait CompositeValidationSessionId {
