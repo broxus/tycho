@@ -1,6 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use anyhow::Result;
 use futures_util::StreamExt;
@@ -420,8 +419,6 @@ impl OverlayServiceInner {
     async fn collect_public_entries(&self, network: &Network, overlay_id: &OverlayId) {
         use futures_util::future::FutureExt;
 
-        const QUERY_TIMEOUT: Duration = Duration::from_millis(100);
-
         let overlay = if let Some(overlay) = self.public_overlays.get(overlay_id) {
             overlay.value().clone()
         } else {
@@ -442,6 +439,8 @@ impl OverlayServiceInner {
                 overlay_id: overlay_id.to_bytes(),
             });
 
+            let query_timeout = self.config.query_timeout;
+
             // NOTE: This guard must be dropped before collecting futures.
             let all_entries = overlay.read_entries();
 
@@ -455,7 +454,7 @@ impl OverlayServiceInner {
                 let req = req.clone();
                 futures.push(JoinTask::new(
                     async move {
-                        match tokio::time::timeout(QUERY_TIMEOUT, network.query(&peer_id, req))
+                        match tokio::time::timeout(query_timeout, network.query(&peer_id, req))
                             .await
                         {
                             Ok(entry) => match entry?.parse_tl()? {
