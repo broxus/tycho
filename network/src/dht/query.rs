@@ -13,6 +13,7 @@ use tycho_util::sync::{rayon_run, yield_on_complex};
 use tycho_util::time::now_sec;
 use tycho_util::{FastDashMap, FastHashMap, FastHashSet};
 
+use crate::dht::config::DhtConfig;
 use crate::dht::routing::{HandlesRoutingTable, SimpleRoutingTable};
 use crate::network::Network;
 use crate::proto::dht::{NodeResponse, Value, ValueRef, ValueResponse, rpc};
@@ -120,6 +121,7 @@ pub struct Query {
     network: Network,
     candidates: SimpleRoutingTable,
     max_k: usize,
+    timeout: Duration,
 }
 
 impl Query {
@@ -127,7 +129,7 @@ impl Query {
         network: Network,
         routing_table: &HandlesRoutingTable,
         target_id: &[u8; 32],
-        max_k: usize,
+        config: &DhtConfig,
         mode: DhtQueryMode,
     ) -> Self {
         let mut candidates = SimpleRoutingTable::new(PeerId(*target_id));
@@ -141,6 +143,9 @@ impl Query {
             }
         };
 
+        let max_k = config.max_k;
+        let timeout = config.request_timeout;
+
         routing_table.visit_closest(target_id_for_full, max_k, |node| {
             candidates.add(node.load_peer_info(), max_k, &Duration::MAX, Some);
         });
@@ -149,6 +154,7 @@ impl Query {
             network,
             candidates,
             max_k,
+            timeout,
         }
     }
 
@@ -174,6 +180,7 @@ impl Query {
                     node.clone(),
                     request_body.clone(),
                     &semaphore,
+                    self.timeout,
                 ));
             });
 
@@ -222,6 +229,7 @@ impl Query {
                                 node.clone(),
                                 request_body.clone(),
                                 &semaphore,
+                                self.timeout,
                             ));
                         });
                 }
@@ -258,6 +266,7 @@ impl Query {
                     node.clone(),
                     request_body.clone(),
                     &semaphore,
+                    self.timeout,
                 ));
             });
 
@@ -296,6 +305,7 @@ impl Query {
                                 node.clone(),
                                 request_body.clone(),
                                 &semaphore,
+                                self.timeout,
                             ));
                         });
                 }
@@ -368,6 +378,7 @@ impl Query {
         node: Arc<PeerInfo>,
         request_body: Bytes,
         semaphore: &Semaphore,
+        timeout: Duration,
     ) -> (Arc<PeerInfo>, Option<Result<T>>)
     where
         for<'a> T: tl_proto::TlRead<'a, Repr = tl_proto::Boxed>,
@@ -381,7 +392,7 @@ impl Query {
             body: request_body.clone(),
         });
 
-        let res = match tokio::time::timeout(REQUEST_TIMEOUT, req).await {
+        let res = match tokio::time::timeout(timeout, req).await {
             Ok(res) => {
                 Some(res.and_then(|res| tl_proto::deserialize::<T>(&res.body).map_err(Into::into)))
             }
@@ -401,7 +412,7 @@ impl StoreValue<()> {
         network: Network,
         routing_table: &HandlesRoutingTable,
         value: &ValueRef<'_>,
-        max_k: usize,
+        config: &DhtConfig,
         local_peer_info: Option<&PeerInfo>,
     ) -> StoreValue<impl Future<Output = (Arc<PeerInfo>, Option<Result<()>>)> + Send + use<>> {
         let key_hash = match value {
@@ -419,12 +430,13 @@ impl StoreValue<()> {
 
         let semaphore = Arc::new(Semaphore::new(10));
         let futures = futures_util::stream::FuturesUnordered::new();
-        routing_table.visit_closest(&key_hash, max_k, |node| {
+        routing_table.visit_closest(&key_hash, config.max_k, |node| {
             futures.push(Self::visit(
                 network.clone(),
                 node.load_peer_info(),
                 request_body.clone(),
                 semaphore.clone(),
+                config.request_timeout,
             ));
         });
 
@@ -436,6 +448,7 @@ impl StoreValue<()> {
         node: Arc<PeerInfo>,
         request_body: Bytes,
         semaphore: Arc<Semaphore>,
+        timeout: Duration,
     ) -> (Arc<PeerInfo>, Option<Result<()>>) {
         let Ok(_permit) = semaphore.acquire().await else {
             return (node, None);
@@ -446,7 +459,7 @@ impl StoreValue<()> {
             body: request_body.clone(),
         });
 
-        let res = (tokio::time::timeout(REQUEST_TIMEOUT, req).await).ok();
+        let res = (tokio::time::timeout(timeout, req).await).ok();
 
         (node, res)
     }
@@ -502,5 +515,4 @@ where
     };
 }
 
-const REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
 const MAX_PARALLEL_REQUESTS: usize = 10;

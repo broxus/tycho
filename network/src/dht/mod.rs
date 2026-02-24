@@ -556,7 +556,7 @@ impl DhtInner {
                     network.clone(),
                     &self.routing_table.lock().unwrap(),
                     key_hash,
-                    self.config.max_k,
+                    &self.config,
                     mode,
                 );
 
@@ -589,7 +589,7 @@ impl DhtInner {
             network.clone(),
             &self.routing_table.lock().unwrap(),
             value,
-            self.config.max_k,
+            &self.config,
             local_peer_info.as_ref(),
         );
 

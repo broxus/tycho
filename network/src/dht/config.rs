@@ -76,6 +76,12 @@ pub struct DhtConfig {
     /// Default: 1 minutes.
     #[serde(with = "serde_helpers::humantime")]
     pub bootstrap_peers_refill_period: Option<Duration>,
+
+    /// Timeout for DHT query request.
+    ///
+    /// Default: 500 ms.
+    #[serde(with = "serde_helpers::humantime")]
+    pub request_timeout: Duration,
 }
 
 impl Default for DhtConfig {
@@ -93,6 +99,7 @@ impl Default for DhtConfig {
             routing_table_refresh_period_max_jitter: Duration::from_secs(60),
             announced_peers_channel_capacity: 10,
             bootstrap_peers_refill_period: Some(Duration::from_secs(60)),
+            request_timeout: Duration::from_millis(500),
         }
     }
 }
