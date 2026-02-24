@@ -186,7 +186,7 @@ impl DhtInner {
                     network.clone(),
                     &routing_table,
                     random_id.as_bytes(),
-                    self.config.max_k,
+                    &self.config,
                     DhtQueryMode::Closest,
                 );
 
