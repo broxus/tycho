@@ -598,8 +598,10 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
                     )));
                 };
 
-                let mut cumulative_stats_guard =
-                    self.remaning_msgs_stats.as_ref().map(|s| s.statistics_mut());
+                let mut cumulative_stats_guard = self
+                    .remaning_msgs_stats
+                    .as_ref()
+                    .map(|s| s.statistics_mut());
 
                 'read_range: loop {
                     // stop reading if buffer is full

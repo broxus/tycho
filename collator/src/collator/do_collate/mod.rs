@@ -201,6 +201,8 @@ impl CollatorStdImpl {
                     let mut anchor_cache_tx = AnchorsCacheTransaction::new(&mut anchors_cache);
                     let mut reader_guard = TransactionGuard::new(&mut reader_state);
 
+                    let collation_is_cancelled = state.collation_is_cancelled.clone();
+
                     let result = Self::run(
                         config,
                         mq_adapter,
@@ -215,31 +217,49 @@ impl CollatorStdImpl {
                         next_chain_time,
                     )
                     .and_then(|(collation_result, pending_queue_diff_tx)| {
-                        if let Some(tx) = pending_queue_diff_tx {
-                            let _h = HistogramGuard::begin_with_labels(
-                                "tycho_do_collate_queue_diff_commit_time",
-                                &labels,
-                            );
-                            tx.write()
-                                .context("queue diff commit failed")
-                                .map_err(CollatorError::Anyhow)?;
+                        // exit collation if cancelled before writing queue diff
+                        if collation_is_cancelled.check() {
+                            return Err(CollatorError::Cancelled(
+                                CollationCancelReason::ExternalCancel,
+                            ));
                         }
-                        Ok(collation_result)
+                        Ok((collation_result, pending_queue_diff_tx))
                     });
 
                     // commit or rollback transaction based on collation result, and record metrics
                     match result {
-                        // if collation was successful, commit reader and anchors cache transactions
-                        Ok(v) => {
-                            {
+                        // if collation was successful, commit all transactions
+                        Ok((collation_result, pending_queue_diff_tx)) => {
+                            let queue_diff_result = if let Some(tx) = pending_queue_diff_tx {
                                 let _h = HistogramGuard::begin_with_labels(
-                                    "tycho_do_collate_reader_state_commit_time",
+                                    "tycho_do_collate_queue_diff_commit_time",
                                     &labels,
                                 );
-                                reader_guard.commit();
+                                tx.write()
+                                    .context("queue diff commit failed")
+                                    .map_err(CollatorError::Anyhow)
+                            } else {
+                                Ok(())
+                            };
+
+                            match queue_diff_result {
+                                Ok(()) => {
+                                    {
+                                        let _h = HistogramGuard::begin_with_labels(
+                                            "tycho_do_collate_reader_state_commit_time",
+                                            &labels,
+                                        );
+                                        reader_guard.commit();
+                                    }
+                                    anchor_cache_tx.commit();
+                                    Ok(collation_result)
+                                }
+                                Err(e) => {
+                                    drop(reader_guard);
+                                    drop(anchor_cache_tx);
+                                    Err(e)
+                                }
                             }
-                            anchor_cache_tx.commit();
-                            Ok(v)
                         }
                         // if collation failed, rollback reader and anchors cache transactions
                         Err(e) => {

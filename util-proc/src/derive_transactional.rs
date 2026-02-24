@@ -32,9 +32,11 @@ pub fn impl_transactional(input: DeriveInput) -> Result<proc_macro2::TokenStream
     }
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
-    let in_tx_body = match tx_idents.first() {
-        Some(field) => quote! { self.#field.in_tx() },
-        None => quote! { false },
+    let in_tx_body = if tx_idents.is_empty() {
+        quote! { false }
+    } else {
+        let checks = tx_idents.iter().map(|field| quote! { self.#field.in_tx() });
+        quote! { #(#checks)||* }
     };
 
     Ok(quote! {

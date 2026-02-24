@@ -118,6 +118,10 @@ impl<K: Ord + Hash + Eq + Clone, V: Transactional> TransactionalBTreeMap<K, V> {
         self.inner.last_key_value()
     }
 
+    /// Direct access to the underlying map.
+    ///
+    /// **Warning**: Modifications bypass transaction tracking (rollback won't work).
+    /// Use only for read-like operations or when tracking is not needed.
     pub fn inner_mut(&mut self) -> &mut BTreeMap<K, V> {
         &mut self.inner
     }

@@ -331,12 +331,18 @@ impl CumulativeStatistics {
         entry.initial_stats.append(&diff_partition_stats);
         entry.remaning_stats.append(&diff_partition_stats);
 
-        self.shards_stats_by_partitions
+        let prev = self
+            .shards_stats_by_partitions
             .entry(diff_shard)
             .or_default()
             .entry(partition)
             .or_default()
             .insert(diff_max_message, diff_partition_stats);
+
+        debug_assert!(
+            prev.is_none(),
+            "duplicate diff_max_message: {diff_max_message:?}"
+        );
 
         if let Some(tx) = tx {
             tx.added_diffs

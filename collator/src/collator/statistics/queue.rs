@@ -138,7 +138,6 @@ mod tests {
             self.statistics_mut()
                 .decrement_for_account(account_addr, count);
         }
-
     }
     use tycho_util::FastHashMap;
 
