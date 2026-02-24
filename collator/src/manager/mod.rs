@@ -49,7 +49,8 @@ use crate::types::processed_upto::{
 use crate::types::{
     BlockCollationResult, BlockIdExt, CollationSessionId, CollationSessionInfo, CollatorConfig,
     DebugIter, DisplayAsShortId, DisplayBlockIdsIntoIter, McData, ProcessedToByPartitions,
-    ShardDescriptionShort, ShardDescriptionShortExt, ShardHashesExt, TopBlockId, TopBlockIdUpdated,
+    SessionId, ShardDescriptionShort, ShardDescriptionShortExt, ShardHashesExt, TopBlockId,
+    TopBlockIdUpdated,
 };
 use crate::utils::async_dispatcher::{AsyncDispatcher, STANDARD_ASYNC_DISPATCHER_BUFFER_SIZE};
 use crate::utils::block::detect_top_processed_to_anchor;
@@ -145,6 +146,9 @@ where
 
     /// `McData` which processing was delayed until block is validated.
     delayed_mc_state_update: Arc<Mutex<Option<Arc<McData>>>>,
+
+    /// Latest validation session metadata derived from masterchain state.
+    latest_session: Mutex<SessionId>,
 }
 
 #[async_trait]
@@ -369,6 +373,12 @@ where
             mempool_config_override,
 
             delayed_mc_state_update: Arc::new(Mutex::new(None)),
+
+            latest_session: Mutex::new(SessionId {
+                seqno: 0,
+                vset_switch_round: 0,
+                catchain_seqno: 0,
+            }),
         };
         let collation_manager = Arc::new(collation_manager);
 
@@ -2321,7 +2331,26 @@ where
         }
 
         // find out the actual collation session start round from master state
-        let current_session_seqno = mc_data.validator_info.catchain_seqno;
+        let catchain_seqno = mc_data.validator_info.catchain_seqno;
+        let vset_switch_round = mc_data.consensus_info.vset_switch_round;
+        let session = {
+            let mut latest_session = self.latest_session.lock();
+            if latest_session.vset_switch_round != vset_switch_round
+                || latest_session.catchain_seqno != catchain_seqno
+            {
+                *latest_session = SessionId {
+                    seqno: latest_session.seqno.saturating_add(1),
+                    vset_switch_round,
+                    catchain_seqno,
+                };
+            }
+            latest_session.clone()
+        };
+        let validation_session_id = (
+            session.seqno,
+            session.vset_switch_round,
+            session.catchain_seqno,
+        );
 
         // we need full validators set to define the subset for each session and to check if current node should collate
         let full_validators_set = mc_data.config.get_current_validator_set()?;
@@ -2343,11 +2372,11 @@ where
             }
             hash_map::Entry::Vacant(entry) => {
                 let (subset, hash_short) = full_validators_set
-                    .compute_mc_subset_indexed(current_session_seqno, collation_config.shuffle_mc_validators)
+                    .compute_mc_subset_indexed(catchain_seqno, collation_config.shuffle_mc_validators)
                     .ok_or_else(|| anyhow!(
-                        "Error calculating subset of validators for session (shard_id = {}, seqno = {})",
+                        "Error calculating subset of validators for catchain session (shard_id = {}, seqno = {})",
                         ShardIdent::MASTERCHAIN,
-                        current_session_seqno,
+                        catchain_seqno,
                     ))?;
 
                 let subset: FastHashMap<_, _> = subset
@@ -2394,7 +2423,8 @@ where
                         if local_pubkey.is_some() {
                             // start new session when seqno changed or subset changed for the same seqno
                             if existing_session_info.collators().short_hash == hash_short
-                                && existing_session_info.seqno() == current_session_seqno
+                                && existing_session_info.get_validation_session_id()
+                                    == validation_session_id
                             {
                                 sessions_to_keep.push((shard_id, existing_session_info, block_ids));
                             } else {
@@ -2434,7 +2464,7 @@ where
             tracing::info!(
                 target: tracing_targets::COLLATION_MANAGER,
                 "Will start new collation sessions: {:?}",
-                DebugIter(sessions_to_start.iter().map(|(s, _)| (s, current_session_seqno))),
+                DebugIter(sessions_to_start.iter().map(|(s, _)| (s, validation_session_id))),
             );
         }
 
@@ -2445,7 +2475,7 @@ where
 
             let new_session_info = Arc::new(CollationSessionInfo::new(
                 shard_id,
-                current_session_seqno,
+                session.clone(),
                 ValidatorSubsetInfo {
                     validators: subset.values().cloned().collect(),
                     short_hash: hash_short,
