@@ -63,6 +63,12 @@ pub struct OverlayConfig {
     ///
     /// Default: 20.
     pub exchange_public_entries_batch: usize,
+
+    /// Timeout for a single query in `collect_public_entries`.
+    ///
+    /// Default: 100 ms.
+    #[serde(with = "serde_helpers::humantime")]
+    pub query_timeout: Duration,
 }
 
 impl Default for OverlayConfig {
@@ -78,6 +84,7 @@ impl Default for OverlayConfig {
             public_overlay_peer_discovery_period: Duration::from_secs(3 * 60),
             public_overlay_peer_discovery_max_jitter: Duration::from_secs(30),
             exchange_public_entries_batch: 20,
+            query_timeout: Duration::from_millis(100),
         }
     }
 }
