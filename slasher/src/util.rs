@@ -1,47 +1,25 @@
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU64, Ordering};
 
+use parking_lot::RwLock;
 use tl_proto::{TlError, TlRead, TlResult, TlWrite};
 use tycho_slasher_traits::ValidationSessionId;
 use tycho_types::prelude::*;
 
 // === AtomicValidationSessionId ===
 
-pub struct AtomicValidationSessionId(AtomicU64);
+pub struct AtomicValidationSessionId(RwLock<ValidationSessionId>);
 
 impl AtomicValidationSessionId {
-    pub const fn new(value: ValidationSessionId) -> Self {
-        Self(AtomicU64::new(Self::pack_id(value)))
+    pub fn new(value: ValidationSessionId) -> Self {
+        Self(RwLock::new(value))
     }
 
     pub fn set(&self, value: ValidationSessionId) {
-        self.0.store(Self::pack_id(value), Ordering::Release);
+        *self.0.write() = value;
     }
 
     pub fn load(&self) -> ValidationSessionId {
-        Self::unpack_id(self.0.load(Ordering::Acquire))
-    }
-
-    #[inline]
-    const fn pack_id(value: ValidationSessionId) -> u64 {
-        const _: () = const {
-            let id = ValidationSessionId {
-                seqno: 0,
-                short_hash: 0,
-            };
-            assert!(std::mem::size_of_val(&id.seqno) == 4);
-            assert!(std::mem::size_of_val(&id.short_hash) == 4);
-        };
-
-        ((value.seqno as u64) << 32) | (value.short_hash as u64)
-    }
-
-    #[inline]
-    const fn unpack_id(value: u64) -> ValidationSessionId {
-        ValidationSessionId {
-            seqno: (value >> 32) as u32,
-            short_hash: value as u32,
-        }
+        *self.0.read()
     }
 }
 

@@ -31,5 +31,6 @@ pub mod util {
 
 #[doc(hidden)]
 pub mod __internal {
-    pub use {serde, serde_json};
+    pub use serde;
+    pub use serde_json;
 }

@@ -48,8 +48,9 @@ impl SlasherStorage {
         batch: &BlocksBatch,
     ) -> Result<()> {
         let mut key = [0u8; tables::BlockBatches::KEY_LEN];
-        key[0..4].copy_from_slice(&session_id.seqno.to_be_bytes());
-        key[4..8].copy_from_slice(&session_id.short_hash.to_be_bytes());
+        // key[0..4].copy_from_slice(&session_id.seqno.to_be_bytes());
+        key[0..4].copy_from_slice(&session_id.catchain_seqno.to_be_bytes());
+        key[4..8].copy_from_slice(&session_id.vset_switch_round.to_be_bytes());
         key[8..10].copy_from_slice(&validator_idx.to_be_bytes());
         key[10..14].copy_from_slice(&batch.start_seqno.to_be_bytes());
 
@@ -60,14 +61,12 @@ impl SlasherStorage {
     }
 
     /// Removes all block batches for sessions BEFORE the specified.
-    ///
-    /// NOTE: Does not touch "rotated" sessions (same seqno but different `short_hash`),
-    /// because we cannot order them properly.
     pub fn remove_outdated_batches(&self, latest_session_id: ValidationSessionId) -> Result<()> {
         let db = &self.inner.db;
 
         let mut key = [0u8; tables::BlockBatches::KEY_LEN];
-        key[0..4].copy_from_slice(&latest_session_id.seqno.to_be_bytes());
+        key[0..4].copy_from_slice(&latest_session_id.catchain_seqno.to_be_bytes());
+        key[4..8].copy_from_slice(&latest_session_id.vset_switch_round.to_be_bytes());
 
         db.rocksdb().delete_range_cf_opt(
             &db.block_batches.cf(),
