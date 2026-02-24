@@ -61,8 +61,8 @@ pub mod tables {
         }
     }
 
-    /// Code hash with account address
-    /// - Key: `session_id: (u32 BE, u32 BE), validator_idx: u16 BE, start_block: u32 BE`
+    /// Block batches submitted by validators
+    /// - Key: `session_id: (seqno u32 BE, vset_switch_round u32 BE, catchain_seqno u32 BE), validator_idx: u16 BE, start_block: u32 BE`
     /// - Value: blocks batch
     pub struct BlockBatches;
 

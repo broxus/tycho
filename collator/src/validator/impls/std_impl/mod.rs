@@ -225,5 +225,5 @@ struct Inner {
 }
 
 type Sessions = FastHashMap<ShardIdent, ShardSessions>;
-/// We use `IndexMap` because "subset short hash" component of session id is not sequential
+/// We use `IndexMap` to keep deterministic insertion order for latest-session scans.
 type ShardSessions = IndexMap<ValidationSessionId, ValidatorSession>;
