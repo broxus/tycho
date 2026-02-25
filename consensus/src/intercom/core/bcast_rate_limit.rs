@@ -137,6 +137,8 @@ impl BcastSenderLimits {
 /// and the round extracted before the check cannot be trusted.
 const QUERY_PERMITS: NonZeroU8 = NonZeroU8::new(2).unwrap();
 
+/// This doesn't use [`crate::engine::ConsensusConfigExt::min_round_duration_millis`]
+/// because last attempt isn't guaranteed to be short, especially for the trailing prev bcast
 fn bcast_config(conf: &MempoolConfig) -> TokenBucketConfig {
     let min_sign_attempts = conf.consensus.min_sign_attempts.get();
     // two consecutive `Broadcaster`s may overlap, so x2
