@@ -80,6 +80,9 @@ impl Transactional for MessagesBuffer {
             entry.is_new = false;
             entry.new_val.as_ref().is_some_and(|v| !v.is_empty())
         });
+        if self.ext_count == 0 {
+            self.min_ext_chain_time = None;
+        }
     }
 
     fn rollback(&mut self) {
@@ -477,7 +480,7 @@ impl MessagesBuffer {
         }
 
         // drop min externals chain time if buffer was drained
-        if self.msgs.is_empty() {
+        if self.ext_count == 0 {
             self.min_ext_chain_time = None;
         }
 
@@ -1531,6 +1534,51 @@ mod transaction_tests {
 
         // After commit, changes persist
         assert_eq!(buffer.int_count, 2 - collected);
+    }
+
+    #[test]
+    fn test_fill_message_group_commit_clears_min_ext_chain_time_when_ints_remain() {
+        let mut buffer = MessagesBuffer::default();
+        let acc_ext = account(1);
+        let acc_int = account(2);
+
+        // Keep one internal message in buffer while expiring the only external message.
+        buffer.add_message(make_test_ext_message(acc_ext, 100));
+        buffer.add_message(make_test_int_message(acc_int, 200));
+
+        assert_eq!(buffer.ext_count, 1);
+        assert_eq!(buffer.int_count, 1);
+        assert_eq!(buffer.min_ext_chain_time(), 100);
+
+        buffer.begin();
+
+        let mut msg_group = MessageGroup::default();
+        let mut skipped = FastHashSet::default();
+        let mut expired_msgs_count = 0u64;
+
+        let _ = buffer.fill_message_group(
+            &mut msg_group,
+            10,
+            10,
+            &mut skipped,
+            |account_id| (account_id == &acc_int, 1), // keep internal account in buffer
+            SkipExpiredExternals {
+                chain_time_threshold_ms: 101, // ext(ct=100) is expired
+                total_skipped: &mut expired_msgs_count,
+            },
+        );
+
+        assert_eq!(expired_msgs_count, 1);
+        assert_eq!(buffer.ext_count, 0);
+        assert_eq!(buffer.int_count, 1);
+        assert_eq!(buffer.account_messages_count(&acc_int), 1);
+
+        buffer.commit();
+
+        // Buffer is not empty (internal remains), but there are no externals anymore.
+        assert_eq!(buffer.account_messages_count(&acc_int), 1);
+        assert_eq!(buffer.ext_count, 0);
+        assert_eq!(buffer.min_ext_chain_time(), u64::MAX);
     }
 
     // ==================== SKIP MESSAGES TESTS ====================

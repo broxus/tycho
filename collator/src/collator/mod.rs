@@ -626,7 +626,7 @@ impl CollatorStdImpl {
         collation_session: Arc<CollationSessionInfo>,
         new_prev_blocks_ids: Vec<BlockId>,
     ) -> Result<()> {
-        self.resume_collation(mc_data, reset, collation_session, new_prev_blocks_ids)
+        Box::pin(self.resume_collation(mc_data, reset, collation_session, new_prev_blocks_ids))
             .await
             .with_context(|| format!("next_block_id: {}", self.next_block_info))
     }
