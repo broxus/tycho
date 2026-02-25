@@ -1,3 +1,5 @@
+use std::num::NonZeroU64;
+
 use tycho_types::models::ConsensusConfig;
 
 /// ```text
@@ -43,6 +45,8 @@ pub trait ConsensusConfigExt {
     fn reset_rounds(&self) -> u32;
 
     fn max_total_rounds(&self) -> u32;
+
+    fn min_round_duration_millis(&self) -> NonZeroU64;
 }
 
 impl ConsensusConfigExt for ConsensusConfig {
@@ -80,5 +84,14 @@ impl ConsensusConfigExt for ConsensusConfig {
             + self.max_consensus_lag_rounds.get() as u32 // assumed to contain at least one TKA
             + self.commit_history_rounds.get() as u32 // to take full first anchor history
             + self.deduplicate_rounds as u32 // to discard full anchor history after restart
+    }
+
+    /// applicable only if mempool is configured for stable round rate and it is not paused
+    fn min_round_duration_millis(&self) -> NonZeroU64 {
+        let value = self.broadcast_retry_millis.get() as u64
+        * (self.min_sign_attempts.get() as u64 - 1) // intended: last attempt finishes before t/o
+            .max(1) // .. until it is the single attempt which duration is unpredictable
+         + 33; // observed duration for last sign attempt and round switch
+        value.try_into().expect("math: cannot be zero")
     }
 }
