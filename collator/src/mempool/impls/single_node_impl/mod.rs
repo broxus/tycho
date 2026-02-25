@@ -55,9 +55,8 @@ impl MempoolAdapterSingleNodeImpl {
 
         self.input_buffer.apply_config(&merged_conf.conf.consensus);
 
-        let timeout = merged_conf.conf.consensus.broadcast_retry_millis.get() as u64
-            * merged_conf.conf.consensus.min_sign_attempts.get() as u64
-            * WAVE_ROUNDS as u64;
+        let timeout =
+            merged_conf.conf.consensus.min_round_duration_millis().get() * WAVE_ROUNDS as u64;
 
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(timeout));
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
