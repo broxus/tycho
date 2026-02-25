@@ -11,7 +11,6 @@ use tracing::Instrument;
 use tycho_consensus::prelude::*;
 use tycho_crypto::ed25519::KeyPair;
 use tycho_network::{Network, OverlayService, PeerResolver};
-use tycho_storage::StorageContext;
 
 use crate::mempool::impls::common::cache::Cache;
 use crate::mempool::impls::common::v_set_adapter::VSetAdapter;
@@ -43,13 +42,11 @@ impl MempoolAdapterStdImpl {
         network: &Network,
         peer_resolver: &PeerResolver,
         overlay_service: &OverlayService,
-        storage_context: &StorageContext,
+        mempool_db: Arc<MempoolDb>,
+        moderator: Moderator,
         mempool_node_config: &MempoolNodeConfig,
     ) -> Result<Self> {
         let config_builder = MempoolConfigBuilder::new(mempool_node_config);
-
-        let mempool_db =
-            MempoolDb::open(storage_context.clone()).context("failed to create mempool db")?;
 
         Ok(Self {
             cache: Default::default(),
@@ -58,6 +55,7 @@ impl MempoolAdapterStdImpl {
                 network: network.clone(),
                 peer_resolver: peer_resolver.clone(),
                 overlay_service: overlay_service.clone(),
+                moderator,
             },
             config: Mutex::new(StdConfigAdapter {
                 builder: config_builder,

@@ -20,6 +20,7 @@ use tycho_collator::types::CollatorConfig;
 use tycho_collator::validator::{
     ValidatorNetworkContext, ValidatorStdImpl, ValidatorStdImplConfig,
 };
+use tycho_consensus::prelude::{MempoolDb, Moderator};
 use tycho_control::{ControlEndpoint, ControlServer, ControlServerConfig, ControlServerVersion};
 use tycho_core::block_strider::{
     BlockProvider, BlockProviderExt, ColdBootType, MetricsSubscriber, OptionalBlockStuff,
@@ -79,19 +80,30 @@ impl Node {
         let rpc_mempool_adapter = if is_single_node {
             RpcMempoolAdapter {
                 inner: Arc::new(MempoolAdapterSingleNodeImpl::new(
-                    &node_config.mempool,
+                    &node_config.mempool.node,
                     *base.network().peer_id(),
                 )?),
             }
         } else {
+            let mempool_db = MempoolDb::open(base.storage_context().clone())
+                .context("failed to create mempool db")?;
+
+            let moderator = Moderator::new(
+                base.network(),
+                mempool_db.clone(),
+                node_config.mempool.moderator,
+                crate::version_string(),
+            )?;
+
             RpcMempoolAdapter {
                 inner: Arc::new(MempoolAdapterStdImpl::new(
                     base.keypair().clone(),
                     base.network(),
                     base.peer_resolver(),
                     base.overlay_service(),
-                    base.storage_context(),
-                    &node_config.mempool,
+                    mempool_db,
+                    moderator,
+                    &node_config.mempool.node,
                 )?),
             }
         };
