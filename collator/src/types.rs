@@ -261,6 +261,7 @@ impl McData {
 #[derive(Debug)]
 pub struct PrevMcData {
     pub shards: Vec<(ShardIdent, ShardDescriptionShort)>,
+    pub consensus_info: ConsensusInfo,
 }
 
 #[derive(Clone)]
