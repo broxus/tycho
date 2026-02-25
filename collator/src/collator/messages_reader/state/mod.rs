@@ -206,12 +206,13 @@ where
         }
     }
 
+    // check current state exists before modifying the map
+    anyhow::ensure!(map.contains_key(&key), "current state not found: {:?}", key);
+
     let left = map;
     let mut right = left.split_off(&key);
 
-    let current = right
-        .remove(&key)
-        .ok_or_else(|| anyhow!("current state not found: {:?}", key))?;
+    let current = right.remove(&key).expect("checked above");
 
     let mut guard = SplitGuard {
         left,
