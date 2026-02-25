@@ -1609,7 +1609,7 @@ where
                 // E.g. we have applied mc block MC100 and collated some shard blocks after it (SC701, SC702)
                 // so we have uncommitted queue diffs from these shard blocks SC701, SC702.
                 // On restart from genesis we will start to collate SC701* again because last validated
-                // and applied mc block is MC100. But mempool will not contain all old externals used collate
+                // and applied mc block is MC100. But mempool will not contain all old externals used to collate
                 // the previous version of SC701. So the new diff will mismatch the old one and node will panic.
                 // So we need to remove all uncommitted queue diffs because we have new mismatched externals queue.
                 let top_shards = self.blocks_cache.get_last_top_shards();
