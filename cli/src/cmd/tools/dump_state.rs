@@ -10,6 +10,7 @@ use tycho_block_util::state::ShardStateStuff;
 use tycho_collator::mempool::{DumpAnchors, DumpedAnchor};
 use tycho_collator::types::processed_upto::ProcessedUptoInfoExtension;
 use tycho_collator::types::{McData, ShardDescriptionShortExt};
+use tycho_core::global_config::ZerostateId;
 use tycho_core::node::ConfiguredStorage;
 use tycho_core::storage::{
     BlockConnection, CoreStorage, CoreStorageConfig, QueueStateWriter, ShardStateWriter,
@@ -56,10 +57,17 @@ impl Cmd {
         output_dir.create_if_not_exists()?;
 
         let storage = self.get_core_storage().await?;
+        let zerostate_id_seqno = storage
+            .node_state()
+            .load_zerostate_id()
+            .unwrap_or_else(ZerostateId::default)
+            .as_block_id()
+            .seqno;
 
         let dumper = Dumper {
             storage,
             output_dir,
+            zerostate_id_seqno,
         };
 
         let target_block_id = self.block_id;
@@ -170,6 +178,7 @@ impl Cmd {
 struct Dumper {
     storage: CoreStorage,
     output_dir: Dir,
+    zerostate_id_seqno: u32,
 }
 
 impl Dumper {
@@ -180,7 +189,7 @@ impl Dumper {
     ) -> Result<ShardStateStuff> {
         println!("Dumping data for block {}", block_id);
         if let Err(e) = self.dump_block_data(block_id).await {
-            if block_id.seqno == 0 {
+            if block_id.seqno <= self.zerostate_id_seqno {
                 println!(
                     "Skipping block data dump for zerostate block {}: {}",
                     block_id, e
@@ -238,7 +247,7 @@ impl Dumper {
 
     async fn dump_queue_state(&self, block_id: &BlockId) -> Result<()> {
         println!("Dumping queue state for block {}", block_id);
-        if block_id.seqno == 0 {
+        if block_id.seqno <= self.zerostate_id_seqno {
             // For zerostate blocks, there is no queue state to dump
             return Ok(());
         }
