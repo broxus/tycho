@@ -362,6 +362,8 @@ impl ProcessedUptoInfoExtension for ProcessedUptoInfo {
 }
 
 impl ProcessedUptoInfoExtension for ProcessedUptoInfoStuff {
+    /// Calculates the min `processed_to_anchor` id
+    /// for current shard among all partitions
     fn get_min_externals_processed_to(&self) -> Result<(MempoolAnchorId, u64)> {
         let min_opt = self
             .partitions

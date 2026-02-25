@@ -736,6 +736,7 @@ impl Phase<FinalizeState> {
                         .clone(),
                     prev_mc_data: Some(PrevMcData {
                         shards: self.state.mc_data.shards.clone(),
+                        consensus_info: self.state.mc_data.consensus_info,
                     }),
                 }))
             }
@@ -789,10 +790,10 @@ impl Phase<FinalizeState> {
 
     fn create_mc_state_extra(
         collation_data: &mut BlockCollationData,
-        processed_to_anchor: u32,
+        processed_to_anchor: u32, // last processed to anchor in collated master block
         config_params: Option<BlockchainConfig>,
         prev_state: &ShardStateStuff,
-        prev_processed_to_anchor: u32,
+        prev_processed_to_anchor: u32, // last processed to anchor in previous master block
         collator_config: Arc<CollatorConfig>,
         zerostate_id: ZerostateId,
     ) -> Result<(McStateExtra, u32)> {
@@ -876,6 +877,8 @@ impl Phase<FinalizeState> {
                 consensus_info.vset_switch_round <= prev_processed_to_anchor;
 
             // calc next session update round
+            // `+1` because it will be the first mempool round in the new session
+            // NOTE: we will use it only if v_set of shuffle flag changed
             let next_session_start_round = if consensus_info != prev_state_extra.consensus_info {
                 // on recovery override: just use passed value; if a signed block includes equal or
                 // lesser value as 'processed_up_to_anchor' - mempool will throw error before start
@@ -884,6 +887,7 @@ impl Phase<FinalizeState> {
                 // update genesis on config change only if it is not already overridden
                 consensus_info.genesis_info = GenesisInfo {
                     // mempool reboots when block gets signed, old session anchors are dropped
+                    // collator should drop all imported cached anchors on resume
                     start_round: processed_to_anchor,
                     // this is max imported anchor time, next one must be from new session
                     genesis_millis: collation_data.get_gen_chain_time() + 1,
@@ -895,7 +899,6 @@ impl Phase<FinalizeState> {
                 // mempool can create `max_consensus_lag` rounds in DAG until it stops to wait
                 let last_round_to_create = prev_processed_to_anchor
                     + prev_consensus_config.max_consensus_lag_rounds.get() as u32;
-                // `+1` because it will be the first mempool round in the new session
                 if !is_curr_switch_applied {
                     // just overwrite (skip) outdated v_set preserving prev_* attributes;
                     // currently set switch round may be greater because of full history requirement
