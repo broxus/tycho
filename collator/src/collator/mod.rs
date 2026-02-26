@@ -648,31 +648,25 @@ impl CollatorStdImpl {
         // anchors importing can stuck if mempool paused
         // so allow to cancel collation here
         let cancel_collation = self.cancel_collation.clone();
-        let collation_cancelled = cancel_collation.notified();
+
+        // await import to be finished or cancelled
         let import_fut = self.check_and_import_init_anchors(&anchors_proc_info, genesis_info);
-        let import_init_anchors_res = tokio::select! {
+        let import_res = tokio::select! {
             res = import_fut => res,
-            _ = collation_cancelled => {
+            _ = cancel_collation.notified() => {
                 tracing::info!(target: tracing_targets::COLLATOR,
                     "collation was cancelled by manager",
                 );
                 let labels = [("workchain", self.shard_id.workchain().to_string())];
                 metrics::counter!("tycho_collator_anchor_import_cancelled_count", &labels[..]).increment(1);
-                self.listener
-                    .on_cancelled(
-                        working_state.mc_data.block_id,
-                        working_state.next_block_id_short,
-                        CollationCancelReason::ExternalCancel,
-                    )
-                    .await?;
-                return Ok(NextCollationFlowStep::Cancel);
+                Err(CollatorError::Cancelled(CollationCancelReason::ExternalCancel))
             }
         };
 
         let ImportInitAnchorsResult {
             anchors_info,
             mut anchors_count_above_last_imported_in_current_shard,
-        } = match import_init_anchors_res {
+        } = match import_res {
             Err(CollatorError::Cancelled(reason)) => {
                 self.listener
                     .on_cancelled(
