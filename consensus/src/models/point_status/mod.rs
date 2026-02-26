@@ -22,32 +22,52 @@ mod valid;
 bitflags::bitflags! {
     #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
     pub struct StatusFlags : u16 {
-        // first byte is merged with `max`, order reflects priority
+        // first byte is merged with `max`, unique, order reflects priority
 
-        // NotFound has less priority than any found to prevent status poisoning, because:
-        // * we don't store author/sig in point key, so authors may be maliciously shuffled
-        // * NotFound can be replayed with Downloader, while others can't
+        const Valid = 0b_1 << 15;
+        const TransInvalid = 0b_1 << 14;
+        const Committable = 0b_1 << 13;
 
-        // Resolved flag to keep the validation result
-
-        // Found=false + Resolved=false => `Proven` status to merge `HasProof` flag
-        // Found=false + Resolved=true => `NotFound` status (no point stored)
-        // Found=true + Resolved=false => `Found` point that must be validated
-        // Found=true + Resolved=true => other statuses for existing points
-        const Found = 0b_1 << 15;
-        const Resolved = 0b_1 << 14;
-
-        const WellFormed = 0b_1 << 12;
-        // Resolved=false + Committable=true => `Committable` status to merge anchor flags and round
-        const Committable = 0b_1 << 11;
-        const Valid = 0b_1 << 10;
-        const FirstValid = 0b_1 << 9;
+        const Invalid = 0b_1 << 11;
+        const IllFormed = 0b_1 << 10;
+        const Found = 0b_1 << 9;
+        const NotFound = 0b_1 << 8; // lowest priority: no signs of a point
+        // and also a `Proven` status with empty first byte
 
         // next byte is merged with `byte_or`
 
+        const FirstValid = 0b_1 << 7; // highest priority among others in same location
         const HasProof = 0b_1 << 5; // may be the only flag (for merge), even without stored point
         const IllFormedReasonFinal = 0b_1 << 4;
         const InvalidHasDagRound = 0b_1 << 2;
+
+        const AllWithPoint =
+            Self::FirstValid.bits() |
+            Self::Valid.bits() |
+            Self::TransInvalid.bits() |
+            Self::Invalid.bits() |
+            Self::IllFormed.bits() |
+            Self::Found.bits();
+
+        const AllCommittable =
+            Self::Valid.bits() |
+            Self::TransInvalid.bits() |
+            Self::Committable.bits();
+    }
+}
+
+impl StatusFlags {
+    /// Preserve `NotFound` status, final `IllFormed`, `Found` and `Proven` statuses for:
+    /// * either `Invalid` -> `Valid` transitions based on certification re-read
+    /// * or `IllFormed` -> `Valid` transitions based on updated `PeerSchedule`
+    ///
+    /// Also keep `FirstValid` points for stable decision on equivocation.
+    /// May reset commit attributes as `HistoryConflict` is raised before they are created.
+    pub fn keep_on_history_conflict(self) -> bool {
+        self.intersects(Self::Found.union(Self::NotFound))
+            || self.contains(Self::Valid.union(Self::FirstValid))
+            || self.contains(Self::IllFormed.union(Self::IllFormedReasonFinal))
+            || self.bits().to_be_bytes()[0] == 0 // `Proven` status
     }
 }
 
@@ -140,6 +160,14 @@ mod test {
     }
 
     #[test]
+    fn check_committable() -> anyhow::Result<()> {
+        for _ in 0..10 {
+            self_check::<PointStatusCommittable, { PointStatusCommittable::BYTE_SIZE }>()?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn check_invalid() -> anyhow::Result<()> {
         for _ in 0..25 {
             self_check::<PointStatusInvalid, { PointStatusInvalid::BYTE_SIZE }>()?;
@@ -156,14 +184,6 @@ mod test {
     }
 
     #[test]
-    fn check_not_found() -> anyhow::Result<()> {
-        for _ in 0..20 {
-            self_check::<PointStatusNotFound, { PointStatusNotFound::BYTE_SIZE }>()?;
-        }
-        Ok(())
-    }
-
-    #[test]
     fn check_found() -> anyhow::Result<()> {
         for _ in 0..5 {
             self_check::<PointStatusFound, { PointStatusFound::BYTE_SIZE }>()?;
@@ -172,9 +192,9 @@ mod test {
     }
 
     #[test]
-    fn check_committable() -> anyhow::Result<()> {
-        for _ in 0..10 {
-            self_check::<PointStatusCommittable, { PointStatusCommittable::BYTE_SIZE }>()?;
+    fn check_not_found() -> anyhow::Result<()> {
+        for _ in 0..20 {
+            self_check::<PointStatusNotFound, { PointStatusNotFound::BYTE_SIZE }>()?;
         }
         Ok(())
     }

@@ -203,7 +203,7 @@ impl MempoolStoreImpl for MempoolDb {
         if let Some(prev_key) = prev_key {
             buffer.clear();
             prev_key.fill(&mut key_buf);
-            PointStatusProven.write_to(&mut buffer);
+            PointStatusProven { has_proof: true }.write_to(&mut buffer);
             batch.merge_cf(&status_cf, &key_buf[..], &buffer);
         }
 
@@ -247,7 +247,7 @@ impl MempoolStoreImpl for MempoolDb {
                 prev_key.fill(&mut key_buf);
 
                 let slice = &mut status_buf[..PointStatusProven::BYTE_SIZE];
-                PointStatusProven.fill(slice)?;
+                PointStatusProven { has_proof: true }.fill(slice)?;
 
                 batch.merge_cf(&cf, &key_buf[..], slice);
 
@@ -413,23 +413,14 @@ impl MempoolStoreImpl for MempoolDb {
             let (k, v) = kv.context("status iter next")?;
             let flags =
                 PointStatusStored::read_flags(&v).with_context(|| PointKey::format_loose(&k))?;
-            // preserve `NotFound` status: reset only for found, which are:
-            if flags.contains(StatusFlags::Found) && {
-                // .. either `IllFormed` -> `Valid` transitions based on updated `PeerSchedule`
-                (!flags.contains(StatusFlags::WellFormed)
-                    && !flags.contains(StatusFlags::IllFormedReasonFinal))
-                    // .. or `Invalid` -> `Valid` transitions based on history re-read
-                    // .. and also other well-formed points as a safety net for future changes
-                    || (flags.contains(StatusFlags::WellFormed)
-                        && !flags.contains(StatusFlags::FirstValid))
-            } {
+            if flags.keep_on_history_conflict() {
+                batch.put_cf(&status_t.cf(), k, v);
+            } else {
                 let new_v = PointStatusFound {
                     has_proof: flags.contains(StatusFlags::HasProof),
                 };
                 new_v.fill(&mut found_status_buf)?;
                 batch.put_cf(&status_t.cf(), k, &found_status_buf[..]);
-            } else {
-                batch.put_cf(&status_t.cf(), k, v);
             };
         }
 

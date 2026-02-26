@@ -39,11 +39,7 @@ impl PointStatus for PointStatusValid {
 impl PointStatusStore for PointStatusValid {
     const BYTE_SIZE: usize = PointStatusCommittable::BYTE_SIZE;
 
-    const DEFAULT_FLAGS: StatusFlags = StatusFlags::Found
-        .union(StatusFlags::Resolved)
-        .union(StatusFlags::WellFormed)
-        .union(StatusFlags::Committable)
-        .union(StatusFlags::Valid);
+    const DEFAULT_FLAGS: StatusFlags = StatusFlags::Valid;
 
     fn status_flags(&self) -> StatusFlags {
         let mut flags = Self::DEFAULT_FLAGS;

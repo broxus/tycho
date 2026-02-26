@@ -34,10 +34,7 @@ impl PointStatus for PointStatusTransInvalid {
 impl PointStatusStore for PointStatusTransInvalid {
     const BYTE_SIZE: usize = PointStatusCommittable::BYTE_SIZE + IndirectLink::MAX_TL_BYTES;
 
-    const DEFAULT_FLAGS: StatusFlags = StatusFlags::Found
-        .union(StatusFlags::Resolved)
-        .union(StatusFlags::WellFormed)
-        .union(StatusFlags::Committable);
+    const DEFAULT_FLAGS: StatusFlags = StatusFlags::TransInvalid;
 
     fn status_flags(&self) -> StatusFlags {
         let mut flags = Self::DEFAULT_FLAGS;
@@ -50,7 +47,6 @@ impl PointStatusStore for PointStatusTransInvalid {
 
     fn read(flags: StatusFlags, stored: &[u8]) -> anyhow::Result<Self> {
         anyhow::ensure!(flags.contains(Self::DEFAULT_FLAGS));
-        anyhow::ensure!(!flags.contains(StatusFlags::Valid));
         anyhow::ensure!(stored.len() == Self::BYTE_SIZE);
 
         Ok(Self {

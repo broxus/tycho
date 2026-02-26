@@ -25,7 +25,7 @@ impl PointStatus for PointStatusNotFound {
 impl PointStatusStore for PointStatusNotFound {
     const BYTE_SIZE: usize = 2 + PeerId::MAX_TL_BYTES;
 
-    const DEFAULT_FLAGS: StatusFlags = StatusFlags::Resolved;
+    const DEFAULT_FLAGS: StatusFlags = StatusFlags::NotFound;
 
     fn status_flags(&self) -> StatusFlags {
         let mut flags = Self::DEFAULT_FLAGS;
@@ -36,13 +36,7 @@ impl PointStatusStore for PointStatusNotFound {
     }
 
     fn read(flags: StatusFlags, stored: &[u8]) -> anyhow::Result<Self> {
-        const FORBIDDEN_FLAGS: StatusFlags = StatusFlags::Found
-            .union(StatusFlags::WellFormed)
-            .union(StatusFlags::Committable)
-            .union(StatusFlags::Valid);
-
         anyhow::ensure!(flags.contains(Self::DEFAULT_FLAGS));
-        anyhow::ensure!(!flags.contains(FORBIDDEN_FLAGS));
         anyhow::ensure!(stored.len() == Self::BYTE_SIZE);
 
         Ok(Self {
