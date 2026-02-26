@@ -128,7 +128,9 @@ async fn validator_signatures_match() -> Result<()> {
         ..zerostate_id
     };
     for session_seqno in (0..).step_by(1000).take(SESSION_COUNT) {
-        let session_id = (session_seqno, 0);
+        let vset_switch_round = session_seqno + 100;
+        let catchain_seqno = session_seqno + 200;
+        let session_id = (session_seqno, vset_switch_round, catchain_seqno);
 
         tracing::info!(?session_id, %block_id, "adding session");
 
@@ -242,7 +244,9 @@ async fn malicious_validators_are_ignored() -> Result<()> {
         ..zerostate_id
     };
     for session_seqno in (0..).step_by(1000).take(SESSION_COUNT) {
-        let session_id = (session_seqno, 0);
+        let vset_switch_round = session_seqno + 100;
+        let catchain_seqno = session_seqno + 200;
+        let session_id = (session_seqno, vset_switch_round, catchain_seqno);
 
         tracing::info!(?session_id, %block_id, "adding session");
 
@@ -380,7 +384,7 @@ async fn network_gets_stuck_without_signatures() -> Result<()> {
         seqno: 1,
         ..zerostate_id
     };
-    let session_id = (0, 0);
+    let session_id = (0, 100, 200);
 
     let validators = make_description(block_id.seqno, &nodes);
     for node in &nodes {

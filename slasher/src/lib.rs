@@ -99,7 +99,8 @@ impl Slasher {
                 storage,
                 known_session_id: AtomicValidationSessionId::new(ValidationSessionId {
                     seqno: 0,
-                    short_hash: 0,
+                    vset_switch_round: 0,
+                    catchain_seqno: 0,
                 }),
                 signature_context: ArcSwap::new(Arc::new(AutoSignatureContext {
                     global_id: 0,
@@ -144,15 +145,26 @@ impl Slasher {
             .set_default_batch_size(slasher_params.blocks_batch_size);
         let slasher_address = StdAddr::new_masterchain(slasher_params.address);
 
-        let session_id_from_block = ValidationSessionId {
-            seqno: state_extra.validator_info.catchain_seqno,
-            short_hash: state_extra.validator_info.validator_list_hash_short,
+        let catchain_seqno = state_extra.validator_info.catchain_seqno;
+        let vset_switch_round = state_extra.consensus_info.vset_switch_round;
+
+        let known_session_id = this.known_session_id.load();
+        let session_id_from_block = if known_session_id.vset_switch_round == vset_switch_round
+            && known_session_id.catchain_seqno == catchain_seqno
+        {
+            known_session_id
+        } else {
+            ValidationSessionId {
+                seqno: known_session_id.seqno.saturating_add(1),
+                vset_switch_round,
+                catchain_seqno,
+            }
         };
         tracing::trace!(?slasher_params, ?session_id_from_block);
 
         // Clear old sessions if needed
         // TODO: Add metrics.
-        if session_id_from_block != this.known_session_id.load() {
+        if session_id_from_block != known_session_id {
             let span = tracing::Span::current();
             let storage = this.storage.clone();
             tokio::task::spawn_blocking(move || {

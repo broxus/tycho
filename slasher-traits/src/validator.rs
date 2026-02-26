@@ -9,19 +9,20 @@ use tycho_util::FastHasherState;
 // TODO: Decide how to be with this collator-defined type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ValidationSessionId {
-    /// Validation round seqno.
+    /// Incremental sequence number.
     pub seqno: u32,
-    /// Validator subset short seqno.
-    pub short_hash: u32,
+    pub vset_switch_round: u32,
+    pub catchain_seqno: u32,
 }
 
 // TEMP
-impl From<(u32, u32)> for ValidationSessionId {
+impl From<(u32, u32, u32)> for ValidationSessionId {
     #[inline]
-    fn from(value: (u32, u32)) -> Self {
+    fn from(value: (u32, u32, u32)) -> Self {
         Self {
             seqno: value.0,
-            short_hash: value.1,
+            vset_switch_round: value.1,
+            catchain_seqno: value.2,
         }
     }
 }
@@ -30,7 +31,11 @@ impl From<(u32, u32)> for ValidationSessionId {
 impl Ord for ValidationSessionId {
     #[inline]
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        (self.seqno, self.short_hash).cmp(&(other.seqno, other.short_hash))
+        (self.seqno, self.vset_switch_round, self.catchain_seqno).cmp(&(
+            other.seqno,
+            other.vset_switch_round,
+            other.catchain_seqno,
+        ))
     }
 }
 
