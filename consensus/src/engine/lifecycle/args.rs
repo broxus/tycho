@@ -78,5 +78,6 @@ impl EngineNetwork {
 /// Use `true` to read point statuses in inverted order of rounds, re-validating invalid points.
 /// This allows to fix rare cases, when node synced slowly and began to validate new broadcasts
 /// with all history being invalid because some point was not downloaded.
+/// Also see [`StatusFlags`](crate::models::point_status::StatusFlags::keep_on_history_conflict).
 #[derive(Default, Clone, Copy)]
 pub struct FixHistoryFlag(pub bool);

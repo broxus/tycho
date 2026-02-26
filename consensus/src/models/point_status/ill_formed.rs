@@ -21,7 +21,7 @@ impl PointStatus for PointStatusIllFormed {
 }
 
 impl PointStatusStore for PointStatusIllFormed {
-    const DEFAULT_FLAGS: StatusFlags = StatusFlags::Found.union(StatusFlags::Resolved);
+    const DEFAULT_FLAGS: StatusFlags = StatusFlags::IllFormed;
 
     fn status_flags(&self) -> StatusFlags {
         let mut flags = Self::DEFAULT_FLAGS;
@@ -33,12 +33,7 @@ impl PointStatusStore for PointStatusIllFormed {
     }
 
     fn read(flags: StatusFlags, stored: &[u8]) -> anyhow::Result<Self> {
-        const FORBIDDEN_FLAGS: StatusFlags = StatusFlags::WellFormed
-            .union(StatusFlags::Committable)
-            .union(StatusFlags::Valid);
-
         anyhow::ensure!(flags.contains(Self::DEFAULT_FLAGS));
-        anyhow::ensure!(!flags.contains(FORBIDDEN_FLAGS));
         anyhow::ensure!(stored.len() == Self::BYTE_SIZE);
 
         Ok(Self {

@@ -21,13 +21,7 @@ impl PointStatusStore for PointStatusFound {
     }
 
     fn read(flags: StatusFlags, stored: &[u8]) -> anyhow::Result<Self> {
-        const FORBIDDEN_FLAGS: StatusFlags = StatusFlags::Resolved
-            .union(StatusFlags::WellFormed)
-            .union(StatusFlags::Committable)
-            .union(StatusFlags::Valid);
-
         anyhow::ensure!(flags.contains(Self::DEFAULT_FLAGS));
-        anyhow::ensure!(!flags.contains(FORBIDDEN_FLAGS));
         anyhow::ensure!(stored.len() == Self::BYTE_SIZE);
 
         Ok(Self {

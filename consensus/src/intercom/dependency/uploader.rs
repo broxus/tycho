@@ -37,7 +37,7 @@ impl Uploader {
                     // despite its well-formedness or validation result (receiver decides on its own)
                     let flags_opt = store.get_status_flags(&point_id.key());
                     let result = match &flags_opt {
-                        Some(flags) if flags.contains(StatusFlags::Found) => {
+                        Some(flags) if flags.intersects(StatusFlags::AllWithPoint) => {
                             match store.get_point_raw(&point_id.key()) {
                                 Some(slice) => DownloadResponse::Defined(slice),
                                 // though point and its status are saved in one batch,
@@ -45,7 +45,7 @@ impl Uploader {
                                 None => DownloadResponse::DefinedNone,
                             }
                         }
-                        Some(flags) if flags.contains(StatusFlags::Resolved) => {
+                        Some(flags) if flags.contains(StatusFlags::NotFound) => {
                             // won't change even after history gets fixed, except for DB transplantation
                             DownloadResponse::DefinedNone
                         }

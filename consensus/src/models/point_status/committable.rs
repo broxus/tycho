@@ -7,6 +7,7 @@ use super::{AnchorFlags, PointStatusStore, StatusFlags};
 #[derive(Default)]
 #[cfg_attr(any(test, feature = "test"), derive(PartialEq))]
 pub struct PointStatusCommittable {
+    pub has_proof: bool,
     pub anchor_flags: AnchorFlags,
     pub committed: Option<CommitHistoryPart>,
 }
@@ -25,20 +26,20 @@ impl PointStatusStore for PointStatusCommittable {
     const DEFAULT_FLAGS: StatusFlags = StatusFlags::Committable;
 
     fn status_flags(&self) -> StatusFlags {
-        Self::DEFAULT_FLAGS
+        let mut flags = Self::DEFAULT_FLAGS;
+
+        flags.set(StatusFlags::HasProof, self.has_proof);
+
+        flags
     }
 
     fn read(flags: StatusFlags, stored: &[u8]) -> anyhow::Result<Self> {
-        const FORBIDDEN_FLAGS: StatusFlags = StatusFlags::Found
-            .union(StatusFlags::Resolved)
-            .union(StatusFlags::WellFormed)
-            .union(StatusFlags::Valid);
-
         anyhow::ensure!(flags.contains(Self::DEFAULT_FLAGS));
-        anyhow::ensure!(!flags.contains(FORBIDDEN_FLAGS));
         anyhow::ensure!(stored.len() == Self::BYTE_SIZE);
 
         Ok(Self {
+            has_proof: flags.contains(StatusFlags::HasProof),
+
             anchor_flags: AnchorFlags::from_bits_retain(stored[2]),
             committed: CommitHistoryPart::read(&stored[CommitHistoryPart::RANGE])?,
         })
@@ -130,6 +131,7 @@ impl Display for PointStatusCommittable {
 impl super::PointStatusStoreRandom for PointStatusCommittable {
     fn random() -> Self {
         Self {
+            has_proof: rand::random(),
             anchor_flags: AnchorFlags::from_bits_truncate(rand::random()),
             committed: CommitHistoryPart::random_opt(),
         }
