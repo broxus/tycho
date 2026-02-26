@@ -15,6 +15,11 @@ harness = false
 #path = "benches/messages_buffer.rs"
 required-features = ["bench-helpers"]
 
+[[bench]]
+name = "queue_statistics"
+harness = false
+required-features = ["bench-helpers"]
+
 [[test]]
 name = "adapter_tests"
 required-features = ["test"]

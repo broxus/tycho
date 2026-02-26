@@ -14,173 +14,169 @@ pub type StatisticsByPartitions = FastHashMap<QueuePartitionIdx, AccountStatisti
 pub type SeparatedStatisticsByPartitions =
     FastHashMap<QueuePartitionIdx, BTreeMap<QueueKey, AccountStatistics>>;
 
-#[derive(Debug, Clone, Copy, Default)]
-struct VersionedValue {
-    committed: u64,
-    uncommitted: Option<u64>,
-}
-
-impl VersionedValue {
-    pub fn committed(value: u64) -> Self {
-        Self {
-            committed: value,
-            uncommitted: None,
-        }
-    }
-
-    pub fn current(&self) -> u64 {
-        self.uncommitted.unwrap_or(self.committed)
-    }
-}
-
 #[derive(Debug, Default, Clone)]
 pub struct QueueStatistics {
-    statistics: FastHashMap<IntAddr, VersionedValue>,
-    in_transaction: bool,
+    statistics: FastHashMap<IntAddr, u64>,
+    tx_changes: Option<FastHashMap<IntAddr, u64>>,
 }
 
 impl Transactional for QueueStatistics {
     fn begin(&mut self) {
-        assert!(!self.in_transaction, "nested transactions not supported");
-        self.in_transaction = true;
+        assert!(
+            self.tx_changes.is_none(),
+            "nested transactions not supported"
+        );
+        self.tx_changes = Some(FastHashMap::default());
     }
 
     fn commit(&mut self) {
-        assert!(self.in_transaction, "no active transaction to commit");
+        let tx_changes = self
+            .tx_changes
+            .take()
+            .expect("no active transaction to commit");
 
-        self.in_transaction = false;
-
-        self.statistics.retain(|_, v| {
-            if let Some(uncommitted) = v.uncommitted.take() {
-                if uncommitted == 0 {
-                    return false;
-                }
-                v.committed = uncommitted;
+        for (account_addr, value) in tx_changes {
+            if value == 0 {
+                self.statistics.remove(&account_addr);
+            } else {
+                self.statistics.insert(account_addr, value);
             }
-            true
-        });
+        }
     }
 
     fn rollback(&mut self) {
-        assert!(self.in_transaction, "no active transaction to rollback");
-        self.in_transaction = false;
-        self.statistics.retain(|_, v| {
-            v.uncommitted = None;
-            v.committed != 0
-        });
+        self.tx_changes
+            .take()
+            .expect("no active transaction to rollback");
     }
 
     fn in_tx(&self) -> bool {
-        self.in_transaction
+        self.tx_changes.is_some()
     }
 }
 
 impl QueueStatistics {
     pub fn with_statistics(statistics: AccountStatistics) -> Self {
         Self {
-            statistics: statistics
-                .into_iter()
-                .map(|(k, v)| (k, VersionedValue::committed(v)))
-                .collect(),
-            in_transaction: false,
+            statistics,
+            tx_changes: None,
         }
     }
 
     pub fn statistics(&self) -> StatisticsView<'_> {
         StatisticsView {
-            inner: &self.statistics,
+            base: &self.statistics,
+            tx_changes: self.tx_changes.as_ref(),
         }
     }
 
     pub fn iter(&self) -> StatisticsViewIter<'_> {
         StatisticsViewIter {
-            inner: self.statistics.iter(),
+            tx_iter: self.tx_changes.as_ref().map(|tx| tx.iter()),
+            tx_shadow: self.tx_changes.as_ref(),
+            base_iter: self.statistics.iter(),
         }
     }
 
     pub fn decrement_for_account(&mut self, account_addr: IntAddr, count: u64) {
-        let Some(v) = self.statistics.get_mut(&account_addr) else {
-            panic!("attempted to decrement non-existent account");
-        };
+        if let Some(tx_changes) = self.tx_changes.as_mut() {
+            let base = &self.statistics;
 
-        let current = v.current();
-        if current < count {
-            panic!(
-                "attempted to decrement below zero: current={}, decrement={}",
-                current, count
-            );
-        }
-
-        let new_value = current - count;
-        if self.in_transaction {
-            v.uncommitted = Some(new_value);
+            match tx_changes.entry(account_addr) {
+                hash_map::Entry::Occupied(mut occupied) => {
+                    let current = *occupied.get();
+                    if current < count {
+                        panic!(
+                            "attempted to decrement below zero: current={}, decrement={}",
+                            current, count
+                        );
+                    }
+                    *occupied.get_mut() = current - count;
+                }
+                hash_map::Entry::Vacant(vacant) => {
+                    let current = *base
+                        .get(vacant.key())
+                        .unwrap_or_else(|| panic!("attempted to decrement non-existent account"));
+                    if current < count {
+                        panic!(
+                            "attempted to decrement below zero: current={}, decrement={}",
+                            current, count
+                        );
+                    }
+                    vacant.insert(current - count);
+                }
+            }
         } else {
-            v.committed = new_value;
-        }
+            let Some(current) = self.statistics.get(&account_addr).copied() else {
+                panic!("attempted to decrement non-existent account");
+            };
 
-        if !self.in_transaction && new_value == 0 {
-            self.statistics.remove(&account_addr);
+            if current < count {
+                panic!(
+                    "attempted to decrement below zero: current={}, decrement={}",
+                    current, count
+                );
+            }
+
+            let new_value = current - count;
+            if new_value == 0 {
+                self.statistics.remove(&account_addr);
+            } else {
+                self.statistics.insert(account_addr, new_value);
+            }
         }
     }
 
     pub fn increment_for_account(&mut self, account_addr: IntAddr, count: u64) {
-        Self::add_count(
-            &mut self.statistics,
-            self.in_transaction,
-            account_addr,
-            count,
-        );
+        if let Some(tx_changes) = self.tx_changes.as_mut() {
+            let base = &self.statistics;
+
+            match tx_changes.entry(account_addr) {
+                hash_map::Entry::Occupied(mut occupied) => {
+                    *occupied.get_mut() += count;
+                }
+                hash_map::Entry::Vacant(vacant) => {
+                    let current = base.get(vacant.key()).copied().unwrap_or_default();
+                    vacant.insert(current + count);
+                }
+            }
+        } else {
+            self.statistics
+                .entry(account_addr)
+                .and_modify(|v| *v += count)
+                .or_insert(count);
+        }
     }
 
     pub fn append(&mut self, other: &AccountStatistics) {
         for (account_addr, &msgs_count) in other {
-            Self::add_count(
-                &mut self.statistics,
-                self.in_transaction,
-                account_addr.clone(),
-                msgs_count,
-            );
-        }
-    }
-
-    fn add_count(
-        statistics: &mut FastHashMap<IntAddr, VersionedValue>,
-        in_transaction: bool,
-        account_addr: IntAddr,
-        count: u64,
-    ) {
-        if in_transaction {
-            statistics
-                .entry(account_addr)
-                .and_modify(|v| v.uncommitted = Some(v.current() + count))
-                .or_insert(VersionedValue {
-                    committed: 0,
-                    uncommitted: Some(count),
-                });
-        } else {
-            statistics
-                .entry(account_addr)
-                .and_modify(|v| v.committed += count)
-                .or_insert(VersionedValue::committed(count));
+            self.increment_for_account(account_addr.clone(), msgs_count);
         }
     }
 }
 
 pub struct StatisticsView<'a> {
-    inner: &'a FastHashMap<IntAddr, VersionedValue>,
+    base: &'a FastHashMap<IntAddr, u64>,
+    tx_changes: Option<&'a FastHashMap<IntAddr, u64>>,
 }
 
 impl<'a> StatisticsView<'a> {
     pub fn get(&self, addr: &IntAddr) -> Option<u64> {
-        self.inner.get(addr).map(|v| v.current()).filter(|&v| v > 0)
+        if let Some(tx_changes) = self.tx_changes
+            && let Some(value) = tx_changes.get(addr)
+        {
+            return (*value > 0).then_some(*value);
+        }
+
+        self.base.get(addr).copied().filter(|&v| v > 0)
     }
 
     pub fn len(&self) -> usize {
-        self.inner.values().filter(|v| v.current() > 0).count()
+        self.iter().count()
     }
 
     pub fn is_empty(&self) -> bool {
-        !self.inner.values().any(|v| v.current() > 0)
+        self.iter().next().is_none()
     }
 
     pub fn contains_key(&self, addr: &IntAddr) -> bool {
@@ -189,14 +185,18 @@ impl<'a> StatisticsView<'a> {
 
     pub fn iter(&self) -> StatisticsViewIter<'a> {
         StatisticsViewIter {
-            inner: self.inner.iter(),
+            tx_iter: self.tx_changes.map(|tx| tx.iter()),
+            tx_shadow: self.tx_changes,
+            base_iter: self.base.iter(),
         }
     }
 }
 
 #[derive(Clone)]
 pub struct StatisticsViewIter<'a> {
-    inner: hash_map::Iter<'a, IntAddr, VersionedValue>,
+    tx_iter: Option<hash_map::Iter<'a, IntAddr, u64>>,
+    tx_shadow: Option<&'a FastHashMap<IntAddr, u64>>,
+    base_iter: hash_map::Iter<'a, IntAddr, u64>,
 }
 
 impl<'a> Iterator for StatisticsViewIter<'a> {
@@ -204,10 +204,23 @@ impl<'a> Iterator for StatisticsViewIter<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            let (k, v) = self.inner.next()?;
-            let c = v.current();
-            if c > 0 {
-                return Some((k, c));
+            if let Some(tx_iter) = self.tx_iter.as_mut() {
+                if let Some((k, v)) = tx_iter.next() {
+                    if *v > 0 {
+                        return Some((k, *v));
+                    }
+                    continue;
+                }
+
+                self.tx_iter = None;
+            }
+
+            let (k, v) = self.base_iter.next()?;
+            if self.tx_shadow.is_some_and(|tx| tx.contains_key(k)) {
+                continue;
+            }
+            if *v > 0 {
+                return Some((k, *v));
             }
         }
     }
@@ -219,7 +232,9 @@ impl<'a> IntoIterator for StatisticsView<'a> {
 
     fn into_iter(self) -> Self::IntoIter {
         StatisticsViewIter {
-            inner: self.inner.iter(),
+            tx_iter: self.tx_changes.map(|tx| tx.iter()),
+            tx_shadow: self.tx_changes,
+            base_iter: self.base.iter(),
         }
     }
 }
@@ -374,7 +389,7 @@ mod tests {
 
     impl QueueStatistics {
         pub fn total_count(&self) -> u64 {
-            self.statistics.values().map(|v| v.current()).sum()
+            self.statistics().iter().map(|(_, v)| v).sum()
         }
     }
 
@@ -497,6 +512,45 @@ mod tests {
         stats.rollback();
 
         assert_eq!(stats.statistics().get(&addr(1)), Some(10));
+    }
+
+    #[test]
+    fn transaction_view_iter_overrides_base_and_hides_zero() {
+        let mut stats = QueueStatistics::default();
+        stats.increment_for_account(addr(1), 10);
+        stats.increment_for_account(addr(2), 20);
+
+        stats.begin();
+        stats.increment_for_account(addr(1), 5);
+        stats.decrement_for_account(addr(2), 20);
+        stats.increment_for_account(addr(3), 7);
+
+        let collected: FastHashMap<_, _> = stats
+            .statistics()
+            .iter()
+            .map(|(k, v)| (k.clone(), v))
+            .collect();
+
+        assert_eq!(collected.len(), 2);
+        assert_eq!(collected.get(&addr(1)), Some(&15));
+        assert_eq!(collected.get(&addr(2)), None);
+        assert_eq!(collected.get(&addr(3)), Some(&7));
+        assert!(!stats.statistics().contains_key(&addr(2)));
+    }
+
+    #[test]
+    fn repeated_updates_in_transaction_are_visible_before_commit() {
+        let mut stats = QueueStatistics::default();
+        stats.increment_for_account(addr(1), 1);
+
+        stats.begin();
+        for _ in 0..1000 {
+            stats.increment_for_account(addr(1), 1);
+        }
+
+        assert_eq!(stats.statistics().get(&addr(1)), Some(1001));
+        stats.commit();
+        assert_eq!(stats.statistics().get(&addr(1)), Some(1001));
     }
 
     // === Transaction: edge cases ===
