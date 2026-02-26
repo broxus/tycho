@@ -404,8 +404,6 @@ impl CollatorStdImpl {
         mc_data: Arc<McData>,
         working_state_tx: oneshot::Sender<Result<Box<WorkingState>>>,
     ) -> Result<()> {
-        let labels = [("workchain", self.shard_id.workchain().to_string())];
-
         tracing::info!(target: tracing_targets::COLLATOR, "initializing...");
 
         // init working state
@@ -425,70 +423,12 @@ impl CollatorStdImpl {
         } = self.handle_mempool_genesis(&mut working_state).await?;
 
         // try import init anchors
-        if let Some(anchors_proc_info) = anchors_proc_info_opt {
-            let timer = std::time::Instant::now();
-
-            // anchors importing can stuck if mempool paused
-            // so allow to cancel collation here
-            let cancel_collation = self.cancel_collation.clone();
-            let collation_cancelled = cancel_collation.notified();
-            let import_fut = self.check_and_import_init_anchors(&anchors_proc_info, &genesis_info);
-            let import_init_anchors_res = tokio::select! {
-                res = import_fut => res,
-                _ = collation_cancelled => {
-                    tracing::info!(target: tracing_targets::COLLATOR,
-                        "collation was cancelled by manager on init",
-                    );
-                    metrics::counter!("tycho_collator_anchor_import_cancelled_count", &labels).increment(1);
-                    self.listener
-                        .on_cancelled(
-                            working_state.mc_data.block_id,
-                            working_state.next_block_id_short,
-                            CollationCancelReason::ExternalCancel,
-                        )
-                        .await?;
-                    return Ok(());
-                }
-            };
-
-            let ImportInitAnchorsResult {
-                anchors_info,
-                mut anchors_count_above_last_imported_in_current_shard,
-            } = match import_init_anchors_res {
-                Err(CollatorError::Cancelled(reason)) => {
-                    self.listener
-                        .on_cancelled(
-                            working_state.mc_data.block_id,
-                            working_state.next_block_id_short,
-                            reason,
-                        )
-                        .await?;
-                    return Ok(());
-                }
-                res => res?,
-            };
-
-            if !anchors_info.is_empty() {
-                tracing::info!(target: tracing_targets::COLLATOR,
-                    elapsed = timer.elapsed().as_millis(),
-                    "imported anchors on init: {:?}",
-                    anchors_info.as_slice()
-                );
-
-                // reduce accumulated wu used from last anchor on
-                // the number of anchors imported after last in current shard
-                // if shard was not updated in last master block
-                let wu_used = &mut working_state.wu_used_from_last_anchor;
-                let wu_step = working_state.collation_config.wu_used_to_import_next_anchor;
-                while anchors_count_above_last_imported_in_current_shard > 0 {
-                    anchors_count_above_last_imported_in_current_shard -= 1;
-                    if let Some(new_wu_used) = wu_used.checked_sub(wu_step) {
-                        *wu_used = new_wu_used;
-                    } else {
-                        break;
-                    }
-                }
-            }
+        if self
+            .try_import_init_anchors(&mut working_state, anchors_proc_info_opt, &genesis_info)
+            .await?
+            .should_cancel()
+        {
+            return Ok(());
         }
 
         working_state_tx.send(Ok(working_state)).ok();
@@ -689,6 +629,87 @@ impl CollatorStdImpl {
 
             Ok(Default::default())
         }
+    }
+
+    /// Try import init anchors if processing info is defined and import required.
+    /// If imported then reduce accumulated wu.
+    async fn try_import_init_anchors(
+        &mut self,
+        working_state: &mut WorkingState,
+        anchors_proc_info_opt: Option<AnchorsProcessingInfo>,
+        genesis_info: &GenesisInfo,
+    ) -> Result<NextCollationFlowStep> {
+        let Some(anchors_proc_info) = anchors_proc_info_opt else {
+            return Ok(NextCollationFlowStep::Continue);
+        };
+
+        let timer = std::time::Instant::now();
+
+        // anchors importing can stuck if mempool paused
+        // so allow to cancel collation here
+        let cancel_collation = self.cancel_collation.clone();
+        let collation_cancelled = cancel_collation.notified();
+        let import_fut = self.check_and_import_init_anchors(&anchors_proc_info, genesis_info);
+        let import_init_anchors_res = tokio::select! {
+            res = import_fut => res,
+            _ = collation_cancelled => {
+                tracing::info!(target: tracing_targets::COLLATOR,
+                    "collation was cancelled by manager",
+                );
+                let labels = [("workchain", self.shard_id.workchain().to_string())];
+                metrics::counter!("tycho_collator_anchor_import_cancelled_count", &labels[..]).increment(1);
+                self.listener
+                    .on_cancelled(
+                        working_state.mc_data.block_id,
+                        working_state.next_block_id_short,
+                        CollationCancelReason::ExternalCancel,
+                    )
+                    .await?;
+                return Ok(NextCollationFlowStep::Cancel);
+            }
+        };
+
+        let ImportInitAnchorsResult {
+            anchors_info,
+            mut anchors_count_above_last_imported_in_current_shard,
+        } = match import_init_anchors_res {
+            Err(CollatorError::Cancelled(reason)) => {
+                self.listener
+                    .on_cancelled(
+                        working_state.mc_data.block_id,
+                        working_state.next_block_id_short,
+                        reason,
+                    )
+                    .await?;
+                return Ok(NextCollationFlowStep::Cancel);
+            }
+            res => res?,
+        };
+
+        if !anchors_info.is_empty() {
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                elapsed = timer.elapsed().as_millis(),
+                new_next_block_id = %self.next_block_info,
+                "imported init anchors: {:?}",
+                anchors_info.as_slice(),
+            );
+
+            // reduce accumulated wu used from last anchor on
+            // the number of anchors imported after last in current shard
+            // if shard was not updated in last master block
+            let wu_used = &mut working_state.wu_used_from_last_anchor;
+            let wu_step = working_state.collation_config.wu_used_to_import_next_anchor;
+            while anchors_count_above_last_imported_in_current_shard > 0 {
+                anchors_count_above_last_imported_in_current_shard -= 1;
+                if let Some(new_wu_used) = wu_used.checked_sub(wu_step) {
+                    *wu_used = new_wu_used;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        Ok(NextCollationFlowStep::Continue)
     }
 
     async fn resume_collation_wrapper(
@@ -920,73 +941,12 @@ impl CollatorStdImpl {
             genesis_was_updated = genesis_updated;
 
             // try import init anchors
-            if let Some(anchors_proc_info) = anchors_proc_info_opt {
-                let timer = std::time::Instant::now();
-
-                // anchors importing can stuck if mempool paused
-                // so allow to cancel collation here
-                let cancel_collation = self.cancel_collation.clone();
-                let collation_cancelled = cancel_collation.notified();
-                let import_fut =
-                    self.check_and_import_init_anchors(&anchors_proc_info, &genesis_info);
-
-                let import_init_anchors_res = tokio::select! {
-                    res = import_fut => res,
-                    _ = collation_cancelled => {
-                        tracing::info!(target: tracing_targets::COLLATOR,
-                            "collation was cancelled by manager on resume",
-                        );
-                        metrics::counter!("tycho_collator_anchor_import_cancelled_count", &labels).increment(1);
-                        self.listener
-                            .on_cancelled(
-                                working_state.mc_data.block_id,
-                                working_state.next_block_id_short,
-                                CollationCancelReason::ExternalCancel,
-                            )
-                            .await?;
-                        return Ok(());
-                    }
-                };
-
-                let ImportInitAnchorsResult {
-                    anchors_info,
-                    mut anchors_count_above_last_imported_in_current_shard,
-                } = match import_init_anchors_res {
-                    Err(CollatorError::Cancelled(reason)) => {
-                        self.listener
-                            .on_cancelled(
-                                working_state.mc_data.block_id,
-                                working_state.next_block_id_short,
-                                reason,
-                            )
-                            .await?;
-                        return Ok(());
-                    }
-                    res => res?,
-                };
-
-                if !anchors_info.is_empty() {
-                    tracing::debug!(target: tracing_targets::COLLATOR,
-                        elapsed = timer.elapsed().as_millis(),
-                        new_next_block_id = %self.next_block_info,
-                        "imported anchors on resume: {:?}",
-                        anchors_info.as_slice(),
-                    );
-
-                    // reduce accumulated wu used from last anchor on
-                    // the number of anchors imported after last in current shard
-                    // if shard was not updated in last master block
-                    let wu_used = &mut working_state.wu_used_from_last_anchor;
-                    let wu_step = working_state.collation_config.wu_used_to_import_next_anchor;
-                    while anchors_count_above_last_imported_in_current_shard > 0 {
-                        anchors_count_above_last_imported_in_current_shard -= 1;
-                        if let Some(new_wu_used) = wu_used.checked_sub(wu_step) {
-                            *wu_used = new_wu_used;
-                        } else {
-                            break;
-                        }
-                    }
-                }
+            if self
+                .try_import_init_anchors(&mut working_state, anchors_proc_info_opt, &genesis_info)
+                .await?
+                .should_cancel()
+            {
+                return Ok(());
             }
 
             working_state
@@ -2601,4 +2561,16 @@ struct ImportInitAnchorsResult {
     /// after "last imported in current shard"
     /// up to "top last imported anchor"
     anchors_count_above_last_imported_in_current_shard: usize,
+}
+
+#[derive(PartialEq, Eq)]
+enum NextCollationFlowStep {
+    Continue,
+    Cancel,
+}
+
+impl NextCollationFlowStep {
+    pub fn should_cancel(&self) -> bool {
+        *self == Self::Cancel
+    }
 }
