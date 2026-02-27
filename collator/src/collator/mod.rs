@@ -2,6 +2,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anchors_cache::{AnchorInfo, AnchorsCache};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use error::CollatorError;
@@ -23,7 +24,7 @@ use tycho_util::mem::Reclaimer;
 use tycho_util::metrics::{HistogramGuard, HistogramGuardWithLabels};
 use tycho_util::sync::rayon_run;
 use tycho_util::time::now_millis;
-use types::{AnchorInfo, AnchorsCache, MsgsExecutionParamsStuff};
+use types::MsgsExecutionParamsStuff;
 
 use self::types::{BlockSerializerCache, CollatorStats, PrevData, WorkingState};
 use crate::internal_queue::types::message::EnqueuedMessage;
@@ -40,6 +41,7 @@ use crate::utils::async_queued_dispatcher::{
 };
 use crate::{method_to_queued_async_closure, tracing_targets};
 
+mod anchors_cache;
 mod debug_info;
 mod do_collate;
 mod error;
@@ -64,6 +66,7 @@ use messages_reader::state::ReaderState;
 pub use types::{ForceMasterCollation, ShardDescriptionExt};
 
 mod state;
+mod statistics;
 #[cfg(test)]
 #[path = "tests/collator_tests.rs"]
 pub(super) mod tests;
@@ -71,6 +74,7 @@ pub(super) mod tests;
 #[cfg(test)]
 pub(crate) use messages_reader::tests::{TestInternalMessage, TestMessageFactory};
 
+use crate::collator::anchors_cache::AnchorsCacheTransaction;
 // FACTORY
 
 pub struct CollatorContext {
@@ -622,7 +626,7 @@ impl CollatorStdImpl {
         collation_session: Arc<CollationSessionInfo>,
         new_prev_blocks_ids: Vec<BlockId>,
     ) -> Result<()> {
-        self.resume_collation(mc_data, reset, collation_session, new_prev_blocks_ids)
+        Box::pin(self.resume_collation(mc_data, reset, collation_session, new_prev_blocks_ids))
             .await
             .with_context(|| format!("next_block_id: {}", self.next_block_info))
     }
@@ -1562,6 +1566,8 @@ impl CollatorStdImpl {
         // create temporary empty anchors cache for checking pending messages
         let mut temp_anchors_cache = AnchorsCache::default();
 
+        let mut tx = AnchorsCacheTransaction::new(&mut temp_anchors_cache);
+
         // Extract values before creating MessagesReaderContext to avoid borrow conflicts
         let for_shard_id = working_state.next_block_id_short.shard;
         let block_seqno = working_state.next_block_id_short.seqno;
@@ -1593,7 +1599,7 @@ impl CollatorStdImpl {
                 reader_state: &mut working_state.reader_state,
                 // do not use anchors cache because we need to check
                 // only for pending internals in iterators
-                anchors_cache: &mut temp_anchors_cache,
+                anchors_cache: &mut tx,
                 is_first_block_after_prev_master: is_first,
                 part_stat_ranges: None,
             },

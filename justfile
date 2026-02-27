@@ -42,12 +42,12 @@ check_format: install_fmt
 
 # Clippy go brr.
 lint:
-    cargo clippy --all-targets --all-features --workspace -- -D warnings
+    cargo clippy --all-targets --workspace $(cargo metadata --format-version=1 | jq -r '.packages[] | select(.source == null) | . as $pkg | .features | to_entries[] | select((.key | test("default|deadlock-detection")) | not) | "-F \($pkg.name)/\(.key)"' | tr '\n' ' ') -- -D warnings
 
 # Generates cargo docs.
 docs:
     export RUSTDOCFLAGS=-D warnings
-    cargo doc --no-deps --document-private-items --all-features --workspace
+    cargo doc --no-deps --document-private-items --workspace $(cargo metadata --format-version=1 | jq -r '.packages[] | select(.source == null) | . as $pkg | .features | to_entries[] | select((.key | test("default|deadlock-detection")) | not) | "-F \($pkg.name)/\(.key)"' | tr '\n' ' ')
 
 # Runs all tests.
 test:

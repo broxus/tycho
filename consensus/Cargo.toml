@@ -12,7 +12,7 @@ license.workspace = true
 [[example]]
 name = "engine"
 path = "examples/engine.rs"
-required-features = ["test"]
+required-features = ["test", "deadlock-detection"]
 
 [dependencies]
 ahash = { workspace = true }
@@ -52,7 +52,6 @@ tycho-storage = { workspace = true }
 
 [dev-dependencies]
 humantime = { workspace = true }
-parking_lot = { workspace = true, features = ["deadlock_detection"] }
 tempfile = { workspace = true }
 tikv-jemallocator = { workspace = true, features = [
     "unprefixed_malloc_on_supported_platforms",
@@ -75,4 +74,5 @@ workspace = true
 
 [features]
 test = ["dep:tokio-stream", "dep:tracing-flame", "dep:tracing-subscriber"]
+deadlock-detection = ["parking_lot/deadlock_detection"]
 mock-feedback = []

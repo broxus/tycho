@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
-use tycho_types::models::{MsgInfo, ShardIdent};
+use tycho_types::models::ShardIdent;
 
 use super::MessagesReaderMetrics;
 use super::internals_reader::InternalsPartitionReader;
@@ -13,15 +13,14 @@ use crate::collator::messages_reader::internals_range_reader::{
     InternalsRangeReader, InternalsRangeReaderKind,
 };
 use crate::collator::messages_reader::state::ShardReaderState;
-use crate::collator::messages_reader::state::internal::{
-    DebugInternalsRangeReaderState, InternalsRangeReaderState,
-};
+use crate::collator::messages_reader::state::int::DebugInternalsRangeReaderState;
+use crate::collator::messages_reader::state::int::range_reader::InternalsRangeReaderState;
 use crate::collator::types::ParsedMessage;
 use crate::internal_queue::state::state_iterator::MessageExt;
 use crate::internal_queue::types::diff::QueueDiffWithMessages;
 use crate::internal_queue::types::message::InternalMessageValue;
 use crate::internal_queue::types::router::PartitionRouter;
-use crate::internal_queue::types::stats::AccountStatistics;
+use crate::internal_queue::types::stats::StatisticsViewIter;
 use crate::tracing_targets;
 use crate::types::processed_upto::BlockSeqno;
 use crate::types::{ProcessedTo, SaturatingAddAssign};
@@ -52,9 +51,9 @@ impl<V: InternalMessageValue> NewMessagesState<V> {
     pub fn init_partition_router(
         &mut self,
         partition_id: QueuePartitionIdx,
-        cumulative_partition_stats: &AccountStatistics,
+        cumulative_partition_stats: StatisticsViewIter<'_>,
     ) {
-        for account_addr in cumulative_partition_stats.keys() {
+        for (account_addr, _) in cumulative_partition_stats {
             self.partition_router
                 .insert_dst(account_addr, partition_id)
                 .unwrap();
@@ -139,7 +138,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<'_, V> {
         // create range reader for new messages if it does not exist
         if !matches!(kind, InternalsRangeReaderKind::NewMessages) {
             let mut new_shard_reader_states = BTreeMap::new();
-            for (shard_id, prev_shard_reader_state) in &state.shards {
+            for (shard_id, prev_shard_reader_state) in state.shards.iter() {
                 let shard_range_to = if *shard_id == for_shard_id {
                     current_next_lt
                 } else {
@@ -153,16 +152,9 @@ impl<V: InternalMessageValue> InternalsPartitionReader<'_, V> {
             }
 
             let state = InternalsRangeReaderState {
-                buffer: Default::default(),
-
                 // we do not use messages satistics when reading new messages
-                msgs_stats: None,
-                remaning_msgs_stats: None,
-                read_stats: Default::default(),
-
-                shards: new_shard_reader_states,
-                skip_offset: 0,
-                processed_offset: 0,
+                shards: new_shard_reader_states.into(),
+                ..Default::default()
             };
 
             let reader = InternalsRangeReader {
@@ -185,8 +177,8 @@ impl<V: InternalMessageValue> InternalsPartitionReader<'_, V> {
                 "created new messages reader",
             );
 
-            self.insert_range_state(seqno, state);
-            self.insert_range_reader(seqno, reader);
+            self.reader_state.ranges.insert(seqno, state);
+            self.range_readers.insert(seqno, reader);
 
             self.all_ranges_fully_read = false;
         } else {
@@ -305,15 +297,13 @@ impl<V: InternalMessageValue> InternalsPartitionReader<'_, V> {
 
                     // add message to buffer
                     res.metrics.add_to_message_groups_timer.start();
-                    state.buffer.add_message(Box::new(ParsedMessage {
-                        info: MsgInfo::Int(msg.message.info().clone()),
-                        dst_in_current_shard: true,
-                        cell: msg.message.cell().clone(),
-                        special_origin: None,
-                        block_seqno: Some(block_seqno),
-                        from_same_shard: Some(msg.source == for_shard_id),
-                        ext_msg_chain_time: None,
-                    }));
+                    state.buffer.add_message(ParsedMessage::from_int(
+                        msg.message.info().clone(),
+                        msg.message.cell().clone(),
+                        true,
+                        Some(block_seqno),
+                        Some(msg.source == for_shard_id),
+                    ));
                     res.metrics
                         .add_to_msgs_groups_ops_count
                         .saturating_add_assign(1);

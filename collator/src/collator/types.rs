@@ -1,52 +1,41 @@
-use std::collections::{BTreeMap, VecDeque};
-use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::BTreeMap;
+use std::hash::Hash;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use ahash::HashMapExt;
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use parking_lot::lock_api::RwLockReadGuard;
 use parking_lot::{MappedRwLockReadGuard, Mutex, RwLock};
 use tl_proto::TlWrite;
-use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
+use tycho_block_util::queue::QueuePartitionIdx;
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_executor::{AccountMeta, PublicLibraryChange, TransactionMeta};
-use tycho_network::PeerId;
 use tycho_types::boc;
 use tycho_types::cell::{Cell, CellFamily, HashBytes, Lazy, UsageTree, UsageTreeMode};
 use tycho_types::dict::{self, Dict};
 use tycho_types::merkle::MerkleBuildResult;
 use tycho_types::models::{
     AccountBlocks, AccountState, BlockId, BlockIdShort, BlockInfo, BlockLimits, BlockParamLimits,
-    BlockRef, BlockchainConfig, CollationConfig, CurrencyCollection, HashUpdate, ImportFees, InMsg,
-    InMsgDescr, IntAddr, IntMsgInfo, LibDescr, MsgInfo, MsgsExecutionParams, OptionalAccount,
-    OutMsg, OutMsgDescr, OwnedMessage, PrevBlockRef, ShardAccount, ShardAccounts, ShardDescription,
-    ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull, ShardStateUnsplit, SpecialFlags,
-    StateInit, StdAddr, Transaction, ValueFlow,
+    BlockRef, BlockchainConfig, CollationConfig, CurrencyCollection, ExtInMsgInfo, HashUpdate,
+    ImportFees, InMsg, InMsgDescr, IntMsgInfo, LibDescr, MsgInfo, MsgsExecutionParams,
+    OptionalAccount, OutMsg, OutMsgDescr, OwnedMessage, PrevBlockRef, ShardAccount, ShardAccounts,
+    ShardDescription, ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull, ShardStateUnsplit,
+    SpecialFlags, StateInit, StdAddr, Transaction, ValueFlow,
 };
 use tycho_types::num::Tokens;
-use tycho_util::{DashMapEntry, FastDashMap, FastHashMap, FastHashSet};
+use tycho_util::{FastHashMap, FastHashSet};
 
 use super::do_collate::work_units::PrepareMsgGroupsWu;
 use super::messages_reader::MessagesReaderMetrics;
 use crate::collator::do_collate::work_units::{DoCollateWu, ExecuteWu, FinalizeWu};
 use crate::collator::messages_reader::MetricsTimer;
 use crate::collator::messages_reader::state::ReaderState;
-use crate::collator::messages_reader::state::external::ExternalKey;
 use crate::internal_queue::types::diff::QueueDiffWithMessages;
-use crate::internal_queue::types::message::{EnqueuedMessage, InternalMessageValue};
-use crate::internal_queue::types::ranges::{Bound, QueueShardBoundedRange};
-use crate::internal_queue::types::stats::{
-    AccountStatistics, DiffStatistics, QueueStatistics, SeparatedStatisticsByPartitions,
-};
-use crate::mempool::{MempoolAnchor, MempoolAnchorId};
-use crate::queue_adapter::MessageQueueAdapter;
+use crate::internal_queue::types::message::EnqueuedMessage;
 use crate::tracing_targets;
-use crate::types::processed_upto::{
-    BlockSeqno, Lt, ProcessedUptoInfoStuff, find_min_processed_to_by_shards,
-};
+use crate::types::processed_upto::{BlockSeqno, ProcessedUptoInfoStuff};
 use crate::types::{BlockCandidate, McData, ProcessedToByPartitions, TopShardBlockInfo};
 
 pub(super) struct WorkingState {
@@ -653,28 +642,8 @@ pub(super) struct CollatorStats {
     pub tps: u128,
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct AnchorInfo {
-    pub id: MempoolAnchorId,
-    pub ct: u64,
-    #[allow(dead_code)]
-    pub all_exts_count: usize,
-    #[allow(dead_code)]
-    pub our_exts_count: usize,
-    pub author: PeerId,
-}
-
-impl AnchorInfo {
-    pub fn from_anchor(anchor: &MempoolAnchor, our_exts_count: usize) -> AnchorInfo {
-        Self {
-            id: anchor.id,
-            ct: anchor.chain_time,
-            all_exts_count: anchor.externals.len(),
-            our_exts_count,
-            author: anchor.author,
-        }
-    }
-}
+#[allow(unused_imports)]
+pub(super) use super::anchors_cache::{AnchorInfo, AnchorsCache, CachedAnchor};
 
 pub(super) type AccountId = HashBytes;
 
@@ -1122,7 +1091,8 @@ pub struct OutMessageData {
     pub dst_in_current_shard: bool,
 }
 
-pub struct ParsedMessage {
+#[derive(Debug)]
+pub struct ParsedMessageInner {
     pub info: MsgInfo,
     pub dst_in_current_shard: bool,
     pub cell: Cell,
@@ -1132,9 +1102,89 @@ pub struct ParsedMessage {
     pub ext_msg_chain_time: Option<u64>,
 }
 
+#[derive(Clone, Debug)]
+pub struct ParsedMessage(Arc<ParsedMessageInner>);
+
 impl ParsedMessage {
+    /// Creates a new parsed internal message.
+    pub fn from_int(
+        info: IntMsgInfo,
+        cell: Cell,
+        dst_in_current_shard: bool,
+        block_seqno: Option<BlockSeqno>,
+        from_same_shard: Option<bool>,
+    ) -> Self {
+        Self(Arc::new(ParsedMessageInner {
+            info: MsgInfo::Int(info),
+            dst_in_current_shard,
+            cell,
+            special_origin: None,
+            block_seqno,
+            from_same_shard,
+            ext_msg_chain_time: None,
+        }))
+    }
+
+    /// Creates a new parsed external message.
+    pub fn from_ext(
+        info: ExtInMsgInfo,
+        cell: Cell,
+        dst_in_current_shard: bool,
+        chain_time: u64,
+    ) -> Self {
+        Self(Arc::new(ParsedMessageInner {
+            info: MsgInfo::ExtIn(info),
+            dst_in_current_shard,
+            cell,
+            special_origin: None,
+            block_seqno: None,
+            from_same_shard: None,
+            ext_msg_chain_time: Some(chain_time),
+        }))
+    }
+
+    /// Creates a new message with special origin.
+    pub fn from_special(
+        info: MsgInfo,
+        cell: Cell,
+        special_origin: SpecialOrigin,
+        block_seqno: BlockSeqno,
+    ) -> Self {
+        Self(Arc::new(ParsedMessageInner {
+            info,
+            dst_in_current_shard: true,
+            cell,
+            special_origin: Some(special_origin),
+            block_seqno: Some(block_seqno),
+            from_same_shard: None,
+            ext_msg_chain_time: None,
+        }))
+    }
+
+    pub fn block_seqno(&self) -> Option<BlockSeqno> {
+        self.0.block_seqno
+    }
+    pub fn is_from_same_shard(&self) -> Option<bool> {
+        self.0.from_same_shard
+    }
+    pub fn info(&self) -> &MsgInfo {
+        &self.0.info
+    }
+    pub fn cell(&self) -> &Cell {
+        &self.0.cell
+    }
+    pub fn ext_msg_chain_time(&self) -> Option<u64> {
+        self.0.ext_msg_chain_time
+    }
+    pub fn dst_in_current_shard(&self) -> bool {
+        self.0.dst_in_current_shard
+    }
+    pub fn special_origin(&self) -> Option<SpecialOrigin> {
+        self.0.special_origin
+    }
+
     pub fn kind(&self) -> ParsedMessageKind {
-        match (&self.info, self.special_origin) {
+        match (self.info(), self.special_origin()) {
             (_, Some(SpecialOrigin::Recover)) => ParsedMessageKind::Recover,
             (_, Some(SpecialOrigin::Mint)) => ParsedMessageKind::Mint,
             (MsgInfo::ExtIn(_), _) => ParsedMessageKind::ExtIn,
@@ -1144,7 +1194,11 @@ impl ParsedMessage {
     }
 
     pub fn is_external(&self) -> bool {
-        matches!(self.info, MsgInfo::ExtIn(_) | MsgInfo::ExtOut(_))
+        matches!(self.info(), MsgInfo::ExtIn(_) | MsgInfo::ExtOut(_))
+    }
+
+    pub fn arc(&self) -> Arc<ParsedMessageInner> {
+        Arc::clone(&self.0)
     }
 }
 
@@ -1161,147 +1215,6 @@ pub enum ParsedMessageKind {
 pub enum SpecialOrigin {
     Recover,
     Mint,
-}
-
-#[derive(Clone)]
-pub struct CachedAnchor {
-    pub anchor: Arc<MempoolAnchor>,
-    pub our_exts_count: usize,
-}
-
-#[derive(Default, Clone)]
-pub struct AnchorsCache {
-    /// The cache of imported from mempool anchors that were not processed yet.
-    /// Anchor is removed from the cache when all its externals are processed.
-    cache: VecDeque<(MempoolAnchorId, CachedAnchor)>,
-
-    imported_anchors_info_history: VecDeque<AnchorInfo>,
-
-    has_pending_externals: bool,
-}
-
-impl AnchorsCache {
-    pub fn add_imported_anchor_info(&mut self, anchor_info: AnchorInfo) {
-        self.imported_anchors_info_history.push_back(anchor_info);
-    }
-
-    fn remove_imported_anchors_info_before(&mut self, ct: u64) {
-        while let Some(info) = self.imported_anchors_info_history.front() {
-            if info.ct < ct && self.imported_anchors_info_history.len() > 1 {
-                self.imported_anchors_info_history.pop_front();
-            } else {
-                break;
-            }
-        }
-    }
-
-    fn remove_imported_anchors_info_above(&mut self, ct: u64) {
-        while let Some(info) = self.imported_anchors_info_history.back() {
-            if info.ct > ct && self.imported_anchors_info_history.len() > 1 {
-                self.imported_anchors_info_history.pop_back();
-            } else {
-                break;
-            }
-        }
-    }
-
-    pub fn last_imported_anchor_info(&self) -> Option<&AnchorInfo> {
-        self.imported_anchors_info_history.back()
-    }
-
-    pub fn get_last_imported_anchor_id_and_ct(&self) -> Option<(u32, u64)> {
-        self.last_imported_anchor_info().map(|a| (a.id, a.ct))
-    }
-
-    pub fn add(&mut self, anchor: Arc<MempoolAnchor>, our_exts_count: usize) {
-        self.add_imported_anchor_info(AnchorInfo::from_anchor(&anchor, our_exts_count));
-
-        if our_exts_count > 0 {
-            self.has_pending_externals = true;
-            self.cache.push_back((anchor.id, CachedAnchor {
-                anchor,
-                our_exts_count,
-            }));
-        }
-    }
-
-    pub fn pop_front(&mut self) -> Option<(MempoolAnchorId, Arc<MempoolAnchor>)> {
-        let removed = self.cache.pop_front();
-
-        if let Some((_, ca)) = &removed {
-            self.remove_imported_anchors_info_before(ca.anchor.chain_time);
-            self.has_pending_externals = !self.cache.is_empty();
-        }
-
-        removed.map(|(id, ca)| (id, ca.anchor))
-    }
-
-    /// Removes anchors from cache above specified chain time,
-    /// and updates the last imported anchor info.
-    pub fn remove_last_imported_above(&mut self, ct: u64) -> Option<&AnchorInfo> {
-        // remove anchors
-        let mut was_removed = false;
-        while let Some(last) = self.cache.back().map(|(_, ca)| ca) {
-            if last.anchor.chain_time > ct {
-                was_removed = true;
-                self.cache.pop_back();
-            } else {
-                break;
-            }
-        }
-
-        // remove anchors info
-        self.remove_imported_anchors_info_above(ct);
-
-        if was_removed {
-            self.has_pending_externals = !self.cache.is_empty();
-        }
-
-        self.last_imported_anchor_info()
-    }
-
-    pub fn clear(&mut self) {
-        self.cache.clear();
-        self.imported_anchors_info_history.clear();
-        self.has_pending_externals = false;
-    }
-
-    #[cfg(test)]
-    pub fn len(&self) -> usize {
-        self.cache.len()
-    }
-
-    pub fn get(&self, index: usize) -> Option<(MempoolAnchorId, Arc<MempoolAnchor>)> {
-        self.cache
-            .get(index)
-            .map(|(id, ca)| (*id, ca.anchor.clone()))
-    }
-
-    pub fn iter(&self) -> std::collections::vec_deque::Iter<'_, (MempoolAnchorId, CachedAnchor)> {
-        self.cache.iter()
-    }
-
-    #[cfg(test)]
-    pub fn first_with_our_externals(&self) -> Option<&Arc<MempoolAnchor>> {
-        let mut idx = 0;
-        while let Some((_, ca)) = self.cache.get(idx) {
-            if ca.our_exts_count > 0 {
-                return Some(&ca.anchor);
-            }
-            idx += 1;
-        }
-        None
-    }
-
-    pub fn has_pending_externals(&self) -> bool {
-        self.has_pending_externals
-    }
-
-    pub fn check_has_pending_externals_in_range(&self, up_to: &ExternalKey) -> bool {
-        self.cache
-            .iter()
-            .any(|(id, ca)| id <= &up_to.anchor_id && ca.our_exts_count > 0)
-    }
 }
 
 pub struct FinalizeMessagesReaderResult {
@@ -1389,450 +1302,6 @@ impl MsgsExecutionParamsExtension for MsgsExecutionParams {
 
     fn open_ranges_limit(&self) -> usize {
         self.open_ranges_limit.max(2) as usize
-    }
-}
-
-type DiffMaxMessage = QueueKey;
-
-#[derive(Debug, Clone)]
-pub struct QueueStatisticsWithRemaning {
-    /// Statistics shows all messages count
-    pub initial_stats: QueueStatistics,
-    /// Statistics shows remaining not read messages.
-    /// We reduce initial statistics by the number of messages that were read.
-    pub remaning_stats: ConcurrentQueueStatistics,
-}
-
-#[derive(Clone)]
-pub struct CumulativeStatistics {
-    /// Cumulative statistics created for this shard. When reader reads messages, it decrements `remaining messages`
-    /// Another shard stats can be decremented only by calling `update_processed_to_by_partitions`
-    for_shard: ShardIdent,
-    /// Actual processed to info for master and all shards
-    all_shards_processed_to_by_partitions: FastHashMap<ShardIdent, (bool, ProcessedToByPartitions)>,
-
-    /// Stores per-shard statistics, keyed by `ShardIdent`.
-    /// Each shard has a `FastHashMap<QueuePartitionIdx, BTreeMap<QueueKey, AccountStatistics>>`
-    shards_stats_by_partitions: FastHashMap<ShardIdent, SeparatedStatisticsByPartitions>,
-
-    /// The final aggregated statistics (across all shards) by partitions.
-    result: FastHashMap<QueuePartitionIdx, QueueStatisticsWithRemaning>,
-}
-
-impl CumulativeStatistics {
-    pub fn new(
-        for_shard: ShardIdent,
-        all_shards_processed_to_by_partitions: FastHashMap<
-            ShardIdent,
-            (bool, ProcessedToByPartitions),
-        >,
-    ) -> Self {
-        Self {
-            for_shard,
-            all_shards_processed_to_by_partitions,
-            shards_stats_by_partitions: Default::default(),
-            result: Default::default(),
-        }
-    }
-
-    /// Create range and full load statistics and store it
-    pub fn load<V: InternalMessageValue>(
-        &mut self,
-        mq_adapter: Arc<dyn MessageQueueAdapter<V>>,
-        partitions: &FastHashSet<QueuePartitionIdx>,
-        prev_state_gen_lt: Lt,
-        mc_state_gen_lt: Lt,
-        mc_top_shards_end_lts: &FastHashMap<ShardIdent, Lt>,
-    ) -> Result<()> {
-        let ranges = Self::compute_cumulative_stats_ranges(
-            &self.for_shard,
-            &self.all_shards_processed_to_by_partitions,
-            prev_state_gen_lt,
-            mc_state_gen_lt,
-            mc_top_shards_end_lts,
-        );
-
-        tracing::trace!(
-            target: tracing_targets::COLLATOR,
-            "cumulative_stats_ranges: {:?}",
-            ranges
-        );
-
-        self.load_internal(mq_adapter, partitions, ranges)
-    }
-
-    /// Partially loads diff statistics for the given ranges.
-    /// Automatically applies `processed_to` filtering and updates internal state.
-    pub fn load_partial<V: InternalMessageValue>(
-        &mut self,
-        mq_adapter: Arc<dyn MessageQueueAdapter<V>>,
-        partitions: &FastHashSet<QueuePartitionIdx>,
-        ranges: Vec<QueueShardBoundedRange>,
-    ) -> Result<()> {
-        tracing::trace!(
-            target: tracing_targets::COLLATOR,
-            "cumulative_stats_partial_ranges: {:?}",
-            ranges
-        );
-
-        self.load_internal(mq_adapter, partitions, ranges)
-    }
-
-    /// Internal helper to load and apply diff statistics.
-    fn load_internal<V: InternalMessageValue>(
-        &mut self,
-        mq_adapter: Arc<dyn MessageQueueAdapter<V>>,
-        partitions: &FastHashSet<QueuePartitionIdx>,
-        ranges: Vec<QueueShardBoundedRange>,
-    ) -> Result<()> {
-        for range in ranges {
-            let stats_by_partitions = mq_adapter
-                .load_separated_diff_statistics(partitions, &range)
-                .with_context(|| format!("partitions: {partitions:?}; range: {range:?}"))?;
-
-            for (partition, partition_stats) in stats_by_partitions {
-                for (diff_max_message, diff_partition_stats) in partition_stats {
-                    self.apply(
-                        partition,
-                        range.shard_ident,
-                        diff_max_message,
-                        diff_partition_stats,
-                    );
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Update `all_shards_processed_to_by_partitions` and remove
-    /// processed data
-    pub fn update_processed_to_by_partitions(
-        &mut self,
-        new_pt: FastHashMap<ShardIdent, (bool, ProcessedToByPartitions)>,
-    ) {
-        if self.all_shards_processed_to_by_partitions == new_pt {
-            return;
-        }
-        for (&dst_shard, (_, processed_to)) in &new_pt {
-            let changed = match self.all_shards_processed_to_by_partitions.get(&dst_shard) {
-                Some((_, old_pt)) => old_pt != processed_to,
-                None => true,
-            };
-
-            if changed {
-                self.handle_processed_to_update(dst_shard, processed_to.clone());
-            }
-        }
-
-        self.shards_stats_by_partitions
-            .retain(|_src_shard, by_partitions| {
-                by_partitions.retain(|_part, diffs| !diffs.is_empty());
-                !by_partitions.is_empty()
-            });
-
-        self.all_shards_processed_to_by_partitions = new_pt;
-    }
-
-    pub(crate) fn compute_cumulative_stats_ranges(
-        current_shard: &ShardIdent,
-        all_shards_processed_to_by_partitions: &FastHashMap<
-            ShardIdent,
-            (bool, ProcessedToByPartitions),
-        >,
-        prev_state_gen_lt: Lt,
-        mc_state_gen_lt: Lt,
-        mc_top_shards_end_lts: &FastHashMap<ShardIdent, Lt>,
-    ) -> Vec<QueueShardBoundedRange> {
-        let mut ranges = vec![];
-
-        let from_ranges = find_min_processed_to_by_shards(all_shards_processed_to_by_partitions);
-
-        for (shard_ident, from) in from_ranges {
-            let to_lt = if shard_ident.is_masterchain() {
-                mc_state_gen_lt
-            } else if shard_ident == *current_shard {
-                prev_state_gen_lt
-            } else {
-                *mc_top_shards_end_lts.get(&shard_ident).unwrap()
-            };
-
-            let to = Bound::Included(QueueKey::max_for_lt(to_lt));
-
-            ranges.push(QueueShardBoundedRange {
-                shard_ident,
-                from: Bound::Excluded(from),
-                to,
-            });
-        }
-
-        ranges
-    }
-
-    /// Adds diff stats weeding processed accounts according to `processed_to` info
-    fn apply(
-        &mut self,
-        partition: QueuePartitionIdx,
-        diff_shard: ShardIdent,
-        diff_max_message: DiffMaxMessage,
-        mut diff_partition_stats: AccountStatistics,
-    ) {
-        for (dst_shard, (_, shard_processed_to_by_partitions)) in
-            &self.all_shards_processed_to_by_partitions
-        {
-            if let Some(partition_processed_to) = shard_processed_to_by_partitions.get(&partition) {
-                // get processed_to border for diff's shard in the destination shard
-                if let Some(to_key) = partition_processed_to.get(&diff_shard) {
-                    // if diff is below processed_to border
-                    // then remove accounts of destination shard from stats
-                    if diff_max_message <= *to_key {
-                        diff_partition_stats
-                            .retain(|dst_acc, _| !dst_shard.contains_address(dst_acc));
-                    }
-                }
-            }
-        }
-
-        let entry = self
-            .result
-            .entry(partition)
-            .or_insert_with(|| QueueStatisticsWithRemaning {
-                initial_stats: QueueStatistics::default(),
-                remaning_stats: ConcurrentQueueStatistics::new(self.for_shard),
-            });
-        entry.initial_stats.append(&diff_partition_stats);
-        entry.remaning_stats.append(&diff_partition_stats);
-
-        // finally add weeded stats
-        self.add_diff_partition_stats(
-            partition,
-            diff_shard,
-            diff_max_message,
-            diff_partition_stats,
-        );
-    }
-
-    fn add_diff_partition_stats(
-        &mut self,
-        partition: QueuePartitionIdx,
-        diff_shard: ShardIdent,
-        diff_max_message: DiffMaxMessage,
-        diff_partition_stats: AccountStatistics,
-    ) {
-        // update diffs stats collection
-        self.shards_stats_by_partitions
-            .entry(diff_shard)
-            .or_default()
-            .entry(partition)
-            .or_default()
-            .insert(diff_max_message, diff_partition_stats);
-    }
-
-    /// Adds diff stats for a particular shard, split by partitions.
-    /// Overwrites any existing data for the same `shard_id`.
-    pub fn add_diff_stats(
-        &mut self,
-        diff_shard: ShardIdent,
-        diff_max_message: DiffMaxMessage,
-        diff_stats: DiffStatistics,
-    ) {
-        for (&partition, diff_partition_stats) in diff_stats.iter() {
-            // append to cumulative stats
-            let partition_stats =
-                self.result
-                    .entry(partition)
-                    .or_insert_with(|| QueueStatisticsWithRemaning {
-                        initial_stats: QueueStatistics::default(),
-                        remaning_stats: ConcurrentQueueStatistics::new(self.for_shard),
-                    });
-            partition_stats.initial_stats.append(diff_partition_stats);
-            partition_stats.remaning_stats.append(diff_partition_stats);
-
-            self.add_diff_partition_stats(
-                partition,
-                diff_shard,
-                diff_max_message,
-                diff_partition_stats.clone(),
-            );
-        }
-    }
-
-    /// Remove stats for accounts from processed diffs
-    pub fn handle_processed_to_update(
-        &mut self,
-        dst_shard: ShardIdent,
-        shard_processed_to_by_partitions: ProcessedToByPartitions,
-    ) {
-        for (src_shard, shard_stats_by_partitions) in self.shards_stats_by_partitions.iter_mut() {
-            for (partition, diffs) in shard_stats_by_partitions.iter_mut() {
-                if let Some(partition_processed_to) =
-                    shard_processed_to_by_partitions.get(partition)
-                {
-                    let cumulative_stats = self.result.entry(*partition).or_insert_with(|| {
-                        QueueStatisticsWithRemaning {
-                            initial_stats: QueueStatistics::default(),
-                            remaning_stats: ConcurrentQueueStatistics::new(self.for_shard),
-                        }
-                    });
-                    if let Some(to_key) = partition_processed_to.get(src_shard) {
-                        let mut to_remove_diffs = vec![];
-                        // find diffs that below processed_to border and remove destination accounts from stats
-                        for (diff_max_message, diff_stats) in diffs.iter_mut() {
-                            if diff_max_message <= to_key {
-                                diff_stats.retain(|dst_acc, count| {
-                                    if dst_shard.contains_address(dst_acc) {
-                                        cumulative_stats
-                                            .initial_stats
-                                            .decrement_for_account(dst_acc.clone(), *count);
-
-                                        if self.for_shard != dst_shard {
-                                            cumulative_stats
-                                                .remaning_stats
-                                                .decrement_for_account(dst_acc.clone(), *count);
-                                        }
-                                        false
-                                    } else {
-                                        true
-                                    }
-                                });
-                                if diff_stats.is_empty() {
-                                    to_remove_diffs.push(*diff_max_message);
-                                }
-                            } else {
-                                // do not need to process diffs above processed_to border
-                                break;
-                            }
-                        }
-                        // remove drained diffs
-                        for key in to_remove_diffs {
-                            diffs.remove(&key);
-                        }
-                    }
-                }
-            }
-        }
-
-        // update all processed_to state
-        self.all_shards_processed_to_by_partitions
-            .insert(dst_shard, (true, shard_processed_to_by_partitions));
-    }
-
-    /// Returns a reference to the aggregated stats by partitions.
-    pub fn result(&self) -> &FastHashMap<QueuePartitionIdx, QueueStatisticsWithRemaning> {
-        &self.result
-    }
-
-    /// Calc aggregated stats among all partitions.
-    pub fn get_aggregated_result(&self) -> QueueStatistics {
-        let mut res: Option<QueueStatistics> = None;
-        for stats in self.result.values() {
-            if let Some(aggregated) = res.as_mut() {
-                aggregated.append(stats.initial_stats.statistics());
-            } else {
-                res.replace(stats.initial_stats.clone());
-            }
-        }
-        res.unwrap_or_default()
-    }
-
-    pub fn remaining_total_for_own_shard(&self) -> u64 {
-        self.result
-            .values()
-            .map(|stats| stats.remaning_stats.tracked_total())
-            .sum()
-    }
-}
-
-impl fmt::Debug for CumulativeStatistics {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let shards_summary: Vec<String> = self
-            .shards_stats_by_partitions
-            .iter()
-            .map(|(shard_id, by_partitions)| {
-                let parts: Vec<String> = by_partitions
-                    .iter()
-                    .map(|(part, diffs)| format!("p{}:{}", part, diffs.len()))
-                    .collect();
-                format!("{} -> {}", shard_id, parts.join(", "))
-            })
-            .collect();
-
-        f.debug_struct("CumulativeStatistics")
-            .field(
-                "processed_to",
-                &format!(
-                    "{} shards",
-                    self.all_shards_processed_to_by_partitions.len()
-                ),
-            )
-            .field("shards_stats_by_partitions", &shards_summary)
-            .field("result", &format!("{} partitions", self.result.len()))
-            .field("for_shard", &self.for_shard)
-            .finish()
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ConcurrentQueueStatistics {
-    statistics: Arc<FastDashMap<IntAddr, u64>>,
-    track_shard: ShardIdent,
-    tracked_total: Arc<AtomicU64>,
-}
-
-impl ConcurrentQueueStatistics {
-    pub fn new(track_shard: ShardIdent) -> Self {
-        Self {
-            statistics: Arc::new(Default::default()),
-            track_shard,
-            tracked_total: Arc::new(Default::default()),
-        }
-    }
-
-    pub fn tracked_total(&self) -> u64 {
-        self.tracked_total.load(Ordering::Relaxed)
-    }
-
-    pub fn statistics(&self) -> &FastDashMap<IntAddr, u64> {
-        &self.statistics
-    }
-
-    pub fn contains(&self, account_addr: &IntAddr) -> bool {
-        self.statistics.contains_key(account_addr)
-    }
-
-    pub fn decrement_for_account(&self, account_addr: IntAddr, count: u64) {
-        if let DashMapEntry::Occupied(mut occupied) = self.statistics.entry(account_addr.clone()) {
-            let value = occupied.get_mut();
-            *value -= count;
-            if *value == 0 {
-                occupied.remove();
-            }
-            if self.track_shard.contains_address(&account_addr) {
-                self.tracked_total.fetch_sub(count, Ordering::Relaxed);
-            }
-        } else {
-            panic!("attempt to decrement non-existing account");
-        }
-    }
-
-    pub fn append(&self, other: &AccountStatistics) {
-        let mut delta_tracked = 0;
-
-        for (account_addr, &msgs_count) in other {
-            self.statistics
-                .entry(account_addr.clone())
-                .and_modify(|count| *count += msgs_count)
-                .or_insert(msgs_count);
-
-            if self.track_shard.contains_address(account_addr) {
-                delta_tracked += msgs_count;
-            }
-        }
-
-        if delta_tracked != 0 {
-            self.tracked_total
-                .fetch_add(delta_tracked, Ordering::Relaxed);
-        }
     }
 }
 

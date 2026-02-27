@@ -12,7 +12,7 @@ use crate::collator::messages_buffer::{
 };
 use crate::collator::messages_reader::internals_reader::InternalsPartitionReader;
 use crate::collator::messages_reader::state::ShardReaderState;
-use crate::collator::messages_reader::state::internal::InternalsRangeReaderState;
+use crate::collator::messages_reader::state::int::range_reader::InternalsRangeReaderState;
 use crate::internal_queue::iterator::QueueIterator;
 use crate::internal_queue::types::message::InternalMessageValue;
 use crate::internal_queue::types::ranges::{Bound, QueueShardBoundedRange};
@@ -55,7 +55,7 @@ impl<V: InternalMessageValue> InternalsRangeReader<V> {
         if !reader_state.is_fully_read() {
             let mut ranges = Vec::with_capacity(reader_state.shards.len());
 
-            for (shard_id, shard_reader_state) in &reader_state.shards {
+            for (shard_id, shard_reader_state) in &*reader_state.shards {
                 let shard_range_to = QueueKey::max_for_lt(shard_reader_state.to);
                 ranges.push(QueueShardBoundedRange {
                     shard_ident: *shard_id,
@@ -120,7 +120,7 @@ impl<V: InternalMessageValue> InternalsRangeReader<V> {
                     // check buffers in previous partition
                     for prev_par_range_reader in prev_par_reader.range_readers().values() {
                         let reader_state = prev_par_reader
-                            .reader_state()
+                            .reader_state
                             .ranges
                             .get(&prev_par_range_reader.seqno)
                             .unwrap();
@@ -137,7 +137,7 @@ impl<V: InternalMessageValue> InternalsRangeReader<V> {
                     check_ops_count.saturating_add_assign(1);
 
                     if let Some(remaning_msgs_stats) = &prev_par_reader.remaning_msgs_stats
-                        && remaning_msgs_stats.statistics().contains_key(&dst_addr)
+                        && remaning_msgs_stats.contains(&dst_addr)
                     {
                         return (true, check_ops_count);
                     }
@@ -198,7 +198,7 @@ pub fn partitions_have_intersecting_accounts<V: InternalMessageValue>(
 
     // Check buffers in range readers
     for range_reader_seqno in next.range_readers.keys() {
-        let state = next.reader_state().ranges.get(range_reader_seqno).unwrap();
+        let state = next.reader_state.ranges.get(range_reader_seqno).unwrap();
 
         for (account_address, _) in state.buffer.iter() {
             let addr = IntAddr::Std(StdAddr::new(workchain, *account_address));
@@ -209,8 +209,7 @@ pub fn partitions_have_intersecting_accounts<V: InternalMessageValue>(
     }
 
     // Check next_stats
-    for item in next_stats.statistics() {
-        let addr = item.key();
+    for (addr, _) in next_stats.statistics().iter() {
         if current_stats.contains(addr) {
             return Ok(Some(addr.clone()));
         }

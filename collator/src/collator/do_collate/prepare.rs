@@ -7,6 +7,7 @@ use super::execute::ExecuteState;
 use super::execution_wrapper::ExecutorWrapper;
 use super::phase::{Phase, PhaseState};
 use crate::collator::CollationCancelReason;
+use crate::collator::anchors_cache::AnchorsCacheTransaction;
 use crate::collator::do_collate::phase::ActualState;
 use crate::collator::error::CollatorError;
 use crate::collator::execution_manager::MessagesExecutor;
@@ -14,25 +15,25 @@ use crate::collator::messages_reader::state::ReaderState;
 use crate::collator::messages_reader::{
     CumulativeStatsCalcParams, MessagesReader, MessagesReaderContext,
 };
-use crate::collator::types::{AnchorsCache, MsgsExecutionParamsStuff};
+use crate::collator::types::MsgsExecutionParamsStuff;
 use crate::internal_queue::types::message::EnqueuedMessage;
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::processed_upto::build_all_shards_processed_to_by_partitions;
 
-pub struct PrepareState<'a> {
+pub struct PrepareState<'a, 'b> {
     mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
     reader_state: &'a mut ReaderState,
-    anchors_cache: &'a mut AnchorsCache,
+    anchors_cache: &'a mut AnchorsCacheTransaction<'b>,
 }
 
-impl<'a> PhaseState for PrepareState<'a> {}
+impl<'a, 'b> PhaseState for PrepareState<'a, 'b> {}
 
-impl<'a> Phase<PrepareState<'a>> {
+impl<'a, 'b> Phase<PrepareState<'a, 'b>> {
     pub fn new(
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
         reader_state: &'a mut ReaderState,
-        anchors_cache: &'a mut AnchorsCache,
+        anchors_cache: &'a mut AnchorsCacheTransaction<'b>,
         state: Box<ActualState>,
     ) -> Self {
         Self {
@@ -45,7 +46,7 @@ impl<'a> Phase<PrepareState<'a>> {
         }
     }
 
-    pub fn run(self) -> Result<Phase<ExecuteState<'a>>, CollatorError> {
+    pub fn run(self) -> Result<Phase<ExecuteState<'a, 'b>>, CollatorError> {
         // log initial processed upto
         tracing::debug!(target: tracing_targets::COLLATOR,
             "initial processed_upto = {:?}",
@@ -181,7 +182,7 @@ impl<'a> Phase<PrepareState<'a>> {
             }
         }
 
-        Ok(Phase::<ExecuteState<'a>> {
+        Ok(Phase::<ExecuteState<'a, 'b>> {
             extra: ExecuteState {
                 messages_reader,
                 executor: ExecutorWrapper::new(executor, self.state.shard_id),

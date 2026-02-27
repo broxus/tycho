@@ -2438,19 +2438,37 @@ def collator_core_operations_metrics() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_do_collate_serialize_queue_diff_time_high",
-            "Serialize queue diff",
-            labels=['workchain=~"$workchain"'],
-        ),
-        create_heatmap_panel(
-            "tycho_do_collate_apply_queue_diff_time_high",
-            "async Apply message queue diff",
+            "tycho_do_collate_prepare_queue_diff_time_high",
+            "async Prepare message queue diff",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
             "tycho_do_collate_build_statistics_time_high",
-            "async Apply message queue diff: inc. Build statistics",
+            "async Prepare message queue diff: inc. Build statistics",
             labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
+            "tycho_do_collate_queue_diff_commit_time",
+            "Queue diff commit (RocksDB write)",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
+            "tycho_do_collate_reader_state_commit_time",
+            "Reader state commit",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
+            "tycho_do_collate_reader_state_rollback_time",
+            "Reader state rollback",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
+            "tycho_do_collate_anchors_cache_commit_time",
+            "Anchors cache commit",
+        ),
+        create_heatmap_panel(
+            "tycho_do_collate_anchors_cache_rollback_time",
+            "Anchors cache rollback",
         ),
         create_heatmap_panel(
             "tycho_collator_finalize_block_time_high",

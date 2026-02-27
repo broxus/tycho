@@ -66,9 +66,9 @@ pub struct FinalizeBlockContext {
 }
 
 impl Phase<FinalizeState> {
-    pub fn finalize_messages_reader<'a>(
+    pub fn finalize_messages_reader(
         &mut self,
-        messages_reader: MessagesReader<'a, EnqueuedMessage>,
+        messages_reader: MessagesReader<'_, '_, EnqueuedMessage>,
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
         zerostate_id: ZerostateId,
     ) -> Result<FinalizeMessagesReaderResult, CollatorError> {
