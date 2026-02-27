@@ -884,7 +884,7 @@ impl Phase<FinalizeState> {
             validator_info = session_update.apply(
                 &mut consensus_info,
                 next_session_start_round,
-                session_start.is_curr_switch_applied,
+                session_start.is_curr_switch_after_pause,
             )?;
         }
         let validator_info = validator_info.unwrap_or(ValidatorInfo {
@@ -1474,12 +1474,13 @@ fn create_merkle_update(
 mod vset_update_start {
     use super::*;
 
+    #[cfg_attr(test, derive(Clone, Debug))]
     pub struct KbNextSessionStart {
         prev_consensus_config: ConsensusConfig,
 
         is_consensus_info_overridden: bool,
         pub is_consensus_config_changed: bool,
-        pub is_curr_switch_applied: bool,
+        pub is_curr_switch_after_pause: bool,
         gen_chain_time_millis: u64,
 
         after_pause_round: u32,
@@ -1496,11 +1497,8 @@ mod vset_update_start {
         ) -> Result<Self> {
             let prev_consensus_config = prev_config.get_consensus_config()?;
 
-            // `prev_processed_to_anchor` is a round in the ending session, after which
-            // mempool can create `max_consensus_lag` rounds in DAG until it stops to wait
-            let after_pause_round = prev_processed_to_anchor
-                + prev_consensus_config.max_consensus_lag_rounds.get() as u32
-                + 1; // `+1` because it will be the first mempool round in the new session
+            let after_pause_round =
+                Self::after_pause_round(prev_processed_to_anchor, &prev_consensus_config);
 
             Ok(Self {
                 is_consensus_info_overridden: {
@@ -1509,15 +1507,24 @@ mod vset_update_start {
                 is_consensus_config_changed: {
                     prev_consensus_config != config.get_consensus_config()?
                 },
-                is_curr_switch_applied: {
-                    consensus_info.vset_switch_round <= prev_processed_to_anchor
-                },
+                is_curr_switch_after_pause: consensus_info.vset_switch_round > after_pause_round,
                 gen_chain_time_millis: collation_data.get_gen_chain_time(),
 
                 after_pause_round,
 
                 prev_consensus_config,
             })
+        }
+
+        /// `prev_processed_to_anchor` is a round in the ending session, after which
+        /// mempool can create `max_consensus_lag` rounds in DAG until it stops to wait
+        fn after_pause_round(
+            prev_processed_to_anchor: u32,
+            prev_consensus_config: &ConsensusConfig,
+        ) -> u32 {
+            prev_processed_to_anchor
+                + prev_consensus_config.max_consensus_lag_rounds.get() as u32
+                + 1 // `+1` because it will be the first mempool round in the new session
         }
 
         /// NOTE: we will use it only if vset of shuffle flag changed
@@ -1546,7 +1553,7 @@ mod vset_update_start {
                 return consensus_info.genesis_info.start_round + 1;
             }
 
-            if !self.is_curr_switch_applied {
+            if self.is_curr_switch_after_pause {
                 // just overwrite (skip) outdated v_set preserving prev_* attributes;
                 // currently set switch round may be greater because of full history requirement
                 self.after_pause_round.max(consensus_info.vset_switch_round)
@@ -1565,6 +1572,7 @@ mod vset_update_start {
         }
     }
 
+    #[cfg_attr(test, derive(Debug))]
     pub struct KbNextSessionUpdate {
         prev_shuffle_mc_validators: bool,
         prev_vset_hash: HashBytes,
@@ -1589,10 +1597,10 @@ mod vset_update_start {
         }
 
         pub fn apply(
-            self,
+            &self,
             consensus_info: &mut ConsensusInfo,
             next_session_start_round: u32,
-            is_curr_switch_applied: bool,
+            is_curr_switch_after_pause: bool,
         ) -> Result<Option<ValidatorInfo>> {
             let is_vset_same = *self.current_vset.repr_hash() == self.prev_vset_hash;
             let is_shuffle_same = self.shuffle_mc_validators == self.prev_shuffle_mc_validators;
@@ -1607,7 +1615,7 @@ mod vset_update_start {
             // take prev_* attributes for mempool to calculate a subset from v_set (if used);
             // also mempool may skip a short-lived session that ended sooner than schedule
             // was applied in mempool (but subset rotations should not be that short)
-            if is_curr_switch_applied {
+            if !is_curr_switch_after_pause {
                 consensus_info.prev_shuffle_mc_validators = self.prev_shuffle_mc_validators;
                 consensus_info.prev_vset_switch_round = consensus_info.vset_switch_round;
             }
@@ -1633,6 +1641,213 @@ mod vset_update_start {
                 catchain_seqno: next_session_start_round,
                 nx_cc_updated: true,
             }))
+        }
+    }
+
+    #[cfg(all(test, feature = "test"))]
+    mod tests {
+        use rand::random;
+        use tycho_consensus::test_utils::default_test_config;
+
+        use super::*;
+
+        fn v_set_cell() -> Cell {
+            let v_set = ValidatorSet {
+                utime_since: 0,
+                utime_until: u32::MAX,
+                main: 1.try_into().unwrap(),
+                total_weight: 1,
+                list: vec![ValidatorDescription {
+                    public_key: HashBytes([1; 32]),
+                    weight: 1,
+                    adnl_addr: None,
+                    mc_seqno_since: 0,
+                    prev_total_weight: 0,
+                }],
+            };
+            CellBuilder::build_from(v_set).unwrap()
+        }
+
+        fn random_consensus_info() -> ConsensusInfo {
+            ConsensusInfo {
+                vset_switch_round: random(),
+                prev_vset_switch_round: random(),
+                genesis_info: GenesisInfo {
+                    start_round: random(),
+                    genesis_millis: random(),
+                },
+                prev_shuffle_mc_validators: random(),
+            }
+        }
+
+        #[test]
+        fn genesis_override_overcomes_config_change() {
+            let mut cons_info = random_consensus_info();
+            let before = cons_info;
+
+            let start = KbNextSessionStart {
+                prev_consensus_config: default_test_config().conf.consensus,
+                is_consensus_info_overridden: true,
+                is_consensus_config_changed: random(),
+                is_curr_switch_after_pause: random(),
+                gen_chain_time_millis: random(),
+                after_pause_round: random(),
+            };
+
+            let next_session_start = start.round(&mut cons_info, random());
+
+            assert_eq!(next_session_start, before.genesis_info.start_round + 1);
+            assert_eq!(cons_info, before);
+        }
+
+        #[test]
+        fn config_change_updates_genesis() {
+            let mut cons_info = random_consensus_info();
+
+            let start = KbNextSessionStart {
+                prev_consensus_config: default_test_config().conf.consensus,
+                is_consensus_info_overridden: false, // no guard here: may overwrite ANY genesis
+                is_consensus_config_changed: true,
+                is_curr_switch_after_pause: random(),
+                gen_chain_time_millis: 50_000,
+                after_pause_round: random(),
+            };
+
+            let next_session_start = start.round(&mut cons_info, 600);
+
+            assert_eq!(next_session_start, 601);
+            assert_eq!(cons_info.genesis_info, GenesisInfo {
+                start_round: 600,
+                genesis_millis: 50_001,
+            });
+        }
+
+        /// Behavior-spec example:
+        /// - First vset change schedules `after_pause = P + 210 + 1`.
+        /// - Second vset change while "applied/too close" indents the switch by:
+        ///   `max_total_rounds() + 1 = (850 + 210 + 140 + 20) + 1 = 1221`.
+        /// - If later vset changes happen while the switch is far in the future
+        ///   (`> after_pause`), the switch round stays unchanged and only the scheduled vset
+        ///   is replaced.
+        #[test]
+        fn consecutive_v_set_changes() {
+            // test doesn't depend on value change: just imagine it's updated
+            let cons_conf = {
+                let mut temp = default_test_config().conf.consensus;
+                temp.commit_history_rounds = 20.try_into().unwrap();
+                temp.deduplicate_rounds = 140;
+                temp.max_consensus_lag_rounds = 210.try_into().unwrap();
+                temp.sync_support_rounds = 850.try_into().unwrap();
+                assert_eq!(temp.max_total_rounds(), 20_u32 + 140 + 210 + 850);
+                temp
+            };
+
+            // test doesn't depend on value change: just imagine it's updated
+            let stub_update = KbNextSessionUpdate {
+                prev_shuffle_mc_validators: false,
+                prev_vset_hash: HashBytes([0; _]),
+                shuffle_mc_validators: false,
+                current_vset: v_set_cell(),
+            };
+
+            let mut cons_info = ConsensusInfo::default();
+
+            // First vset change: soon after genesis may apply just pause bound
+
+            let mut processed_up_to = 1;
+            let mut after_pause_round =
+                KbNextSessionStart::after_pause_round(processed_up_to, &cons_conf);
+
+            let start_1 = KbNextSessionStart {
+                prev_consensus_config: cons_conf.clone(),
+                is_consensus_info_overridden: false,
+                is_consensus_config_changed: false,
+                is_curr_switch_after_pause: cons_info.vset_switch_round > after_pause_round,
+                gen_chain_time_millis: 0,
+                after_pause_round,
+            };
+            assert!(!start_1.is_curr_switch_after_pause);
+
+            let next_1 = start_1.round(&mut cons_info, processed_up_to);
+            assert_eq!(next_1, after_pause_round);
+
+            let validator_info = stub_update
+                .apply(&mut cons_info, next_1, start_1.is_curr_switch_after_pause)
+                .unwrap()
+                .unwrap();
+            assert_eq!(cons_info.prev_vset_switch_round, 0);
+            assert_eq!(cons_info.vset_switch_round, after_pause_round);
+            assert_eq!(validator_info.catchain_seqno, next_1);
+
+            // Second vset change while switch is still "applied/too close": push by full history.
+
+            processed_up_to += 1;
+            after_pause_round = KbNextSessionStart::after_pause_round(processed_up_to, &cons_conf);
+
+            let start_2 = {
+                let mut temp = start_1;
+                temp.is_curr_switch_after_pause = cons_info.vset_switch_round > after_pause_round;
+                temp.after_pause_round = after_pause_round;
+                assert!(!temp.is_curr_switch_after_pause);
+                temp
+            };
+
+            let next_2 = start_2.round(&mut cons_info, processed_up_to);
+            assert!(next_2 > processed_up_to);
+            assert_eq!(next_2, (next_1 + cons_conf.max_total_rounds() + 1));
+
+            let validator_info = stub_update
+                .apply(&mut cons_info, next_2, start_2.is_curr_switch_after_pause)
+                .unwrap()
+                .unwrap();
+            assert_eq!(cons_info.prev_vset_switch_round, next_1);
+            assert_eq!(cons_info.vset_switch_round, next_2);
+            assert_eq!(validator_info.catchain_seqno, next_2);
+
+            // Third vset change while switch is far in the future: keep the same switch round.
+
+            processed_up_to += 1;
+            after_pause_round = KbNextSessionStart::after_pause_round(processed_up_to, &cons_conf);
+
+            let start_3 = {
+                let mut temp = start_2;
+                temp.is_curr_switch_after_pause = cons_info.vset_switch_round > after_pause_round;
+                temp.after_pause_round = after_pause_round;
+                assert!(temp.is_curr_switch_after_pause);
+                temp
+            };
+            assert!(start_3.is_curr_switch_after_pause);
+
+            let next_3 = start_3.round(&mut cons_info, processed_up_to);
+            assert!(next_3 > processed_up_to);
+            assert_eq!(next_3, next_2);
+
+            let validator_info = stub_update
+                .apply(&mut cons_info, next_3, start_3.is_curr_switch_after_pause)
+                .unwrap()
+                .unwrap();
+            assert_eq!(cons_info.prev_vset_switch_round, next_1);
+            assert_eq!(cons_info.vset_switch_round, next_2);
+            assert_eq!(validator_info.catchain_seqno, next_2);
+        }
+
+        #[test]
+        fn noop_if_v_set_unchanged() {
+            let is_shuffle = random();
+            let update = KbNextSessionUpdate {
+                prev_shuffle_mc_validators: is_shuffle,
+                prev_vset_hash: *v_set_cell().repr_hash(),
+                shuffle_mc_validators: is_shuffle,
+                current_vset: v_set_cell(),
+            };
+
+            let mut cons_info = random_consensus_info();
+            let before = cons_info;
+
+            let validator_info = update.apply(&mut cons_info, random(), true).unwrap();
+
+            assert!(validator_info.is_none(), "{update:?} {cons_info:?}");
+            assert_eq!(cons_info, before, "{update:?} {cons_info:?}");
         }
     }
 }
