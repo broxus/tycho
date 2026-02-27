@@ -623,4 +623,103 @@ fn test_get_anchors_processing_info() {
         anchors_proc_info.last_imported_in_block_id,
         mc_data.block_id,
     );
+
+    //======
+    // when previous shard state has no processed_to and master has one, take from mc
+    let anchors_proc_info_opt = CollatorStdImpl::get_anchors_processing_info(
+        &shard_id,
+        &mc_data,
+        &prev_block_id,
+        prev_gen_chain_time,
+        (0, 0),
+    );
+    assert!(anchors_proc_info_opt.is_some());
+    let anchors_proc_info = anchors_proc_info_opt.unwrap();
+    assert_eq!(
+        anchors_proc_info.processed_to_anchor_id,
+        min_externals_processed_to.0,
+    );
+    assert_eq!(
+        anchors_proc_info.processed_to_msgs_offset,
+        min_externals_processed_to.1,
+    );
+    assert_eq!(
+        anchors_proc_info.last_imported_chain_time,
+        mc_data.gen_chain_time,
+    );
+    assert_eq!(
+        anchors_proc_info.last_imported_in_block_id,
+        mc_data.block_id,
+    );
+
+    //======
+    // if previous block seqno is ahead from top shard seqno, info from mc must be ignored
+    let prev_block_id_with_other_seqno = BlockId {
+        shard: shard_id,
+        seqno: prev_block_id.seqno + 1,
+        root_hash: Default::default(),
+        file_hash: Default::default(),
+    };
+    let anchors_proc_info_opt = CollatorStdImpl::get_anchors_processing_info(
+        &shard_id,
+        &mc_data,
+        &prev_block_id_with_other_seqno,
+        prev_gen_chain_time,
+        prev_processed_upto_externals.processed_to,
+    );
+    assert!(anchors_proc_info_opt.is_some());
+    let anchors_proc_info = anchors_proc_info_opt.unwrap();
+    assert_eq!(
+        anchors_proc_info.processed_to_anchor_id,
+        prev_processed_upto_externals.processed_to.0,
+    );
+    assert_eq!(
+        anchors_proc_info.processed_to_msgs_offset,
+        prev_processed_upto_externals.processed_to.1,
+    );
+    assert_eq!(
+        anchors_proc_info.last_imported_chain_time,
+        prev_gen_chain_time,
+    );
+    assert_eq!(
+        anchors_proc_info.last_imported_in_block_id,
+        prev_block_id_with_other_seqno,
+    );
+
+    //======
+    // for masterchain info is always taken from previous data
+    let master_shard_id = ShardIdent::MASTERCHAIN;
+    let master_prev_block_id = BlockId {
+        shard: master_shard_id,
+        seqno: 1005,
+        root_hash: Default::default(),
+        file_hash: Default::default(),
+    };
+    let master_prev_gen_chain_time = 1732479530330;
+    let master_prev_processed_to = (1901, 42);
+    let anchors_proc_info_opt = CollatorStdImpl::get_anchors_processing_info(
+        &master_shard_id,
+        &mc_data,
+        &master_prev_block_id,
+        master_prev_gen_chain_time,
+        master_prev_processed_to,
+    );
+    assert!(anchors_proc_info_opt.is_some());
+    let anchors_proc_info = anchors_proc_info_opt.unwrap();
+    assert_eq!(
+        anchors_proc_info.processed_to_anchor_id,
+        master_prev_processed_to.0,
+    );
+    assert_eq!(
+        anchors_proc_info.processed_to_msgs_offset,
+        master_prev_processed_to.1,
+    );
+    assert_eq!(
+        anchors_proc_info.last_imported_chain_time,
+        master_prev_gen_chain_time,
+    );
+    assert_eq!(
+        anchors_proc_info.last_imported_in_block_id,
+        master_prev_block_id,
+    );
 }
