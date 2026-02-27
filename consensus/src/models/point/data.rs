@@ -71,9 +71,30 @@ impl PointData {
             + 2 * UnixTime::MAX_TL_BYTES
     };
 
+    pub(super) fn check_genesis_except_maps(&self) -> Result<(), StructureIssue> {
+        if matches!(self.chained_anchor_proof, ChainedAnchorProof::Chained(_)) {
+            return Err(StructureIssue::ChainedProofMustUse(false));
+        }
+        if self.anchor_trigger != AnchorLink::ToSelf {
+            return Err(StructureIssue::SelfAnchorStage(AnchorStageRole::Trigger));
+        }
+        // evidence map is required to be empty during other peer sets checks
+        if self.anchor_proof != AnchorLink::ToSelf {
+            return Err(StructureIssue::SelfAnchorStage(AnchorStageRole::Proof));
+        }
+        if self.time != self.anchor_time {
+            return Err(StructureIssue::AnchorTime);
+        }
+        Ok(())
+    }
+
     /// counterpart of [`crate::dag::Verifier::verify`] that must be called earlier,
     /// does not require config and allows to use [`crate::models::Point`] methods
-    pub(super) fn check_maps(&self, author: &PeerId, round: Round) -> Result<(), StructureIssue> {
+    pub(super) fn check_regular_structure(
+        &self,
+        author: &PeerId,
+        round: Round,
+    ) -> Result<(), StructureIssue> {
         // proof for previous point consists of digest and 2F++ evidences
         // proof is listed in includes - to count for 2/3+1, verify and commit dependencies
         ((self.evidence.is_empty() == self.includes.contains_key(author))
@@ -83,28 +104,51 @@ impl PointData {
         // also cannot witness own point
         .or((self.witness.contains_key(author)).then_some(PointMap::Witness))
         .map(StructureIssue::AuthorInMap)
-        .or(self.chained_proof_error(round))
         .map_or(Ok(()), Err)?;
+
+        let must_use_chained_proof = self.anchor_proof == AnchorLink::ToSelf;
+        if matches!(self.chained_anchor_proof, ChainedAnchorProof::Chained(_))
+            != must_use_chained_proof
+        {
+            return Err(StructureIssue::ChainedProofMustUse(must_use_chained_proof));
+        }
+        match &self.chained_anchor_proof {
+            ChainedAnchorProof::Inapplicable => {}
+            ChainedAnchorProof::Chained(indirect) => {
+                if let Some(map) = self.indirect_link_error(indirect, round) {
+                    return Err(StructureIssue::ChainedProof(map));
+                }
+            }
+        }
+
         for role in [AnchorStageRole::Proof, AnchorStageRole::Trigger] {
-            self.link_error(role, round)
-                .map(|map| StructureIssue::Link(role, map))
-                .map_or(Ok(()), Err)?;
+            if let Some(map) = self.link_error(role, author, round) {
+                return Err(StructureIssue::Link(role, map));
+            }
+            // leader must maintain its chain of proofs,
+            // while others must link to previous points (checked at the end of this method)
+            if self.evidence.is_empty() && self.anchor_link(role) == &AnchorLink::ToSelf {
+                return Err(StructureIssue::SelfAnchorStage(role));
+            }
+        }
+
+        if self.time <= self.anchor_time {
+            // point time must be greater than anchor time
+            return Err(StructureIssue::AnchorTime);
         }
         Ok(())
     }
 
-    fn chained_proof_error(&self, round: Round) -> Option<StructureIssue> {
-        match &self.chained_anchor_proof {
-            ChainedAnchorProof::Inapplicable => None,
-            ChainedAnchorProof::Chained(indirect) => {
-                (self.indirect_link_error(indirect, round)).map(StructureIssue::ChainedProof)
-            }
-        }
-    }
-
-    fn link_error(&self, link_field: AnchorStageRole, round: Round) -> Option<PointMap> {
+    fn link_error(
+        &self,
+        link_field: AnchorStageRole,
+        author: &PeerId,
+        round: Round,
+    ) -> Option<PointMap> {
         match self.anchor_link(link_field) {
-            AnchorLink::ToSelf => None,
+            AnchorLink::ToSelf => {
+                (!self.includes.contains_key(author)).then_some(PointMap::Includes)
+            }
             AnchorLink::Direct(Through::Includes(peer)) => {
                 (!self.includes.contains_key(peer)).then_some(PointMap::Includes)
             }

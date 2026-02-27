@@ -62,12 +62,12 @@ pub enum IllFormedReason {
     AfterLoadFromDb { is_final: bool },
     #[error("{0}")]
     EvidenceSigError(EvidenceSigError),
-    #[error("structure issue: {0}")]
-    Structure(StructureIssue),
     #[error("point before genesis cannot exist in this overlay")]
     BeforeGenesis,
     #[error("too large payload: {0} bytes")]
     TooLargePayload(u32),
+    #[error("structure issue: {0}")]
+    Structure(StructureIssue),
     #[error("links anchor across genesis")]
     LinksAcrossGenesis,
     #[error("links both anchor roles to same round")]
@@ -78,13 +78,6 @@ pub enum IllFormedReason {
     UnknownPeers((Vec<PeerId>, PointMap)),
     #[error("{} peers is not enough in {:?} map for 3F+1={}", .0.0, .0.2, .0.1.full())]
     LackOfPeers((usize, PeerCount, PointMap)),
-    #[error("anchor time")]
-    AnchorTime,
-    #[error("anchor stage role {0:?}")]
-    SelfAnchorStage(AnchorStageRole),
-    /// `false` for "must NOT have used chained proof"
-    #[error("must{} have used chained proof", .0.then_some("").unwrap_or(" not"))]
-    ChainedProofMustUse(bool),
     // Errors below are thrown from `validate()` because they require DagRound
     #[error("self link")]
     SelfLink,
@@ -719,10 +712,6 @@ impl Verifier {
             }
         }
 
-        info.check_structure()
-            .map_err(IllFormedReason::Structure)
-            .map_err(VerifyError::IllFormed)?;
-
         let (
             same_round_peers, // @ r+0
             includes_peers,   // @ r-1
@@ -762,15 +751,8 @@ impl Verifier {
             }
         };
 
-        // point belongs to current genesis
-        if let Some(reason) = Self::links_across_genesis(info, conf) {
-            return Err(VerifyError::IllFormed(reason));
-        }
-
-        // check only now, as config seems up to date
-        if let Some(reason) = Self::is_well_formed(info, conf) {
-            return Err(VerifyError::IllFormed(reason));
-        }
+        // now it's safe to call `round().prev()`
+        Self::check_well_formed(info, conf).map_err(VerifyError::IllFormed)?;
 
         // Every point producer @ r-1 must prove its delivery to 2/3 signers @ r+0
         // inside proving point @ r+0.
@@ -870,7 +852,27 @@ impl Verifier {
         Ok(())
     }
 
-    fn links_across_genesis(info: &PointInfo, conf: &MempoolConfig) -> Option<IllFormedReason> {
+    /// allows to link this [`PointInfo`] with its dependencies for validation and commit;
+    /// its decided later in [`Self::check_links`] whether current point belongs to leader
+    fn check_well_formed(info: &PointInfo, conf: &MempoolConfig) -> Result<(), IllFormedReason> {
+        if info.round() == conf.genesis_round {
+            if info.payload_len() > 0 {
+                return Err(IllFormedReason::TooLargePayload(info.payload_bytes()));
+            }
+            // calling method checks maps to throw `MustBeEmpty` and also checks author
+            return (info.check_genesis_except_maps()).map_err(IllFormedReason::Structure);
+        }
+
+        if info.payload_bytes() > conf.consensus.payload_batch_bytes.get() {
+            return Err(IllFormedReason::TooLargePayload(info.payload_bytes()));
+        }
+
+        (info.check_regular_structure()).map_err(IllFormedReason::Structure)?;
+
+        if (info.chained_anchor_proof()).is_some_and(|link| link.to.round < conf.genesis_round) {
+            return Err(IllFormedReason::LinksAcrossGenesis);
+        }
+
         let proof_round = info.anchor_round(AnchorStageRole::Proof);
         let trigger_round = info.anchor_round(AnchorStageRole::Trigger);
         match (
@@ -878,66 +880,17 @@ impl Verifier {
             trigger_round.cmp(&conf.genesis_round),
         ) {
             (cmp::Ordering::Less, _) | (_, cmp::Ordering::Less) => {
-                Some(IllFormedReason::LinksAcrossGenesis)
+                return Err(IllFormedReason::LinksAcrossGenesis);
             }
             (cmp::Ordering::Greater, cmp::Ordering::Greater) if proof_round == trigger_round => {
                 // equality is impossible due to commit waves do not start every round;
                 // anchor trigger may belong to a later round than proof and vice versa;
                 // no indirect links over genesis tombstone
-                Some(IllFormedReason::LinksSameRound)
+                return Err(IllFormedReason::LinksSameRound);
             }
-            _ => info
-                .chained_anchor_proof()
-                .filter(|link| link.to.round < conf.genesis_round)
-                .map(|_| IllFormedReason::LinksAcrossGenesis),
+            _ => {}
         }
-    }
-
-    /// counterpart of [`crate::models::PointData::has_well_formed_maps`] that must be called later
-    /// and allows to link this [`PointInfo`] with its dependencies for validation and commit;
-    /// its decided later in [`Self::check_links`] whether current point belongs to leader
-    fn is_well_formed(info: &PointInfo, conf: &MempoolConfig) -> Option<IllFormedReason> {
-        if info.round() == conf.genesis_round {
-            if info.payload_len() > 0 {
-                return Some(IllFormedReason::TooLargePayload(info.payload_bytes()));
-            }
-            // evidence map is required to be empty during other peer sets checks
-            if info.anchor_proof() != &AnchorLink::ToSelf {
-                return Some(IllFormedReason::SelfAnchorStage(AnchorStageRole::Proof));
-            }
-            if info.anchor_trigger() != &AnchorLink::ToSelf {
-                return Some(IllFormedReason::SelfAnchorStage(AnchorStageRole::Trigger));
-            }
-            if info.chained_anchor_proof().is_some() {
-                return Some(IllFormedReason::ChainedProofMustUse(false));
-            }
-            if info.time() != info.anchor_time() {
-                return Some(IllFormedReason::AnchorTime);
-            }
-        } else {
-            if info.payload_bytes() > conf.consensus.payload_batch_bytes.get() {
-                return Some(IllFormedReason::TooLargePayload(info.payload_bytes()));
-            }
-            // leader must maintain its chain of proofs,
-            // while others must link to previous points (checked at the end of this method)
-            if info.evidence().is_empty() {
-                if info.anchor_proof() == &AnchorLink::ToSelf {
-                    return Some(IllFormedReason::SelfAnchorStage(AnchorStageRole::Proof));
-                }
-                if info.anchor_trigger() == &AnchorLink::ToSelf {
-                    return Some(IllFormedReason::SelfAnchorStage(AnchorStageRole::Trigger));
-                }
-            }
-            let must_use_chained_proof = info.anchor_proof() == &AnchorLink::ToSelf;
-            if info.chained_anchor_proof().is_some() != must_use_chained_proof {
-                return Some(IllFormedReason::ChainedProofMustUse(must_use_chained_proof));
-            }
-            if info.time() <= info.anchor_time() {
-                // point time must be greater than anchor time
-                return Some(IllFormedReason::AnchorTime);
-            }
-        };
-        None
+        Ok(())
     }
 
     /// blame author and every dependent point's author

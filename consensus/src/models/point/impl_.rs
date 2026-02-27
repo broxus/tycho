@@ -38,6 +38,13 @@ pub enum StructureIssue {
     Link(AnchorStageRole, PointMap),
     #[error("bad chained proof through {0:?} map")]
     ChainedProof(PointMap),
+    #[error("anchor stage role {0:?}")]
+    SelfAnchorStage(AnchorStageRole),
+    /// `false` for "must NOT have used chained proof"
+    #[error("must{} have used chained proof", .0.then_some("").unwrap_or(" not"))]
+    ChainedProofMustUse(bool),
+    #[error("anchor time")]
+    AnchorTime,
 }
 
 #[derive(Debug, Copy, Clone)]
