@@ -306,7 +306,7 @@ async fn overlay_server_persistent_state() -> Result<()> {
         shard_states.min_ref_mc_state().insert_untracked(),
     )?;
     shard_states
-        .store_state(&zerostate_handle, &zerostate, Default::default())
+        .store_state_ignore_cache(&zerostate_handle, &zerostate, Default::default())
         .await?;
 
     {
