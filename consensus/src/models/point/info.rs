@@ -141,8 +141,12 @@ impl PointInfo {
         if is_ok { Ok(()) } else { Err(EvidenceSigError) }
     }
 
-    pub fn check_structure(&self) -> Result<(), StructureIssue> {
-        (self.0.data).check_maps(self.author(), self.round())
+    pub fn check_genesis_except_maps(&self) -> Result<(), StructureIssue> {
+        (self.0.data).check_genesis_except_maps()
+    }
+
+    pub fn check_regular_structure(&self) -> Result<(), StructureIssue> {
+        (self.0.data).check_regular_structure(self.author(), self.round())
     }
 
     pub fn anchor_link(&self, link_field: AnchorStageRole) -> &AnchorLink {
