@@ -1506,9 +1506,7 @@ mod vset_update_start {
                 is_consensus_config_changed: {
                     prev_consensus_config != config.get_consensus_config()?
                 },
-                is_curr_switch_applied: {
-                    consensus_info.vset_switch_round <= prev_processed_to_anchor
-                },
+                is_curr_switch_applied: consensus_info.vset_switch_round <= after_pause_round,
                 gen_chain_time_millis: collation_data.get_gen_chain_time(),
 
                 after_pause_round,
