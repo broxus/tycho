@@ -260,7 +260,7 @@ export class Elector implements Contract {
   constructor(
     readonly address: Address,
     readonly init?: { code: Cell; data: Cell }
-  ) {}
+  ) { }
 
   static createFromAddress(address: Address) {
     return new Elector(address);
