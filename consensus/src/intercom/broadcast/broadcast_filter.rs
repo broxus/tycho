@@ -7,7 +7,7 @@ use tycho_network::PeerId;
 use tycho_util::FastDashMap;
 use tycho_util::metrics::HistogramGuard;
 
-use crate::dag::{DagHead, DagRound, IllFormedReason, Verifier, VerifyError, VerifyFailReason};
+use crate::dag::{DagHead, DagRound, IllFormedReason, UninitVset, Verifier, VerifyError};
 use crate::dyn_event;
 use crate::effects::{AltFormat, Ctx, RoundCtx};
 use crate::engine::{ConsensusConfigExt, NodeConfig};
@@ -200,7 +200,7 @@ impl BroadcastFilter {
     fn cache(
         &self,
         id: &PointId,
-        checked: &Result<ByAuthorItem, VerifyFailReason>,
+        checked: &Result<ByAuthorItem, UninitVset>,
         store: &MempoolStore,
         peer_schedule: &PeerSchedule,
         downloader: &Downloader,

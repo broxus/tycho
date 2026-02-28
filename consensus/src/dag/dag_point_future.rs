@@ -12,7 +12,8 @@ use tycho_util::sync::OnceTake;
 
 use crate::dag::dag_location::InclusionState;
 use crate::dag::{
-    DagRound, IllFormedReason, InvalidDependency, InvalidReason, ValidateResult, Verifier,
+    DagRound, IllFormedReason, InvalidDependency, InvalidReason, UninitVset, ValidateResult,
+    Verifier, VerifyError,
 };
 use crate::effects::{
     AltFormat, Cancelled, Ctx, DownloadCtx, RoundCtx, SpawnLimit, Task, TaskResult, ValidateCtx,
@@ -407,7 +408,7 @@ impl DagPointFuture {
                     let nested = LIMIT.spawn_blocking(into_round_ctx.task(), store_fn);
                     nested.await.await
                 }
-                DownloadResult::IllFormed(point, reason) => {
+                DownloadResult::IllFormed(point, VerifyError::IllFormed(reason)) => {
                     let mut status = PointStatusIllFormed {
                         is_first_resolved: false,
                         has_proof: cert.has_proof(),
@@ -420,6 +421,30 @@ impl DagPointFuture {
                     let store_fn = move || {
                         let _guard = ctx.span().enter();
                         store.insert_point(&point, &PointStatusStored::IllFormed(status));
+                        state.resolve(&dag_point);
+                        dag_point
+                    };
+                    let nested = LIMIT.spawn_blocking(into_round_ctx.task(), store_fn);
+                    nested.await.await
+                }
+                DownloadResult::IllFormed(point, VerifyError::Fail(UninitVset(_))) => {
+                    let store_status = PointStatusFound {
+                        has_proof: cert.has_proof(),
+                    };
+                    let mut status = PointStatusNotFound {
+                        is_first_resolved: false,
+                        has_proof: false,
+                        author: point_id.author,
+                    };
+                    state.acquire(&point_id, &mut status);
+                    // to raise HistoryConflict and restart mempool at next block
+                    let dag_point = DagPoint::new_not_found(point_id, cert, &status);
+                    let ctx = into_round_ctx.clone();
+
+                    let store_fn = move || {
+                        let _guard = ctx.span().enter();
+                        // to retry `verify()` at restart with new TKA and maybe also vset
+                        store.insert_point(&point, &PointStatusStored::Found(store_status));
                         state.resolve(&dag_point);
                         dag_point
                     };
@@ -702,7 +727,10 @@ impl DagPointFuture {
         {
             let result = match ill_formed_reason {
                 None => DownloadResult::Verified(broadcast.clone()),
-                Some(reason) => DownloadResult::IllFormed(broadcast.clone(), reason.clone()),
+                Some(reason) => DownloadResult::IllFormed(
+                    broadcast.clone(),
+                    VerifyError::IllFormed(reason.clone()),
+                ),
             };
             // receiver is dropped upon completion
             oneshot.send(result).ok();

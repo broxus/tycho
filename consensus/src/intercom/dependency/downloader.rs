@@ -38,7 +38,7 @@ pub struct Downloader {
 pub enum DownloadResult {
     NotFound,
     Verified(Point),
-    IllFormed(Point, IllFormedReason),
+    IllFormed(Point, VerifyError),
 }
 
 struct DownloaderInner {
@@ -373,8 +373,8 @@ impl DownloadTask {
                     point = debug(&point),
                     "downloaded ill-formed"
                 );
-                let reason = IllFormedReason::EvidenceSigError(issue);
-                Some(DownloadResult::IllFormed(point, reason))
+                let error = VerifyError::IllFormed(IllFormedReason::EvidenceSigError(issue));
+                Some(DownloadResult::IllFormed(point, error))
             }
             LastResponse::Point(point) if point.info().id() != self.query.point_id() => {
                 on_not_found();
@@ -392,22 +392,13 @@ impl DownloadTask {
             LastResponse::Point(point) => {
                 match Verifier::verify(point.info(), &self.peer_schedule, self.ctx.conf()) {
                     Ok(()) => Some(DownloadResult::Verified(point)), // `Some` breaks outer loop
-                    Err(VerifyError::IllFormed(reason)) => {
-                        tracing::error!(
-                            error = display(&reason),
-                            point = debug(&point),
-                            "downloaded ill-formed"
-                        );
-                        Some(DownloadResult::IllFormed(point, reason))
-                    }
-                    Err(VerifyError::Fail(error)) => {
+                    Err(error) => {
                         tracing::error!(
                             error = display(&error),
                             point = debug(&point),
-                            "failed to verify downloaded point: outdated vset"
+                            "downloaded ill-formed"
                         );
-                        // to raise HistoryConflict and restart mempool at next block
-                        Some(DownloadResult::NotFound)
+                        Some(DownloadResult::IllFormed(point, error))
                     }
                 }
             }
