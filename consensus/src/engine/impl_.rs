@@ -12,7 +12,9 @@ use tokio::sync::mpsc;
 use tycho_network::PeerId;
 use tycho_util::metrics::HistogramGuard;
 
-use crate::dag::{DagFront, DagRound, HistoryConflict, KeyGroup, Verifier, VerifyError};
+use crate::dag::{
+    DagFront, DagRound, HistoryConflict, KeyGroup, UninitVset, Verifier, VerifyError,
+};
 use crate::effects::{
     AltFormat, Cancelled, Ctx, EngineCtx, RoundCtx, Task, TaskResult, TaskTracker,
 };
@@ -302,23 +304,22 @@ impl Engine {
                 let verified = need_verify
                     .into_par_iter()
                     .map(|(info, status)| {
-                        let mut ill_status = PointStatusIllFormed {
-                            is_first_resolved: false,
-                            has_proof: status.has_proof,
-                            is_reason_final: false,
-                        };
                         match Verifier::verify(&info, &peer_schedule, round_ctx.conf()) {
                             Ok(()) => Ok(PointRestore::Found(info, status)),
                             Err(VerifyError::IllFormed(reason)) => {
-                                ill_status.is_reason_final = reason.is_final();
+                                let ill_status = PointStatusIllFormed {
+                                    is_first_resolved: false,
+                                    has_proof: status.has_proof,
+                                    is_reason_final: reason.is_final(),
+                                };
                                 Ok(PointRestore::IllFormed(*info.id(), ill_status))
                             }
-                            Err(VerifyError::Fail(error)) => {
+                            Err(VerifyError::Fail(error @ UninitVset(_))) => {
                                 tracing::error!(
                                     parent: round_ctx.span(),
                                     point_id = ?info.id().alt(),
                                     %error,
-                                    "cannot preload point, but it was verified to be stored"
+                                    "cannot verify preloaded point"
                                 );
                                 Err(HistoryConflict(info.round()).into())
                             }

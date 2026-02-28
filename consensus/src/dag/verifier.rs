@@ -34,7 +34,7 @@ pub struct Verifier;
 #[derive(thiserror::Error, Debug)]
 pub enum VerifyError {
     #[error("cannot verify: {0}")]
-    Fail(VerifyFailReason),
+    Fail(UninitVset),
     #[error("ill-formed: {0}")]
     IllFormed(IllFormedReason),
 }
@@ -48,17 +48,13 @@ pub enum ValidateResult {
 }
 
 #[derive(thiserror::Error, Debug)]
-pub enum VerifyFailReason {
-    #[error("uninit {:?} peer set of {} len at round {}", .0.2, .0.0, .0.1.0)]
-    Uninit((usize, Round, PointMap)),
-    #[error("author is not scheduled: outdated peer schedule or author out of nowhere")]
-    UnknownAuthor,
-}
+#[error("uninit {:?} peer set of {} len at round {}", .0.2, .0.0, .0.1.0)]
+pub struct UninitVset(pub (usize, Round, PointMap));
 
 #[derive(thiserror::Error, Debug, Clone)]
 pub enum IllFormedReason {
     /// Flag is preserved across restarts, because only non-final are subjects to `FixHistory`
-    #[error("ill-formed after load from DB, is_final={}", .is_final)]
+    #[error("ill-formed after load from DB{}", if *.is_final { ": final" } else { "" },)]
     AfterLoadFromDb { is_final: bool },
     #[error("{0}")]
     EvidenceSigError(EvidenceSigError),
@@ -72,6 +68,8 @@ pub enum IllFormedReason {
     LinksAcrossGenesis,
     #[error("links both anchor roles to same round")]
     LinksSameRound,
+    #[error("author is not scheduled: outdated vset or author out of vset")]
+    UnknownAuthor,
     #[error("{0:?} peer map must be empty")]
     MustBeEmpty(PointMap),
     #[error("unknown peers in {:?} map: {}", .0.1, .0.0.as_slice().alt())]
@@ -122,8 +120,8 @@ pub enum InvalidReason {
 impl IllFormedReason {
     pub fn is_final(&self) -> bool {
         match self {
-            IllFormedReason::AfterLoadFromDb { is_final } => *is_final,
-            IllFormedReason::EvidenceSigError(_) => true,
+            Self::AfterLoadFromDb { is_final } => *is_final,
+            Self::EvidenceSigError(_) => true,
             _ => false,
         }
     }
@@ -704,12 +702,25 @@ impl Verifier {
         peer_schedule: &PeerSchedule,
         conf: &MempoolConfig,
     ) -> Result<(), VerifyError> {
-        fn peer_count_genesis(len: usize, round: Round) -> Result<PeerCount, Round> {
+        fn peer_count_genesis(
+            len: usize,
+            round: Round,
+            point_map: PointMap,
+        ) -> Result<PeerCount, VerifyError> {
             if len == PeerCount::GENESIS.full() {
                 Ok(PeerCount::GENESIS)
             } else {
-                Err(round)
+                Err(VerifyError::Fail(UninitVset((len, round, point_map))))
             }
+        }
+
+        fn peer_count(
+            len: usize,
+            round: Round,
+            point_map: PointMap,
+        ) -> Result<PeerCount, VerifyError> {
+            PeerCount::try_from(len)
+                .map_err(|_e| VerifyError::Fail(UninitVset((len, round, point_map))))
         }
 
         let (
@@ -720,16 +731,15 @@ impl Verifier {
             0 => return Err(VerifyError::IllFormed(IllFormedReason::BeforeGenesis)),
             1 => {
                 let a = peer_schedule.atomic().peers_for(info.round()).clone();
-                ((peer_count_genesis(a.len(), info.round()), a), None, None)
+                let peer_count_a = peer_count_genesis(a.len(), info.round(), PointMap::Evidence)?;
+                ((peer_count_a, a), None, None)
             }
             2 => {
                 let rounds = [info.round(), info.round().prev()];
                 let [a, b] = peer_schedule.atomic().peers_for_array(rounds);
-                (
-                    (PeerCount::try_from(a.len()).map_err(|_e| rounds[0]), a),
-                    Some((peer_count_genesis(b.len(), rounds[1]), b)),
-                    None,
-                )
+                let peer_count_a = peer_count(a.len(), rounds[0], PointMap::Evidence)?;
+                let peer_count_b = peer_count_genesis(b.len(), rounds[1], PointMap::Includes)?;
+                ((peer_count_a, a), Some((peer_count_b, b)), None)
             }
             more => {
                 let rounds = [
@@ -739,13 +749,13 @@ impl Verifier {
                 ];
                 let [a, b, c] = peer_schedule.atomic().peers_for_array(rounds);
                 let peer_count_c = if more == 3 {
-                    peer_count_genesis(c.len(), rounds[2])
+                    peer_count_genesis(c.len(), rounds[2], PointMap::Witness)?
                 } else {
-                    PeerCount::try_from(c.len()).map_err(|_e| rounds[2])
+                    peer_count(c.len(), rounds[2], PointMap::Witness)?
                 };
                 (
-                    (PeerCount::try_from(a.len()).map_err(|_e| rounds[0]), a),
-                    Some((PeerCount::try_from(b.len()).map_err(|_e| rounds[1]), b)),
+                    (peer_count(a.len(), rounds[0], PointMap::Evidence)?, a),
+                    Some((peer_count(b.len(), rounds[1], PointMap::Includes)?, b)),
                     Some((peer_count_c, c)),
                 )
             }
@@ -756,54 +766,43 @@ impl Verifier {
 
         // Every point producer @ r-1 must prove its delivery to 2/3 signers @ r+0
         // inside proving point @ r+0.
-        match same_round_peers {
-            (Err(round), scheduled) => {
-                let len = scheduled.len();
-                let reason = VerifyFailReason::Uninit((len, round, PointMap::Evidence));
-                return Err(VerifyError::Fail(reason));
+        {
+            let (total, scheduled) = same_round_peers;
+            if !scheduled.contains(info.author()) {
+                let reason = IllFormedReason::UnknownAuthor;
+                return Err(VerifyError::IllFormed(reason));
             }
-            (Ok(total), scheduled) => {
-                if !scheduled.contains(info.author()) {
-                    let reason = VerifyFailReason::UnknownAuthor;
-                    return Err(VerifyError::Fail(reason));
+            let evidence = &info.evidence();
+            if !evidence.is_empty() {
+                if total == PeerCount::GENESIS {
+                    let reason = IllFormedReason::MustBeEmpty(PointMap::Evidence);
+                    return Err(VerifyError::IllFormed(reason));
                 }
-                let evidence = &info.evidence();
-                if !evidence.is_empty() {
-                    if total == PeerCount::GENESIS {
-                        let reason = IllFormedReason::MustBeEmpty(PointMap::Evidence);
-                        return Err(VerifyError::IllFormed(reason));
-                    }
-                    let unknown = evidence
-                        .keys()
-                        .filter(|id| !scheduled.contains(id))
-                        .copied()
-                        .collect::<Vec<_>>();
-                    if !unknown.is_empty() {
-                        let reason = IllFormedReason::UnknownPeers((unknown, PointMap::Evidence));
-                        return Err(VerifyError::IllFormed(reason));
-                    }
-                    let len = evidence.len();
-                    if len < total.majority_of_others() {
-                        let reason = IllFormedReason::LackOfPeers((len, total, PointMap::Evidence));
-                        return Err(VerifyError::IllFormed(reason));
-                    }
+                let unknown = evidence
+                    .keys()
+                    .filter(|id| !scheduled.contains(id))
+                    .copied()
+                    .collect::<Vec<_>>();
+                if !unknown.is_empty() {
+                    let reason = IllFormedReason::UnknownPeers((unknown, PointMap::Evidence));
+                    return Err(VerifyError::IllFormed(reason));
+                }
+                let len = evidence.len();
+                if len < total.majority_of_others() {
+                    let reason = IllFormedReason::LackOfPeers((len, total, PointMap::Evidence));
+                    return Err(VerifyError::IllFormed(reason));
                 }
             }
         }
 
         match includes_peers {
-            Some((Err(round), scheduled)) => {
-                let len = scheduled.len();
-                let reason = VerifyFailReason::Uninit((len, round, PointMap::Includes));
-                return Err(VerifyError::Fail(reason));
-            }
             None => {
                 if !info.includes().is_empty() {
                     let reason = IllFormedReason::MustBeEmpty(PointMap::Includes);
                     return Err(VerifyError::IllFormed(reason));
                 }
             }
-            Some((Ok(total), scheduled)) => {
+            Some((total, scheduled)) => {
                 let includes = &info.includes();
                 let unknown = includes
                     .keys()
@@ -823,18 +822,13 @@ impl Verifier {
         }
 
         match witness_peers {
-            Some((Err(round), scheduled)) => {
-                let len = scheduled.len();
-                let reason = VerifyFailReason::Uninit((len, round, PointMap::Witness));
-                return Err(VerifyError::Fail(reason));
-            }
             None => {
                 if !info.witness().is_empty() {
                     let reason = IllFormedReason::MustBeEmpty(PointMap::Witness);
                     return Err(VerifyError::IllFormed(reason));
                 }
             }
-            Some((Ok(_), scheduled)) => {
+            Some((_, scheduled)) => {
                 if !info.witness().is_empty() {
                     let peers = info.witness().keys();
                     let unknown = peers
@@ -935,7 +929,7 @@ impl ValidateCtx {
 
     fn verified(result: &Result<(), VerifyError>) {
         let label = match result {
-            Err(VerifyError::Fail(_)) => "failed",
+            Err(VerifyError::Fail(UninitVset(_))) => "uninit_vset",
             Err(VerifyError::IllFormed(IllFormedReason::UnknownPeers(_))) => "bad_peer",
             Err(VerifyError::IllFormed(_)) => "ill_formed",
             Ok(_) => {
