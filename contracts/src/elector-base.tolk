@@ -331,7 +331,9 @@ fun conductElection<T>(): bool {
         bounce: true,
         value: MSG_VALUE_UPDATE_VSET,
         dest: (MASTERCHAIN, configAddress),
-        body: ConfigSetNextValidatorSet { queryId: election.electAt as uint64, vset },
+        body: ConfigSetNextValidatorSet {
+            queryId: election.electAt as uint64, vset
+        },
     })
         .send(SEND_MODE_PAY_FEES_SEPARATELY);
 
@@ -596,8 +598,8 @@ fun syncElectionWithVset<T>(): bool {
 
     // Find vset hash in config params (search in current or next vset).
     if (
-        blockchain.configParam(PARAM_IDX_CURRENT_VSET).hashEq(vsetHash) ||
-        blockchain.configParam(PARAM_IDX_NEXT_VSET).hashEq(vsetHash)
+    blockchain.configParam(PARAM_IDX_CURRENT_VSET).hashEq(vsetHash) ||
+    blockchain.configParam(PARAM_IDX_NEXT_VSET).hashEq(vsetHash)
     ) {
         // Reset `currentElection` since it is not needed anymore.
         data.currentElection = null;
@@ -719,6 +721,9 @@ fun updateActiveVsetId<T>(): bool {
 
     // Look up new activeId by hash.
     var iterNext = -1;
+    // Keep the scan cursor separate from the resolved id so we clear
+    // `activeId` when the current config hash is absent from history.
+    var newActiveId = 0;
     do {
         var (id, cs, found) = data.pastElections.uDictGetNext(32, iterNext);
         if (found) {
@@ -732,6 +737,7 @@ fun updateActiveVsetId<T>(): bool {
 
                 // Serialize back
                 data.pastElections.uDictSetBuilder(32, iterNext, beginCell().storeAny(pastElection));
+                newActiveId = id!;
 
                 // Break.
                 found = false;
@@ -740,7 +746,7 @@ fun updateActiveVsetId<T>(): bool {
     } while (found);
 
     // Save active election id and vset hash.
-    data.activeId = iterNext == -1 ? 0 : iterNext;
+    data.activeId = newActiveId;
     data.activeHash = currentVsetHash;
     data.save();
 
@@ -1108,8 +1114,8 @@ fun unfreezeAll(credits: dict, pastElections: dict, electionId: int): UnfreezeAl
 
     val pe = lazy PastElection.fromSlice(cs!);
     val recovered = pe.bonuses > 0
-         ? unfreezeWithBonuses(mutate credits, pe.frozenDict, pe.totalStake, pe.bonuses)
-         : unfreezeWithoutBonuses(mutate credits, pe.frozenDict, pe.totalStake);
+        ? unfreezeWithBonuses(mutate credits, pe.frozenDict, pe.totalStake, pe.bonuses)
+        : unfreezeWithoutBonuses(mutate credits, pe.frozenDict, pe.totalStake);
 
     return UnfreezeAllResult {
         credits,
