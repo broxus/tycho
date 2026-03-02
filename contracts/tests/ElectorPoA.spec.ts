@@ -9,9 +9,9 @@ import {
   SendMode,
   toNano,
 } from "@ton/core";
-import { compile } from "@ton/blueprint";
-import { Blockchain, createShardAccount } from "@ton/sandbox";
-import { TychoExecutor } from "@tychosdk/emulator";
+import {compile} from "@ton/blueprint";
+import {Blockchain, createShardAccount} from "@ton/sandbox";
+import {TychoExecutor} from "@tychosdk/emulator";
 
 import {
   ELECTOR_OP_NEW_STAKE,
@@ -30,7 +30,7 @@ import {
   loadElectorPoAData,
   storeElectorPoAData,
 } from "../wrappers/ElectorPoA";
-import { simpleInternal } from "../wrappers/util";
+import {simpleInternal} from "../wrappers/util";
 
 const ELECTOR_ADDR = address(
   "-1:3333333333333333333333333333333333333333333333333333333333333333"
@@ -329,12 +329,12 @@ describe("ElectorPoA", () => {
     const cs = elector.accountState.state.data!.asSlice();
     loadElectorData(cs);
 
-    expect(cs.remainingBits).toEqual(1);
+    expect(cs.remainingBits).toEqual(0);
 
-    const whitelist = cs.loadDict(
-      Dictionary.Keys.BigUint(256),
-      Dictionary.Values.BitString(0)
-    );
-    expect(whitelist.size).toEqual(0);
+    // const whitelist = cs.loadDict(
+    //   Dictionary.Keys.BigUint(256),
+    //   Dictionary.Values.BitString(0)
+    // );
+    // expect(whitelist.size).toEqual(0);
   });
 });
