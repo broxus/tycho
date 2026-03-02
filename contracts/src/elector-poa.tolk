@@ -129,7 +129,9 @@ fun afterCodeUpgrade(source: address, _args: slice, queryId: int) {
 
     var newData = beginCell() //
         .storeSlice(oldData)
-        .storeAny(PoAData { whitelist: null })
+        .storeAny(PoAData {
+        whitelist: null
+    })
         .endCell();
     contract.setData(newData);
 
@@ -152,8 +154,8 @@ fun canParticipateInElection(source: address): bool {
 
 fun processManageWhitelist(source: address, queryId: int, body: slice, add: bool) {
     var answerTag = manageWhitelist(source, body, add)
-         ? ANSWER_TAG_POA_WHITELIST_UPDATED
-         : ANSWER_TAG_ERROR;
+        ? ANSWER_TAG_POA_WHITELIST_UPDATED
+        : ANSWER_TAG_ERROR;
 
     sendMessageBack(
         source,
