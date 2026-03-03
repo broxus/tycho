@@ -499,19 +499,8 @@ impl CollatorStdImpl {
 
         // needs to set last imported anchor info into cache
         // to be able to import next anchor for collation
-        // only if node not in zerostate
         if let Some(anchors_proc_info) = &anchors_proc_info_opt {
-            self.anchors_cache.add_imported_anchor_info(AnchorInfo {
-                id: genesis_info.start_round,
-                ct: anchors_proc_info.last_imported_chain_time,
-                all_exts_count: 0,
-                our_exts_count: 0,
-                // SAFETY: omit author info for dummy anchor,
-                //      it will not be used to collate next block,
-                //      collator will import next anchor for sure
-                //      because processed_to anchor will be equal to last inported
-                author: PeerId(HashBytes::ZERO.0),
-            });
+            self.set_anchors_cache_last_imported_from_genesis(&genesis_info, anchors_proc_info);
         }
 
         // reset externals buffers
@@ -534,6 +523,24 @@ impl CollatorStdImpl {
             genesis_info,
             genesis_updated,
         })
+    }
+
+    fn set_anchors_cache_last_imported_from_genesis(
+        &mut self,
+        genesis_info: &GenesisInfo,
+        anchors_proc_info: &AnchorsProcessingInfo,
+    ) {
+        self.anchors_cache.add_imported_anchor_info(AnchorInfo {
+            id: genesis_info.start_round,
+            ct: anchors_proc_info.last_imported_chain_time,
+            all_exts_count: 0,
+            our_exts_count: 0,
+            // SAFETY: omit author info for dummy anchor,
+            //      it will not be used to collate next block,
+            //      collator will import next anchor for sure
+            //      because processed_to anchor will be equal to last inported
+            author: PeerId(HashBytes::ZERO.0),
+        });
     }
 
     async fn check_and_import_init_anchors(
@@ -602,6 +609,12 @@ impl CollatorStdImpl {
             tracing::info!(target: tracing_targets::COLLATOR,
                 "will not import init anchors",
             );
+
+            // needs to set last imported anchor info into cache
+            // to be able to import next anchor for collation
+            if self.anchors_cache.last_imported_anchor_info().is_none() {
+                self.set_anchors_cache_last_imported_from_genesis(genesis_info, anchors_proc_info);
+            }
 
             Ok(Default::default())
         }
@@ -1702,7 +1715,7 @@ impl CollatorStdImpl {
         let (mut last_imported_anchor_id, mut last_imported_chain_time) = self
             .anchors_cache
             .get_last_imported_anchor_id_and_ct()
-            .unwrap();
+            .context("should contain at least one imported anchor info here")?;
         if last_imported_chain_time < next_chain_time {
             let labels = [("workchain", self.shard_id.workchain().to_string())];
             let top_processed_to_anchor = working_state.mc_data.top_processed_to_anchor;
