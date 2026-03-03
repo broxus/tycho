@@ -54,6 +54,7 @@ pin-project-lite = { workspace = true }
 quick_cache = { workspace = true }
 rand = { workspace = true }
 rayon = { workspace = true }
+roaring = { workspace = true }
 scopeguard = { workspace = true }
 serde = { workspace = true }
 sha2 = { workspace = true }

@@ -30,6 +30,7 @@ use self::cell_storage::*;
 use self::store_state_raw::StoreStateContext;
 use super::{BlockHandle, BlockHandleStorage, BlockStorage, CellsDb, CoreStorageConfig};
 
+pub mod counters;
 mod cell_storage;
 mod entries_buffer;
 mod store_state_raw;
