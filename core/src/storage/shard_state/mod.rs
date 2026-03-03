@@ -35,6 +35,8 @@ use super::{
 use crate::storage::BlockConnection;
 
 mod cell_storage;
+pub mod counters;
+mod cell_storage;
 mod entries_buffer;
 mod store_state_raw;
 
