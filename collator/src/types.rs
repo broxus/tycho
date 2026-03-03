@@ -158,12 +158,17 @@ pub struct McData {
 
     pub shards_processed_to_by_partitions: FastHashMap<ShardIdent, (bool, ProcessedToByPartitions)>,
 
+    /// Previous `McData`. Can be None on start from persistent or zerostate.
     pub prev_mc_data: Option<PrevMcData>,
 }
 
 impl McData {
+    /// Creates `McData` from mc state.
+    ///
+    /// [`all_shards_processed_to_by_partitions`]: internals `processed_to` from master and all shards
     pub fn load_from_state(
         state_stuff: &ShardStateStuff,
+        prev_mc_state: Option<&ShardStateStuff>,
         all_shards_processed_to_by_partitions: FastHashMap<
             ShardIdent,
             (bool, ProcessedToByPartitions),
@@ -194,6 +199,16 @@ impl McData {
             .filter(|(shard_id, _)| !shard_id.is_masterchain())
             .collect();
 
+        let prev_mc_data = if let Some(prev_mc_state) = prev_mc_state {
+            let prev_extra = prev_mc_state.state_extra()?;
+            Some(PrevMcData {
+                shards: prev_extra.shards.as_vec()?,
+                consensus_info: prev_extra.consensus_info,
+            })
+        } else {
+            None
+        };
+
         Ok(Arc::new(Self {
             global_id: state.global_id,
             block_id,
@@ -215,7 +230,8 @@ impl McData {
 
             ref_mc_state_handle: state_stuff.ref_mc_state_handle().clone(),
             shards_processed_to_by_partitions,
-            prev_mc_data: None,
+
+            prev_mc_data,
         }))
     }
 

@@ -94,7 +94,7 @@ impl Cmd {
         let mc_state_stuff = dumper
             .dump_block_and_state(&master_block_id, master_block_id.seqno)
             .await?;
-        let mc_data = McData::load_from_state(&mc_state_stuff, Default::default())?;
+        let mc_data = McData::load_from_state(&mc_state_stuff, None, Default::default())?;
 
         println!("Dumping top shard blocks, states and queues...");
 

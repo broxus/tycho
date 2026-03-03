@@ -189,7 +189,7 @@ async fn test_collation_process_on_dump() {
 
     tracing::info!("Trying to start CollationManager");
 
-    let mc_data = McData::load_from_state(&mc_state, Default::default()).unwrap();
+    let mc_data = McData::load_from_state(&mc_state, None, Default::default()).unwrap();
 
     let (engine_stop_tx, mut engine_stop_rx) = tokio::sync::mpsc::channel(1);
     let validator = ValidatorStub {};

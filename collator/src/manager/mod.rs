@@ -1697,10 +1697,11 @@ where
         };
 
         // process latest master state: notify mempool and refresh collation session
+        let last_mc_block_id = *last_mc_state.block_id();
 
         // HACK: do not need to set master block latest chain time from zerostate when using mempool stub
         //      because anchors from stub have older chain time than in zerostate and it will brake collation
-        if last_mc_state.block_id().seqno > self.state_node_adapter.zerostate_id().seqno {
+        if last_mc_block_id.seqno > self.state_node_adapter.zerostate_id().seqno {
             Self::renew_mc_block_latest_chain_time(
                 &mut self.collation_sync_state.lock(),
                 last_mc_state.get_gen_chain_time(),
@@ -1710,14 +1711,18 @@ where
         Self::reset_collation_sync_status(&mut self.collation_sync_state.lock());
 
         // update last "synced to" info
-        self.update_last_synced_to_mc_block_id(*last_mc_state.block_id());
+        self.update_last_synced_to_mc_block_id(last_mc_block_id);
 
         // reset top shard blocks info
         // because next we will start to collate new shard blocks after the sync
         self.blocks_cache.reset_top_shard_blocks_additional_info();
 
-        let mc_data =
-            McData::load_from_state(&last_mc_state, all_shards_processed_to_by_partitions)?;
+        let mc_data = self.build_mc_data(
+            last_mc_state,
+            queue_restore_res.prev_mc_state,
+            queue_restore_res.prev_mc_block_id,
+            all_shards_processed_to_by_partitions,
+        )?;
 
         self.blocks_cache
             .remove_next_collated_blocks_from_cache(&queue_restore_res.synced_to_blocks_keys);
@@ -1757,6 +1762,44 @@ where
         }
 
         Ok(true)
+    }
+
+    /// Builds `McData` from provided parts.
+    /// Tries to load the previous mc state from storage when passed `None`.
+    fn build_mc_data(
+        &self,
+        last_mc_state: ShardStateStuff,
+        prev_mc_state: Option<ShardStateStuff>,
+        prev_mc_block_id: Option<BlockId>,
+        all_shards_processed_to_by_partitions: FastHashMap<
+            ShardIdent,
+            (bool, ProcessedToByPartitions),
+        >,
+    ) -> Result<Arc<McData>> {
+        let prev_mc_state = match (prev_mc_state, prev_mc_block_id) {
+            (Some(mc_state), _) => Some(mc_state),
+            (None, None) => None,
+            (None, Some(prev_mc_block_id)) if prev_mc_block_id.seqno <= self.state_node_adapter.zerostate_id().seqno => None,
+            // NOTE: Use zero epoch here since we don't need to reuse these states.
+            (None, Some(prev_mc_block_id)) => self
+                .state_node_adapter
+                .load_state(0, &prev_mc_block_id)
+                .await_blocking()
+                .map_err(|err| {
+                    tracing::warn!(target: tracing_targets::COLLATION_MANAGER,
+                        prev_mc_block_id = %prev_mc_block_id.as_short_id(),
+                        error = ?err,
+                        "failed to load previous mc state to build mc data, continue without prev_mc_data",
+                    );
+                    err
+                }).ok(),
+        };
+
+        McData::load_from_state(
+            &last_mc_state,
+            prev_mc_state.as_ref(),
+            all_shards_processed_to_by_partitions,
+        )
     }
 
     async fn get_all_shards_processed_to_by_partitions_for_mc_block(
@@ -2025,6 +2068,10 @@ where
             }
         }
 
+        // will track last mc state and previous before it
+        let mut prev_mc_state = None;
+        let mut last_mc_state;
+
         // extract all recevied blocks, apply required diffs
         // and return latest master state
         loop {
@@ -2084,6 +2131,8 @@ where
             let to_blocks_keys = mc_block_entry.get_top_blocks_keys()?;
             blocks_cache.set_gc_to_boundary(&to_blocks_keys);
 
+            last_mc_state = mc_block_entry.cached_state()?.clone();
+
             // on sync finish we commit diffs
             if is_last {
                 let partitions = subgraph.get_partitions();
@@ -2100,13 +2149,15 @@ where
                 let top_shards = blocks_cache.get_last_top_shards();
                 mq_adapter.clear_uncommitted_state(&top_shards)?;
 
-                let state = mc_block_entry.cached_state()?.clone();
-                res.last_mc_state = Some(state);
-
+                res.last_mc_state = Some(last_mc_state);
+                res.prev_mc_state = prev_mc_state;
+                res.prev_mc_block_id = mc_block_entry.prev_blocks_ids.first().copied();
                 res.synced_to_blocks_keys.extend(to_blocks_keys.into_iter());
 
                 return Ok(res);
             }
+
+            prev_mc_state = Some(last_mc_state.clone());
         }
     }
 
@@ -3463,6 +3514,8 @@ enum ProcessMcStateUpdateMode {
 #[derive(Default)]
 struct RestoreQueueResult {
     last_mc_state: Option<ShardStateStuff>,
+    prev_mc_state: Option<ShardStateStuff>,
+    prev_mc_block_id: Option<BlockId>,
     synced_to_blocks_keys: Vec<BlockCacheKey>,
     applied_diffs_ids: FastHashSet<BlockId>,
 }
