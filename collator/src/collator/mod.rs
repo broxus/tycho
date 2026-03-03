@@ -1849,35 +1849,51 @@ impl CollatorStdImpl {
         // check if has unprocessed messages in buffer or queue
         let has_unprocessed_messages = self.check_has_unprocessed_messages(&mut working_state)?;
 
-        if has_unprocessed_messages {
-            // do not import next anchor and force collation
-            tracing::info!(target: tracing_targets::COLLATOR,
-                top_processed_to_anchor,
-                last_imported_anchor_id,
-                last_imported_chain_time,
-                "there are unprocessed messages from previous block, will collate next block",
-            );
+        // check if should force master collation by unprocessed messages
+        let force_mc_collation =
+            has_unprocessed_messages.then_some(ForceMasterCollation::ByUnprocessedMessages);
 
-            self.listener
-                .on_skipped(
-                    working_state.mc_data.block_id,
-                    working_state.next_block_id_short,
-                    working_state.prev_shard_data_ref().gen_chain_time(),
-                    ForceMasterCollation::ByUnprocessedMessages,
-                    working_state.collation_config.clone(),
-                )
-                .await?;
-            self.delayed_working_state.delay(working_state);
-            return Ok(());
+        match (has_unprocessed_messages, force_one_anchor_import) {
+            (true, false) => {
+                // do not import next anchor and force collation
+                tracing::info!(target: tracing_targets::COLLATOR,
+                    top_processed_to_anchor,
+                    last_imported_anchor_id,
+                    last_imported_chain_time,
+                    "there are unprocessed messages from previous block, will collate next block",
+                );
+
+                self.listener
+                    .on_skipped(
+                        working_state.mc_data.block_id,
+                        working_state.next_block_id_short,
+                        working_state.prev_shard_data_ref().gen_chain_time(),
+                        force_mc_collation.expect(
+                            "should be Some(..) here because of `has_unprocessed_messages = true`",
+                        ),
+                        working_state.collation_config.clone(),
+                    )
+                    .await?;
+                self.delayed_working_state.delay(working_state);
+                return Ok(());
+            }
+            (false, _) => {
+                tracing::debug!(target: tracing_targets::COLLATOR,
+                    top_processed_to_anchor,
+                    last_imported_anchor_id,
+                    last_imported_chain_time,
+                    "there are no unprocessed messages, will import next anchor",
+                );
+            }
+            (_, true) => {
+                tracing::info!(target: tracing_targets::COLLATOR,
+                    force_one_anchor_import,
+                    "will import next anchor",
+                );
+            }
         }
 
-        // otherwise import next anchor and check if can collate in manager
-        tracing::debug!(target: tracing_targets::COLLATOR,
-            top_processed_to_anchor,
-            last_imported_anchor_id,
-            last_imported_chain_time,
-            "there are no unprocessed messages, will import next anchor",
-        );
+        // import next anchor and check if can collate in manager
 
         // next anchor importing can stuck if mempool paused
         // so allow to cancel collation here
@@ -1966,7 +1982,7 @@ impl CollatorStdImpl {
                             working_state.mc_data.block_id,
                             working_state.next_block_id_short,
                             next_anchor.chain_time,
-                            ForceMasterCollation::No,
+                            force_mc_collation.unwrap_or(ForceMasterCollation::No),
                             working_state.collation_config.clone(),
                         )
                         .await?;
@@ -1989,7 +2005,7 @@ impl CollatorStdImpl {
                         working_state.mc_data.block_id,
                         working_state.next_block_id_short,
                         last_imported_chain_time,
-                        ForceMasterCollation::ByAnchorImportSkipped,
+                        force_mc_collation.unwrap_or(ForceMasterCollation::ByAnchorImportSkipped),
                         working_state.collation_config.clone(),
                     )
                     .await?;
