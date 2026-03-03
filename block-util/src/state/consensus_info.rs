@@ -9,20 +9,21 @@ pub fn choose_genesis_info(
     if let Some(genesis_info_override) = &genesis_info_override
         && genesis_info_override.overrides(&curr_genesis_info)
     {
-        // new genesis info provided from global config and overrides the previous mc block
+        // new genesis info provided from global config and overrides the current from the last mc block
         (*genesis_info_override, true)
-    } else if let Some(prev_genesis_info) = prev_genesis_info
-        && !curr_genesis_info.overrides(&prev_genesis_info)
-    {
-        // genesis info was not updated in the previous mc block
+    } else if prev_genesis_info.is_none_or(|prev| !curr_genesis_info.overrides(&prev)) {
+        // genesis info was not updated in the last mc block
+        // NOTE: When prev mc data not exists it may be a start from zerostate or persistent
+        //      we cannot detect if genesis was really updated, so consider `genesis_updated = false`.
+        //      But is does not matter, because it will be on the node start so cache/buffers will be empty anyway.
         (curr_genesis_info, false)
     } else {
-        // genesis info from the previous mc block overrides the mc block before it
+        // genesis info from the last mc block overrides the previous mc block before it
 
         // NOTE: Special case when collating the next block after mc block
         //      that applied genesis override from the global config:
-        //      Genesis will override the mc block before the previous
-        //      but externals were already reset in the previous mc block collation.
+        //      Genesis will override the previous mc block before it
+        //      but externals were already reset in the last mc block collation.
         //      So we should not reset again.
         // So we consider the current genesis info was updated only if it overrides info from the global config
         let genesis_updated_after_override = genesis_info_override
@@ -100,14 +101,32 @@ mod tests {
                 expected_genesis: g2,
                 expected_updated: true,
             },
-            // No previous data and no override: updated.
+            // No previous data and no override: not updated.
             Case {
                 name: "no_prev_no_override",
                 curr: g1,
                 prev: None,
                 override_: None,
                 expected_genesis: g1,
-                expected_updated: true,
+                expected_updated: false,
+            },
+            // With no previous genesis, lower override still goes to "not updated" branch.
+            Case {
+                name: "no_prev_lower_override",
+                curr: g2,
+                prev: None,
+                override_: Some(g1),
+                expected_genesis: g2,
+                expected_updated: false,
+            },
+            // With no previous genesis, equal override still goes to "not updated" branch.
+            Case {
+                name: "no_prev_equal_override",
+                curr: g2,
+                prev: None,
+                override_: Some(g2),
+                expected_genesis: g2,
+                expected_updated: false,
             },
             // Current equals config override after previous update: should not update again.
             Case {
