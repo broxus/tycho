@@ -46,14 +46,21 @@ impl Shuttle {
             let unique_messages_len = unique_messages.len();
 
             if is_executable {
+                // don't link to prev anchor in case there was a gap
+                let prev_id = if self.first_after_gap.is_some() {
+                    self.first_after_gap = None;
+                    None
+                } else {
+                    committed.prev_anchor.map(|round| round.0)
+                };
                 push(MempoolAnchor {
                     id: anchor_id,
-                    prev_id: committed.prev_anchor.map(|round| round.0),
+                    prev_id,
                     chain_time,
                     author: *committed.anchor.author(),
                     externals: unique_messages,
-                });
-            }
+                })
+            };
 
             metrics::counter!("tycho_mempool_msgs_unique_count")
                 .increment(unique_messages_len as _);
