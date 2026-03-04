@@ -12,7 +12,7 @@ use tycho_block_util::dict::{
 };
 use tycho_block_util::queue::{QueuePartitionIdx, SerializedQueueDiff};
 use tycho_block_util::state::ShardStateStuff;
-use tycho_consensus::prelude::ConsensusConfigExt;
+use tycho_consensus::prelude::{ConsensusConfigExt, WAVE_ROUNDS};
 use tycho_core::global_config::ZerostateId;
 use tycho_types::boc;
 use tycho_types::cell::Lazy;
@@ -28,6 +28,7 @@ use crate::collator::debug_info::BlockDebugInfo;
 use crate::collator::do_collate::work_units::FinalizeWu;
 use crate::collator::error::{CollationCancelReason, CollatorError};
 use crate::collator::execution_manager::MessagesExecutor;
+use crate::collator::max_anchors_processing_lag_rounds;
 use crate::collator::messages_reader::{FinalizedMessagesReader, MessagesReader};
 use crate::collator::types::{
     AccountExistence, BlockCollationData, BlockSerializerCache, ExecuteResult, FinalizeBlockResult,
@@ -469,21 +470,22 @@ impl Phase<FinalizeState> {
                     .saturating_add(self.state.do_collate_wu.resume_collation_wu);
             }
 
-            // total wu used should cover max the number of rounds
-            // which mempool can be ahead of last applied master block
-            // because mempool will not produce more anchors
+            // total wu used should cover max the number of anchors
+            // which can be imported by collator
             let max_consensus_lag_rounds = self
                 .state
                 .mc_data
                 .config
                 .get_consensus_config()?
                 .max_consensus_lag_rounds
-                .get() as u64;
+                .get();
+            let max_anchors_processing_lag_rounds =
+                max_anchors_processing_lag_rounds(max_consensus_lag_rounds) as u64;
             let wu_used_to_import_next_anchor =
                 self.state.collation_config.wu_used_to_import_next_anchor;
-            let max_wu_used_limit = max_consensus_lag_rounds
-                .saturating_div(4)
-                .saturating_mul(wu_used_to_import_next_anchor);
+            let max_wu_used_limit =
+                (max_anchors_processing_lag_rounds.saturating_div(WAVE_ROUNDS as u64) + 1)
+                    .saturating_mul(wu_used_to_import_next_anchor);
 
             tracing::info!(target: tracing_targets::COLLATOR,
                 "wu_used_from_last_anchor update: old={}, new={}, max_limit={}, \
