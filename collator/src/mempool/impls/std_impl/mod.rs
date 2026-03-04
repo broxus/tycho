@@ -19,6 +19,7 @@ use crate::mempool::impls::std_impl::anchor_handler::StdAnchorHandler;
 use crate::mempool::impls::std_impl::state_update_queue::StateUpdateQueue;
 use crate::mempool::{DebugStateUpdateContext, StateUpdateContext};
 use crate::tracing_targets;
+use crate::types::processed_upto::BlockSeqno;
 
 pub struct MempoolAdapterStdImpl {
     cache: Arc<Cache>,
@@ -35,6 +36,7 @@ struct StdConfigAdapter {
     builder: MempoolConfigBuilder,
     state_update_queue: StateUpdateQueue,
     engine_session: Option<EngineSession>,
+    expect_genesis_change: Option<BlockSeqno>,
 }
 
 impl MempoolAdapterStdImpl {
@@ -63,11 +65,49 @@ impl MempoolAdapterStdImpl {
                 builder: config_builder,
                 state_update_queue: Default::default(),
                 engine_session: None,
+                expect_genesis_change: None,
             }),
             mempool_db,
             input_buffer: InputBuffer::default(),
             top_known_anchor: RoundWatch::default(),
         })
+    }
+
+    /// may be called even on non-yet-signed blocks
+    fn check_expect_genesis_change(
+        &self,
+        config_guard: &mut StdConfigAdapter,
+        new_cx: &StateUpdateContext,
+    ) -> Result<()> {
+        let Some(session) = config_guard.engine_session.as_ref() else {
+            return Ok(());
+        };
+        if !(new_cx.consensus_info.genesis_info).overrides(&session.genesis_info()) {
+            return Ok(());
+        };
+        if (config_guard.expect_genesis_change).is_some_and(|x| new_cx.mc_block_id.seqno >= x) {
+            // if genesis change is cancelled in A' after A, mempool will restart with no changes
+            return Ok(()); // support BAB' only: may reset to a lower value, don't if GEQ
+        }
+
+        let span = tracing::error_span!(
+            "expect_genesis_change",
+            tka = new_cx.top_processed_to_anchor_id
+        );
+        let _guard = span.enter();
+
+        config_guard.expect_genesis_change = Some(new_cx.mc_block_id.seqno);
+        (self.cache).close(new_cx.consensus_info.genesis_info.start_round_aligned());
+
+        tracing::warn!(
+            target: tracing_targets::MEMPOOL_ADAPTER,
+            seqno = %new_cx.mc_block_id.seqno,
+            new_cx = ?DebugStateUpdateContext(new_cx),
+            current = ?session.genesis_info(),
+            "Mempool anchor cache closed for newer anchors",
+        );
+
+        Ok(())
     }
 
     async fn process_state_update(
@@ -76,7 +116,7 @@ impl MempoolAdapterStdImpl {
         new_cx: &StateUpdateContext,
     ) -> Result<()> {
         // method is called in a for-cycle, so `seq_no` may differ
-        let span = tracing::error_span!("mc_state_update", seq_no = new_cx.mc_block_id.seqno);
+        let span = tracing::error_span!("tka", seq_no = new_cx.top_processed_to_anchor_id);
         let _guard = span.enter();
 
         if let Some(session) = config_guard.engine_session.as_ref() {
@@ -87,6 +127,22 @@ impl MempoolAdapterStdImpl {
                 "Processing state update from mc block",
             );
 
+            let apply_ctx_genesis =
+                (new_cx.consensus_info.genesis_info).overrides(&session.genesis_info());
+
+            // regardless mempool restart: another block version with old genesis may be signed
+            if (config_guard.expect_genesis_change).is_some_and(|x| new_cx.mc_block_id.seqno >= x) {
+                config_guard.expect_genesis_change = None;
+                if self.cache.reopen(apply_ctx_genesis) {
+                    tracing::warn!(
+                        target: tracing_targets::MEMPOOL_ADAPTER,
+                        seqno = %new_cx.mc_block_id.seqno,
+                        drop_data = apply_ctx_genesis,
+                        "Mempool anchor cache reopened",
+                    );
+                }
+            }
+
             // when genesis doesn't change - just (re-)schedule v_set change as defined by collator
             if new_cx.consensus_info.genesis_info == session.genesis_info() {
                 session.set_peers(VSetAdapter::init_peers(new_cx)?);
@@ -94,7 +150,7 @@ impl MempoolAdapterStdImpl {
             }
 
             // rare case when node starts with empty DB to sync and genesis in GlobalConfig
-            if !(new_cx.consensus_info.genesis_info).overrides(&session.genesis_info()) {
+            if !apply_ctx_genesis {
                 tracing::warn!(
                     target: tracing_targets::MEMPOOL_ADAPTER,
                     seqno = %new_cx.mc_block_id.seqno,
@@ -110,7 +166,6 @@ impl MempoolAdapterStdImpl {
 
             let session = (config_guard.engine_session.take())
                 .context("cannot happen: engine must be started")?;
-            self.cache.reset();
 
             drop(_guard);
             session.stop().instrument(span.clone()).await;
