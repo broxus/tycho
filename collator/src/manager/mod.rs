@@ -12,7 +12,7 @@ use tycho_block_util::block::{ValidatorSubsetInfo, calc_next_block_id_short};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_core::global_config::MempoolGlobalConfig;
-use tycho_core::storage::ShardStateStorageError;
+use tycho_core::storage::{LoadStateHint, StateNotFound};
 use tycho_crypto::ed25519::KeyPair;
 use tycho_types::models::{
     BlockId, BlockIdShort, CollationConfig, GlobalCapabilities, ProcessedUptoInfo, ShardIdent,
@@ -1782,7 +1782,10 @@ where
                     } else {
                         // get from state
                         let state = state_node_adapter
-                            .load_state(mc_block_key.seqno, &top_block_id)
+                            .load_state(mc_block_key.seqno, &top_block_id, LoadStateHint {
+                                // State must already be applied at this point.
+                                allow_ignore_direct: false,
+                            })
                             .await?;
                         let processed_upto = state.state().processed_upto.load()?;
                         let processed_upto = ProcessedUptoInfoStuff::try_from(processed_upto)?;
@@ -3426,11 +3429,11 @@ where
         match top_shard_blocks {
             None => {
                 let state = match state_node_adapter
-                    .load_state(mc_block_id.seqno, mc_block_id)
+                    .load_state(mc_block_id.seqno, mc_block_id, Default::default())
                     .await
                 {
-                    Err(err) => match err.downcast_ref::<ShardStateStorageError>() {
-                        Some(ShardStateStorageError::NotFound(_)) => {
+                    Err(err) => match err.downcast_ref::<StateNotFound>() {
+                        Some(_) => {
                             tracing::warn!(target: tracing_targets::COLLATION_MANAGER,
                                 %mc_block_id,
                                 "master state not found in get_top_blocks_seqno",

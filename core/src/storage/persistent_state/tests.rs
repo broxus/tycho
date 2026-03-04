@@ -57,7 +57,7 @@ async fn persistent_shard_state() -> Result<()> {
     );
 
     shard_states
-        .store_state(&handle, &zerostate, Default::default())
+        .store_state_ignore_cache(&handle, &zerostate, Default::default())
         .await?;
 
     // Check seqno

@@ -568,6 +568,10 @@ impl StarterInner {
 
             let _handle = state.ref_mc_state_handle().clone();
 
+            // NOTE: We must ensure that `state` is stored as direct.
+            state_storage
+                .store_state_ignore_cache(&handle, &state, Default::default())
+                .await?;
             persistent_states
                 .store_shard_state(mc_block_id.seqno, &handle)
                 .await?;
@@ -588,6 +592,8 @@ impl StarterInner {
         let _mc_handle = mc_zerostate.ref_mc_state_handle().clone();
 
         // TODO: Somehow save the original file.
+        // NOTE: All masterchain states are stored directly, so there is no
+        // need to explicitly store it as root.
         persistent_states
             .store_shard_state(mc_block_id.seqno, &handle)
             .await?;
@@ -809,6 +815,10 @@ impl StarterInner {
                     // Possibly slow full state traversal
                     StoreZeroStateFrom::State(_handle) => {
                         // Store zerostate as is
+                        anyhow::ensure!(
+                            block_handle.has_state(),
+                            "downloaded persistent state must be stored directly"
+                        );
                         persistent_states
                             .store_shard_state(mc_seqno, &block_handle)
                             .await
@@ -831,6 +841,7 @@ impl StarterInner {
                 let from = if state_file.exists() {
                     StoreZeroStateFrom::File(state_file)
                 } else {
+                    // FIXME: Ensure that `state` is stored as direct.
                     StoreZeroStateFrom::State(state.ref_mc_state_handle().clone())
                 };
                 try_save_persistent(handle, from)

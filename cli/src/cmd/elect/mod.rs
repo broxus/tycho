@@ -17,8 +17,8 @@ use tycho_crypto::ed25519;
 use tycho_network::PeerId;
 use tycho_types::abi::{AbiType, AbiValue, AbiVersion, FromAbi, IntoAbi, WithAbiType};
 use tycho_types::models::{
-    Account, AccountState, BlockchainConfig, ExtInMsgInfo, MsgInfo, OwnedMessage, SignatureContext,
-    StateInit, StdAddr, ValidatorStakeParams,
+    Account, AccountState, BlockchainConfig, SignatureContext, StateInit, StdAddr,
+    ValidatorStakeParams,
 };
 use tycho_types::prelude::*;
 use tycho_util::cli::logger::init_logger_simple;
@@ -1051,25 +1051,14 @@ impl Wallet {
 
         let now_ms = now_millis();
         let expire_at = (now_ms / 1000) as u32 + ttl;
-        let body = wallet::methods::send_transaction()
+        let message = wallet::methods::send_transaction()
             .encode_external(&inputs)
-            .with_address(&self.address)
             .with_time(now_ms)
             .with_expire_at(expire_at)
             .with_pubkey(&self.public)
-            .build_input()?
+            .build_message(&self.address)?
+            .with_state_init_opt(init)
             .sign(&self.secret, self.signature_context)?;
-
-        let message = OwnedMessage {
-            info: MsgInfo::ExtIn(ExtInMsgInfo {
-                src: None,
-                dst: self.address.clone().into(),
-                ..Default::default()
-            }),
-            init,
-            body: body.into(),
-            layout: None,
-        };
         let message_cell = CellBuilder::build_from(message)?;
 
         self.client.broadcast_message(message_cell.as_ref()).await?;

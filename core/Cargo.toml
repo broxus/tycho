@@ -44,6 +44,7 @@ dashmap = { workspace = true }
 futures-util = { workspace = true }
 governor = { workspace = true, optional = true }
 humantime = { workspace = true }
+indexmap = { workspace = true }
 metrics = { workspace = true }
 moka = { workspace = true }
 object_store = { workspace = true, optional = true }
@@ -52,6 +53,7 @@ parking_lot_core = { workspace = true }
 pin-project-lite = { workspace = true }
 quick_cache = { workspace = true }
 rand = { workspace = true }
+rayon = { workspace = true }
 scopeguard = { workspace = true }
 serde = { workspace = true }
 sha2 = { workspace = true }
