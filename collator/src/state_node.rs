@@ -108,7 +108,6 @@ pub struct StateNodeAdapterStdImpl {
     listener: Arc<dyn StateNodeEventListener>,
     blocks: FastDashMap<ShardIdent, BTreeMap<u32, Arc<BlockStuffForSync>>>,
     shard_blocks: FastDashMap<ShardIdent, BTreeMap<u32, ShardBlockData>>,
-    last_stored_state_seqno: Mutex<FastHashMap<ShardIdent, u32>>,
     storage: CoreStorage,
     broadcaster: broadcast::Sender<BlockId>,
 
@@ -133,7 +132,6 @@ impl StateNodeAdapterStdImpl {
             storage,
             blocks: Default::default(),
             shard_blocks: Default::default(),
-            last_stored_state_seqno: Default::default(),
             broadcaster,
             sync_context_tx,
             delayed_state_notifier: DelayedStateNotifier::default(),
@@ -253,12 +251,6 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
             .store_state_root(&handle, state_root, hint)
             .await?;
 
-        if status.is_stored() {
-            self.last_stored_state_seqno
-                .lock()
-                .insert(block_id.shard, block_id.seqno);
-        }
-
         Ok(status)
     }
 
@@ -331,6 +323,9 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
                     _prev_id_alt: prev_id_alt,
                 },
             );
+
+            let count: usize = self.shard_blocks.iter().map(|e| e.value().len()).sum();
+            metrics::gauge!("tycho_shard_blocks_count_in_collation_manager_cache").set(count as f64);
         }
 
         Ok(())
@@ -419,22 +414,20 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         // Don't wait for drop inside a tokio context.
         Reclaimer::instance().drop(to_drop);
 
-        let mut to_drop = Vec::new();
-        let last_stored = self.last_stored_state_seqno.lock();
-        for (shard, _) in &to_split {
-            let Some(&safe_seqno) = last_stored.get(shard) else {
-                continue;
-            };
-
-            if let Some(mut shard_blocks) = self.shard_blocks.get_mut(shard) {
-                let retained = shard_blocks.split_off(&safe_seqno);
-                to_drop.push(std::mem::replace(&mut *shard_blocks, retained));
+        if shard.is_masterchain() {
+            let mut to_drop = Vec::new();
+            for entry in state.shards()?.latest_blocks() {
+                let block_id = entry?;
+                if let Some(mut sb) = self.shard_blocks.get_mut(&block_id.shard) {
+                    let retained = sb.split_off(&block_id.seqno);
+                    to_drop.push(std::mem::replace(&mut *sb, retained));
+                }
             }
-        }
-        drop(last_stored);
+            Reclaimer::instance().drop(to_drop);
 
-        // Don't wait for drop inside a tokio context.
-        Reclaimer::instance().drop(to_drop);
+            let count: usize = self.shard_blocks.iter().map(|e| e.value().len()).sum();
+            metrics::gauge!("tycho_shard_blocks_count_in_collation_manager_cache").set(count as f64);
+        }
 
         Ok(())
     }

@@ -1557,6 +1557,10 @@ def collation_metrics() -> RowPanel:
             "tycho_blocks_count_in_collation_manager_cache",
             "Blocks count in collation manager cache",
         ),
+        create_gauge_panel(
+            "tycho_shard_blocks_count_in_collation_manager_cache",
+            "Shard blocks count in collation manager cache",
+        ),
     ]
     return create_row("collator: Collation Metrics", metrics)
 
