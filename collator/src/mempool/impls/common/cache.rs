@@ -49,6 +49,7 @@ pub struct DupAnchorError {
 struct CacheData {
     anchors: IndexMap<MempoolAnchorId, Arc<MempoolAnchor>, ahash::RandomState>,
     is_paused: bool,
+    is_off_after_anchor: Option<MempoolAnchorId>,
 }
 
 #[derive(Default)]
@@ -58,10 +59,41 @@ pub struct Cache {
 }
 
 impl Cache {
-    pub fn reset(&self) {
+    pub fn close(&self, after_anchor_id: MempoolAnchorId) {
         let mut data = self.data.write();
-        data.anchors = Default::default();
-        // let waiters wait for new data to be pushed
+        data.is_off_after_anchor = Some(after_anchor_id);
+
+        drop(data);
+        self.anchor_added.notify_waiters();
+        // postpone destructive changes
+    }
+
+    /// returns `false` if a no-op
+    pub fn reopen(&self, drop_data: bool) -> bool {
+        let mut data = self.data.write();
+
+        let Some(after_anchor_id) = data.is_off_after_anchor.take() else {
+            return false;
+        };
+
+        if !drop_data {
+            self.anchor_added.notify_waiters();
+            return true;
+        }
+
+        let pos = (data.anchors)
+            .binary_search_keys(&(after_anchor_id + 1))
+            .unwrap_or_else(std::convert::identity);
+
+        let anchors_to_clean = (data.anchors).drain(pos..).collect::<Vec<_>>();
+
+        drop(data);
+
+        self.anchor_added.notify_waiters();
+
+        Reclaimer::instance().drop(anchors_to_clean);
+
+        true
     }
 
     pub fn push(&self, anchor: Arc<MempoolAnchor>) -> Result<(), Box<DupAnchorError>> {
@@ -96,8 +128,12 @@ impl Cache {
             // NOTE: Subscribe to notification before checking
             let anchor_added = self.anchor_added.notified();
 
-            {
+            'attempt: {
                 let data = &self.data.read();
+
+                if data.is_off_after_anchor.is_some_and(|off| anchor_id > off) {
+                    break 'attempt;
+                }
 
                 match data.anchors.first() {
                     // Continue to wait for the first anchor
@@ -149,8 +185,12 @@ impl Cache {
             // NOTE: Subscribe to notification before checking
             let anchor_added = self.anchor_added.notified();
 
-            {
+            'attempt: {
                 let data = &self.data.read();
+
+                if (data.is_off_after_anchor).is_some_and(|off| prev_anchor_id >= off) {
+                    break 'attempt;
+                }
 
                 match data.anchors.first() {
                     None => {
@@ -291,5 +331,222 @@ impl CacheData {
         if self.anchors.capacity() > len.saturating_mul(4) {
             self.anchors.shrink_to(len.saturating_mul(2));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::convert::Infallible;
+    use std::fmt::Debug;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tokio::task::JoinHandle;
+    use tokio::time::timeout;
+    use tycho_network::PeerId;
+
+    use super::{Cache, CacheError};
+    use crate::mempool::{MempoolAnchor, MempoolAnchorId};
+
+    const WAIT: Duration = Duration::from_millis(100);
+    const DONE: Duration = Duration::from_secs(1);
+
+    fn anchor(id: MempoolAnchorId, prev_id: Option<MempoolAnchorId>) -> Arc<MempoolAnchor> {
+        Arc::new(MempoolAnchor {
+            id,
+            prev_id,
+            author: PeerId(Default::default()),
+            chain_time: id as u64,
+            externals: vec![],
+        })
+    }
+
+    async fn unwrap_task<T: Send, E: Debug>(task: JoinHandle<Result<T, E>>) -> T {
+        let result = timeout(DONE, task).await.expect("task must not hang");
+        let result = result.expect("task must not panic");
+        result.expect("task must not raise error")
+    }
+
+    #[tokio::test]
+    async fn get_next_first_anchor_removed() {
+        let cache = Cache::default();
+        cache.push(anchor(6, Some(5))).unwrap();
+
+        let result = cache.get_next_anchor(5).await;
+        let error = result.expect_err("must detect removed first anchor");
+        assert!(matches!(error, CacheError::FirstAnchorRemoved {
+            prev_anchor_id: 5,
+            first_id: 6,
+            ..
+        }));
+    }
+
+    #[tokio::test]
+    async fn get_next_unexpected_gap() {
+        let cache = Cache::default();
+        cache.push(anchor(5, None)).unwrap();
+        cache.push(anchor(11, Some(10))).unwrap();
+
+        let result = cache.get_next_anchor(5).await;
+        let error = result.expect_err("must detect gap");
+        assert!(matches!(error, CacheError::UnexpectedGap {
+            prev_anchor_id: 5,
+            found_prev_id: 10,
+            found_id: 11,
+            ..
+        }));
+    }
+
+    #[tokio::test]
+    async fn get_next_unexpected_anchor() {
+        let cache = Cache::default();
+        cache.push(anchor(10, None)).unwrap();
+        cache.push(anchor(11, Some(5))).unwrap();
+
+        let result = cache.get_next_anchor(10).await;
+        let error = result.expect_err("must detect unexpected middle anchor");
+        assert!(matches!(error, CacheError::UnexpectedAnchor {
+            prev_anchor_id: 10,
+            found_prev_id: 5,
+            found_id: 11,
+            ..
+        }));
+    }
+
+    #[tokio::test]
+    async fn wait_for_next_anchor() {
+        let cache = Arc::new(Cache::default());
+        cache.push(anchor(5, None)).unwrap();
+
+        let cache_copy = cache.clone();
+        let mut task: JoinHandle<Result<Option<Arc<MempoolAnchor>>, CacheError>> =
+            tokio::spawn(async move { cache_copy.get_next_anchor(5).await });
+
+        assert!(timeout(WAIT, &mut task).await.is_err());
+
+        cache.push(anchor(6, Some(5))).unwrap();
+
+        let next = unwrap_task(task).await.expect("anchor must exist");
+        assert_eq!(next.id, 6);
+    }
+
+    #[tokio::test]
+    async fn close_reopen_keeps_current() {
+        let cache = Arc::new(Cache::default());
+        cache.push(anchor(5, None)).unwrap();
+        cache.close(5);
+
+        let cache_copy = cache.clone();
+        let mut task =
+            tokio::spawn(async move { Ok::<_, Infallible>(cache_copy.get_anchor_by_id(6).await) });
+
+        assert!(timeout(WAIT, &mut task).await.is_err());
+
+        cache.push(anchor(6, Some(5))).unwrap();
+
+        assert!(cache.reopen(false));
+
+        let found = unwrap_task(task).await.expect("anchor must exist");
+        assert_eq!(found.id, 6);
+    }
+
+    #[tokio::test]
+    async fn close_reopen_serves_new_next() {
+        let cache = Arc::new(Cache::default());
+        cache.push(anchor(5, None)).unwrap();
+        cache.close(5);
+
+        let cache_copy = cache.clone();
+        let mut task = tokio::spawn(async move { cache_copy.get_next_anchor(5).await });
+
+        assert!(timeout(WAIT, &mut task).await.is_err());
+
+        cache.push(anchor(6, Some(5))).unwrap();
+
+        assert!(cache.reopen(false));
+
+        let next = unwrap_task(task).await.expect("anchor must exist");
+        assert_eq!(next.id, 6);
+    }
+
+    #[tokio::test]
+    async fn close_reopen_serves_old_next() {
+        let cache = Arc::new(Cache::default());
+        cache.push(anchor(5, None)).unwrap();
+        cache.push(anchor(6, Some(5))).unwrap();
+        cache.close(5);
+
+        let cache_copy = cache.clone();
+        let mut task = tokio::spawn(async move { cache_copy.get_next_anchor(5).await });
+
+        assert!(timeout(WAIT, &mut task).await.is_err());
+
+        assert!(cache.reopen(false));
+
+        let next = unwrap_task(task).await.expect("anchor must exist");
+        assert_eq!(next.id, 6);
+    }
+
+    #[tokio::test]
+    async fn close_reopen_drops_new_input() {
+        let cache = Arc::new(Cache::default());
+        cache.push(anchor(5, None)).unwrap();
+        cache.push(anchor(6, Some(5))).unwrap();
+        cache.close(5);
+
+        let cache_copy = cache.clone();
+        let mut task =
+            tokio::spawn(async move { Ok::<_, Infallible>(cache_copy.get_anchor_by_id(6).await) });
+
+        assert!(timeout(WAIT, &mut task).await.is_err());
+
+        assert!(cache.reopen(true));
+        cache.push(anchor(10, Some(5))).unwrap(); // make id=6 "too old" to unhang task
+
+        let maybe_id = unwrap_task(task).await.map(|a| a.id);
+        assert_eq!(maybe_id, None);
+    }
+
+    #[tokio::test]
+    async fn close_reopen_drops_to_fork() {
+        let cache = Arc::new(Cache::default());
+        cache.push(anchor(5, None)).unwrap();
+        cache.push(anchor(6, Some(5))).unwrap();
+        cache.close(5);
+
+        let cache_copy = cache.clone();
+        let mut task = tokio::spawn(async move { cache_copy.get_next_anchor(5).await });
+
+        assert!(timeout(WAIT, &mut task).await.is_err());
+
+        assert!(cache.reopen(true));
+        cache.push(anchor(10, Some(5))).unwrap(); // make id=5 "too old" to unhang task
+
+        let next = unwrap_task(task).await.expect("anchor must exist");
+        assert_eq!(next.id, 10);
+    }
+
+    #[tokio::test]
+    async fn close_reopen_waits_next_anchor() {
+        let cache = Arc::new(Cache::default());
+        cache.push(anchor(5, None)).unwrap();
+        cache.close(5);
+
+        let cache_copy = cache.clone();
+        let mut task = tokio::spawn(async move { cache_copy.get_next_anchor(5).await });
+
+        assert!(timeout(WAIT, &mut task).await.is_err());
+
+        cache.push(anchor(6, Some(5))).unwrap();
+        assert!(cache.push(anchor(6, Some(5))).is_err(), "duplicate push");
+
+        assert!(cache.reopen(true));
+
+        assert!(timeout(WAIT, &mut task).await.is_err());
+
+        (cache.push(anchor(6, Some(5)))).expect("reopen must remove prev version");
+
+        let next = unwrap_task(task).await.expect("anchor must exist");
+        assert_eq!(next.id, 6);
     }
 }
