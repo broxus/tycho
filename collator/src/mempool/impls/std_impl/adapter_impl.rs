@@ -24,6 +24,9 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
         // handle_top_processed_to_anchor() is called with monotonically increasing anchors
         let mut config_guard = self.config.lock().await;
 
+        // collator won't receive any anchors since the prepare until the block gets signed
+        self.check_expect_genesis_change(&mut config_guard, &new_cx)?;
+
         if let Some(ctx) = config_guard.state_update_queue.push(new_cx)? {
             self.process_state_update(&mut config_guard, &ctx).await?;
             self.top_known_anchor
