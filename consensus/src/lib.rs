@@ -15,7 +15,7 @@ pub mod prelude {
     pub use crate::engine::lifecycle::{EngineBinding, EngineNetworkArgs, EngineSession};
     pub use crate::engine::round_watch::{Commit, RoundWatch, TopKnownAnchor};
     pub use crate::engine::{
-        ConsensusConfigExt, InputBuffer, MempoolConfigBuilder, MempoolMergedConfig,
+        ConsensusConfigExt, GenesisInfoExt, InputBuffer, MempoolConfigBuilder, MempoolMergedConfig,
         MempoolNodeConfig,
     };
     pub use crate::intercom::InitPeers;

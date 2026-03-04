@@ -1,6 +1,8 @@
 use std::num::NonZeroU64;
 
-use tycho_types::models::ConsensusConfig;
+use tycho_types::models::{ConsensusConfig, GenesisInfo};
+
+use crate::dag::AnchorStage;
 
 /// ```text
 ///    RESET_ROUNDS      DagFront.top() == DagHead.next()
@@ -93,5 +95,15 @@ impl ConsensusConfigExt for ConsensusConfig {
             .max(1) // .. until it is the single attempt which duration is unpredictable
          + 33; // observed duration for last sign attempt and round switch
         value.try_into().expect("math: cannot be zero")
+    }
+}
+
+pub trait GenesisInfoExt {
+    fn start_round_aligned(&self) -> u32;
+}
+
+impl GenesisInfoExt for GenesisInfo {
+    fn start_round_aligned(&self) -> u32 {
+        AnchorStage::align_genesis(self.start_round).0
     }
 }
