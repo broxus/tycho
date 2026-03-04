@@ -1314,7 +1314,7 @@ impl CollatorStdImpl {
         // do not import anchor if mempool may be paused
         // needs to process more anchors in collator first
         if prev_anchor_id.saturating_sub(top_processed_to_anchor)
-            > max_consensus_lag_rounds.saturating_mul(2).saturating_div(3)
+            > max_anchors_processing_lag_rounds(max_consensus_lag_rounds)
         {
             metrics::counter!("tycho_collator_anchor_import_skipped_count", &labels).increment(1);
             return Ok(ImportNextAnchor::Skipped);
@@ -2458,4 +2458,14 @@ struct ImportInitAnchorsResult {
     /// after "last imported in current shard"
     /// up to "top last imported anchor"
     anchors_count_above_last_imported_in_current_shard: usize,
+}
+
+/// Calculates maximum allowed lag in rounds between last imported anchor
+/// and last processed. We won't import next anchors until we process more
+/// previously imported anchors.
+fn max_anchors_processing_lag_rounds<T: Into<u32>>(max_consensus_lag_rounds: T) -> u32 {
+    max_consensus_lag_rounds
+        .into()
+        .saturating_mul(2)
+        .saturating_div(3)
 }

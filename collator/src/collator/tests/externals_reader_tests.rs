@@ -27,6 +27,7 @@ pub(crate) fn fill_test_anchors_cache(
     let mut dst_addrs = vec![];
     let mut prev_anchor_id = 0;
     for anchor_id in 1..=82 {
+        // NOTE: we use 4 rounds here, because test was created for 1 anchor per 4 rounds
         if anchor_id % 4 != 0 {
             continue;
         }
