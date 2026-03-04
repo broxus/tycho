@@ -66,7 +66,6 @@ impl StdAnchorHandler {
                 self.commit_finished.set_max(round);
             }
             MempoolOutput::NewStartAfterGap(anchors_full_bottom) => {
-                self.cache.reset();
                 let first_to_execute = (anchors_full_bottom + self.deduplicate_rounds).0;
 
                 shuttle.parser = Parser::new(self.deduplicate_rounds);
