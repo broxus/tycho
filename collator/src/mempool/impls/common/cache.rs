@@ -25,12 +25,6 @@ pub enum CacheError {
         found_id: MempoolAnchorId,
         is_paused: bool,
     },
-    #[error("Only first anchor after Genesis may be not linked to previous one {self:?}")]
-    NoPreviousAnchor {
-        prev_anchor_id: MempoolAnchorId,
-        found_id: MempoolAnchorId,
-        is_paused: bool,
-    },
     #[error("cache was not cleaned properly: it must contain prev anchor {self:?}")]
     FirstAnchorRemoved {
         prev_anchor_id: MempoolAnchorId,
@@ -201,11 +195,14 @@ impl Cache {
                                         },
                                     }
                                 } else {
-                                    CacheError::NoPreviousAnchor {
-                                        prev_anchor_id,
-                                        found_id: found.id,
-                                        is_paused: data.is_paused,
-                                    }
+                                    tracing::debug!(
+                                        target: tracing_targets::MEMPOOL_ADAPTER,
+                                        %prev_anchor_id,
+                                        found_anchor_id = found.id,
+                                        is_paused = data.is_paused.then_some(true),
+                                        "Found first after a gep"
+                                    );
+                                    return Ok(Some(found.clone()));
                                 };
                                 tracing::error!(
                                     target: tracing_targets::MEMPOOL_ADAPTER,
