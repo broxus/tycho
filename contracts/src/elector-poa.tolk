@@ -125,13 +125,15 @@ fun onInternalMessage(in: InMessage) {
 /// it contained some arguments besides the code.
 @method_id(1666)
 fun afterCodeUpgrade(source: address, _args: slice, queryId: int) {
-    var oldData = contract.getData().beginParse().getFirstAny<Storage<()>>();
+    var oldData = lazy Storage<PoAData>.load();
+    val currentVsetHash = blockchain.configParam(PARAM_IDX_CURRENT_VSET)!.hash();
 
-    var newData = beginCell() //
-        .storeSlice(oldData)
-        .storeAny(PoAData { whitelist: null })
-        .endCell();
-    contract.setData(newData);
+    //reset stuck elections.
+    oldData.currentElection = null;
+    oldData.activeId = 0;
+    oldData.activeHash = currentVsetHash;
+
+    oldData.save();
 
     sendMessageBack(source, ANSWER_TAG_CODE_ACCEPTED, queryId, ELECTOR_OP_UPGRADE_CODE);
 }
@@ -152,8 +154,8 @@ fun canParticipateInElection(source: address): bool {
 
 fun processManageWhitelist(source: address, queryId: int, body: slice, add: bool) {
     var answerTag = manageWhitelist(source, body, add)
-         ? ANSWER_TAG_POA_WHITELIST_UPDATED
-         : ANSWER_TAG_ERROR;
+        ? ANSWER_TAG_POA_WHITELIST_UPDATED
+        : ANSWER_TAG_ERROR;
 
     sendMessageBack(
         source,

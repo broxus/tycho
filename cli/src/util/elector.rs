@@ -43,6 +43,8 @@ pub mod methods {
 }
 
 pub mod data {
+    use tycho_types::num::Tokens;
+
     use super::*;
 
     #[derive(Debug, Clone, Serialize, Deserialize, WithAbiType, FromAbi)]
@@ -50,6 +52,9 @@ pub mod data {
         pub current_election: Option<Ref<CurrentElectionData>>,
         pub credits: BTreeMap<HashBytes, FpTokens>,
         pub past_elections: BTreeMap<u32, PastElectionData>,
+        pub grams: Tokens,
+        pub active_id: u32,
+        pub active_hash: HashBytes,
     }
 
     impl PartialElectorData {
@@ -84,6 +89,8 @@ pub mod data {
     #[derive(Debug, Clone, Serialize, Deserialize, WithAbiType, FromAbi)]
     pub struct PastElectionData {
         pub unfreeze_at: u32,
+        pub stake_held: u32,
+        pub vset_hash: HashBytes,
     }
 
     // TODO: Move into `tycho-types`?

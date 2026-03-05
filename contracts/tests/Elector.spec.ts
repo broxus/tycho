@@ -32,6 +32,8 @@ import {
   bufferToBigInt,
   Crypto,
   ConfigParams,
+  makeStubValidatorSet,
+  storeValidatorSet,
   ValidatorAccount,
   VsetTimings,
   simpleInternal,
@@ -369,6 +371,82 @@ describe("Elector", () => {
       assert(elector.accountState?.type === "active");
       expect(elector.accountState.state.data).toEqualCell(electorDataCell);
     }
+  });
+
+  it("clears active id when current vset hash is absent from past elections", async () => {
+    const validators = Array(4)
+      .fill(null)
+      .map((_, i) =>
+        ValidatorAccount.makeStub(address(`-1:${`e${i}`.repeat(32)}`))
+      );
+
+    const stake = toNano(10000);
+
+    blockchain.now = time(
+      timings.electedFor - timings.electionsBeginBefore + 1
+    );
+    const electionId = await startElection({ blockchain, elector });
+
+    await sendStakes({
+      blockchain,
+      elector,
+      stake,
+      validators,
+      electionId,
+      count: 3,
+      crypto,
+    });
+
+    blockchain.now = time(timings.electedFor - timings.electionsEndBefore + 1);
+    const firstVset = await finishElection({
+      blockchain,
+      elector,
+      electionId,
+    });
+
+    blockchain.now = time(timings.electedFor + 1);
+    await syncVset({
+      blockchain,
+      elector,
+      vset: firstVset,
+      electionId,
+    });
+
+    const missingVset = await makeStubValidatorSet({
+      utimeSince: time(timings.electedFor + 10),
+      utimeUntil: time(3 * timings.electedFor),
+      validatorCount: 3,
+    }).then((vset) => beginCell().store(storeValidatorSet(vset)).endCell());
+    let config = new ConfigParams(blockchain.config);
+    config.setCurrentVset(missingVset);
+    config.setNextVset(null);
+    blockchain.setConfig(config.toCell());
+
+    blockchain.now = time(timings.electedFor + 2);
+    await elector.runTickTock("tick");
+
+    let data = await getters(blockchain, elector).getData();
+    assert(data != null);
+    expect(data.activeId).toEqual(0);
+    expect(data.activeHash).toEqual(bufferToBigInt(missingVset.hash()));
+
+    const anotherMissingVset = await makeStubValidatorSet({
+      utimeSince: time(timings.electedFor + 20),
+      utimeUntil: time(4 * timings.electedFor),
+      validatorCount: 3,
+    }).then((vset) => beginCell().store(storeValidatorSet(vset)).endCell());
+    config = new ConfigParams(blockchain.config);
+    config.setCurrentVset(anotherMissingVset);
+    config.setNextVset(null);
+    blockchain.setConfig(config.toCell());
+
+    blockchain.now = time(timings.electedFor + 3);
+    await elector.runTickTock("tick");
+
+    data = await getters(blockchain, elector).getData();
+    assert(data != null);
+    expect(data.activeId).toEqual(0);
+    expect(data.activeHash).toEqual(bufferToBigInt(anotherMissingVset.hash()));
   });
 });
 
