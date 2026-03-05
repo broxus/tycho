@@ -11,17 +11,18 @@ use crate::types::processed_upto::BlockSeqno;
 #[async_trait::async_trait]
 impl MempoolAdapter for MempoolAdapterStdImpl {
     async fn handle_mc_state_update(&self, new_cx: StateUpdateContext) -> Result<()> {
+        tracing::debug!(
+            target: tracing_targets::MEMPOOL_ADAPTER,
+            tka = %new_cx.top_processed_to_anchor_id,
+            "Received state update from mc block",
+        );
+        assert!(new_cx.mc_block_id.is_masterchain(), "expect only MC data");
+
         // assume first block versions are monotonic by both top anchor and seqno
         // and there may be a second block version out of particular order,
         // but strictly before `handle_top_processed_to_anchor()` is called;
         // handle_top_processed_to_anchor() is called with monotonically increasing anchors
         let mut config_guard = self.config.lock().await;
-
-        tracing::debug!(
-            target: tracing_targets::MEMPOOL_ADAPTER,
-            full_id = %new_cx.mc_block_id,
-            "Received state update from mc block",
-        );
 
         if let Some(ctx) = config_guard.state_update_queue.push(new_cx)? {
             self.process_state_update(&mut config_guard, &ctx).await?;

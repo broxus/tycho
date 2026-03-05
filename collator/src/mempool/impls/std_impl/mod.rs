@@ -82,7 +82,7 @@ impl MempoolAdapterStdImpl {
         if let Some(session) = config_guard.engine_session.as_ref() {
             tracing::debug!(
                 target: tracing_targets::MEMPOOL_ADAPTER,
-                id = %new_cx.mc_block_id.as_short_id(),
+                seqno = %new_cx.mc_block_id.seqno,
                 new_cx = ?DebugStateUpdateContext(new_cx),
                 "Processing state update from mc block",
             );
@@ -97,7 +97,7 @@ impl MempoolAdapterStdImpl {
             if !(new_cx.consensus_info.genesis_info).overrides(&session.genesis_info()) {
                 tracing::warn!(
                     target: tracing_targets::MEMPOOL_ADAPTER,
-                    id = %new_cx.mc_block_id.as_short_id(),
+                    seqno = %new_cx.mc_block_id.seqno,
                     new_cx = ?DebugStateUpdateContext(new_cx),
                     current = ?session.genesis_info(),
                     "Ignoring new genesis: it does not override current, node state was deleted?",
@@ -129,7 +129,7 @@ impl MempoolAdapterStdImpl {
 
         tracing::info!(
             target: tracing_targets::MEMPOOL_ADAPTER,
-            id = %new_cx.mc_block_id.as_short_id(),
+            seqno = %new_cx.mc_block_id.seqno,
             new_cx = ?DebugStateUpdateContext(new_cx),
             "Will start mempool with state update from mc block"
         );
