@@ -169,7 +169,7 @@ impl Inner {
                 for data in committed {
                     round_ctx.commit_metrics(&data.anchor);
                     anchors_tx
-                        .send(MempoolOutput::NextAnchor(data))
+                        .send(MempoolOutput::NextAnchor(Box::new(data)))
                         .map_err(|_closed| Cancelled())?;
                 }
                 // stats should be reported for each round separately - to be grouped by consumer

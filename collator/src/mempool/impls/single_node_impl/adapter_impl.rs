@@ -11,7 +11,7 @@ use crate::types::processed_upto::BlockSeqno;
 
 #[async_trait::async_trait]
 impl MempoolAdapter for MempoolAdapterSingleNodeImpl {
-    async fn handle_mc_state_update(&self, new_cx: StateUpdateContext) -> Result<()> {
+    async fn handle_mc_state_update(&self, new_cx: Box<StateUpdateContext>) -> Result<()> {
         let mut config_guard = self.config.lock().await;
 
         tracing::debug!(

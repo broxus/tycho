@@ -85,12 +85,12 @@ impl DumpAnchors {
             .restore_committed(top_processed_to_anchor, &conf)
             .await?;
 
-        let mut shuttle = Shuttle {
+        let mut shuttle = Box::new(Shuttle {
             store: self.store,
             parser: Parser::new(conf.consensus.deduplicate_rounds),
             first_after_gap: Some(top_processed_to_anchor),
             set_committed_in_db: false,
-        };
+        });
 
         let mut results = Vec::new();
 
