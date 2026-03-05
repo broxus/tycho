@@ -2297,7 +2297,7 @@ where
             .validator_set_cache
             .get_next_validator_set(&mc_data.config)?;
 
-        let cx = StateUpdateContext {
+        let cx = Box::new(StateUpdateContext {
             mc_block_id: mc_data.block_id,
             mc_block_chain_time: mc_data.gen_chain_time,
             top_processed_to_anchor_id: mc_data.top_processed_to_anchor,
@@ -2307,7 +2307,7 @@ where
             prev_validator_set,
             current_validator_set,
             next_validator_set,
-        };
+        });
 
         self.mpool_adapter.handle_mc_state_update(cx).await
     }

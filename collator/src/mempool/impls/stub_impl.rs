@@ -256,7 +256,7 @@ impl MempoolAdapterStubImpl {
 
 #[async_trait]
 impl MempoolAdapter for MempoolAdapterStubImpl {
-    async fn handle_mc_state_update(&self, cx: StateUpdateContext) -> Result<()> {
+    async fn handle_mc_state_update(&self, cx: Box<StateUpdateContext>) -> Result<()> {
         tracing::info!(
             target: tracing_targets::MEMPOOL_ADAPTER,
             "STUB: Processing state update from mc block {}: {:?}",
