@@ -9,13 +9,16 @@ use crate::types::processed_upto::BlockSeqno;
 
 #[derive(Default)]
 pub struct StateUpdateQueue {
-    unsigned: BTreeMap<BlockSeqno, StateUpdateContext>,
+    unsigned: BTreeMap<BlockSeqno, Box<StateUpdateContext>>,
     drained: BlockSeqno, // only signed versions are reported to mempool
     signed: BlockSeqno,  // seqno=0 is stateinit
 }
 
 impl StateUpdateQueue {
-    pub fn push(&mut self, ctx: StateUpdateContext) -> Result<Option<StateUpdateContext>> {
+    pub fn push(
+        &mut self,
+        ctx: Box<StateUpdateContext>,
+    ) -> Result<Option<Box<StateUpdateContext>>> {
         let new_seqno = ctx.mc_block_id.seqno;
         match new_seqno.cmp(&self.drained) {
             cmp::Ordering::Less => {
@@ -64,7 +67,8 @@ impl StateUpdateQueue {
         Ok(None)
     }
 
-    pub fn signed(&mut self, signed: BlockSeqno) -> Result<Vec<StateUpdateContext>> {
+    #[allow(clippy::vec_box, reason = "caller site shouldn't re-box")]
+    pub fn signed(&mut self, signed: BlockSeqno) -> Result<Vec<Box<StateUpdateContext>>> {
         if self.signed < signed {
             self.signed = signed;
             self.drain()
@@ -81,7 +85,8 @@ impl StateUpdateQueue {
         }
     }
 
-    fn drain(&mut self) -> Result<Vec<StateUpdateContext>> {
+    #[allow(clippy::vec_box, reason = "caller site shouldn't re-box")]
+    fn drain(&mut self) -> Result<Vec<Box<StateUpdateContext>>> {
         anyhow::ensure!(
             self.drained <= self.signed,
             "coding error: drained unsigned state update ctx; \

@@ -38,12 +38,12 @@ impl StdAnchorHandler {
             target: tracing_targets::MEMPOOL_ADAPTER,
             "handle anchors task stopped"
         ));
-        let mut shuttle = Shuttle {
+        let mut shuttle = Box::new(Shuttle {
             store: MempoolAdapterStore::new(mempool_db),
             parser: Parser::new(self.deduplicate_rounds),
             first_after_gap: None,
             set_committed_in_db: true,
-        };
+        });
         while let Some(output) = self.anchor_rx.recv().await {
             shuttle = self.handle_mempool_output(shuttle, output).await?;
         }
@@ -52,9 +52,9 @@ impl StdAnchorHandler {
 
     async fn handle_mempool_output(
         &self,
-        mut shuttle: Shuttle,
+        mut shuttle: Box<Shuttle>,
         output: MempoolOutput,
-    ) -> Result<Shuttle> {
+    ) -> Result<Box<Shuttle>> {
         match output {
             MempoolOutput::NextAnchor(adata) => {
                 let (output, dirty) = shuttle.handle(adata).await?;

@@ -10,7 +10,7 @@ use crate::types::processed_upto::BlockSeqno;
 
 #[async_trait::async_trait]
 impl MempoolAdapter for MempoolAdapterStdImpl {
-    async fn handle_mc_state_update(&self, new_cx: StateUpdateContext) -> Result<()> {
+    async fn handle_mc_state_update(&self, new_cx: Box<StateUpdateContext>) -> Result<()> {
         tracing::debug!(
             target: tracing_targets::MEMPOOL_ADAPTER,
             tka = %new_cx.top_processed_to_anchor_id,

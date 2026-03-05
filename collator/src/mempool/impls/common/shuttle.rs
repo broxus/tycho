@@ -20,15 +20,15 @@ pub struct Shuttle {
 /// removed from hot path at the price of anchor dump may not recover last anchor
 /// in case of ungraceful shutdown; node restart is independent of stored anchor flags
 pub struct DirtyShuttle {
-    shuttle: Shuttle,
-    committed: AnchorData,
+    shuttle: Box<Shuttle>,
+    committed: Box<AnchorData>,
     bump: Bump,
 }
 
 impl Shuttle {
     pub async fn handle(
-        mut self,
-        committed: AnchorData,
+        mut self: Box<Self>,
+        committed: Box<AnchorData>,
     ) -> Result<(Option<MempoolAnchor>, DirtyShuttle)> {
         let anchor_id: MempoolAnchorId = committed.anchor.round().0;
         metrics::gauge!("tycho_mempool_last_anchor_round").set(anchor_id);
@@ -115,7 +115,7 @@ impl Shuttle {
 }
 
 impl DirtyShuttle {
-    pub async fn clean(mut self) -> Result<Shuttle> {
+    pub async fn clean(mut self) -> Result<Box<Shuttle>> {
         let task = tokio::task::spawn_blocking(move || {
             if self.shuttle.set_committed_in_db {
                 self.shuttle.store.set_committed(&self.committed)?;
