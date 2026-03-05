@@ -4022,6 +4022,7 @@ dependencies = [
  "bytes",
  "bytesize",
  "criterion",
+ "dashmap",
  "futures-util",
  "humantime",
  "indexmap",
@@ -4050,6 +4051,7 @@ dependencies = [
  "tycho-storage",
  "tycho-types",
  "tycho-util",
+ "tycho-util-proc",
  "tycho-vm",
  "weedb",
 ]

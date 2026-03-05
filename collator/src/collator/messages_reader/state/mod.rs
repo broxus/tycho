@@ -1,22 +1,22 @@
 use std::collections::BTreeMap;
 
 use anyhow::anyhow;
+use ext::ExternalsReaderRange;
+use ext::partition_reader::ExternalsPartitionReaderState;
+use ext::range_reader::ExternalsRangeReaderState;
+use ext::reader::ExternalsReaderState;
 use tycho_block_util::queue::QueueKey;
+use tycho_util_proc::Transactional;
 
-use crate::collator::messages_reader::state::external::{
-    ExternalsPartitionReaderState, ExternalsRangeReaderState, ExternalsReaderRange,
-    ExternalsReaderState,
-};
-use crate::collator::messages_reader::state::internal::InternalsReaderState;
+use crate::collator::messages_reader::state::int::reader::InternalsReaderState;
 use crate::types::processed_upto::{
     ExternalsProcessedUptoStuff, Lt, ProcessedUptoInfoStuff, ProcessedUptoPartitionStuff,
     ShardRangeInfo,
 };
+pub mod ext;
+pub mod int;
 
-pub mod external;
-pub mod internal;
-
-#[derive(Default)]
+#[derive(Transactional)]
 pub struct ReaderState {
     pub externals: ExternalsReaderState,
     pub internals: InternalsReaderState,
@@ -34,53 +34,60 @@ impl ReaderState {
                     curr_processed_offset: 0,
                 });
             for (seqno, range_info) in &par.externals.ranges {
-                ext_reader_state
-                    .ranges
-                    .entry(*seqno)
-                    .and_modify(|r| {
+                match ext_reader_state.ranges.get_mut(seqno) {
+                    Some(r) => {
                         r.by_partitions.insert(*par_id, range_info.into());
-                    })
-                    .or_insert(ExternalsRangeReaderState {
-                        range: ExternalsReaderRange::from_range_info(range_info, processed_to),
-                        by_partitions: [(*par_id, range_info.into())].into(),
-                        fully_read: false,
-                    });
+                    }
+                    None => {
+                        // TODO transitions neccessary?
+                        ext_reader_state.ranges.insert(
+                            *seqno,
+                            ExternalsRangeReaderState::new(
+                                ExternalsReaderRange::from_range_info(range_info, processed_to),
+                                [(*par_id, range_info.into())].into(),
+                            ),
+                        );
+                    }
+                }
             }
         }
+        let partitions = processed_upto
+            .partitions
+            .iter()
+            .map(|(k, v)| (*k, (&v.internals).into()))
+            .collect();
+
         Self {
-            internals: InternalsReaderState {
-                partitions: processed_upto
-                    .partitions
-                    .iter()
-                    .map(|(k, v)| (*k, (&v.internals).into()))
-                    .collect(),
-                cumulative_statistics: None,
-            },
+            internals: InternalsReaderState::new(partitions, None),
             externals: ext_reader_state,
         }
     }
 
     pub fn get_updated_processed_upto(&self) -> ProcessedUptoInfoStuff {
         let mut processed_upto = ProcessedUptoInfoStuff::default();
-        for (par_id, par) in &self.internals.partitions {
+        for (par_id, par) in self.internals.partitions.iter() {
             let ext_reader_state_by_partition =
                 self.externals.get_state_by_partition(*par_id).unwrap();
+
+            let externals = ExternalsProcessedUptoStuff {
+                processed_to: ext_reader_state_by_partition.processed_to.into(),
+                ranges: self
+                    .externals
+                    .ranges
+                    .iter()
+                    .map(|(k, v)| {
+                        let ext_range_reader_state_by_partition =
+                            v.get_state_by_partition(*par_id).unwrap();
+
+                        (*k, (&*v.range, ext_range_reader_state_by_partition).into())
+                    })
+                    .collect(),
+            };
+
             processed_upto
                 .partitions
                 .insert(*par_id, ProcessedUptoPartitionStuff {
-                    externals: ExternalsProcessedUptoStuff {
-                        processed_to: ext_reader_state_by_partition.processed_to.into(),
-                        ranges: self
-                            .externals
-                            .ranges
-                            .iter()
-                            .map(|(k, v)| {
-                                let ext_range_reader_state_by_partition =
-                                    v.get_state_by_partition(*par_id).unwrap();
-                                (*k, (&v.range, ext_range_reader_state_by_partition).into())
-                            })
-                            .collect(),
-                    },
+                    externals,
                     internals: par.into(),
                 });
         }
@@ -92,15 +99,16 @@ impl ReaderState {
             .internals
             .partitions
             .values()
-            .any(|par| par.ranges.values().any(|r| r.processed_offset > 0));
+            .any(|par| par.ranges.values().any(|r| *r.processed_offset > 0));
         if check_internals {
             return check_internals;
         }
 
-        self.externals
-            .ranges
-            .values()
-            .any(|r| r.by_partitions.values().any(|par| par.processed_offset > 0))
+        self.externals.ranges.values().any(|r| {
+            r.by_partitions
+                .values()
+                .any(|par| *par.processed_offset > 0)
+        })
     }
 
     pub fn has_messages_in_buffers(&self) -> bool {
@@ -198,12 +206,13 @@ where
         }
     }
 
+    // check current state exists before modifying the map
+    anyhow::ensure!(map.contains_key(&key), "current state not found: {:?}", key);
+
     let left = map;
     let mut right = left.split_off(&key);
 
-    let current = right
-        .remove(&key)
-        .ok_or_else(|| anyhow!("current state not found: {:?}", key))?;
+    let current = right.remove(&key).expect("checked above");
 
     let mut guard = SplitGuard {
         left,

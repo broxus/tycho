@@ -15,6 +15,11 @@ harness = false
 #path = "benches/messages_buffer.rs"
 required-features = ["bench-helpers"]
 
+[[bench]]
+name = "queue_statistics"
+harness = false
+required-features = ["bench-helpers"]
+
 [[test]]
 name = "adapter_tests"
 required-features = ["test"]
@@ -34,12 +39,13 @@ blake3 = { workspace = true }
 bumpalo = { workspace = true }
 bytes = { workspace = true }
 bytesize = { workspace = true }
+dashmap = { workspace = true }
 futures-util = { workspace = true }
 humantime = { workspace = true }
 indexmap = { workspace = true }
 metrics = { workspace = true }
 num-bigint = { workspace = true }
-parking_lot = { workspace = true }
+parking_lot = { workspace = true, features = ["send_guard"] }
 rand = { workspace = true }
 rayon = { workspace = true }
 scc = { workspace = true }
@@ -55,6 +61,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tycho-crypto = { workspace = true }
 tycho-types = { workspace = true, features = ["rand9", "blake3", "rayon"] }
+tycho-util-proc = { workspace = true}
 weedb = { workspace = true }
 
 # local deps
@@ -68,13 +75,13 @@ tycho-util = { workspace = true }
 tycho-vm = { workspace = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 tycho-block-util = { workspace = true, features = ["test"] }
 tycho-core = { workspace = true, features = ["test"] }
 tycho-network = { workspace = true, features = ["test"] }
 tycho-storage = { workspace = true, features = ["test"] }
 tycho-util = { workspace = true, features = ["test"] }
-criterion = { workspace = true }
 
 [features]
 default = []

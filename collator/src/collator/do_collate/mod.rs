@@ -20,18 +20,21 @@ use tycho_util::mem::Reclaimer;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::CancellationFlag;
 use tycho_util::time::now_millis;
+use tycho_util::transactional::TransactionGuard;
 
 use super::types::{
-    AnchorInfo, AnchorsCache, BlockCollationData, BlockCollationDataBuilder, BlockSerializerCache,
+    AnchorsCache, BlockCollationData, BlockCollationDataBuilder, BlockSerializerCache,
     CollationResult, ExecuteResult, FinalResult, FinalizeBlockResult, FinalizeCollationResult,
     FinalizeMessagesReaderResult, PrevData, WorkingState,
 };
 use super::{CollatorStdImpl, ForceMasterCollation, ShardDescriptionExt};
+use crate::collator::anchors_cache::AnchorsCacheTransaction;
 use crate::collator::do_collate::finalize::FinalizeBlockContext;
 use crate::collator::do_collate::work_units::{DoCollateWu, WuEvent, WuEventData};
 use crate::collator::error::{CollationCancelReason, CollatorError};
 use crate::collator::messages_reader::state::ReaderState;
 use crate::collator::types::{FinalizeMetrics, PartialValueFlow, RandSeed};
+use crate::internal_queue::queue::PendingQueueDiff;
 use crate::internal_queue::types::diff::{DiffZone, QueueDiffWithMessages};
 use crate::internal_queue::types::message::EnqueuedMessage;
 use crate::internal_queue::types::ranges::{Bound, QueueShardBoundedRange};
@@ -122,36 +125,17 @@ impl CollatorStdImpl {
             )),
         );
 
-        // We should remove all previously imported anchors above next chain time.
-        // We have cases when some shard can force master block collation (e.g. no pending messages after sc block)
-        // but it is not clear how many anchors were already imported by master. So we take next chain time
-        // from shard and should use anchors only up to chosen next chain time.
-        let Some(AnchorInfo {
-            ct: last_imported_chain_time,
-            author,
-            ..
-        }) = self
+        // Get created_by using read-only lookup (actual removal happens inside run() transactionally)
+        let Some(created_by) = self
             .anchors_cache
-            .remove_last_imported_above(next_chain_time)
+            .last_imported_anchor_info_at_ct(next_chain_time)
+            .map(|info| info.author.to_bytes().into())
         else {
             bail!(
                 "last_imported_anchor should exist when we collating block \
                     even after removing anchors above the next chain time"
             )
         };
-
-        // TODO: needs to update metrics
-        // metrics::gauge!("tycho_collator_ext_msgs_imported_queue_size", &labels).decrement(our_exts_count as f64);
-
-        assert!(
-            *last_imported_chain_time >= next_chain_time,
-            "all anchors upto next chain time {} should be imported before collation, \
-            but last imported chain time is {}",
-            next_chain_time,
-            last_imported_chain_time,
-        );
-
-        let created_by = author.to_bytes().into();
 
         let is_first_block_after_prev_master = is_first_block_after_prev_master(
             prev_shard_data.blocks_ids()[0], // TODO: consider split/merge
@@ -180,7 +164,6 @@ impl CollatorStdImpl {
             top_shard_blocks_info,
         )?;
 
-        let mut anchors_cache = std::mem::take(&mut self.anchors_cache);
         let block_serializer_cache = self.block_serializer_cache.clone();
 
         let state = Box::new(ActualState {
@@ -197,30 +180,108 @@ impl CollatorStdImpl {
                 ..Default::default()
             },
         });
+
         let collation_is_cancelled = state.collation_is_cancelled.clone();
 
-        let zerostate_id = self.zerostate_id;
+        let mut anchors_cache = std::mem::take(&mut self.anchors_cache);
 
         let do_collate_fut = tycho_util::sync::rayon_run_fifo({
             let collation_session = self.collation_session.clone();
             let config = self.config.clone();
             let mq_adapter = self.mq_adapter.clone();
+            let shard_id = self.shard_id;
             let span = tracing::Span::current();
+            let zerostate_id = self.zerostate_id;
+
             move || {
+                let labels = [("workchain", shard_id.workchain().to_string())];
                 let _span = span.enter();
 
-                let result = Self::run(
-                    config,
-                    mq_adapter,
-                    &mut reader_state,
-                    &mut anchors_cache,
-                    block_serializer_cache,
-                    state,
-                    collation_session,
-                    wu_used_from_last_anchor,
-                    usage_tree,
-                    zerostate_id,
-                );
+                let result = {
+                    let mut anchor_cache_tx = AnchorsCacheTransaction::new(&mut anchors_cache);
+                    let mut reader_guard = TransactionGuard::new(&mut reader_state);
+
+                    let collation_is_cancelled = state.collation_is_cancelled.clone();
+
+                    let result = Self::run(
+                        config,
+                        mq_adapter,
+                        &mut reader_guard,
+                        &mut anchor_cache_tx,
+                        block_serializer_cache,
+                        state,
+                        collation_session,
+                        wu_used_from_last_anchor,
+                        usage_tree,
+                        zerostate_id,
+                        next_chain_time,
+                    )
+                    .and_then(|(collation_result, pending_queue_diff_tx)| {
+                        // exit collation if cancelled before writing queue diff
+                        if collation_is_cancelled.check() {
+                            return Err(CollatorError::Cancelled(
+                                CollationCancelReason::ExternalCancel,
+                            ));
+                        }
+                        Ok((collation_result, pending_queue_diff_tx))
+                    });
+
+                    // commit or rollback transaction based on collation result, and record metrics
+                    match result {
+                        // if collation was successful, commit all transactions
+                        Ok((collation_result, pending_queue_diff_tx)) => {
+                            let queue_diff_result = if let Some(tx) = pending_queue_diff_tx {
+                                let _h = HistogramGuard::begin_with_labels(
+                                    "tycho_do_collate_queue_diff_commit_time",
+                                    &labels,
+                                );
+                                tx.write()
+                                    .context("queue diff commit failed")
+                                    .map_err(CollatorError::Anyhow)
+                            } else {
+                                Ok(())
+                            };
+
+                            match queue_diff_result {
+                                Ok(()) => {
+                                    {
+                                        let _h = HistogramGuard::begin_with_labels(
+                                            "tycho_do_collate_reader_state_commit_time",
+                                            &labels,
+                                        );
+                                        reader_guard.commit();
+                                    }
+                                    anchor_cache_tx.commit();
+                                    Ok(collation_result)
+                                }
+                                Err(e) => {
+                                    drop(reader_guard);
+                                    drop(anchor_cache_tx);
+                                    Err(e)
+                                }
+                            }
+                        }
+                        // if collation failed, rollback reader and anchors cache transactions
+                        Err(e) => {
+                            {
+                                let _h = HistogramGuard::begin_with_labels(
+                                    "tycho_do_collate_reader_state_rollback_time",
+                                    &labels,
+                                );
+                                drop(reader_guard);
+                            }
+
+                            {
+                                let _h = HistogramGuard::begin_with_labels(
+                                    "tycho_do_collate_anchors_cache_rollback_time",
+                                    &labels,
+                                );
+                                drop(anchor_cache_tx);
+                            }
+                            Err(e)
+                        }
+                    }
+                };
 
                 CollationOutput {
                     reader_state,
@@ -250,7 +311,7 @@ impl CollatorStdImpl {
             reader_state,
             anchors_cache: restored_anchors_cache,
             result: do_collate_res,
-        } = do_collate_res.unwrap();
+        } = do_collate_res.expect("do_collate future must complete");
 
         self.anchors_cache = restored_anchors_cache;
 
@@ -269,13 +330,19 @@ impl CollatorStdImpl {
             res => res?,
         };
 
+        // Increment shard blocks counter for metrics (only for non-masterchain)
+        if !self.shard_id.is_masterchain() {
+            self.shard_blocks_count_from_last_anchor =
+                self.shard_blocks_count_from_last_anchor.saturating_add(1);
+        }
+
         let int_queue_len = reader_state
             .internals
             .cumulative_statistics
-            .as_ref()
+            .inner()
             .map(|cumulative_stats| cumulative_stats.remaining_total_for_own_shard());
 
-        let last_read_to_anchor_chain_time = reader_state.externals.last_read_to_anchor_chain_time;
+        let last_read_to_anchor_chain_time = *reader_state.externals.last_read_to_anchor_chain_time;
 
         let block_id = *finalized.block_candidate.block.id();
         let finalize_wu = finalized.finalize_wu.clone();
@@ -376,24 +443,55 @@ impl CollatorStdImpl {
         Ok(())
     }
 
+    /// Run collation phase. Returns `CollationResult` and pending queue diff transaction.
+    /// The transaction should be committed only after successful collation.
     #[allow(clippy::too_many_arguments)]
     fn run(
         collator_config: Arc<CollatorConfig>,
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
         reader_state: &mut ReaderState,
-        anchors_cache: &mut AnchorsCache,
+        anchors_cache: &mut AnchorsCacheTransaction<'_>,
         block_serializer_cache: BlockSerializerCache,
         state: Box<ActualState>,
         collation_session: Arc<CollationSessionInfo>,
         wu_used_from_last_anchor: u64,
         usage_tree: UsageTree,
         zerostate_id: ZerostateId,
-    ) -> Result<CollationResult, CollatorError> {
+        next_chain_time: u64,
+    ) -> Result<(CollationResult, Option<PendingQueueDiff>), CollatorError> {
         let shard_id = state.shard_id;
         let labels = [("workchain", shard_id.workchain().to_string())];
         let mc_data = state.mc_data.clone();
 
         let collation_is_cancelled = state.collation_is_cancelled.clone();
+
+        // Remove previously imported anchors above next chain time (transactionally).
+        // We have cases when some shard can force master block collation (e.g. no pending messages after sc block)
+        // but it is not clear how many anchors were already imported by master. So we take next chain time
+        // from shard and should use anchors only up to chosen next chain time.
+        anchors_cache.remove_last_imported_above(next_chain_time);
+
+        // Verify that anchor author matches created_by set before collation
+        let Some(anchor_info) = anchors_cache.last_imported_anchor_info() else {
+            return Err(CollatorError::Anyhow(anyhow::anyhow!(
+                "last_imported_anchor should exist when collating block \
+                    even after removing anchors above the next chain time"
+            )));
+        };
+
+        assert!(
+            anchor_info.ct >= next_chain_time,
+            "all anchors upto next chain time {} should be imported before collation, \
+            but last imported chain time is {}",
+            next_chain_time,
+            anchor_info.ct,
+        );
+
+        let expected_created_by: HashBytes = anchor_info.author.to_bytes().into();
+        assert_eq!(
+            state.collation_data.created_by, expected_created_by,
+            "created_by mismatch: expected author from anchor after removal"
+        );
 
         // prepare execution
         let histogram_prepare =
@@ -412,8 +510,12 @@ impl CollatorStdImpl {
             .cloned()
             .unwrap_or_default();
 
-        let prepare_phase =
-            Phase::<PrepareState<'_>>::new(mq_adapter.clone(), reader_state, anchors_cache, state);
+        let prepare_phase = Phase::<PrepareState<'_, '_>>::new(
+            mq_adapter.clone(),
+            reader_state,
+            anchors_cache,
+            state,
+        );
 
         let mut execute_phase = prepare_phase.run()?;
 
@@ -465,12 +567,6 @@ impl CollatorStdImpl {
             }
         };
 
-        histogram_create_queue_diff.finish();
-
-        let histogram_serialize_queue_diff = HistogramGuard::begin_with_labels(
-            "tycho_do_collate_serialize_queue_diff_time_high",
-            &labels,
-        );
         let serialized_diff = serialize_diff(
             &queue_diff_with_msgs,
             &min_message,
@@ -480,9 +576,9 @@ impl CollatorStdImpl {
             reader_state.internals.get_min_processed_to_by_shards(),
         );
 
-        histogram_serialize_queue_diff.finish();
+        histogram_create_queue_diff.finish();
 
-        let update_queue_task = create_apply_diff_task(
+        let prepare_queue_task = create_prepare_diff_task(
             &mq_adapter,
             queue_diff_with_msgs,
             &block_id_short,
@@ -536,7 +632,7 @@ impl CollatorStdImpl {
 
         // finalize block
         let span = tracing::Span::current();
-        let (finalize_phase_result, update_queue_task_result) = rayon::join(
+        let (finalize_phase_result, prepare_queue_result) = rayon::join(
             || {
                 let _span = span.enter();
 
@@ -552,14 +648,14 @@ impl CollatorStdImpl {
                     zerostate_id,
                 })
             },
-            // run update queue task and wait before returning collation result
-            // to be sure that queue was updated before block commit and next block collation
-            update_queue_task,
+            // prepare queue diff task (do not write yet, will be committed later)
+            prepare_queue_task,
         );
         let (mut finalized, execute_result) = finalize_phase_result?;
+        let prepared_queue_diff = prepare_queue_result?;
 
         // update finalize metrics and wu
-        finalized.finalize_metrics.apply_queue_diff_elapsed = update_queue_task_result?;
+        finalized.finalize_metrics.apply_queue_diff_elapsed = prepared_queue_diff.elapsed;
         finalized.finalize_metrics.total_timer.stop();
         finalized
             .finalize_wu
@@ -578,11 +674,14 @@ impl CollatorStdImpl {
             has_unprocessed_messages,
         };
 
-        Ok(CollationResult {
-            finalized,
-            execute_result,
-            final_result,
-        })
+        Ok((
+            CollationResult {
+                finalized,
+                execute_result,
+                final_result,
+            },
+            prepared_queue_diff.tx,
+        ))
     }
 
     /// Get max LT from masterchain (and shardchain) then calc start LT
@@ -931,7 +1030,7 @@ impl CollatorStdImpl {
     }
 
     fn create_collation_data(
-        &mut self,
+        &self,
         next_block_id_short: BlockIdShort,
         next_chain_time: u64,
         created_by: HashBytes,
@@ -949,11 +1048,6 @@ impl CollatorStdImpl {
         tracing::trace!(target: tracing_targets::COLLATOR, "rand_seed from chain time: {}", rand_seed);
 
         let is_masterchain = self.shard_id.is_masterchain();
-
-        if !is_masterchain {
-            self.shard_blocks_count_from_last_anchor =
-                self.shard_blocks_count_from_last_anchor.saturating_add(1);
-        }
 
         // prepare block collation data
         let block_limits = mc_data.config.get_block_limits(is_masterchain)?;
@@ -1464,16 +1558,22 @@ fn serialize_diff(
         .serialize()
 }
 
-fn create_apply_diff_task(
+/// Returned type from `prepare_queue_diff_task`
+struct PreparedQueueDiff {
+    elapsed: Duration,
+    tx: Option<PendingQueueDiff>,
+}
+
+fn create_prepare_diff_task(
     mq_adapter: &Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
     queue_diff_with_msgs: QueueDiffWithMessages<EnqueuedMessage>,
     block_id_short: &BlockIdShort,
     min_message: QueueKey,
     max_message: QueueKey,
     diff_hash: HashBytes,
-) -> Result<impl FnOnce() -> Result<Duration>> {
-    // create update queue task but do not run it
-    let update_queue_task = {
+) -> Result<impl FnOnce() -> Result<PreparedQueueDiff>> {
+    // create prepare queue diff task but do not run it
+    let prepare_queue_task = {
         let labels = [("workchain", block_id_short.shard.workchain().to_string())];
         let span = tracing::Span::current();
         move || {
@@ -1493,28 +1593,28 @@ fn create_apply_diff_task(
 
             histogram.finish();
 
-            // apply queue diff
+            // prepare queue diff (do not write yet)
             let histogram = HistogramGuard::begin_with_labels(
-                "tycho_do_collate_apply_queue_diff_time_high",
+                "tycho_do_collate_prepare_queue_diff_time_high",
                 &labels,
             );
 
             // check only uncommitted diffs because the last committed diff
             // may not be sequential after sync on a block ahead
-            mq_adapter
-                .apply_diff(
+            let tx = mq_adapter
+                .prepare_diff(
                     queue_diff_with_msgs,
                     *block_id_short,
                     &diff_hash,
                     statistics,
                     Some(DiffZone::Uncommitted),
                 )
-                .context("finalize")?;
-            let apply_queue_diff_elapsed = histogram.finish();
+                .context("prepare_diff")?;
+            let elapsed = histogram.finish();
 
-            Ok(apply_queue_diff_elapsed)
+            Ok(PreparedQueueDiff { elapsed, tx })
         }
     };
 
-    Ok(update_queue_task)
+    Ok(prepare_queue_task)
 }
