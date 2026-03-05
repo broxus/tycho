@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use tycho_consensus::prelude::{
@@ -92,7 +92,7 @@ impl DumpAnchors {
             set_committed_in_db: false,
         };
 
-        let results = Arc::new(Mutex::new(Vec::new()));
+        let mut results = Vec::new();
 
         for output in outputs {
             match output {
@@ -110,9 +110,11 @@ impl DumpAnchors {
                     );
                 }
                 MempoolOutput::NextAnchor(adata) => {
-                    let results = results.clone();
-                    let f = move |anchor| results.lock().unwrap().push(anchor);
-                    shuttle = shuttle.handle(adata, f).await?;
+                    let (output, dirty) = shuttle.handle(adata).await?;
+                    if let Some(anchor) = output {
+                        results.push(anchor);
+                    };
+                    shuttle = dirty.clean().await?;
                 }
                 MempoolOutput::CommitFinished(_)
                 | MempoolOutput::Running
@@ -120,9 +122,7 @@ impl DumpAnchors {
             }
         }
 
-        let results = Arc::into_inner(results).expect("it's the only ref");
-
-        results.into_inner().context("Shuttle handle anchors")
+        Ok(results)
     }
 }
 

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 use parking_lot::RwLock;
 use tokio::sync::Notify;
+use tycho_network::PeerId;
 use tycho_util::mem::Reclaimer;
 
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
@@ -33,6 +34,17 @@ pub enum CacheError {
     },
 }
 
+#[derive(thiserror::Error, Debug)]
+#[error("received non-unique anchor id: {self:?}")]
+pub struct DupAnchorError {
+    id: MempoolAnchorId,
+    is_paused: bool,
+    prev_id_diff: Option<(Option<MempoolAnchorId>, Option<MempoolAnchorId>)>,
+    chain_time_diff: Option<(u64, u64)>,
+    externals_count_diff: Option<(usize, usize)>,
+    author_diff: Option<(PeerId, PeerId)>,
+}
+
 #[derive(Default)]
 struct CacheData {
     anchors: IndexMap<MempoolAnchorId, Arc<MempoolAnchor>, ahash::RandomState>,
@@ -52,18 +64,26 @@ impl Cache {
         // let waiters wait for new data to be pushed
     }
 
-    pub fn push(&self, anchor: Arc<MempoolAnchor>) {
+    pub fn push(&self, anchor: Arc<MempoolAnchor>) -> Result<(), Box<DupAnchorError>> {
         let mut data = self.data.write();
-        let old = data.anchors.insert(anchor.id, anchor);
-        if let Some(old) = old {
-            tracing::error!(
-                target: tracing_targets::MEMPOOL_ADAPTER,
-                id = old.id,
-                is_paused = data.is_paused.then_some(true),
-                "received same anchor more than once"
-            );
+        let prev_id = anchor.prev_id;
+        let chain_time = anchor.chain_time;
+        let externals_count = anchor.externals.len();
+        let author = anchor.author;
+        if let Some(old) = data.anchors.insert(anchor.id, anchor) {
+            return Err(Box::new(DupAnchorError {
+                id: old.id,
+                is_paused: data.is_paused,
+                prev_id_diff: (old.prev_id != prev_id).then_some((old.prev_id, prev_id)),
+                chain_time_diff: (old.chain_time != chain_time)
+                    .then_some((old.chain_time, chain_time)),
+                externals_count_diff: (old.externals.len() != externals_count)
+                    .then_some((old.externals.len(), externals_count)),
+                author_diff: (old.author != author).then_some((old.author, author)),
+            }));
         }
         self.anchor_added.notify_waiters();
+        Ok(())
     }
 
     pub fn set_paused(&self, is_paused: bool) {

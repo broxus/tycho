@@ -94,14 +94,10 @@ impl StateUpdateQueue {
             return Ok(Vec::new());
         }
 
-        let mut vec =
-            Vec::with_capacity(((self.signed - self.drained) as usize).min(self.unsigned.len()));
-        while let Some(entry) = self.unsigned.first_entry() {
-            if *entry.key() > self.signed {
-                break;
-            }
-            vec.push(entry.remove());
-        }
+        let vec = (self.unsigned)
+            .extract_if(..=self.signed, |_, _| true)
+            .map(|(_, value)| value)
+            .collect::<Vec<_>>();
 
         if let Some(first_seqno) = (vec.first()).map(|ctx| ctx.mc_block_id.seqno) {
             anyhow::ensure!(
