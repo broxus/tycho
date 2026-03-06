@@ -5,7 +5,6 @@ use arc_swap::ArcSwapOption;
 use futures_util::future::BoxFuture;
 use futures_util::{FutureExt, future};
 use tycho_network::{PeerId, Response, Service, ServiceRequest};
-use tycho_util::sync::rayon_run_fifo;
 
 use crate::dag::DagHead;
 use crate::effects::{AltFormat, Ctx, RoundCtx};
@@ -208,7 +207,7 @@ impl ResponderInner {
         let query = match medium_query {
             QueryRequestMedium::Broadcast(bytes) => {
                 let start = Instant::now();
-                let parse_result = rayon_run_fifo(|| Point::parse(bytes.into())).await;
+                let parse_result = Point::parse_async(bytes.into()).await;
                 metrics::histogram!("tycho_mempool_engine_parse_point_time")
                     .record(start.elapsed());
                 match parse_result {

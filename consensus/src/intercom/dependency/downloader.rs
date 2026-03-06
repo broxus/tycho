@@ -15,7 +15,6 @@ use tycho_network::PeerId;
 use tycho_util::FastHashSet;
 use tycho_util::mem::Reclaimer;
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::sync::rayon_run_fifo;
 
 use crate::dag::{IllFormedReason, Verifier, VerifyError};
 use crate::effects::{AltFormat, Cancelled, Ctx, DownloadCtx, TaskResult};
@@ -263,7 +262,7 @@ impl DownloadTask {
 
     async fn parse(peer_id: PeerId, bytes: Bytes) -> QueryFutureOutput<ParseResult> {
         let start = std::time::Instant::now();
-        let parse_result = rayon_run_fifo(|| Point::parse(bytes.into())).await;
+        let parse_result = Point::parse_async(bytes.into()).await;
         metrics::histogram!("tycho_mempool_engine_parse_point_time").record(start.elapsed());
         QueryFutureOutput {
             peer_id,

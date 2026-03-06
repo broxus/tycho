@@ -198,6 +198,46 @@ impl Point {
         }))
     }
 
+    pub async fn parse_async(serialized: Vec<u8>) -> ParseResult {
+        let _duration = HistogramGuard::begin("tycho_mempool_point_parse_verify_time");
+
+        let raw = PointRawRead::<'_>::read_from(&mut &serialized[..])?;
+
+        tokio::task::consume_budget().await;
+
+        if !(raw.signature).verifies(raw.author()?, raw.digest) {
+            return Ok(Err(PointIntegrityError::BadSig));
+        };
+
+        tokio::task::consume_budget().await;
+
+        if *raw.digest != Digest::new(raw.body.as_ref()) {
+            return Ok(Err(PointIntegrityError::BadHash));
+        };
+
+        tokio::task::yield_now().await;
+
+        let point = Self::from_bytes(serialized)?;
+
+        tokio::task::yield_now().await;
+
+        let mut sig_check_result = Ok(());
+        if let Some(prev_proof) = point.info.prev_digest() {
+            for (peer, sig) in point.info.evidence() {
+                if !sig.verifies(peer, prev_proof) {
+                    sig_check_result = Err(EvidenceSigError);
+                    break;
+                }
+                tokio::task::consume_budget().await;
+            }
+        }
+
+        Ok(Ok(match sig_check_result {
+            Ok(()) => Ok(point),
+            Err(err) => Err((point, err)),
+        }))
+    }
+
     pub fn serialized(&self) -> &[u8] {
         &self.serialized
     }
