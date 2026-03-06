@@ -1912,6 +1912,10 @@ impl CollatorStdImpl {
                 // check pending externals
                 let has_externals = self.anchors_cache.has_pending_externals();
 
+                // calculate mc block max interval threshold after the previous mc block
+                let mc_block_max_interval_threshold = working_state.mc_data.gen_chain_time
+                    + working_state.collation_config.mc_block_max_interval_ms as u64;
+
                 // check if should import anchor after fixed wu used by blocks collation
                 let wu_used_from_last_anchor = working_state.wu_used_from_last_anchor;
                 let wu_used_to_import_next_anchor =
@@ -2113,13 +2117,28 @@ impl CollatorStdImpl {
 
                                 tracing::debug!(target: tracing_targets::COLLATOR,
                                     wu_used_from_last_anchor = working_state.wu_used_from_last_anchor,
-                                    should_import_anchor_by_used_wu,
+                                    wu_used_to_import_next_anchor,
                                     "used wu dropped to",
                                 );
 
                                 if working_state.wu_used_from_last_anchor
                                     < wu_used_to_import_next_anchor
                                 {
+                                    break;
+                                }
+
+                                // even if accumulated wu still allow to import more anchors,
+                                // we stop when mc block max interval thresold reached
+
+                                // NOTE: if collator is ahead of mempool, and wu was calculated inaccurately,
+                                //      so that too much wu accumulated, we will not wait for many anchors,
+                                //      we will produce mc block each max interval
+                                if anchor.chain_time >= mc_block_max_interval_threshold {
+                                    tracing::debug!(target: tracing_targets::COLLATOR,
+                                        anchor_chain_time = anchor.chain_time,
+                                        mc_block_max_interval_threshold,
+                                        "stop importing anchors when mc block max interval threshold reached",
+                                    );
                                     break;
                                 }
                             }
