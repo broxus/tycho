@@ -261,9 +261,7 @@ impl DownloadTask {
     }
 
     async fn parse(peer_id: PeerId, bytes: Bytes) -> QueryFutureOutput<ParseResult> {
-        let start = std::time::Instant::now();
         let parse_result = Point::parse_async(bytes.into()).await;
-        metrics::histogram!("tycho_mempool_engine_parse_point_time").record(start.elapsed());
         QueryFutureOutput {
             peer_id,
             result: Ok(DownloadResponse::Defined(parse_result)),

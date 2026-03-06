@@ -2951,8 +2951,8 @@ def mempool_misc() -> RowPanel:
             legend_format="{{instance}} - {{kind}}",
         ),
         create_heatmap_panel(
-            "tycho_mempool_point_parse_verify_time",
-            "Responder and Downloader: point parse time (incl check sig and verify)",
+            "tycho_mempool_engine_parse_point_time",
+            "Responder and Downloader: point parse task duration (async)",
         ),
         create_counter_panel(
             expr_sum_increase(
@@ -2963,10 +2963,6 @@ def mempool_misc() -> RowPanel:
             ),
             "Stats: merge errors",
             legend_format="{{instance}} - {{kind}}",
-        ),
-        create_heatmap_panel(
-            "tycho_mempool_engine_parse_point_time",
-            "Responder and Downloader: point parse task duration (async result)",
         ),
         create_heatmap_panel(
             "tycho_mempool_verifier_validate_time",

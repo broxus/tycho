@@ -178,8 +178,6 @@ impl Point {
     }
 
     pub fn parse(serialized: Vec<u8>) -> ParseResult {
-        let _duration = HistogramGuard::begin("tycho_mempool_point_parse_verify_time");
-
         let raw = PointRawRead::<'_>::read_from(&mut &serialized[..])?;
 
         if !(raw.signature).verifies(raw.author()?, raw.digest) {
@@ -199,7 +197,7 @@ impl Point {
     }
 
     pub async fn parse_async(serialized: Vec<u8>) -> ParseResult {
-        let _duration = HistogramGuard::begin("tycho_mempool_point_parse_verify_time");
+        let _duration = HistogramGuard::begin("tycho_mempool_engine_parse_point_time");
 
         let raw = PointRawRead::<'_>::read_from(&mut &serialized[..])?;
 
