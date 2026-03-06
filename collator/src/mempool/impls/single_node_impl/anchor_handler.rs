@@ -53,13 +53,15 @@ impl SingleNodeAnchorHandler {
 
             let unique_messages_len = unique_messages.len();
 
-            self.cache.push(Arc::new(MempoolAnchor {
-                id: anchor_id,
-                prev_id: prev_anchor_id,
-                chain_time,
-                author: self.peer_id,
-                externals: unique_messages,
-            }));
+            self.cache
+                .push(Arc::new(MempoolAnchor {
+                    id: anchor_id,
+                    prev_id: prev_anchor_id,
+                    chain_time,
+                    author: self.peer_id,
+                    externals: unique_messages,
+                }))
+                .expect("push new anchor");
 
             metrics::counter!("tycho_mempool_msgs_unique_count")
                 .increment(unique_messages_len as _);

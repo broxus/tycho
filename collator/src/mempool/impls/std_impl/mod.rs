@@ -1,5 +1,6 @@
 mod adapter_impl;
 mod anchor_handler;
+mod session_keeper;
 mod state_update_queue;
 
 use std::sync::Arc;
@@ -13,28 +14,22 @@ use tycho_crypto::ed25519::KeyPair;
 use tycho_network::{Network, OverlayService, PeerResolver};
 use tycho_storage::StorageContext;
 
+use crate::mempool::StateUpdateContext;
 use crate::mempool::impls::common::cache::Cache;
 use crate::mempool::impls::common::v_set_adapter::VSetAdapter;
 use crate::mempool::impls::std_impl::anchor_handler::StdAnchorHandler;
-use crate::mempool::impls::std_impl::state_update_queue::StateUpdateQueue;
-use crate::mempool::{DebugStateUpdateContext, StateUpdateContext};
+use crate::mempool::impls::std_impl::session_keeper::StdSessionKeeper;
 use crate::tracing_targets;
 
 pub struct MempoolAdapterStdImpl {
     cache: Arc<Cache>,
     net_args: EngineNetworkArgs,
 
-    config: Mutex<StdConfigAdapter>,
+    keeper: Mutex<StdSessionKeeper>,
 
     mempool_db: Arc<MempoolDb>,
     input_buffer: InputBuffer,
     top_known_anchor: RoundWatch<TopKnownAnchor>,
-}
-
-struct StdConfigAdapter {
-    builder: MempoolConfigBuilder,
-    state_update_queue: StateUpdateQueue,
-    engine_session: Option<EngineSession>,
 }
 
 impl MempoolAdapterStdImpl {
@@ -46,8 +41,6 @@ impl MempoolAdapterStdImpl {
         storage_context: &StorageContext,
         mempool_node_config: &MempoolNodeConfig,
     ) -> Result<Self> {
-        let config_builder = MempoolConfigBuilder::new(mempool_node_config);
-
         let mempool_db =
             MempoolDb::open(storage_context.clone()).context("failed to create mempool db")?;
 
@@ -59,11 +52,7 @@ impl MempoolAdapterStdImpl {
                 peer_resolver: peer_resolver.clone(),
                 overlay_service: overlay_service.clone(),
             },
-            config: Mutex::new(StdConfigAdapter {
-                builder: config_builder,
-                state_update_queue: Default::default(),
-                engine_session: None,
-            }),
+            keeper: Mutex::new(StdSessionKeeper::new(mempool_node_config)),
             mempool_db,
             input_buffer: InputBuffer::default(),
             top_known_anchor: RoundWatch::default(),
@@ -72,110 +61,19 @@ impl MempoolAdapterStdImpl {
 
     async fn process_state_update(
         &self,
-        config_guard: &mut StdConfigAdapter,
+        keeper: &mut StdSessionKeeper,
         new_cx: &StateUpdateContext,
     ) -> Result<()> {
         // method is called in a for-cycle, so `seq_no` may differ
-        let span = tracing::error_span!("mc_state_update", seq_no = new_cx.mc_block_id.seqno);
-        let _guard = span.enter();
+        let span = tracing::error_span!("tka", seq_no = new_cx.top_processed_to_anchor_id);
 
-        if let Some(session) = config_guard.engine_session.as_ref() {
-            tracing::debug!(
-                target: tracing_targets::MEMPOOL_ADAPTER,
-                id = %new_cx.mc_block_id.as_short_id(),
-                new_cx = ?DebugStateUpdateContext(new_cx),
-                "Processing state update from mc block",
-            );
+        let has_session_after_update = keeper.has_session_after_update(&self.cache, new_cx);
 
-            // when genesis doesn't change - just (re-)schedule v_set change as defined by collator
-            if new_cx.consensus_info.genesis_info == session.genesis_info() {
-                session.set_peers(VSetAdapter::init_peers(new_cx)?);
-                return Ok(());
-            }
-
-            // rare case when node starts with empty DB to sync and genesis in GlobalConfig
-            if !(new_cx.consensus_info.genesis_info).overrides(&session.genesis_info()) {
-                tracing::warn!(
-                    target: tracing_targets::MEMPOOL_ADAPTER,
-                    id = %new_cx.mc_block_id.as_short_id(),
-                    new_cx = ?DebugStateUpdateContext(new_cx),
-                    current = ?session.genesis_info(),
-                    "Ignoring new genesis: it does not override current, node state was deleted?",
-                );
-                return Ok(());
-            }
-
-            // Genesis is changed at runtime - restart immediately:
-            // block is signed by majority, so old mempool session and its anchors are not needed
-
-            let session = (config_guard.engine_session.take())
-                .context("cannot happen: engine must be started")?;
-            self.cache.reset();
-
-            drop(_guard);
-            session.stop().instrument(span.clone()).await;
+        if !has_session_after_update.instrument(span.clone()).await? {
             let _guard = span.enter();
-
-            // a new genesis is created even when overlay-related part of config stays the same
-            (config_guard.builder).set_genesis(new_cx.consensus_info.genesis_info);
-            // so config simultaneously changes with genesis via mempool restart
-            (config_guard.builder).set_consensus_config(&new_cx.consensus_config)?;
-
-            let merged_config = config_guard.builder.build()?;
-            config_guard.engine_session = Some(self.start(&merged_config, new_cx)?);
-
-            return Ok(());
+            let merged_config = keeper.config_builder.build()?;
+            keeper.engine_session = Some(self.start(&merged_config, new_cx)?);
         }
-
-        tracing::info!(
-            target: tracing_targets::MEMPOOL_ADAPTER,
-            id = %new_cx.mc_block_id.as_short_id(),
-            new_cx = ?DebugStateUpdateContext(new_cx),
-            "Will start mempool with state update from mc block"
-        );
-
-        if let Some(genesis_override) = (config_guard.builder.get_genesis())
-            .filter(|genesis| genesis.overrides(&new_cx.consensus_info.genesis_info))
-        {
-            // Note: assume that global config is applied to mempool adapter
-            //   before collator is run in synchronous code, so this method is called later
-
-            // genesis does not have externals, so only strictly greater time and round
-            // will be saved into next block, so genesis can have values GEQ than in prev block
-            anyhow::ensure!(
-                genesis_override.start_round >= new_cx.top_processed_to_anchor_id
-                    && genesis_override.genesis_millis >= new_cx.mc_block_chain_time,
-                "new {genesis_override:?} should be >= \
-                    top processed_to_anchor_id {} and block gen chain_time {}",
-                new_cx.top_processed_to_anchor_id,
-                new_cx.mc_block_chain_time,
-            );
-
-            tracing::warn!(
-                target: tracing_targets::MEMPOOL_ADAPTER,
-                value = ?genesis_override,
-                "Using genesis override from global config"
-            );
-            let message = match config_guard.builder.get_consensus_config() {
-                Some(cc) if cc == &new_cx.consensus_config => {
-                    "consensus config from global config is the same as in mc block"
-                }
-                Some(_) => "consensus config from global config overrides one from mc block",
-                None => {
-                    (config_guard.builder).set_consensus_config(&new_cx.consensus_config)?;
-                    "no consensus config in global config, using one from mc block"
-                }
-            };
-            // "message" is a reserved field in macro
-            tracing::warn!(target: tracing_targets::MEMPOOL_ADAPTER, message);
-        } else {
-            (config_guard.builder).set_genesis(new_cx.consensus_info.genesis_info);
-            (config_guard.builder).set_consensus_config(&new_cx.consensus_config)?;
-        };
-
-        let merged_config = config_guard.builder.build()?;
-        config_guard.engine_session = Some(self.start(&merged_config, new_cx)?);
-
         Ok(())
     }
 

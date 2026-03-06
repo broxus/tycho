@@ -230,7 +230,7 @@ impl MempoolAdapterStore {
                 output.push(MempoolOutput::NewStartAfterGap(full_history_bottom));
             };
             last_visited = Some(adata.anchor.round());
-            output.push(MempoolOutput::NextAnchor(adata));
+            output.push(MempoolOutput::NextAnchor(Box::new(adata)));
         }
 
         Ok(output)

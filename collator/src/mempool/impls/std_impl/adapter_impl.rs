@@ -10,21 +10,25 @@ use crate::types::processed_upto::BlockSeqno;
 
 #[async_trait::async_trait]
 impl MempoolAdapter for MempoolAdapterStdImpl {
-    async fn handle_mc_state_update(&self, new_cx: StateUpdateContext) -> Result<()> {
+    async fn handle_mc_state_update(&self, new_cx: Box<StateUpdateContext>) -> Result<()> {
+        tracing::debug!(
+            target: tracing_targets::MEMPOOL_ADAPTER,
+            tka = %new_cx.top_processed_to_anchor_id,
+            "Received state update from mc block",
+        );
+        assert!(new_cx.mc_block_id.is_masterchain(), "expect only MC data");
+
         // assume first block versions are monotonic by both top anchor and seqno
         // and there may be a second block version out of particular order,
         // but strictly before `handle_top_processed_to_anchor()` is called;
         // handle_top_processed_to_anchor() is called with monotonically increasing anchors
-        let mut config_guard = self.config.lock().await;
+        let mut keeper_guard = self.keeper.lock().await;
 
-        tracing::debug!(
-            target: tracing_targets::MEMPOOL_ADAPTER,
-            full_id = %new_cx.mc_block_id,
-            "Received state update from mc block",
-        );
+        // collator won't receive any anchors since the prepare until the block gets signed
+        keeper_guard.check_expect_genesis_change(&self.cache, &new_cx)?;
 
-        if let Some(ctx) = config_guard.state_update_queue.push(new_cx)? {
-            self.process_state_update(&mut config_guard, &ctx).await?;
+        if let Some(ctx) = keeper_guard.state_update_queue.push(new_cx)? {
+            self.process_state_update(&mut keeper_guard, &ctx).await?;
             self.top_known_anchor
                 .set_max_raw(ctx.top_processed_to_anchor_id);
         }
@@ -33,10 +37,10 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
     }
 
     async fn handle_signed_mc_block(&self, mc_block_seqno: BlockSeqno) -> Result<()> {
-        let mut config_guard = self.config.lock().await;
+        let mut keeper_guard = self.keeper.lock().await;
 
-        for ctx in config_guard.state_update_queue.signed(mc_block_seqno)? {
-            self.process_state_update(&mut config_guard, &ctx).await?;
+        for ctx in keeper_guard.state_update_queue.signed(mc_block_seqno)? {
+            self.process_state_update(&mut keeper_guard, &ctx).await?;
             self.top_known_anchor
                 .set_max_raw(ctx.top_processed_to_anchor_id);
         }
@@ -87,12 +91,12 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
         consensus_config: Option<&ConsensusConfig>,
         genesis_info: &GenesisInfo,
     ) -> Result<()> {
-        let mut config_guard = self.config.lock().await;
+        let mut keeper_guard = self.keeper.lock().await;
         if let Some(consensus_config) = consensus_config {
-            (config_guard.builder).set_consensus_config(consensus_config)?;
+            (keeper_guard.config_builder).set_consensus_config(consensus_config)?;
         } // else: will be set from mc state after sync
 
-        config_guard.builder.set_genesis(*genesis_info);
+        keeper_guard.config_builder.set_genesis(*genesis_info);
         Ok(())
     }
 }

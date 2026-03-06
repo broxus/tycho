@@ -38,12 +38,12 @@ impl StdAnchorHandler {
             target: tracing_targets::MEMPOOL_ADAPTER,
             "handle anchors task stopped"
         ));
-        let mut shuttle = Shuttle {
+        let mut shuttle = Box::new(Shuttle {
             store: MempoolAdapterStore::new(mempool_db),
             parser: Parser::new(self.deduplicate_rounds),
             first_after_gap: None,
             set_committed_in_db: true,
-        };
+        });
         while let Some(output) = self.anchor_rx.recv().await {
             shuttle = self.handle_mempool_output(shuttle, output).await?;
         }
@@ -52,21 +52,22 @@ impl StdAnchorHandler {
 
     async fn handle_mempool_output(
         &self,
-        mut shuttle: Shuttle,
+        mut shuttle: Box<Shuttle>,
         output: MempoolOutput,
-    ) -> Result<Shuttle> {
+    ) -> Result<Box<Shuttle>> {
         match output {
-            MempoolOutput::NextAnchor(committed) => {
-                let cache = self.cache.clone();
-                let f = move |anchor| cache.push(Arc::new(anchor));
-                return shuttle.handle(committed, f).await;
+            MempoolOutput::NextAnchor(adata) => {
+                let (output, dirty) = shuttle.handle(adata).await?;
+                if let Some(anchor) = output {
+                    self.cache.push(Arc::new(anchor))?;
+                }
+                return dirty.clean().await;
             }
             MempoolOutput::CommitFinished(round) => {
                 // history payloads are read from DB and marked committed, so ready to be removed
                 self.commit_finished.set_max(round);
             }
             MempoolOutput::NewStartAfterGap(anchors_full_bottom) => {
-                self.cache.reset();
                 let first_to_execute = (anchors_full_bottom + self.deduplicate_rounds).0;
 
                 shuttle.parser = Parser::new(self.deduplicate_rounds);

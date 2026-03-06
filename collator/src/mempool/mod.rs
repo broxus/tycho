@@ -60,7 +60,7 @@ pub trait MempoolAdapter: Send + Sync + 'static {
     /// 1. Mempool switch round
     /// 2. Mempool config
     /// 3. Validators sets
-    async fn handle_mc_state_update(&self, cx: StateUpdateContext) -> Result<()>;
+    async fn handle_mc_state_update(&self, cx: Box<StateUpdateContext>) -> Result<()>;
 
     /// Process state update reported by collation manager earlier.
     /// Will apply vset and config changes to mempool. Also starts mempool at first call.
