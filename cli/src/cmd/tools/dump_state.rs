@@ -14,6 +14,7 @@ use tycho_core::global_config::ZerostateId;
 use tycho_core::node::ConfiguredStorage;
 use tycho_core::storage::{
     BlockConnection, CoreStorage, CoreStorageConfig, QueueStateWriter, ShardStateWriter,
+    StoreStateHint,
 };
 use tycho_storage::StorageContext;
 use tycho_storage::fs::Dir;
@@ -220,23 +221,39 @@ impl Dumper {
         block_id: &BlockId,
         master_block_seqno: u32,
     ) -> Result<ShardStateStuff> {
+        let block_handle = self.storage.block_handle_storage().load_handle(block_id);
+
+        let state = self
+            .storage
+            .shard_state_storage()
+            .load_state(
+                block_handle
+                    .as_ref()
+                    .map_or(master_block_seqno, |b| b.ref_by_mc_seqno()),
+                block_id,
+            )
+            .await?;
+
+        // Ensure skipped state is stored in DB before loading persistent state.
+        if let Some(block_handle) = block_handle
+            && block_handle.has_virtual_state()
+        {
+            self.storage
+                .shard_state_storage()
+                .store_state(&block_handle, &state, StoreStateHint {
+                    is_top_block: Some(true),
+                    ..Default::default()
+                })
+                .await
+                .context("failed to store skipped shard state for persistent save")?;
+        }
+
         let dir = Dir::new(self.output_dir.path().join("persistents"))?;
         let writer = ShardStateWriter::new(
             self.storage.shard_state_storage().cell_storage().db(),
             &dir,
             block_id,
         );
-        let ref_by_mc_seqno = self
-            .storage
-            .block_handle_storage()
-            .load_handle(block_id)
-            .map(|block_handle| block_handle.ref_by_mc_seqno());
-
-        let state = self
-            .storage
-            .shard_state_storage()
-            .load_state(ref_by_mc_seqno.unwrap_or(master_block_seqno), block_id)
-            .await?;
 
         writer
             .write(state.root_cell().repr_hash(), None)
