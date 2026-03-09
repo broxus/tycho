@@ -347,7 +347,7 @@ impl CumulativeStatistics {
             .or_default()
             .insert(diff_max_message, diff_partition_stats);
 
-        debug_assert!(
+        assert!(
             prev.is_none(),
             "duplicate diff_max_message: {diff_max_message:?}"
         );
