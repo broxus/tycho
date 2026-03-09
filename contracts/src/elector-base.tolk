@@ -20,8 +20,8 @@ const STAKE_ERR_ADDR_CHANGED = 4
 const STAKE_ERR_STAKE_TOO_SMALL = 5
 const STAKE_ERR_MAX_FACTOR_TOO_SMALL = 6
 
-const MSG_VALUE_UPDATE_VSET = 1 << 30
-const MSG_VALUE_STAKE_ACCEPTED = ton("1")
+const MSG_VALUE_UPDATE_VSET = ton("36")
+const MSG_VALUE_STAKE_ACCEPTED = ton("36")
 
 //
 // === Storage Models ===
