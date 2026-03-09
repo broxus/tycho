@@ -1422,12 +1422,14 @@ impl CollatorStdImpl {
             }
         }
 
-        self.build_ranges(&mc_data.block_id, shard_pairs).await
+        self.build_ranges(&mc_data.block_id, shard_pairs, true)
+            .await
     }
 
-    /// Collect ranges for loading cumulative statistics if collation block is master
-    /// Using range from previous masterchain block diff
-    /// and diffs between previous masterchain top blocks and current top blocks
+    /// Collect ranges for loading cumulative statistics if collation block is master.
+    /// Only includes diffs between previous masterchain top blocks and current top blocks.
+    /// Does NOT include the MC block's own diff — it was already applied
+    /// via `apply_diff_stats` during the previous MC block's collation.
     async fn mc_compute_part_stat_ranges(
         &self,
         mc_data: &McData,
@@ -1452,13 +1454,15 @@ impl CollatorStdImpl {
             }
         }
 
-        self.build_ranges(&mc_data.block_id, shard_pairs).await
+        self.build_ranges(&mc_data.block_id, shard_pairs, false)
+            .await
     }
 
     async fn build_ranges(
         &self,
         master_block_id: &BlockId,
         shard_pairs: Vec<ShardPair>,
+        include_master_diff: bool,
     ) -> Result<Option<Vec<QueueShardBoundedRange>>> {
         let Some(master_max_msg) = self
             .get_diff_max_message(master_block_id)
@@ -1468,12 +1472,17 @@ impl CollatorStdImpl {
             return Ok(None);
         };
 
-        // add mc block diff range
-        let mut ranges = vec![QueueShardBoundedRange {
-            shard_ident: master_block_id.shard,
-            from: Bound::Included(master_max_msg),
-            to: Bound::Included(master_max_msg),
-        }];
+        let mut ranges = Vec::new();
+
+        // Add mc block diff range only for shard block collation.
+        // For MC collation this diff was already applied via `apply_diff_stats`.
+        if include_master_diff {
+            ranges.push(QueueShardBoundedRange {
+                shard_ident: master_block_id.shard,
+                from: Bound::Included(master_max_msg),
+                to: Bound::Included(master_max_msg),
+            });
+        }
 
         for pair in shard_pairs {
             if pair.prev_block_id.ref_by_mc_seqno == self.zerostate_id.seqno {
