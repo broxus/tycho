@@ -824,6 +824,9 @@ where
         let block_id = *collation_result.candidate.block.id();
         let candidate_chain_time = collation_result.candidate.chain_time;
         let consensus_config_changed = collation_result.candidate.consensus_config_changed;
+        let prev_mc_block_id = collation_result.prev_mc_block_id;
+        let force_next_mc_block = &collation_result.force_next_mc_block;
+        let has_processed_externals = collation_result.has_processed_externals;
 
         debug_assert_eq!(
             block_id.is_masterchain(),
@@ -929,39 +932,19 @@ where
             )?;
 
             if store_res.block_mismatch {
+                tracing::warn!(target: tracing_targets::COLLATION_MANAGER,
+                    block_id = %block_id.as_short_id(),
+                    prev_mc_block_id = %prev_mc_block_id.as_short_id(),
+                    candidate_chain_time,
+                    consensus_config_changed = ?consensus_config_changed,
+                    force_next_mc_block = ?force_next_mc_block,
+                    has_processed_externals,
+                    ?store_res,
+                    "collated block candidate mismatched with cached block",
+                );
                 let labels = [("workchain", block_id.shard.workchain().to_string())];
                 metrics::counter!("tycho_collator_block_mismatch_count", &labels).increment(1);
-
-                self.set_collator_state(&block_id.shard, |ac| ac.state = CollatorState::Cancelled);
-
-                // when master block mismatched then should cancel shard collators as well
-                if block_id.is_masterchain() {
-                    for mut ac in self
-                        .active_collators
-                        .iter_mut()
-                        .filter(|ac| ac.key() != &block_id.shard)
-                    {
-                        // now we cannot cancel active collation directly
-                        // so we mark collators to be cancelled when they finish current active collation
-                        ac.state = match ac.state {
-                            CollatorState::Waiting | CollatorState::Cancelled => {
-                                CollatorState::Cancelled
-                            }
-                            _ => CollatorState::CancelPending,
-                        };
-                    }
-                }
-
-                // we clear uncommitted queue diffs, including one from just collated block
-                // because it is not correct
-                let top_shards = self.blocks_cache.get_last_top_shards();
-                self.mq_adapter.clear_uncommitted_state(&top_shards)?;
-
-                tracing::info!(
-                    target: tracing_targets::COLLATION_MANAGER,
-                    ?store_res,
-                    "saved block candidate to cache",
-                );
+                Self::abort_on_block_mismatch(&block_id, "collated_block_candidate");
             } else {
                 tracing::debug!(
                     target: tracing_targets::COLLATION_MANAGER,
@@ -1284,6 +1267,7 @@ where
         scopeguard::defer!(self.ready_to_sync.notify_one());
 
         let processed_upto = ProcessedUptoInfoStuff::try_from(ctx.processed_upto)?;
+        let min_externals_processed_to = processed_upto.get_min_externals_processed_to().ok();
 
         let Some(store_res) = self
             .blocks_cache
@@ -1299,45 +1283,17 @@ where
         };
 
         if store_res.block_mismatch {
+            tracing::warn!(target: tracing_targets::COLLATION_MANAGER,
+                block_id = %block_id.as_short_id(),
+                mc_block_id = %ctx.mc_block_id.as_short_id(),
+                min_externals_processed_to = ?min_externals_processed_to,
+                is_last_mc_block_in_batch,
+                ?store_res,
+                "block from bc mismatched with locally collated block",
+            );
             let labels = [("workchain", block_id.shard.workchain().to_string())];
             metrics::counter!("tycho_collator_block_mismatch_count", &labels).increment(1);
-
-            // now we cannot cancel active collation directly
-            // so we mark collators to be cancelled when they finish current active collation
-            self.set_collator_state(&block_id.shard, |ac| {
-                ac.state = match ac.state {
-                    CollatorState::Waiting | CollatorState::Cancelled => CollatorState::Cancelled,
-                    _ => CollatorState::CancelPending,
-                };
-            });
-
-            // when master block mismatched then should cancel shard collators as well
-            if block_id.is_masterchain() {
-                for mut ac in self
-                    .active_collators
-                    .iter_mut()
-                    .filter(|ac| ac.key() != &block_id.shard)
-                {
-                    ac.state = match ac.state {
-                        CollatorState::Waiting | CollatorState::Cancelled => {
-                            CollatorState::Cancelled
-                        }
-                        _ => CollatorState::CancelPending,
-                    };
-                }
-            }
-
-            // When received blokc mismatches with collated one
-            // then we should clear uncommitted queue diffs.
-            // The queue diff from last collated master and its shard blocks
-            // are uncommitted and will be removed because they are incorrect.
-            let top_shards = self.blocks_cache.get_last_top_shards();
-            self.mq_adapter.clear_uncommitted_state(&top_shards)?;
-
-            tracing::info!(target: tracing_targets::COLLATION_MANAGER,
-                ?store_res,
-                "saved block from bc to cache",
-            );
+            Self::abort_on_block_mismatch(&block_id, "block_from_bc");
         } else {
             tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
                 ?store_res,
@@ -2209,6 +2165,16 @@ where
             );
         }
         (seqno_delta, is_equal)
+    }
+
+    #[cold]
+    fn abort_on_block_mismatch(block_id: &BlockId, source: &'static str) -> ! {
+        tracing::error!(target: tracing_targets::COLLATION_MANAGER,
+            block_id = %block_id.as_short_id(),
+            source,
+            "block mismatch is treated as fatal; aborting process",
+        );
+        std::process::abort();
     }
 
     async fn process_mc_state_update(

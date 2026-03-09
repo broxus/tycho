@@ -22,8 +22,8 @@ use crate::state_node::StateNodeAdapter;
 use crate::tracing_targets;
 use crate::types::processed_upto::{BlockSeqno, ProcessedUptoInfoStuff};
 use crate::types::{
-    BlockCandidate, DisplayIntoIter, DisplayIter, ProcessedToByPartitions, TopBlockDescription,
-    TopBlockIdUpdated,
+    BlockCandidate, DisplayBlockIdsIntoIter, DisplayIntoIter, DisplayIter,
+    ProcessedToByPartitions, TopBlockDescription, TopBlockIdUpdated,
 };
 use crate::validator::ValidationStatus;
 
@@ -822,6 +822,21 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
         match self.blocks.entry(block_id.seqno) {
             btree_map::Entry::Occupied(mut occupied) => {
                 let entry = occupied.get_mut();
+                let received_prev_blocks_ids = entry.prev_blocks_ids.clone();
+                let received_top_shard_blocks_ids =
+                    entry.iter_top_shard_blocks_ids().copied().collect::<Vec<_>>();
+                let received_ref_by_mc_seqno = entry.ref_by_mc_seqno;
+                let received_top_processed_to_anchor = entry.top_processed_to_anchor;
+                let received_block_id = entry.block_id;
+                let (received_queue_diff_hash, received_collated_after_receive) = match &entry.data
+                {
+                    BlockCacheEntryData::Received {
+                        queue_diff,
+                        collated_after_receive,
+                        ..
+                    } => (queue_diff.diff_hash().clone(), *collated_after_receive),
+                    _ => unreachable!("occupied entry must be received here"),
+                };
                 tracing::debug!(
                     target: tracing_targets::COLLATION_MANAGER,
                     data = %entry.data,
@@ -837,6 +852,24 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
                 };
 
                 if entry.block_id != block_id {
+                    tracing::warn!(target: tracing_targets::COLLATION_MANAGER,
+                        local_block_id = %block_id.as_short_id(),
+                        local_ref_by_mc_seqno = candidate.ref_by_mc_seqno,
+                        local_prev_blocks_ids = %DisplayBlockIdsIntoIter(&candidate.prev_blocks_ids),
+                        local_top_shard_blocks_ids = %DisplayBlockIdsIntoIter(&candidate.top_shard_blocks_ids),
+                        local_processed_to_anchor_id = candidate.processed_to_anchor_id,
+                        local_chain_time = candidate.chain_time,
+                        local_collated_file_hash = ?candidate.collated_file_hash,
+                        local_queue_diff_hash = ?candidate.queue_diff_aug.diff_hash(),
+                        received_block_id = %received_block_id.as_short_id(),
+                        received_ref_by_mc_seqno,
+                        received_prev_blocks_ids = %DisplayBlockIdsIntoIter(&received_prev_blocks_ids),
+                        received_top_shard_blocks_ids = %DisplayBlockIdsIntoIter(&received_top_shard_blocks_ids),
+                        received_top_processed_to_anchor = ?received_top_processed_to_anchor,
+                        received_queue_diff_hash = ?received_queue_diff_hash,
+                        received_collated_after_receive,
+                        "block mismatch: collated block differs from block previously received from bc",
+                    );
                     return Ok(StoredBlock {
                         received_and_collated: false,
                         block_mismatch: true,
@@ -887,6 +920,35 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
         let res = match self.blocks.entry(block_id.seqno) {
             btree_map::Entry::Occupied(mut occupied) => {
                 let entry = occupied.get_mut();
+                let local_prev_blocks_ids = entry.prev_blocks_ids.clone();
+                let local_top_shard_blocks_ids =
+                    entry.iter_top_shard_blocks_ids().copied().collect::<Vec<_>>();
+                let local_block_id = entry.block_id;
+                let local_ref_by_mc_seqno = entry.ref_by_mc_seqno;
+                let local_top_processed_to_anchor = entry.top_processed_to_anchor;
+                let (
+                    local_processed_to_anchor_id,
+                    local_chain_time,
+                    local_collated_file_hash,
+                    local_queue_diff_hash,
+                    local_status_value,
+                    local_received_after_collation_value,
+                ) = match &entry.data {
+                    BlockCacheEntryData::Collated {
+                        candidate_stuff,
+                        status,
+                        received_after_collation,
+                        ..
+                    } => (
+                        candidate_stuff.candidate.processed_to_anchor_id,
+                        candidate_stuff.candidate.chain_time,
+                        candidate_stuff.candidate.collated_file_hash,
+                        candidate_stuff.candidate.queue_diff_aug.diff_hash().clone(),
+                        *status,
+                        *received_after_collation,
+                    ),
+                    _ => unreachable!("occupied entry must be collated here"),
+                };
 
                 tracing::debug!(
                     target: tracing_targets::COLLATION_MANAGER,
@@ -913,6 +975,33 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
                         ctx.ref_by_mc_seqno,
                         ctx.processed_upto,
                     )?;
+                    let received_prev_blocks_ids = new_entry.prev_blocks_ids.clone();
+                    let received_top_shard_blocks_ids =
+                        new_entry.iter_top_shard_blocks_ids().copied().collect::<Vec<_>>();
+                    let received_queue_diff_hash = match &new_entry.data {
+                        BlockCacheEntryData::Received { queue_diff, .. } => queue_diff.diff_hash(),
+                        _ => unreachable!("new entry is always received here"),
+                    };
+                    tracing::warn!(target: tracing_targets::COLLATION_MANAGER,
+                        local_block_id = %local_block_id.as_short_id(),
+                        local_ref_by_mc_seqno,
+                        local_prev_blocks_ids = %DisplayBlockIdsIntoIter(&local_prev_blocks_ids),
+                        local_top_shard_blocks_ids = %DisplayBlockIdsIntoIter(&local_top_shard_blocks_ids),
+                        local_top_processed_to_anchor = ?local_top_processed_to_anchor,
+                        local_status = ?local_status_value,
+                        local_received_after_collation = local_received_after_collation_value,
+                        local_processed_to_anchor_id,
+                        local_chain_time,
+                        local_collated_file_hash = ?local_collated_file_hash,
+                        local_queue_diff_hash = ?local_queue_diff_hash,
+                        received_block_id = %new_entry.block_id.as_short_id(),
+                        received_ref_by_mc_seqno = new_entry.ref_by_mc_seqno,
+                        received_prev_blocks_ids = %DisplayBlockIdsIntoIter(&received_prev_blocks_ids),
+                        received_top_shard_blocks_ids = %DisplayBlockIdsIntoIter(&received_top_shard_blocks_ids),
+                        received_top_processed_to_anchor = ?new_entry.top_processed_to_anchor,
+                        received_queue_diff_hash = ?received_queue_diff_hash,
+                        "block mismatch: block received from bc differs from previously collated block",
+                    );
 
                     self.data.on_insert_received(&new_entry)?;
                     occupied.insert(new_entry);

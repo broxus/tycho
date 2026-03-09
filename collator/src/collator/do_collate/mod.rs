@@ -23,7 +23,7 @@ use tycho_util::time::now_millis;
 use tycho_util::transactional::TransactionGuard;
 
 use super::types::{
-    AnchorsCache, BlockCollationData, BlockCollationDataBuilder, BlockSerializerCache,
+    AnchorInfo, AnchorsCache, BlockCollationData, BlockCollationDataBuilder, BlockSerializerCache,
     CollationResult, ExecuteResult, FinalResult, FinalizeBlockResult, FinalizeCollationResult,
     FinalizeMessagesReaderResult, PrevData, WorkingState,
 };
@@ -125,17 +125,53 @@ impl CollatorStdImpl {
             )),
         );
 
-        // Get created_by using read-only lookup (actual removal happens inside run() transactionally)
-        let Some(created_by) = self
-            .anchors_cache
-            .last_imported_anchor_info_at_ct(next_chain_time)
-            .map(|info| info.author.to_bytes().into())
-        else {
-            bail!(
-                "last_imported_anchor should exist when we collating block \
-                    even after removing anchors above the next chain time"
+        // We should remove all previously imported anchors above next chain time.
+        // We have cases when some shard can force master block collation (e.g. no pending messages after sc block)
+        // but it is not clear how many anchors were already imported by master. So we take next chain time
+        // from shard and should use anchors only up to chosen next chain time.
+        let (last_imported_anchor_id, last_imported_chain_time, author) = {
+            let Some(AnchorInfo {
+                id: last_imported_anchor_id,
+                ct: last_imported_chain_time,
+                author,
+                ..
+            }) = self
+                .anchors_cache
+                .remove_last_imported_above(next_chain_time)
+            else {
+                bail!(
+                    "last_imported_anchor should exist when we collating block \
+                        even after removing anchors above the next chain time"
+                )
+            };
+
+            (
+                *last_imported_anchor_id,
+                *last_imported_chain_time,
+                *author,
             )
         };
+
+        assert!(
+            last_imported_chain_time >= next_chain_time,
+            "all anchors upto next chain time {} should be imported before collation, \
+            but last imported chain time is {}",
+            next_chain_time,
+            last_imported_chain_time,
+        );
+
+        let created_by = author.to_bytes().into();
+
+        tracing::info!(target: tracing_targets::COLLATOR,
+            mc_data_block_id = %mc_data.block_id.as_short_id(),
+            next_block_id = %next_block_id_short,
+            next_chain_time,
+            top_processed_to_anchor = mc_data.top_processed_to_anchor,
+            selected_anchor_id = last_imported_anchor_id,
+            selected_anchor_ct = last_imported_chain_time,
+            anchors_cache_has_pending_externals = self.anchors_cache.has_pending_externals(),
+            "prepared anchor context for collation",
+        );
 
         let is_first_block_after_prev_master = is_first_block_after_prev_master(
             prev_shard_data.blocks_ids()[0], // TODO: consider split/merge
@@ -214,7 +250,6 @@ impl CollatorStdImpl {
                         wu_used_from_last_anchor,
                         usage_tree,
                         zerostate_id,
-                        next_chain_time,
                     )
                     .and_then(|(collation_result, pending_queue_diff_tx)| {
                         // exit collation if cancelled before writing queue diff
@@ -321,6 +356,12 @@ impl CollatorStdImpl {
             final_result,
         } = match do_collate_res {
             Err(CollatorError::Cancelled(reason)) => {
+                tracing::warn!(target: tracing_targets::COLLATOR,
+                    mc_block_id = %mc_block_id.as_short_id(),
+                    next_block_id = %next_block_id_short,
+                    ?reason,
+                    "collation cancelled; reader state and anchors cache were rolled back",
+                );
                 // cancel collation
                 self.listener
                     .on_cancelled(mc_block_id, next_block_id_short, reason)
@@ -457,41 +498,12 @@ impl CollatorStdImpl {
         wu_used_from_last_anchor: u64,
         usage_tree: UsageTree,
         zerostate_id: ZerostateId,
-        next_chain_time: u64,
     ) -> Result<(CollationResult, Option<PendingQueueDiff>), CollatorError> {
         let shard_id = state.shard_id;
         let labels = [("workchain", shard_id.workchain().to_string())];
         let mc_data = state.mc_data.clone();
 
         let collation_is_cancelled = state.collation_is_cancelled.clone();
-
-        // Remove previously imported anchors above next chain time (transactionally).
-        // We have cases when some shard can force master block collation (e.g. no pending messages after sc block)
-        // but it is not clear how many anchors were already imported by master. So we take next chain time
-        // from shard and should use anchors only up to chosen next chain time.
-        anchors_cache.remove_last_imported_above(next_chain_time);
-
-        // Verify that anchor author matches created_by set before collation
-        let Some(anchor_info) = anchors_cache.last_imported_anchor_info() else {
-            return Err(CollatorError::Anyhow(anyhow::anyhow!(
-                "last_imported_anchor should exist when collating block \
-                    even after removing anchors above the next chain time"
-            )));
-        };
-
-        assert!(
-            anchor_info.ct >= next_chain_time,
-            "all anchors upto next chain time {} should be imported before collation, \
-            but last imported chain time is {}",
-            next_chain_time,
-            anchor_info.ct,
-        );
-
-        let expected_created_by: HashBytes = anchor_info.author.to_bytes().into();
-        assert_eq!(
-            state.collation_data.created_by, expected_created_by,
-            "created_by mismatch: expected author from anchor after removal"
-        );
 
         // prepare execution
         let histogram_prepare =

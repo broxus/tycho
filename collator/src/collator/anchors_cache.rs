@@ -73,6 +73,7 @@ impl AnchorsCache {
 
     /// Returns the last imported anchor info that would remain after
     /// `remove_last_imported_above(ct)`, without actually modifying the cache.
+    #[allow(dead_code)]
     pub fn last_imported_anchor_info_at_ct(&self, ct: u64) -> Option<&AnchorInfo> {
         self.imported_anchors_info_history
             .iter()
@@ -180,6 +181,7 @@ enum UndoOp {
         removed_infos: Vec<AnchorInfo>,
         old_has_pending: bool,
     },
+    #[allow(dead_code)]
     RemoveLastImportedAbove {
         removed_from_cache: Vec<(MempoolAnchorId, CachedAnchor)>,
         removed_from_history: Vec<AnchorInfo>,
@@ -231,6 +233,7 @@ impl<'a> AnchorsCacheTransaction<'a> {
         self.cache.pop_front()
     }
 
+    #[allow(dead_code)]
     pub fn remove_last_imported_above(&mut self, ct: u64) {
         let old_has_pending = self.cache.has_pending_externals;
 
