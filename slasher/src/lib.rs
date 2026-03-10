@@ -147,29 +147,23 @@ impl Slasher {
         let catchain_seqno = state_extra.validator_info.catchain_seqno;
         let vset_switch_round = state_extra.consensus_info.vset_switch_round;
 
-        let known_session_id = this.known_session_id.load();
-        let session_id_from_block = if known_session_id.vset_switch_round == vset_switch_round
-            && known_session_id.catchain_seqno == catchain_seqno
-        {
-            known_session_id
-        } else {
-            ValidationSessionId {
-                vset_switch_round,
-                catchain_seqno,
-            }
+        let session_id_from_block = ValidationSessionId {
+            vset_switch_round,
+            catchain_seqno,
         };
         tracing::trace!(?slasher_params, ?session_id_from_block);
 
         // Clear old sessions if needed
         // TODO: Add metrics.
-        if session_id_from_block != known_session_id {
+        if session_id_from_block != this.known_session_id.load() {
             let span = tracing::Span::current();
             let storage = this.storage.clone();
-            tokio::task::spawn_blocking(move || {
-                let _span = span.enter();
-                storage.remove_outdated_batches(session_id_from_block)
-            })
-            .await??;
+            // tokio::task::spawn_blocking(move || {
+            //     let _span = span.enter();
+            //     // TODO: should really clear batches right away?
+            //     storage.remove_outdated_batches(session_id_from_block)
+            // })
+            // .await??;
 
             this.known_session_id.set(session_id_from_block);
         }
@@ -205,7 +199,7 @@ impl Slasher {
                         bc::SlasherContractEvent::SubmitBlocksBatch(submitted) => {
                             // TODO: Move into blocking.
                             this.storage.store_blocks_batch(
-                                session_id_from_block,
+                                submitted.session_id,
                                 submitted.validator_idx,
                                 &submitted.blocks_batch,
                             )?;

@@ -1,6 +1,7 @@
 use std::num::{NonZeroU8, NonZeroU32};
 
 use anyhow::{Context, Result};
+use tycho_slasher_traits::ValidationSessionId;
 use tycho_types::cell::Lazy;
 use tycho_types::dict;
 use tycho_types::models::{
@@ -63,6 +64,8 @@ impl SlasherContract for StubSlasherContract {
             let mut b = CellBuilder::new();
             b.store_u64(now)?;
             b.store_u32(expire_at)?;
+            b.store_u32(params.session_id.catchain_seqno)?;
+            b.store_u32(params.session_id.vset_switch_round)?;
             b.store_u16(params.validator_idx)?;
             b.store_reference(cell)?;
             b.build()?
@@ -118,6 +121,12 @@ impl SlasherContract for StubSlasherContract {
         // TODO: Add message op
         let mut body = msg.body;
         body.skip_first(512 + 64 + 32, 0)?;
+        let catchain_seqno = body.load_u32()?;
+        let vset_switch_round = body.load_u32()?;
+        let session_id = ValidationSessionId {
+            vset_switch_round,
+            catchain_seqno,
+        };
         let validator_idx = body.load_u16()?;
         let mut batch_cs = body.load_reference_as_slice()?;
         let BlocksBatchBc(blocks_batch) = <_>::load_from(&mut batch_cs)?;
@@ -127,6 +136,7 @@ impl SlasherContract for StubSlasherContract {
 
         Ok(Some(SlasherContractEvent::SubmitBlocksBatch(
             SubmitBlocksBatch {
+                session_id,
                 validator_idx,
                 blocks_batch,
             },
