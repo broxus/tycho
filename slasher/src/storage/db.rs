@@ -31,6 +31,7 @@ impl WithMigrations for SlasherTables {
 weedb::tables! {
     pub struct SlasherTables<TableContext> {
         pub state: tables::State,
+        pub sessions: tables::Sessions,
         pub block_batches: tables::BlockBatches,
     }
 }
@@ -42,6 +43,28 @@ pub mod tables {
     };
     use weedb::rocksdb::Options;
     use weedb::{ColumnFamily, ColumnFamilyOptions};
+
+    /// Stores list of validation sessions
+    /// - Key: `session_id: (catchain_seqno u32 BE, vset_switch_round u32 BE)`
+    /// - Value: ()
+    pub struct Sessions;
+
+    impl Sessions {
+        pub const KEY_LEN: usize = 4 + 4;
+    }
+
+    impl ColumnFamily for Sessions {
+        const NAME: &'static str = "sessions";
+    }
+
+    impl ColumnFamilyOptions<TableContext> for Sessions {
+        fn options(opts: &mut Options, ctx: &mut TableContext) {
+            default_block_based_table_factory(opts, ctx);
+
+            opts.set_optimize_filters_for_hits(true);
+            optimize_for_point_lookup(opts, ctx);
+        }
+    }
 
     /// Stores generic node parameters
     /// - Key: `...`
@@ -62,7 +85,7 @@ pub mod tables {
     }
 
     /// Block batches submitted by validators
-    /// - Key: `session_id: (seqno u32 BE, vset_switch_round u32 BE, catchain_seqno u32 BE), validator_idx: u16 BE, start_block: u32 BE`
+    /// - Key: `session_id: (catchain_seqno u32 BE, vset_switch_round u32 BE), validator_idx: u16 BE, start_block: u32 BE`
     /// - Value: blocks batch
     pub struct BlockBatches;
 
