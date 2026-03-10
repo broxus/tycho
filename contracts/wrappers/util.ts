@@ -9,9 +9,9 @@ import {
   Slice,
   toNano,
 } from "@ton/core";
-import { getSecureRandomBytes, KeyPair, keyPairFromSeed } from "@ton/crypto";
+import {getSecureRandomBytes, KeyPair, keyPairFromSeed} from "@ton/crypto";
 
-import { ELECTOR_OP_NEW_STAKE } from "./Elector";
+import {ELECTOR_OP_NEW_STAKE} from "./Elector";
 
 export class ConfigParams {
   dict: Dictionary<number, Cell>;
@@ -164,7 +164,7 @@ export async function makeStubValidatorSet(args: {
 export function loadValidatorSet(cs: Slice): ValidatorSet {
   const tag = cs.loadUint(8);
   if (tag != VALIDATOR_SET_TAG) {
-    throw new UnknownTagError({ tag, bits: 8 });
+    throw new UnknownTagError({tag, bits: 8});
   }
 
   return {
@@ -210,7 +210,7 @@ export function loadValidatorDescr(cs: Slice): ValidatorDescr {
     case VALIDATOR_DESCR_TAG_WITH_ADDR:
       break;
     default:
-      throw new UnknownTagError({ tag, bits: 8 });
+      throw new UnknownTagError({tag, bits: 8});
   }
 
   const withAddr = tag === VALIDATOR_DESCR_TAG_WITH_ADDR;
@@ -289,7 +289,7 @@ export class ValidatorAccount {
       src: this.address,
       dest: electorAddress,
       bounce: true,
-      value: args.stake + toNano(1),
+      value: args.stake + toNano(36),
       body: this.createStakePayload(args),
     });
   }

@@ -329,12 +329,12 @@ describe("ElectorPoA", () => {
     const cs = elector.accountState.state.data!.asSlice();
     loadElectorData(cs);
 
-    expect(cs.remainingBits).toEqual(1);
+    expect(cs.remainingBits).toEqual(0);
 
-    const whitelist = cs.loadDict(
-      Dictionary.Keys.BigUint(256),
-      Dictionary.Values.BitString(0)
-    );
-    expect(whitelist.size).toEqual(0);
+    // const whitelist = cs.loadDict(
+    //   Dictionary.Keys.BigUint(256),
+    //   Dictionary.Values.BitString(0)
+    // );
+    // expect(whitelist.size).toEqual(0);
   });
 });

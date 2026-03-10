@@ -11,14 +11,14 @@ import {
   SendMode,
   toNano,
 } from "@ton/core";
-import { compile } from "@ton/blueprint";
+import {compile} from "@ton/blueprint";
 import {
   Blockchain,
   createShardAccount,
   SandboxContract,
   SmartContract,
 } from "@ton/sandbox";
-import { TychoExecutor, cryptoWithSignatureId } from "@tychosdk/emulator";
+import {TychoExecutor, cryptoWithSignatureId} from "@tychosdk/emulator";
 
 import {
   ELECTOR_OP_UPGRADE_CODE,
@@ -56,7 +56,7 @@ describe("Elector", () => {
   let timings: VsetTimings;
 
   beforeAll(async () => {
-    code = await compile("Elector", { debugInfo: true });
+    code = await compile("Elector", {debugInfo: true});
     executor = await TychoExecutor.create();
   });
 
@@ -129,7 +129,7 @@ describe("Elector", () => {
     blockchain.now = time(
       timings.electedFor - timings.electionsBeginBefore + 1
     );
-    const firstElectionId = await startElection({ blockchain, elector });
+    const firstElectionId = await startElection({blockchain, elector});
 
     await sendStakes({
       blockchain,
@@ -162,7 +162,7 @@ describe("Elector", () => {
     blockchain.now = time(
       2 * timings.electedFor - timings.electionsBeginBefore + 1
     );
-    const nextElectionId = await startElection({ blockchain, elector });
+    const nextElectionId = await startElection({blockchain, elector});
 
     await sendStakes({
       blockchain,
@@ -197,7 +197,7 @@ describe("Elector", () => {
     blockchain.now = time(
       3 * timings.electedFor - timings.electionsBeginBefore + 1
     );
-    await startElection({ blockchain, elector });
+    await startElection({blockchain, elector});
 
     // Check unfreeze
     await elector.runTickTock("tock");
@@ -224,7 +224,7 @@ describe("Elector", () => {
     blockchain.now = time(
       timings.electedFor - timings.electionsBeginBefore + 1
     );
-    const firstElectionId = await startElection({ blockchain, elector });
+    const firstElectionId = await startElection({blockchain, elector});
 
     await sendStakes({
       blockchain,
@@ -385,7 +385,7 @@ describe("Elector", () => {
     blockchain.now = time(
       timings.electedFor - timings.electionsBeginBefore + 1
     );
-    const electionId = await startElection({ blockchain, elector });
+    const electionId = await startElection({blockchain, elector});
 
     await sendStakes({
       blockchain,
@@ -550,7 +550,7 @@ async function checkElectionId(
   blockchain: Blockchain,
   elector: SandboxContract<Elector>
 ): Promise<number> {
-  let { electionId } = await elector.getActiveElectionId();
+  let {electionId} = await elector.getActiveElectionId();
   let timings = new ConfigParams(blockchain.config).getVsetTimings();
   expect(electionId).toEqual(blockchain.now! + timings.electionsBeginBefore);
   return electionId;
