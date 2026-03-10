@@ -375,7 +375,7 @@ impl CollationSessionInfo {
     }
 
     pub fn get_validation_session_id(&self) -> ValidationSessionId {
-        (self.vset_switch_round, self.catchain_seqno)
+        (self.catchain_seqno, self.vset_switch_round)
     }
 
     pub fn shard(&self) -> ShardIdent {

@@ -966,7 +966,7 @@ fn compute_session_overlay_id(
         zerostate_root_hash: zerostate_id.root_hash.0,
         zerostate_file_hash: zerostate_id.file_hash.0,
         shard_ident: *shard_ident,
-        session_seqno: session_id.seqno(),
+        session_seqno: session_id.catchain_seqno(),
     }))
 }
 
