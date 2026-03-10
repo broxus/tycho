@@ -1193,6 +1193,21 @@ def storage() -> RowPanel:
             "Number of items in shard states cache",
             labels=['workchain=~"$workchain"'],
         ),
+        create_gauge_panel(
+            "tycho_storage_state_shard_cache_failed_count",
+            "Number of failed items in shard states cache",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_storage_state_applier_new_cells_map_len",
+            "Number of entries in applier new_cells map",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_storage_state_applier_age_blocks",
+            "Applier age in blocks since pivot",
+            labels=['workchain=~"$workchain"'],
+        ),
     ]
     return create_row("Storage", metrics)
 

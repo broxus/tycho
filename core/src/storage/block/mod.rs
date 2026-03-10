@@ -146,18 +146,34 @@ impl BlockStorage {
             .block_handle_storage
             .create_or_load_handle(block_id, meta_data);
 
+        tracing::info!(
+            %block_id,
+            handle_created = status == HandleCreationStatus::Created,
+            has_data = handle.has_data(),
+            ref_by_mc_seqno = handle.ref_by_mc_seqno(),
+            "store_block_data: handle loaded"
+        );
+
         let archive_id = PackageEntryKey::block(block_id);
         let mut updated = false;
         if !handle.has_data() {
             let data = archive_data.clone_new_archive_data()?;
             metrics::histogram!("tycho_storage_store_block_data_size").record(data.len() as f64);
 
+            tracing::info!(
+                %block_id,
+                data_len = data.len(),
+                "store_block_data: writing block body"
+            );
+
             let lock = handle.block_data_lock().write().await;
             if !handle.has_data() {
                 self.blob_storage.add_data(&archive_id, data, &lock).await?;
+                tracing::info!(%block_id, "store_block_data: block body written");
                 if handle.meta().add_flags(BlockFlags::HAS_DATA) {
                     self.block_handle_storage.store_handle(&handle, false);
                     updated = true;
+                    tracing::info!(%block_id, "store_block_data: HAS_DATA set");
                 }
             }
         }
@@ -169,6 +185,13 @@ impl BlockStorage {
 
         // Update block cache
         self.blocks_cache.insert(*block_id, block.clone());
+
+        tracing::info!(
+            %block_id,
+            updated,
+            has_data = handle.has_data(),
+            "store_block_data: completed"
+        );
 
         Ok(StoreBlockResult {
             handle,
@@ -183,6 +206,8 @@ impl BlockStorage {
         const BIG_DATA_THRESHOLD: usize = 1 << 20; // 1 MB
 
         let _histogram = HistogramGuard::begin("tycho_storage_load_block_data_time");
+
+        tracing::info!(has_data = handle.has_data(), "load_block_data");
 
         anyhow::ensure!(
             handle.has_data(),

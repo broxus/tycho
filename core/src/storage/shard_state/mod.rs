@@ -143,7 +143,7 @@ impl ShardStateStorage {
     }
 
     /// Stores a state for the specified block pair of blocks
-    /// using their merkle update and and optional state root.
+    /// using their merkle update and optional state root.
     ///
     /// ## How does it work
     ///
@@ -216,7 +216,7 @@ impl ShardStateStorage {
 
                 this.shard_states_cache
                     .get_mut(&block_id.shard)
-                    .expect("shard must not dissapear from cache")
+                    .expect("shard must not disappear from cache")
                     .save_result(&block_id, result);
             });
         };
@@ -369,6 +369,12 @@ impl ShardStateStorage {
         max_tail: NonZeroU32,
         get_merkle_update: Option<Box<FnGetBlockInfoForApply>>,
     ) -> impl Future<Output = Result<StateWithApplier>> + Send + 'static {
+        tracing::info!(
+            ?block_id,
+            cache = get_merkle_update.is_some(),
+            "load_prev_state_root_no_cache"
+        );
+
         let block_id = *block_id;
         let block_handles = self.block_handle_storage.clone();
         let blocks = self.block_storage.clone();
@@ -475,6 +481,13 @@ impl ShardStateStorage {
             block_handles.set_has_virtual_shard_state(&handle);
 
             applier.add_new_virtual_cells(hint.new_cell_count());
+
+            let age = handle
+                .id()
+                .seqno
+                .saturating_sub(applier.pivot_block_seqno());
+            let labels = [("workchain", handle.id().shard.workchain().to_string())];
+            metrics::gauge!(MerkleUpdateApplier::METRIC_APPLIER_AGE, &labels).set(age);
 
             Ok::<_, anyhow::Error>(StateWithApplier { state, applier })
         }
@@ -746,6 +759,38 @@ impl ShardStateStorage {
     where
         F: Fn(&BlockId) -> Option<BlockInfoForApply>,
     {
+        #[derive(Clone, Copy)]
+        enum LoadStateSource {
+            CacheStored,
+            CachePendingWait,
+            CachePendingIgnore,
+            StorageDirect,
+            StorageVirtualChain,
+            RebuiltFromPivotChain,
+        }
+
+        impl LoadStateSource {
+            fn as_str(self) -> &'static str {
+                match self {
+                    Self::CacheStored => "cache_stored",
+                    Self::CachePendingWait => "cache_pending_wait",
+                    Self::CachePendingIgnore => "cache_pending_ignore",
+                    Self::StorageDirect => "storage_direct",
+                    Self::StorageVirtualChain => "storage_virtual_chain",
+                    Self::RebuiltFromPivotChain => "rebuilt_from_pivot_chain",
+                }
+            }
+        }
+
+        let track_load_source = |source: LoadStateSource| {
+            metrics::counter!(
+                "tycho_storage_state_load_source_total",
+                "source" => source.as_str(),
+                "caller" => hint.caller.as_str(),
+            )
+            .increment(1);
+        };
+
         fn load_failed(error: StoreStateError) -> anyhow::Error {
             anyhow::anyhow!("unable to load a state that failed to save with error: {error:?}")
         }
@@ -767,15 +812,18 @@ impl ShardStateStorage {
 
         let mut pivot_block_id = *block_id;
         let mut to_apply = Vec::new();
+        let mut pivot_source = None;
         let pivot = 'pivot: {
             while to_apply.len() <= max_tail {
-                if let Some(cache) = self.shard_states_cache.get(&pivot_block_id.shard)
+                if !hint.bypass_shard_state_cache
+                    && let Some(cache) = self.shard_states_cache.get(&pivot_block_id.shard)
                     && let Some(item) = cache.states.get(&pivot_block_id.root_hash)
                 {
                     // We found a pending operation for that block id so we can try to reuse its state.
                     match &item.state {
                         // State is in cache and already loaded.
                         CachedState::Stored(stored) => {
+                            pivot_source = Some(LoadStateSource::CacheStored);
                             break 'pivot Some(stored.clone());
                         }
                         // State is in cache but its store was unsuccessful.
@@ -798,17 +846,23 @@ impl ShardStateStorage {
                             drop(cache);
 
                             let (result, _) = task.await;
+                            pivot_source = Some(LoadStateSource::CachePendingWait);
                             break 'pivot Some(result.map_err(load_failed)?);
                         }
                         // Otherwise we assume that applying merkle updates will be faster.
                         // Continue searching back for the first item with "pending virtual"
                         // or "stored" state (or we will find something in storage).
                         CachedState::Pending(_) => {
+                            if pivot_source.is_none() {
+                                pivot_source = Some(LoadStateSource::CachePendingIgnore);
+                            }
                             to_apply.push(item.partial_root_cell.clone());
                             pivot_block_id = item.prev_block_id;
                         }
                     }
                 } else {
+                    tracing::info!(?pivot_block_id, "try_load_from_storage");
+
                     // NOTE: `cache` must be dropped here (we rely on Rust edition 2024 behavior).
 
                     // There was no such state in cache so we search in storage.
@@ -817,12 +871,16 @@ impl ShardStateStorage {
                         None => break,
                         // Only merkle update was found for this block.
                         Some(FromStorage::Virtual(f)) => {
+                            if pivot_source.is_none() {
+                                pivot_source = Some(LoadStateSource::StorageVirtualChain);
+                            }
                             to_apply.push(f.partial_root_cell);
                             pivot_block_id = f.prev_block_id;
                         }
                         // A directly stored state was found for this block so we
                         // can use it as a pivot.
                         Some(FromStorage::Applied(applied)) => {
+                            pivot_source.get_or_insert(LoadStateSource::StorageDirect);
                             break 'pivot Some(applied);
                         }
                     }
@@ -841,6 +899,7 @@ impl ShardStateStorage {
         // Fast path when there are no updates.
         if to_apply.is_empty() {
             anyhow::ensure!(state.block_id() == block_id, "loaded state id mismatch");
+            track_load_source(pivot_source.unwrap_or(LoadStateSource::StorageDirect));
             return Ok(state);
         }
 
@@ -858,6 +917,7 @@ impl ShardStateStorage {
         .await?;
 
         let shard_state = pivot_root.parse::<Box<ShardStateUnsplit>>()?;
+        track_load_source(LoadStateSource::RebuiltFromPivotChain);
         ShardStateStuff::from_state_and_root(block_id, shard_state, pivot_root, ref_mc_state_handle)
     }
 
@@ -1149,7 +1209,10 @@ async fn load_state_or_update<F>(
 where
     F: Fn(&BlockId) -> Option<BlockInfoForApply>,
 {
+    tracing::info!(%block_id, ref_by_mc_seqno, "load_state_or_update: start");
+
     if let Some(root_hash) = load_state_root_hash_opt(cell_storage.db(), block_id)? {
+        tracing::info!(%block_id, %root_hash, "load_state_or_update: found direct state root");
         let state =
             load_state_by_hash(ref_by_mc_seqno, block_id, &root_hash, cell_storage, tracker)?;
         let ref_mc_state_handle = state.ref_mc_state_handle().clone();
@@ -1165,12 +1228,42 @@ where
     }
 
     let handle = match block_handles.load_handle(block_id) {
-        Some(handle) => handle,
-        None => return Ok(get_merkle_update(block_id).map(FromStorage::Virtual)),
+        Some(handle) => {
+            tracing::info!(
+                %block_id,
+                has_data = handle.has_data(),
+                has_state = handle.has_state(),
+                has_virtual_state = handle.has_virtual_state(),
+                ref_by_mc_seqno = handle.ref_by_mc_seqno(),
+                "load_state_or_update: found block handle"
+            );
+            handle
+        }
+        None => {
+            let from_cache = get_merkle_update(block_id);
+            tracing::info!(
+                %block_id,
+                found_in_shard_blocks = from_cache.is_some(),
+                "load_state_or_update: no block handle"
+            );
+            return Ok(from_cache.map(FromStorage::Virtual));
+        }
     };
 
     let mut res = get_merkle_update(block_id);
+    tracing::info!(
+        %block_id,
+        found_in_shard_blocks = res.is_some(),
+        "load_state_or_update: queried shard_blocks cache"
+    );
     if res.is_none() {
+        tracing::warn!(
+            %block_id,
+            has_data = handle.has_data(),
+            has_state = handle.has_state(),
+            has_virtual_state = handle.has_virtual_state(),
+            "load_state_or_update: shard_blocks miss, falling back to block storage"
+        );
         let block = blocks.load_block_data(&handle).await?;
         let merkle_update = block.as_ref().state_update.load()?;
 
@@ -1180,6 +1273,11 @@ where
             "split/merge is not supported for now"
         );
 
+        tracing::info!(
+            %block_id,
+            %prev_id,
+            "load_state_or_update: restored merkle update from block storage"
+        );
         res = Some(BlockInfoForApply {
             prev_block_id: prev_id,
             partial_root_cell: merkle_update.new,
@@ -1246,6 +1344,7 @@ struct ShardStatesCache {
 impl ShardStatesCache {
     const METRIC_PIVOT_SEQNO: &str = "tycho_storage_state_shard_cache_pivot_seqno";
     const METRIC_CACHE_SIZE: &str = "tycho_storage_state_shard_cache_size";
+    const METRIC_FAILED_COUNT: &str = "tycho_storage_state_shard_cache_failed_count";
 
     fn save_result(&mut self, block_id: &BlockId, result: StoreTaskResult) {
         let Some(item) = self.states.get_mut(&block_id.root_hash) else {
@@ -1260,6 +1359,7 @@ impl ShardStatesCache {
                 // Reset cache tail on each saved block.
                 if !item.is_virtual && pivot_block_seqno > self.pivot_block_seqno {
                     self.pivot_block_seqno = pivot_block_seqno;
+
                     self.states
                         .retain(|_, item| item.block_id.seqno >= pivot_block_seqno);
 
@@ -1272,6 +1372,14 @@ impl ShardStatesCache {
             Err(error) => {
                 tracing::error!(%block_id, "store state failed: {error:?}");
                 item.state = CachedState::Failed(error);
+
+                let labels = [("workchain", block_id.shard.workchain().to_string())];
+                let failed_count = self
+                    .states
+                    .values()
+                    .filter(|i| matches!(i.state, CachedState::Failed(_)))
+                    .count();
+                metrics::gauge!(Self::METRIC_FAILED_COUNT, &labels).set(failed_count as f64);
             }
         }
     }
@@ -1358,6 +1466,8 @@ struct MerkleUpdateApplierInner {
 impl MerkleUpdateApplier {
     const METRIC_ALIVE_APPLIERS: &str = "tycho_storage_state_applier_count";
     const METRIC_NEW_CELL_COUNT: &str = "tycho_storage_state_applier_all_new_cell_count";
+    const METRIC_NEW_CELLS_MAP_LEN: &str = "tycho_storage_state_applier_new_cells_map_len";
+    const METRIC_APPLIER_AGE: &str = "tycho_storage_state_applier_age_blocks";
 
     fn new(
         epoch: u32,
@@ -1426,6 +1536,9 @@ impl MerkleUpdateApplier {
             .fetch_add(diff as u64, Ordering::Release)
             .saturating_add(diff as u64);
         metrics::gauge!(Self::METRIC_NEW_CELL_COUNT).set(clamp_u64_to_u32(v));
+
+        let labels = [("workchain", self.0.shard.workchain().to_string())];
+        metrics::gauge!(Self::METRIC_NEW_CELLS_MAP_LEN, &labels).set(self.new_cells.len() as f64);
 
         res
     }
@@ -1506,6 +1619,26 @@ pub struct LoadStateHint {
     /// Allow applying merkle updates even when there is a pending
     /// direct store.
     pub allow_ignore_direct: bool,
+    /// Ignore shard state cache and load state only from storage/rebuild path.
+    pub bypass_shard_state_cache: bool,
+    /// Annotates the metric source for the caller that requested the load.
+    pub caller: LoadStateCaller,
+}
+
+#[derive(Default, Debug, Clone, Copy)]
+pub enum LoadStateCaller {
+    #[default]
+    Unknown,
+    CollatorReloadPrevData,
+}
+
+impl LoadStateCaller {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::CollatorReloadPrevData => "collator_reload_prev_data",
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone)]

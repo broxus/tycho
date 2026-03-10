@@ -1785,6 +1785,8 @@ where
                             .load_state(mc_block_key.seqno, &top_block_id, LoadStateHint {
                                 // State must already be applied at this point.
                                 allow_ignore_direct: false,
+                                bypass_shard_state_cache: false,
+                                caller: Default::default(),
                             })
                             .await?;
                         let processed_upto = state.state().processed_upto.load()?;

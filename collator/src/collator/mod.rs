@@ -13,7 +13,7 @@ use tracing::Instrument;
 use tycho_block_util::block::calc_next_block_id_short;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_core::global_config::{MempoolGlobalConfig, ZerostateId};
-use tycho_core::storage::LoadStateHint;
+use tycho_core::storage::{LoadStateCaller, LoadStateHint};
 use tycho_network::PeerId;
 use tycho_types::models::*;
 use tycho_types::prelude::*;
@@ -259,6 +259,7 @@ pub struct CollatorStdImpl {
     timer: std::time::Instant,
     anchor_timer: std::time::Instant,
     shard_blocks_count_from_last_anchor: u16,
+    reload_prev_data_count: u32,
 
     /// Mempool config override for a new genesis
     mempool_config_override: Option<MempoolGlobalConfig>,
@@ -323,6 +324,7 @@ impl CollatorStdImpl {
             timer: std::time::Instant::now(),
             anchor_timer: std::time::Instant::now(),
             shard_blocks_count_from_last_anchor: 0,
+            reload_prev_data_count: 0,
             mempool_config_override,
             cancel_collation,
             wu_tuner_event_sender,
@@ -656,12 +658,17 @@ impl CollatorStdImpl {
                 // and only for shard collator
                 // update prev states to drop usage tree
                 if !self.shard_id.is_masterchain() {
+                    self.reload_prev_data_count = self.reload_prev_data_count.wrapping_add(1);
                     Self::reload_prev_data(
                         prev_mc_seqno,
                         &mut working_state,
                         self.state_node_adapter.clone(),
                         LoadStateHint {
                             allow_ignore_direct: false,
+                            bypass_shard_state_cache: self
+                                .reload_prev_data_count
+                                .is_multiple_of(10),
+                            caller: LoadStateCaller::CollatorReloadPrevData,
                         },
                     )
                     .await?;

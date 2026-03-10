@@ -162,7 +162,10 @@ impl CmdRun {
 
         tracing::info!(%init_block_id, "node initialized");
 
-        node.run(&init_block_id, self.single_node).await?;
+        if let Err(e) = node.run(&init_block_id, self.single_node).await {
+            tracing::error!(error = ?e, %init_block_id, "node run failed");
+            return Err(e);
+        }
 
         Ok(())
     }
