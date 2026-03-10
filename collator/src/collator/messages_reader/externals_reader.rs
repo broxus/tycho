@@ -87,6 +87,22 @@ impl<'a, 'b> ExternalsReader<'a, 'b> {
         self.all_ranges_fully_read = false;
     }
 
+    pub(super) fn debug_summary(&self) -> String {
+        format!(
+            "all_ranges_fully_read={}, last_read_to_anchor_chain_time={:?}, by_partitions={:?}, ranges={:?}",
+            self.all_ranges_fully_read,
+            *self.reader_state.last_read_to_anchor_chain_time,
+            DebugIter(self.reader_state.by_partitions.iter().map(|(par_id, state)| (
+                par_id,
+                (&state.processed_to, state.curr_processed_offset),
+            ))),
+            DebugIter(self.reader_state.ranges.iter().map(|(seqno, state)| (
+                seqno,
+                DebugExternalsRangeReaderState(state),
+            ))),
+        )
+    }
+
     pub fn finalize(&mut self) -> Result<()> {
         let mut max_processed_offsets = BTreeMap::<QueuePartitionIdx, u32>::new();
 

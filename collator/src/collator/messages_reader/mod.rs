@@ -122,6 +122,12 @@ impl<'a, 'b, V: InternalMessageValue> MessagesReader<'a, 'b, V> {
         let mut new_messages = NewMessagesState::new(cx.for_shard_id);
 
         let mut cumulative_stats_just_loaded = false;
+        let part_stat_ranges_len = cx.part_stat_ranges.as_ref().map(Vec::len);
+        let mut cumulative_stats_source = if cx.cumulative_stats_calc_params.is_some() {
+            "not_initialized"
+        } else {
+            "disabled"
+        };
 
         let ReaderState {
             externals: externals_reader_state,
@@ -145,6 +151,7 @@ impl<'a, 'b, V: InternalMessageValue> MessagesReader<'a, 'b, V> {
                     cx.part_stat_ranges,
                 ) {
                     (Some(prev), Some(part_stat_ranges)) => {
+                        cumulative_stats_source = "reused_and_extended";
                         prev.update_processed_to_by_partitions(
                             params.all_shards_processed_to_by_partitions.clone(),
                         );
@@ -153,6 +160,7 @@ impl<'a, 'b, V: InternalMessageValue> MessagesReader<'a, 'b, V> {
                     }
                     _ => {
                         cumulative_stats_just_loaded = true;
+                        cumulative_stats_source = "rebuilt_from_ranges";
 
                         let ranges = compute_cumulative_stats_ranges(
                             &cx.for_shard_id,
@@ -173,6 +181,7 @@ impl<'a, 'b, V: InternalMessageValue> MessagesReader<'a, 'b, V> {
                     }
                 }
             } else {
+                cumulative_stats_source = "reused_existing";
                 assert!(
                     internals_reader_state.cumulative_statistics.is_some(),
                     "cumulative statistics should exist"
@@ -311,8 +320,69 @@ impl<'a, 'b, V: InternalMessageValue> MessagesReader<'a, 'b, V> {
                 .map(|(par_id, par)| (par_id, par.all_read_existing_messages_collected()))),
             "messages reader created",
         );
+        res.log_reader_snapshot(
+            "messages reader snapshot after create",
+            Some(cumulative_stats_source),
+            part_stat_ranges_len,
+        );
 
         Ok(res)
+    }
+
+    fn log_reader_snapshot(
+        &self,
+        message: &str,
+        cumulative_stats_source: Option<&str>,
+        part_stat_ranges_len: Option<usize>,
+    ) {
+        tracing::debug!(target: tracing_targets::COLLATOR,
+            cumulative_stats_source,
+            part_stat_ranges_len,
+            cumulative_stats = %self.cumulative_stats_debug_summary(),
+            internals = %self.internals_debug_summary(),
+            externals = %self.externals_reader.debug_summary(),
+            "{}", message,
+        );
+    }
+
+    fn cumulative_stats_debug_summary(&self) -> String {
+        let Some(stats) = self.internal_queue_statistics.as_ref() else {
+            return "none".to_string();
+        };
+
+        format!(
+            "{:?}",
+            DebugIter(stats.result().iter().map(|(partition_id, stats)| (
+                partition_id,
+                (
+                    stats.initial_stats.statistics().len(),
+                    stats.remaning_stats.statistics().iter().count(),
+                    stats.remaning_stats.tracked_total(),
+                ),
+            )))
+        )
+    }
+
+    fn internals_debug_summary(&self) -> String {
+        format!(
+            "{:?}",
+            DebugIter(self.internals_partition_readers.iter().map(|(partition_id, reader)| (
+                partition_id,
+                (
+                    *reader.reader_state.curr_processed_offset,
+                    format!("{:?}", *reader.reader_state.processed_to),
+                    DebugIter(reader.reader_state.ranges.iter().map(|(seqno, state)| (
+                        seqno,
+                        reader
+                            .range_readers
+                            .get(seqno)
+                            .map(|range_reader| format!("{:?}", range_reader.kind)),
+                        state.is_fully_read(),
+                        DebugInternalsRangeReaderState(state),
+                    ))),
+                ),
+            )))
+        )
     }
 
     pub fn reset_read_state(&mut self) {
@@ -804,6 +874,8 @@ impl<'a, 'b, V: InternalMessageValue> MessagesReader<'a, 'b, V> {
                 "internals partition reader remaning_msgs_stats after refill",
             );
         }
+
+        self.log_reader_snapshot("messages reader snapshot after refill", None, None);
 
         tracing::debug!(target: tracing_targets::COLLATOR,
             "finished: refill messages buffer and skip groups upto",

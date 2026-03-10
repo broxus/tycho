@@ -261,9 +261,8 @@ impl CollatorStdImpl {
                         Ok((collation_result, pending_queue_diff_tx))
                     });
 
-                    // commit or rollback transaction based on collation result, and record metrics
+                    // always commit transactional state for debugging, even on error/cancel
                     match result {
-                        // if collation was successful, commit all transactions
                         Ok((collation_result, pending_queue_diff_tx)) => {
                             let queue_diff_result = if let Some(tx) = pending_queue_diff_tx {
                                 let _h = HistogramGuard::begin_with_labels(
@@ -290,29 +289,36 @@ impl CollatorStdImpl {
                                     Ok(collation_result)
                                 }
                                 Err(e) => {
-                                    drop(reader_guard);
-                                    drop(anchor_cache_tx);
+                                    tracing::warn!(target: tracing_targets::COLLATOR,
+                                        error = %e,
+                                        "queue diff commit failed; forcing reader state and anchors cache commit",
+                                    );
+                                    {
+                                        let _h = HistogramGuard::begin_with_labels(
+                                            "tycho_do_collate_reader_state_commit_time",
+                                            &labels,
+                                        );
+                                        reader_guard.commit();
+                                    }
+                                    anchor_cache_tx.commit();
                                     Err(e)
                                 }
                             }
                         }
-                        // if collation failed, rollback reader and anchors cache transactions
                         Err(e) => {
+                            tracing::warn!(target: tracing_targets::COLLATOR,
+                                error = %e,
+                                "collation failed; forcing reader state and anchors cache commit",
+                            );
                             {
                                 let _h = HistogramGuard::begin_with_labels(
-                                    "tycho_do_collate_reader_state_rollback_time",
+                                    "tycho_do_collate_reader_state_commit_time",
                                     &labels,
                                 );
-                                drop(reader_guard);
+                                reader_guard.commit();
                             }
 
-                            {
-                                let _h = HistogramGuard::begin_with_labels(
-                                    "tycho_do_collate_anchors_cache_rollback_time",
-                                    &labels,
-                                );
-                                drop(anchor_cache_tx);
-                            }
+                            anchor_cache_tx.commit();
                             Err(e)
                         }
                     }
@@ -360,7 +366,7 @@ impl CollatorStdImpl {
                     mc_block_id = %mc_block_id.as_short_id(),
                     next_block_id = %next_block_id_short,
                     ?reason,
-                    "collation cancelled; reader state and anchors cache were rolled back",
+                    "collation cancelled; reader state and anchors cache were committed",
                 );
                 // cancel collation
                 self.listener
