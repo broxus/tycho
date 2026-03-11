@@ -68,17 +68,15 @@ impl Cache {
         // postpone destructive changes
     }
 
-    /// returns `false` if a no-op
-    pub fn reopen(&self, drop_data: bool) -> bool {
+    /// returns anchor id at which cache was closed
+    pub fn reopen(&self, drop_data: bool) -> Option<MempoolAnchorId> {
         let mut data = self.data.write();
 
-        let Some(after_anchor_id) = data.is_off_after_anchor.take() else {
-            return false;
-        };
+        let after_anchor_id = data.is_off_after_anchor.take()?;
 
         if !drop_data {
             self.anchor_added.notify_waiters();
-            return true;
+            return Some(after_anchor_id);
         }
 
         let pos = (data.anchors)
@@ -93,7 +91,7 @@ impl Cache {
 
         Reclaimer::instance().drop(anchors_to_clean);
 
-        true
+        Some(after_anchor_id)
     }
 
     pub fn push(&self, anchor: Arc<MempoolAnchor>) -> Result<(), Box<DupAnchorError>> {
@@ -444,7 +442,7 @@ mod tests {
 
         cache.push(anchor(6, Some(5))).unwrap();
 
-        assert!(cache.reopen(false));
+        assert_eq!(cache.reopen(false), Some(5));
 
         let found = unwrap_task(task).await.expect("anchor must exist");
         assert_eq!(found.id, 6);
@@ -463,7 +461,7 @@ mod tests {
 
         cache.push(anchor(6, Some(5))).unwrap();
 
-        assert!(cache.reopen(false));
+        assert_eq!(cache.reopen(false), Some(5));
 
         let next = unwrap_task(task).await.expect("anchor must exist");
         assert_eq!(next.id, 6);
@@ -481,7 +479,7 @@ mod tests {
 
         assert!(timeout(WAIT, &mut task).await.is_err());
 
-        assert!(cache.reopen(false));
+        assert_eq!(cache.reopen(false), Some(5));
 
         let next = unwrap_task(task).await.expect("anchor must exist");
         assert_eq!(next.id, 6);
@@ -500,7 +498,7 @@ mod tests {
 
         assert!(timeout(WAIT, &mut task).await.is_err());
 
-        assert!(cache.reopen(true));
+        assert_eq!(cache.reopen(true), Some(5));
         cache.push(anchor(10, Some(5))).unwrap(); // make id=6 "too old" to unhang task
 
         let maybe_id = unwrap_task(task).await.map(|a| a.id);
@@ -519,7 +517,7 @@ mod tests {
 
         assert!(timeout(WAIT, &mut task).await.is_err());
 
-        assert!(cache.reopen(true));
+        assert_eq!(cache.reopen(true), Some(5));
         cache.push(anchor(10, Some(5))).unwrap(); // make id=5 "too old" to unhang task
 
         let next = unwrap_task(task).await.expect("anchor must exist");
@@ -540,7 +538,7 @@ mod tests {
         cache.push(anchor(6, Some(5))).unwrap();
         assert!(cache.push(anchor(6, Some(5))).is_err(), "duplicate push");
 
-        assert!(cache.reopen(true));
+        assert_eq!(cache.reopen(true), Some(5));
 
         assert!(timeout(WAIT, &mut task).await.is_err());
 
