@@ -1,14 +1,13 @@
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tycho_slasher_traits::ValidationSessionId;
 use tycho_storage::StorageContext;
-use tycho_types::cell::HashBytes;
 use weedb::OwnedSnapshot;
 
 use self::db::{SlasherDb, tables};
-use self::models::StoredBlocksBatch;
-use crate::BlocksBatch;
+use self::models::{StoredBlocksBatch, StoredSessionPenaltyReport};
+use crate::{BlocksBatch, SessionPenaltyReport};
 
 pub mod db;
 pub mod models;
@@ -30,13 +29,10 @@ impl SlasherStorage {
         })
     }
 
-    pub fn db(&self) -> &SlasherDb {
-        &self.inner.db
-    }
-
     /// Creates a new snapshot.
     pub fn snapshot(&self) -> SlasherStorageSnapshot {
         SlasherStorageSnapshot {
+            db: self.inner.db.clone(),
             snapshot: Arc::new(self.inner.db.owned_snapshot()),
         }
     }
@@ -46,45 +42,60 @@ impl SlasherStorage {
         session_id: ValidationSessionId,
         validator_idx: u16,
         batch: &BlocksBatch,
-    ) -> Result<()> {
-        let mut key = [0u8; tables::BlockBatches::KEY_LEN];
-        key[0..4].copy_from_slice(&session_id.catchain_seqno.to_be_bytes());
-        key[4..8].copy_from_slice(&session_id.vset_switch_round.to_be_bytes());
-        key[8..10].copy_from_slice(&validator_idx.to_be_bytes());
-        key[10..14].copy_from_slice(&batch.start_seqno.to_be_bytes());
+    ) -> Result<Option<SessionPenaltyReport>> {
+        let key = block_batches_key(session_id, validator_idx, batch.start_seqno);
 
         let value = tl_proto::serialize(StoredBlocksBatch::wrap(batch));
 
         self.inner.db.block_batches.insert(key.as_slice(), value)?;
+        self.take_session_report(session_id)
+    }
+
+    pub fn store_session_report(&self, report: &SessionPenaltyReport) -> Result<()> {
+        let key = session_key(report.session_id);
+        let value = tl_proto::serialize(StoredSessionPenaltyReport::wrap(report));
+        self.inner
+            .db
+            .session_reports
+            .insert(key.as_slice(), value)?;
         Ok(())
     }
 
-    /// Removes all block batches for sessions BEFORE the specified.
-    pub fn remove_outdated_batches(&self, latest_session_id: ValidationSessionId) -> Result<()> {
-        let db = &self.inner.db;
+    pub fn load_session_report(
+        &self,
+        session_id: ValidationSessionId,
+    ) -> Result<Option<SessionPenaltyReport>> {
+        let table = &self.inner.db.session_reports;
+        let key = session_key(session_id);
+        let Some(value) = self
+            .inner
+            .db
+            .rocksdb()
+            .get_cf(&table.cf(), key.as_slice())?
+        else {
+            return Ok(None);
+        };
 
-        let mut session_key = [0u8; tables::Sessions::KEY_LEN];
-        session_key[0..4].copy_from_slice(&latest_session_id.catchain_seqno.to_be_bytes());
-        session_key[4..8].copy_from_slice(&latest_session_id.vset_switch_round.to_be_bytes());
+        let report = tl_proto::deserialize::<StoredSessionPenaltyReport>(&value)
+            .context("failed to deserialize slasher session report")?
+            .0;
+        Ok(Some(report))
+    }
 
-        db.rocksdb().delete_range_cf_opt(
-            &db.sessions.cf(),
-            [0u8; tables::Sessions::KEY_LEN],
-            session_key,
-            db.sessions.write_config(),
-        )?;
-
-        let mut key = [0u8; tables::BlockBatches::KEY_LEN];
-        key[0..4].copy_from_slice(&latest_session_id.catchain_seqno.to_be_bytes());
-        key[4..8].copy_from_slice(&latest_session_id.vset_switch_round.to_be_bytes());
-
-        db.rocksdb().delete_range_cf_opt(
-            &db.block_batches.cf(),
-            [0u8; tables::BlockBatches::KEY_LEN],
-            key,
-            db.block_batches.write_config(),
-        )?;
-        Ok(())
+    fn take_session_report(
+        &self,
+        session_id: ValidationSessionId,
+    ) -> Result<Option<SessionPenaltyReport>> {
+        let report = self.load_session_report(session_id)?;
+        if report.is_some() {
+            let key = session_key(session_id);
+            self.inner.db.rocksdb().delete_cf_opt(
+                &self.inner.db.session_reports.cf(),
+                key.as_slice(),
+                self.inner.db.session_reports.write_config(),
+            )?;
+        }
+        Ok(report)
     }
 }
 
@@ -94,5 +105,241 @@ struct Inner {
 
 #[derive(Clone)]
 pub struct SlasherStorageSnapshot {
+    db: SlasherDb,
     snapshot: Arc<OwnedSnapshot>,
+}
+
+impl SlasherStorageSnapshot {
+    pub fn load_latest_session_id(&self) -> Result<Option<ValidationSessionId>> {
+        let table = &self.db.block_batches;
+        let mut read_config = table.new_read_config();
+        read_config.set_snapshot(self.snapshot.as_ref());
+
+        let cf = table.cf();
+        let mut iter = self.db.rocksdb().raw_iterator_cf_opt(&cf, read_config);
+        iter.seek_to_last();
+
+        match iter.key() {
+            Some(key) => Ok(Some(parse_session_id_prefix(key))),
+            None => {
+                iter.status()?;
+                Ok(None)
+            }
+        }
+    }
+
+    pub fn load_distinct_session_ids(&self) -> Result<Vec<ValidationSessionId>> {
+        let table = &self.db.block_batches;
+        let mut read_config = table.new_read_config();
+        read_config.set_snapshot(self.snapshot.as_ref());
+
+        let cf = table.cf();
+        let mut iter = self.db.rocksdb().raw_iterator_cf_opt(&cf, read_config);
+        iter.seek_to_first();
+
+        let mut items = Vec::new();
+        let mut prev = None;
+        loop {
+            let key = match iter.key() {
+                Some(key) => key,
+                None => {
+                    iter.status()?;
+                    break;
+                }
+            };
+
+            let session_id = parse_session_id_prefix(key);
+            if prev != Some(session_id) {
+                items.push(session_id);
+                prev = Some(session_id);
+            }
+
+            iter.next();
+        }
+
+        Ok(items)
+    }
+
+    pub fn load_batches_for_session(
+        &self,
+        session_id: ValidationSessionId,
+    ) -> Result<Vec<BlocksBatch>> {
+        let table = &self.db.block_batches;
+        let mut read_config = table.new_read_config();
+        read_config.set_snapshot(self.snapshot.as_ref());
+
+        let prefix = session_key(session_id);
+        read_config.set_iterate_lower_bound(prefix.as_slice());
+
+        let cf = table.cf();
+        let mut iter = self.db.rocksdb().raw_iterator_cf_opt(&cf, read_config);
+        iter.seek(prefix.as_slice());
+
+        let mut items = Vec::new();
+        while let Some((key, value)) = iter.item() {
+            if &key[0..tables::Sessions::KEY_LEN] != prefix.as_slice() {
+                break;
+            }
+
+            let batch = tl_proto::deserialize::<StoredBlocksBatch>(value)
+                .context("failed to deserialize slasher blocks batch")?
+                .0;
+            items.push(batch);
+            iter.next();
+        }
+        iter.status()?;
+
+        Ok(items)
+    }
+
+    pub fn load_session_report(
+        &self,
+        session_id: ValidationSessionId,
+    ) -> Result<Option<SessionPenaltyReport>> {
+        let table = &self.db.session_reports;
+        let mut read_config = table.new_read_config();
+        read_config.set_snapshot(self.snapshot.as_ref());
+
+        let key = session_key(session_id);
+        let Some(value) =
+            self.db
+                .rocksdb()
+                .get_pinned_cf_opt(&table.cf(), key.as_slice(), &read_config)?
+        else {
+            return Ok(None);
+        };
+
+        let report = tl_proto::deserialize::<StoredSessionPenaltyReport>(value.as_ref())
+            .context("failed to deserialize slasher session report")?
+            .0;
+        Ok(Some(report))
+    }
+}
+
+fn session_key(session_id: ValidationSessionId) -> [u8; tables::SessionReports::KEY_LEN] {
+    let mut key = [0u8; tables::SessionReports::KEY_LEN];
+    key[0..4].copy_from_slice(&session_id.catchain_seqno.to_be_bytes());
+    key[4..8].copy_from_slice(&session_id.vset_switch_round.to_be_bytes());
+    key
+}
+
+fn block_batches_key(
+    session_id: ValidationSessionId,
+    validator_idx: u16,
+    start_seqno: u32,
+) -> [u8; tables::BlockBatches::KEY_LEN] {
+    let mut key = [0u8; tables::BlockBatches::KEY_LEN];
+    key[0..4].copy_from_slice(&session_id.catchain_seqno.to_be_bytes());
+    key[4..8].copy_from_slice(&session_id.vset_switch_round.to_be_bytes());
+    key[8..10].copy_from_slice(&validator_idx.to_be_bytes());
+    key[10..14].copy_from_slice(&start_seqno.to_be_bytes());
+    key
+}
+
+fn parse_session_id_prefix(key: &[u8]) -> ValidationSessionId {
+    ValidationSessionId {
+        catchain_seqno: u32::from_be_bytes(key[0..4].try_into().unwrap()),
+        vset_switch_round: u32::from_be_bytes(key[4..8].try_into().unwrap()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroU32;
+
+    use tycho_slasher_traits::{ReceivedSignature, ValidationSessionId};
+    use tycho_storage::StorageContext;
+
+    use super::*;
+    use crate::{SessionPenaltyReport, ValidatorPenalty};
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn reads_sessions_and_invalidates_reports() {
+        let (ctx, _tmp_dir) = StorageContext::new_temp().await.unwrap();
+        let storage = SlasherStorage::open(&ctx).unwrap();
+
+        let session_1 = ValidationSessionId {
+            catchain_seqno: 2,
+            vset_switch_round: 10,
+        };
+        let session_2 = ValidationSessionId {
+            catchain_seqno: 2,
+            vset_switch_round: 11,
+        };
+
+        storage
+            .store_blocks_batch(session_1, 1, &make_batch(100, &[(100, &[(1, 0b01)])]))
+            .unwrap();
+        storage
+            .store_blocks_batch(session_1, 2, &make_batch(110, &[(110, &[(1, 0b01)])]))
+            .unwrap();
+        storage
+            .store_blocks_batch(session_2, 1, &make_batch(120, &[(120, &[(1, 0b01)])]))
+            .unwrap();
+
+        let report = SessionPenaltyReport {
+            session_id: session_1,
+            total_blocks_in_session: 1,
+            offenders: vec![ValidatorPenalty {
+                validator_idx: 1,
+                missing_signatures: 1,
+                invalid_signatures: 0,
+            }]
+            .into_boxed_slice(),
+        };
+        storage.store_session_report(&report).unwrap();
+        assert_eq!(
+            storage.load_session_report(session_1).unwrap(),
+            Some(report.clone())
+        );
+
+        let stale = storage
+            .store_blocks_batch(session_1, 3, &make_batch(130, &[(130, &[(1, 0b01)])]))
+            .unwrap();
+        assert_eq!(stale, Some(report));
+        assert_eq!(storage.load_session_report(session_1).unwrap(), None);
+
+        let snapshot = storage.snapshot();
+        assert_eq!(snapshot.load_latest_session_id().unwrap(), Some(session_2));
+        assert_eq!(snapshot.load_distinct_session_ids().unwrap(), vec![
+            session_1, session_2
+        ]);
+        assert_eq!(
+            snapshot.load_batches_for_session(session_1).unwrap().len(),
+            3
+        );
+        assert_eq!(snapshot.load_session_report(session_1).unwrap(), None);
+    }
+
+    fn make_batch(start_seqno: u32, blocks: &[(u32, &[(u16, u8)])]) -> BlocksBatch {
+        let end_seqno = blocks.iter().map(|(seqno, _)| *seqno).max().unwrap();
+        let mut validators = blocks
+            .iter()
+            .flat_map(|(_, signatures)| signatures.iter().map(|(validator_idx, _)| *validator_idx))
+            .collect::<Vec<_>>();
+        validators.sort_unstable();
+        validators.dedup();
+
+        let mut batch = BlocksBatch::new(
+            start_seqno,
+            NonZeroU32::new(end_seqno - start_seqno + 1).unwrap(),
+            &validators,
+        );
+
+        for (seqno, signatures) in blocks {
+            let signatures = validators
+                .iter()
+                .map(|validator_idx| {
+                    let bits = signatures
+                        .iter()
+                        .find_map(|(item, bits)| (*item == *validator_idx).then_some(*bits))
+                        .unwrap_or(0);
+                    ReceivedSignature(bits)
+                })
+                .collect::<Vec<_>>();
+            assert!(batch.commit_signatures(*seqno, &signatures));
+        }
+
+        batch
+    }
 }

@@ -120,6 +120,24 @@ impl BitSet {
         self.as_slice().iter().all(|item| *item == 0)
     }
 
+    pub fn get(&self, bit: usize) -> bool {
+        assert!(
+            bit < self.length,
+            "get at index {bit} exceeds bitset size {}",
+            self.length
+        );
+
+        let Some(data) = self.data else {
+            return false;
+        };
+
+        let block = bit / Self::BLOCK_BITS;
+        let rem = bit % Self::BLOCK_BITS;
+
+        // SAFETY: `bit` is whithin the range.
+        unsafe { (*data.as_ptr().add(block) & (1 << rem)) != 0 }
+    }
+
     pub fn set(&mut self, bit: usize, enabled: bool) {
         assert!(
             bit < self.length,
