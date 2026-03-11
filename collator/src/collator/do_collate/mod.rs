@@ -64,6 +64,8 @@ struct CollationOutput {
     result: Result<CollationResult, CollatorError>,
 }
 
+const CANCELLED_COLLATION_DELAY_MS: u64 = 300;
+
 pub struct FinalizeCollationCtx {
     /// Do we have unprocessed messages in internals
     /// or externals queue after block collation
@@ -526,6 +528,12 @@ impl CollatorStdImpl {
 
         // exit collation if cancelled
         if collation_is_cancelled.check() {
+            tracing::warn!(target: tracing_targets::COLLATOR,
+                delay_ms = CANCELLED_COLLATION_DELAY_MS,
+                "collation cancel token was triggered; delaying cancellation",
+            );
+            std::thread::sleep(Duration::from_millis(CANCELLED_COLLATION_DELAY_MS));
+
             return Err(CollatorError::Cancelled(
                 CollationCancelReason::ExternalCancel,
             ));
