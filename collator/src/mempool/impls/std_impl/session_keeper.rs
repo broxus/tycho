@@ -58,7 +58,7 @@ impl StdSessionKeeper {
             seqno = %new_cx.mc_block_id.seqno,
             new_cx = ?DebugStateUpdateContext(new_cx),
             current = ?session.genesis_info(),
-            "Mempool anchor cache closed for newer anchors",
+            "Mempool anchor cache closed for reading anchors after TKA",
         );
 
         Ok(())
@@ -77,20 +77,42 @@ impl StdSessionKeeper {
                 "Processing state update from mc block",
             );
 
-            let apply_ctx_genesis = new_cx
-                .consensus_info
-                .genesis_info
-                .overrides(&session.genesis_info());
+            let apply_ctx_genesis =
+                (new_cx.consensus_info.genesis_info).overrides(&session.genesis_info());
 
-            // regardless mempool restart: another block version with old genesis may be signed
             if (self.expect_genesis_change).is_some_and(|x| new_cx.mc_block_id.seqno >= x) {
+                // Collator may collate version with old genesis and sign with new genesis,
+                // but won't change its mind (reversed) from new genesis to old (or any other) one.
+                // Because of its workflow on consensus config change:
+                // - collate mb1
+                // - block mb1 is validated
+                // - StateUpdate from mb1
+                // - try to collate next mb2 and try to get next anchor
+                // - block mb1 stored
+                // - notify top_processed_to from mb1
+                // That differs from its regular workflow:
+                // - collate mb1
+                // - StateUpdate from mb1
+                // - try to collate next mb2 and try to get next anchor
+                // - block mb1 is validated
+                // - block mb1 stored
+                // - notify top_processed_to from mb1
                 self.expect_genesis_change = None;
-                if cache.reopen(apply_ctx_genesis) {
+                // regardless mempool restart: cannot use TKA to drop cache, it may be too old
+                if let Some(after_anchor_id) = cache.reopen(apply_ctx_genesis) {
                     tracing::warn!(
                         target: tracing_targets::MEMPOOL_ADAPTER,
                         seqno = %new_cx.mc_block_id.seqno,
                         drop_data = apply_ctx_genesis,
-                        "Mempool anchor cache reopened",
+                        ?after_anchor_id,
+                        "Mempool anchor cache reopened for reading anchors after TKA",
+                    );
+                } else {
+                    tracing::error!(
+                        target: tracing_targets::MEMPOOL_ADAPTER,
+                        seqno = %new_cx.mc_block_id.seqno,
+                        ?apply_ctx_genesis,
+                        "Mempool anchor cache was not closed to be reopened for reading anchors",
                     );
                 }
             }
