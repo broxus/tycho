@@ -33,6 +33,7 @@ weedb::tables! {
         pub state: tables::State,
         pub sessions: tables::Sessions,
         pub block_batches: tables::BlockBatches,
+        pub session_reports: tables::SessionReports,
     }
 }
 
@@ -58,6 +59,28 @@ pub mod tables {
     }
 
     impl ColumnFamilyOptions<TableContext> for Sessions {
+        fn options(opts: &mut Options, ctx: &mut TableContext) {
+            default_block_based_table_factory(opts, ctx);
+
+            opts.set_optimize_filters_for_hits(true);
+            optimize_for_point_lookup(opts, ctx);
+        }
+    }
+
+    /// Cached analyzer result for a completed validation session.
+    /// - Key: `session_id: (catchain_seqno u32 BE, vset_switch_round u32 BE)`
+    /// - Value: `SessionPenaltyReport`
+    pub struct SessionReports;
+
+    impl SessionReports {
+        pub const KEY_LEN: usize = 4 + 4;
+    }
+
+    impl ColumnFamily for SessionReports {
+        const NAME: &'static str = "session_reports";
+    }
+
+    impl ColumnFamilyOptions<TableContext> for SessionReports {
         fn options(opts: &mut Options, ctx: &mut TableContext) {
             default_block_based_table_factory(opts, ctx);
 
