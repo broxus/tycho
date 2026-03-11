@@ -19,6 +19,7 @@ use tycho_util::config::PartialConfig;
 use tycho_util::futures::JoinTask;
 use tycho_util::serde_helpers;
 
+pub use self::analyzer::{SessionPenaltyReport, ValidatorPenalty};
 pub use self::bc::{
     BlocksBatch, ContractSubscription, EncodeBlocksBatchMessage, MessageDeliveryStatus,
     SignatureHistory, SignedMessage, SlasherContract, StubSlasherContract,
@@ -27,6 +28,7 @@ use self::collector::{ValidatorEventsCollector, ValidatorSessionInfo};
 use self::storage::SlasherStorage;
 use self::util::AtomicValidationSessionId;
 
+mod analyzer;
 pub mod collector {
     pub use self::validator_events::*;
 
@@ -35,7 +37,6 @@ pub mod collector {
 }
 
 mod bc;
-#[expect(unused)]
 mod storage;
 mod util;
 
@@ -98,8 +99,8 @@ impl Slasher {
                 blockchain_rpc_client,
                 storage,
                 known_session_id: AtomicValidationSessionId::new(ValidationSessionId {
-                    seqno: 0,
-                    short_hash: 0,
+                    vset_switch_round: 0,
+                    catchain_seqno: 0,
                 }),
                 signature_context: ArcSwap::new(Arc::new(AutoSignatureContext {
                     global_id: 0,
@@ -144,24 +145,23 @@ impl Slasher {
             .set_default_batch_size(slasher_params.blocks_batch_size);
         let slasher_address = StdAddr::new_masterchain(slasher_params.address);
 
-        let session_id_from_block = ValidationSessionId {
-            seqno: state_extra.validator_info.catchain_seqno,
-            short_hash: state_extra.validator_info.validator_list_hash_short,
+        let catchain_seqno = state_extra.validator_info.catchain_seqno;
+        let vset_switch_round = state_extra.consensus_info.vset_switch_round;
+
+        let current_session_id = ValidationSessionId {
+            vset_switch_round,
+            catchain_seqno,
         };
-        tracing::trace!(?slasher_params, ?session_id_from_block);
+        tracing::trace!(?slasher_params, ?current_session_id);
 
-        // Clear old sessions if needed
         // TODO: Add metrics.
-        if session_id_from_block != this.known_session_id.load() {
-            let span = tracing::Span::current();
-            let storage = this.storage.clone();
-            tokio::task::spawn_blocking(move || {
-                let _span = span.enter();
-                storage.remove_outdated_batches(session_id_from_block)
-            })
-            .await??;
-
-            this.known_session_id.set(session_id_from_block);
+        if current_session_id != this.known_session_id.load() {
+            tracing::info!(
+                old_session_id = ?this.known_session_id.load(),
+                ?current_session_id,
+                "slasher observed validation session change",
+            );
+            this.known_session_id.set(current_session_id);
         }
 
         // Handle subscription
@@ -194,11 +194,13 @@ impl Slasher {
                     Ok(Some(event)) => match event {
                         bc::SlasherContractEvent::SubmitBlocksBatch(submitted) => {
                             // TODO: Move into blocking.
-                            this.storage.store_blocks_batch(
-                                session_id_from_block,
+                            if let Some(report) = this.storage.store_blocks_batch(
+                                submitted.session_id,
                                 submitted.validator_idx,
                                 &submitted.blocks_batch,
-                            )?;
+                            )? {
+                                analyzer::clear_report_metrics(&report);
+                            }
                             tokio::task::yield_now().await;
                         }
                     },
@@ -207,6 +209,8 @@ impl Slasher {
                 }
             }
         }
+
+        self.shared.analyze_completed_sessions()?;
 
         while let Some(session_info) = self
             .validator_events_collector
@@ -267,6 +271,28 @@ struct SlasherSharedState {
 }
 
 impl SlasherSharedState {
+    fn analyze_completed_sessions(&self) -> Result<()> {
+        let snapshot = self.storage.snapshot();
+        let Some(latest_session_id) = snapshot.load_latest_session_id()? else {
+            return Ok(());
+        };
+
+        for session_id in snapshot.load_distinct_session_ids()? {
+            if session_id >= latest_session_id
+                || snapshot.load_session_report(session_id)?.is_some()
+            {
+                continue;
+            }
+
+            let batches = snapshot.load_batches_for_session(session_id)?;
+            let report = analyzer::analyze_session(session_id, &batches);
+            self.storage.store_session_report(&report)?;
+            analyzer::emit_report_metrics(&report);
+        }
+
+        Ok(())
+    }
+
     #[instrument(skip_all, fields(session_id = ?info.session_id))]
     async fn send_batches_to_contract(
         self: Arc<Self>,

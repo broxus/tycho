@@ -1,8 +1,9 @@
 use tl_proto::{TlError, TlPacket, TlRead, TlResult, TlWrite};
+use tycho_slasher_traits::ValidationSessionId;
 use tycho_util::FastHashSet;
 
 use crate::util::BitSet;
-use crate::{BlocksBatch, SignatureHistory};
+use crate::{BlocksBatch, SessionPenaltyReport, SignatureHistory, ValidatorPenalty};
 
 #[repr(transparent)]
 pub struct StoredBlocksBatch(pub BlocksBatch);
@@ -98,6 +99,84 @@ impl<'tl> TlRead<'tl> for StoredBlocksBatch {
     }
 }
 
+#[repr(transparent)]
+pub struct StoredSessionPenaltyReport(pub SessionPenaltyReport);
+
+impl StoredSessionPenaltyReport {
+    pub const TL_ID: u32 = tl_proto::id!("slasher.sessionPenaltyReport", scheme = "proto.tl");
+
+    #[inline]
+    pub const fn wrap(inner: &SessionPenaltyReport) -> &Self {
+        // SAFETY: `StoredSessionPenaltyReport` has the same layout as `SessionPenaltyReport`.
+        unsafe { &*(inner as *const SessionPenaltyReport).cast::<Self>() }
+    }
+}
+
+impl TlWrite for StoredSessionPenaltyReport {
+    type Repr = tl_proto::Boxed;
+
+    fn max_size_hint(&self) -> usize {
+        4 + 4 + 4 + 4 + 4 + self.0.offenders.len() * (4 + 4 + 4)
+    }
+
+    fn write_to<P: TlPacket>(&self, packet: &mut P) {
+        packet.write_u32(Self::TL_ID);
+        packet.write_u32(self.0.session_id.catchain_seqno);
+        packet.write_u32(self.0.session_id.vset_switch_round);
+        packet.write_u32(self.0.total_blocks_in_session);
+        packet.write_u32(self.0.offenders.len() as u32);
+        for offender in &self.0.offenders {
+            packet.write_u32(offender.validator_idx as u32);
+            packet.write_u32(offender.missing_signatures);
+            packet.write_u32(offender.invalid_signatures);
+        }
+    }
+}
+
+impl<'tl> TlRead<'tl> for StoredSessionPenaltyReport {
+    type Repr = tl_proto::Boxed;
+
+    fn read_from(packet: &mut &'tl [u8]) -> TlResult<Self> {
+        if u32::read_from(packet)? != Self::TL_ID {
+            return Err(TlError::UnknownConstructor);
+        }
+
+        let session_id = ValidationSessionId {
+            catchain_seqno: u32::read_from(packet)?,
+            vset_switch_round: u32::read_from(packet)?,
+        };
+        let total_blocks_in_session = u32::read_from(packet)?;
+        let offender_count = u32::read_from(packet)? as usize;
+
+        let mut offenders = Vec::with_capacity(offender_count);
+        let mut unique_indices =
+            FastHashSet::with_capacity_and_hasher(offender_count, Default::default());
+        for _ in 0..offender_count {
+            let Ok(validator_idx) = u16::try_from(u32::read_from(packet)?) else {
+                return Err(TlError::InvalidData);
+            };
+            if !unique_indices.insert(validator_idx) {
+                return Err(TlError::InvalidData);
+            }
+
+            let missing_signatures = u32::read_from(packet)?;
+            let invalid_signatures = u32::read_from(packet)?;
+
+            offenders.push(ValidatorPenalty {
+                validator_idx,
+                missing_signatures,
+                invalid_signatures,
+            });
+        }
+
+        Ok(Self(SessionPenaltyReport {
+            session_id,
+            total_blocks_in_session,
+            offenders: offenders.into_boxed_slice(),
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU32;
@@ -149,5 +228,33 @@ mod tests {
         let stored = tl_proto::serialize(StoredBlocksBatch::wrap(&batch));
         let loaded = tl_proto::deserialize::<StoredBlocksBatch>(&stored).unwrap();
         assert_eq!(batch, loaded.0);
+    }
+
+    #[test]
+    fn session_penalty_report_tl_repr() {
+        let report = SessionPenaltyReport {
+            session_id: ValidationSessionId {
+                catchain_seqno: 5,
+                vset_switch_round: 8,
+            },
+            total_blocks_in_session: 10,
+            offenders: vec![
+                ValidatorPenalty {
+                    validator_idx: 1,
+                    missing_signatures: 6,
+                    invalid_signatures: 0,
+                },
+                ValidatorPenalty {
+                    validator_idx: 4,
+                    missing_signatures: 7,
+                    invalid_signatures: 7,
+                },
+            ]
+            .into_boxed_slice(),
+        };
+
+        let stored = tl_proto::serialize(StoredSessionPenaltyReport::wrap(&report));
+        let loaded = tl_proto::deserialize::<StoredSessionPenaltyReport>(&stored).unwrap();
+        assert_eq!(report, loaded.0);
     }
 }

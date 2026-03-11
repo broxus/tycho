@@ -912,9 +912,7 @@ impl CollatorStdImpl {
         self.stats.int_queue_length = self
             .stats
             .int_queue_length
-            .checked_sub(collation_data.int_dequeue_count)
-            .unwrap_or_default();
-
+            .saturating_sub(collation_data.int_dequeue_count);
         self.stats.tps_block += 1;
         self.stats.tps_execute_count += collation_data.execute_count_all;
         if self.stats.tps_block == 10 {

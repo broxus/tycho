@@ -933,6 +933,12 @@ impl Phase<FinalizeState> {
                 consensus_info.vset_switch_round = next_session_start_round;
 
                 // calculate next validator subset and hash
+
+                let next_catchain_seqno = prev_state_extra
+                    .validator_info
+                    .catchain_seqno
+                    .saturating_add(1);
+
                 let current_vset = current_vset.parse::<ValidatorSet>()?;
                 let (_, validator_list_hash_short) = current_vset
                     .compute_mc_subset(
@@ -951,7 +957,7 @@ impl Phase<FinalizeState> {
                 validator_info = Some(ValidatorInfo {
                     validator_list_hash_short,
                     // TODO: rename field in types
-                    catchain_seqno: next_session_start_round,
+                    catchain_seqno: next_catchain_seqno,
                     nx_cc_updated: true,
                 });
             }
