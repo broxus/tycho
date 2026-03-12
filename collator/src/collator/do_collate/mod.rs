@@ -424,9 +424,9 @@ impl CollatorStdImpl {
         let elapsed_from_prev_block = self.timer.elapsed();
         let collation_mngmnt_overhead = elapsed_from_prev_block - collation_total_elapsed;
         self.timer = std::time::Instant::now();
-        metrics::histogram!("tycho_do_collate_from_prev_block_time", &labels)
+        metrics::histogram!("tycho_do_collate_from_prev_block_time_high", &labels)
             .record(elapsed_from_prev_block);
-        metrics::histogram!("tycho_do_collate_overhead_time", &labels)
+        metrics::histogram!("tycho_do_collate_overhead_time_high", &labels)
             .record(collation_mngmnt_overhead);
 
         // block time diff from now
