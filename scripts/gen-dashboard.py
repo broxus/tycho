@@ -1851,27 +1851,27 @@ def collator_time_metrics() -> RowPanel:
         create_gauge_panel(
             "tycho_do_collate_block_time_diff",
             "Block time diff",
-            UNITS.SECONDS,
+            UNITS.MILLI_SECONDS,
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
             "tycho_do_collate_ext_msgs_time_diff",
             "Externals time diff",
-            UNITS.SECONDS,
+            UNITS.MILLI_SECONDS,
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_do_collate_from_prev_block_time",
+            "tycho_do_collate_from_prev_block_time_high",
             "Time elapsed from prev block",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_collator_from_prev_anchor_time",
+            "tycho_collator_from_prev_anchor_time_high",
             "Time elapsed from prev anchor",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_do_collate_overhead_time",
+            "tycho_do_collate_overhead_time_high",
             "Collation flow overhead",
             labels=['workchain=~"$workchain"'],
         ),
@@ -1908,9 +1908,10 @@ def collator_time_metrics() -> RowPanel:
             "tycho_collator_try_collate_next_shard_block_time",
             "Try collate next shard block",
         ),
-        create_heatmap_panel(
-            "tycho_collator_import_next_anchor_time_high",
-            "Import next anchor time",
+        create_gauge_panel(
+            "tycho_collator_time_between_anchors",
+            "Time between anchors",
+            UNITS.MILLI_SECONDS,
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
