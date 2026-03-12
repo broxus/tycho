@@ -199,7 +199,15 @@ impl CollatorStdImpl {
 
                 let result = {
                     let mut anchor_cache_tx = AnchorsCacheTransaction::new(&mut anchors_cache);
-                    let mut reader_guard = TransactionGuard::new(&mut reader_state);
+                    let mut reader_guard = {
+                        let _h = HistogramGuard::begin_with_labels(
+                            "tycho_do_collate_reader_state_begin_time",
+                            &labels,
+                        );
+                        metrics::counter!("tycho_do_collate_reader_state_begin_tx_total", &labels)
+                            .increment(1);
+                        TransactionGuard::new(&mut reader_state)
+                    };
 
                     let collation_is_cancelled = state.collation_is_cancelled.clone();
 

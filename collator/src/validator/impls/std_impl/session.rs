@@ -387,7 +387,6 @@ impl ValidatorSession {
 
                     let validator_info = validators.get(peer_id).expect("peer info out of sync");
                     if !validator_info.public_key.verify_raw(&data, &signature) {
-                        panic!("cahced signature from peer {peer_id}");
                         tracing::warn!(
                             target: tracing_targets::VALIDATOR,
                             %my_peer_id,
@@ -649,7 +648,6 @@ impl SessionState {
             );
             // TODO: Store that the signature is invalid to avoid further checks on retries
             // TODO: Collect statistics on invalid signatures to slash the malicious validator
-            panic!("invalid signature from peer {peer_id}");
             metrics::counter!(METRIC_INVALID_SIGNATURES_IN_TOTAL).increment(1);
             return Err(ValidationError::InvalidSignature);
         }

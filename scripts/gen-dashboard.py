@@ -2453,6 +2453,11 @@ def collator_core_operations_metrics() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
+            "tycho_do_collate_reader_state_begin_time",
+            "Reader state begin tx",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
             "tycho_do_collate_reader_state_commit_time",
             "Reader state commit",
             labels=['workchain=~"$workchain"'],
@@ -2461,6 +2466,11 @@ def collator_core_operations_metrics() -> RowPanel:
             "tycho_do_collate_reader_state_rollback_time",
             "Reader state rollback",
             labels=['workchain=~"$workchain"'],
+        ),
+        create_counter_panel(
+            "tycho_do_collate_reader_state_begin_tx_total",
+            "Reader state begin tx count",
+            labels_selectors=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
             "tycho_do_collate_anchors_cache_commit_time",

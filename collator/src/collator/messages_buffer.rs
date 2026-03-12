@@ -52,6 +52,13 @@ pub struct BufferTransaction {
     int_count: usize,
     ext_count: usize,
     min_ext_chain_time: Option<u64>,
+    removed_accounts: FastHashMap<HashBytes, RemovedAccount>,
+    order_snapshot: Option<Vec<HashBytes>>,
+}
+
+#[derive(Clone)]
+struct RemovedAccount {
+    entry: AccountEntry,
 }
 
 #[derive(Default)]
@@ -69,17 +76,25 @@ impl Transactional for MessagesBuffer {
             int_count: self.int_count,
             ext_count: self.ext_count,
             min_ext_chain_time: self.min_ext_chain_time,
+            removed_accounts: FastHashMap::default(),
+            order_snapshot: None,
         });
     }
 
     fn commit(&mut self) {
-        assert!(self.tx.is_some(), "no active transaction to commit");
-        self.tx = None;
-        self.msgs.retain(|_, entry| {
+        assert!(
+            self.tx.take().is_some(),
+            "no active transaction to commit"
+        );
+        for (account_id, entry) in &mut self.msgs {
+            assert!(
+                entry.new_val.as_ref().is_some_and(|v| !v.is_empty()),
+                "messages buffer invariant violated on commit: account {:?} has empty entry",
+                account_id
+            );
             entry.old_val = None;
             entry.is_new = false;
-            entry.new_val.as_ref().is_some_and(|v| !v.is_empty())
-        });
+        }
         if self.ext_count == 0 {
             self.min_ext_chain_time = None;
         }
@@ -89,20 +104,61 @@ impl Transactional for MessagesBuffer {
         let Some(snapshot) = self.tx.take() else {
             panic!("no active transaction to rollback")
         };
+        let BufferTransaction {
+            int_count,
+            ext_count,
+            min_ext_chain_time,
+            removed_accounts,
+            order_snapshot,
+        } = snapshot;
 
-        self.msgs.retain(|_, entry| {
-            if entry.is_new {
-                return false;
-            }
-            if entry.old_val.is_some() {
-                entry.new_val = entry.old_val.take();
-            }
-            entry.new_val.is_some()
-        });
+        if let Some(order_snapshot) = order_snapshot.as_deref() {
+            let mut current = std::mem::take(&mut self.msgs);
+            let mut removed = removed_accounts;
+            let mut restored =
+                FastIndexMap::with_capacity_and_hasher(order_snapshot.len(), Default::default());
 
-        self.int_count = snapshot.int_count;
-        self.ext_count = snapshot.ext_count;
-        self.min_ext_chain_time = snapshot.min_ext_chain_time;
+            // Rebuild accounts exactly in pre-transaction order.
+            for account_id in order_snapshot {
+                let mut entry = match current.swap_remove(account_id) {
+                    Some(entry) => entry,
+                    None => match removed.remove(account_id) {
+                        Some(removed) => removed.entry,
+                        None => continue,
+                    },
+                };
+
+                // Accounts created inside the transaction must not survive rollback.
+                if entry.is_new {
+                    continue;
+                }
+
+                if entry.old_val.is_some() {
+                    entry.new_val = entry.old_val.take();
+                }
+                entry.is_new = false;
+
+                if entry.new_val.is_some() {
+                    restored.insert(*account_id, entry);
+                }
+            }
+
+            self.msgs = restored;
+        } else {
+            self.msgs.retain(|_, entry| {
+                if entry.is_new {
+                    return false;
+                }
+                if entry.old_val.is_some() {
+                    entry.new_val = entry.old_val.take();
+                }
+                entry.new_val.is_some()
+            });
+        }
+
+        self.int_count = int_count;
+        self.ext_count = ext_count;
+        self.min_ext_chain_time = min_ext_chain_time;
     }
 
     fn in_tx(&self) -> bool {
@@ -111,6 +167,61 @@ impl Transactional for MessagesBuffer {
 }
 
 impl MessagesBuffer {
+    fn ensure_tx_order_snapshot(&mut self) {
+        let need_snapshot = self
+            .tx
+            .as_ref()
+            .is_some_and(|tx| tx.order_snapshot.is_none());
+        if !need_snapshot {
+            return;
+        }
+
+        let order_snapshot = self.msgs.keys().copied().collect();
+        if let Some(tx) = self.tx.as_mut()
+            && tx.order_snapshot.is_none()
+        {
+            tx.order_snapshot = Some(order_snapshot);
+        }
+    }
+
+    fn remove_empty_accounts(&mut self) {
+        let in_tx = self.in_tx();
+        let mut idx = 0;
+
+        while idx < self.msgs.len() {
+            let Some((account_id, is_empty, is_new)) = self
+                .msgs
+                .get_index(idx)
+                .map(|(account_id, entry)| (*account_id, entry.is_empty(), entry.is_new))
+            else {
+                break;
+            };
+
+            if !is_empty {
+                idx += 1;
+                continue;
+            }
+
+            if in_tx && !is_new {
+                self.ensure_tx_order_snapshot();
+            }
+
+            let Some(mut entry) = self.msgs.shift_remove(&account_id) else {
+                continue;
+            };
+
+            if in_tx && !is_new {
+                Self::backup_entry(&mut entry, true);
+                entry.new_val = None;
+                if let Some(tx) = self.tx.as_mut() {
+                    tx.removed_accounts
+                        .entry(account_id)
+                        .or_insert(RemovedAccount { entry });
+                }
+            }
+        }
+    }
+
     fn backup_entry(entry: &mut AccountEntry, in_tx: bool) {
         if in_tx && entry.old_val.is_none() {
             entry.old_val = entry.new_val.clone();
@@ -172,14 +283,25 @@ impl MessagesBuffer {
         let account_id = dst.as_std().map(|a| a.address).unwrap_or_default();
 
         let in_tx = self.in_tx();
+        let restored_entry = self.tx.as_ref().and_then(|tx| {
+            tx.removed_accounts
+                .get(&account_id)
+                .map(|removed| removed.entry.clone())
+        });
 
         match self.msgs.entry(account_id) {
             indexmap::map::Entry::Vacant(vacant) => {
-                vacant.insert(AccountEntry {
-                    old_val: None,
-                    new_val: Some([msg].into()),
-                    is_new: self.tx.is_some(),
-                });
+                if let Some(mut entry) = restored_entry {
+                    entry.new_val = Some([msg].into());
+                    entry.is_new = false;
+                    vacant.insert(entry);
+                } else {
+                    vacant.insert(AccountEntry {
+                        old_val: None,
+                        new_val: Some([msg].into()),
+                        is_new: self.tx.is_some(),
+                    });
+                }
             }
             indexmap::map::Entry::Occupied(mut occupied) => {
                 let entry = occupied.get_mut();
@@ -201,13 +323,31 @@ impl MessagesBuffer {
         let in_tx = self.in_tx();
 
         for addr in addresses_to_remove {
-            if let Some(entry) = self.msgs.get_mut(addr) {
-                Self::backup_entry(entry, in_tx);
+            let Some(is_new) = self.msgs.get(addr).map(|entry| entry.is_new) else {
+                continue;
+            };
 
-                if let Some(msgs) = entry.current() {
-                    self.int_count -= msgs.len();
-                }
+            if in_tx && !is_new {
+                self.ensure_tx_order_snapshot();
+            }
+
+            let Some(mut entry) = self.msgs.shift_remove(addr) else {
+                continue;
+            };
+
+            Self::backup_entry(&mut entry, in_tx);
+
+            if let Some(msgs) = entry.current() {
+                self.int_count -= msgs.len();
+            }
+
+            if in_tx && !entry.is_new {
                 entry.new_val = None;
+                if let Some(tx) = self.tx.as_mut() {
+                    tx.removed_accounts
+                        .entry(*addr)
+                        .or_insert(RemovedAccount { entry });
+                }
             }
         }
     }
@@ -473,11 +613,7 @@ impl MessagesBuffer {
 
         // remove empty accounts from buffer
         ops_count.saturating_add_assign(self.msgs.len() as u64);
-
-        if !self.in_tx() {
-            self.msgs
-                .retain(|_, entry| entry.current().is_some_and(|v| !v.is_empty()));
-        }
+        self.remove_empty_accounts();
 
         // drop min externals chain time if buffer was drained
         if self.ext_count == 0 {
@@ -1162,6 +1298,10 @@ mod transaction_tests {
         ParsedMessage::from_ext(msg, Cell::default(), false, chain_time)
     }
 
+    fn account_order(buffer: &MessagesBuffer) -> Vec<HashBytes> {
+        buffer.msgs.keys().copied().collect()
+    }
+
     // ==================== BASIC TRANSACTION TESTS ====================
 
     #[test]
@@ -1466,6 +1606,88 @@ mod transaction_tests {
         assert_eq!(buffer.int_count, 2);
     }
 
+    #[test]
+    fn test_remove_then_add_moves_account_to_end_in_tx() {
+        let mut buffer = MessagesBuffer::default();
+        let acc1 = account(1);
+        let acc2 = account(2);
+        let acc3 = account(3);
+
+        buffer.add_message(make_test_int_message(acc1, 100));
+        buffer.add_message(make_test_int_message(acc2, 200));
+        buffer.add_message(make_test_int_message(acc3, 300));
+        assert_eq!(account_order(&buffer), vec![acc1, acc2, acc3]);
+
+        buffer.begin();
+        let mut to_remove = FastHashSet::default();
+        to_remove.insert(acc2);
+        buffer.remove_int_messages_by_accounts(&to_remove);
+        buffer.add_message(make_test_int_message(acc2, 201));
+
+        assert_eq!(account_order(&buffer), vec![acc1, acc3, acc2]);
+    }
+
+    #[test]
+    fn test_rollback_restores_order_after_remove_then_add() {
+        let mut buffer = MessagesBuffer::default();
+        let acc1 = account(1);
+        let acc2 = account(2);
+        let acc3 = account(3);
+
+        buffer.add_message(make_test_int_message(acc1, 100));
+        buffer.add_message(make_test_int_message(acc2, 200));
+        buffer.add_message(make_test_int_message(acc3, 300));
+        assert_eq!(account_order(&buffer), vec![acc1, acc2, acc3]);
+
+        buffer.begin();
+        let mut to_remove = FastHashSet::default();
+        to_remove.insert(acc2);
+        buffer.remove_int_messages_by_accounts(&to_remove);
+        buffer.add_message(make_test_int_message(acc2, 201));
+        assert_eq!(account_order(&buffer), vec![acc1, acc3, acc2]);
+
+        buffer.rollback();
+
+        assert_eq!(account_order(&buffer), vec![acc1, acc2, acc3]);
+        assert_eq!(buffer.int_count, 3);
+    }
+
+    #[test]
+    fn test_rollback_restores_order_with_readded_account_and_later_removal() {
+        let mut buffer = MessagesBuffer::default();
+        let acc1 = account(1);
+        let acc2 = account(2);
+        let acc3 = account(3);
+        let acc4 = account(4);
+
+        buffer.add_message(make_test_int_message(acc1, 100));
+        buffer.add_message(make_test_int_message(acc2, 200));
+        buffer.add_message(make_test_int_message(acc3, 300));
+        buffer.add_message(make_test_int_message(acc4, 400));
+        assert_eq!(account_order(&buffer), vec![acc1, acc2, acc3, acc4]);
+
+        buffer.begin();
+
+        // Remove acc2 and add it again (it should be moved to the end).
+        let mut to_remove = FastHashSet::default();
+        to_remove.insert(acc2);
+        buffer.remove_int_messages_by_accounts(&to_remove);
+        buffer.add_message(make_test_int_message(acc2, 201));
+        assert_eq!(account_order(&buffer), vec![acc1, acc3, acc4, acc2]);
+
+        // Remove another account after re-add.
+        let mut to_remove = FastHashSet::default();
+        to_remove.insert(acc4);
+        buffer.remove_int_messages_by_accounts(&to_remove);
+        assert_eq!(account_order(&buffer), vec![acc1, acc3, acc2]);
+
+        buffer.rollback();
+
+        // Original order must be fully restored.
+        assert_eq!(account_order(&buffer), vec![acc1, acc2, acc3, acc4]);
+        assert_eq!(buffer.int_count, 4);
+    }
+
     // ==================== FILL MESSAGE GROUP TESTS ====================
 
     #[test]
@@ -1699,5 +1921,34 @@ mod transaction_tests {
             buffer.msgs.contains_key(&acc_pre),
             "The original account should still exist"
         );
+    }
+
+    #[test]
+    fn test_rollback_with_snapshot_drops_new_account_added_before_first_remove() {
+        let mut buffer = MessagesBuffer::default();
+        let acc_pre = account(1);
+        let acc_new = account(2);
+
+        // Existing state before transaction.
+        buffer.add_message(make_test_int_message(acc_pre, 100));
+
+        buffer.begin();
+
+        // Add a brand new account first...
+        buffer.add_message(make_test_int_message(acc_new, 200));
+        assert!(buffer.msgs.contains_key(&acc_new));
+
+        // ...then perform first structural remove, which creates order snapshot.
+        let mut to_remove = FastHashSet::default();
+        to_remove.insert(acc_pre);
+        buffer.remove_int_messages_by_accounts(&to_remove);
+        assert!(!buffer.msgs.contains_key(&acc_pre));
+
+        buffer.rollback();
+
+        // New account must be dropped, original account must be restored.
+        assert!(buffer.msgs.contains_key(&acc_pre));
+        assert!(!buffer.msgs.contains_key(&acc_new));
+        assert_eq!(buffer.int_count, 1);
     }
 }
