@@ -1445,6 +1445,8 @@ fn serialize_diff(
     prev_hash: &HashBytes,
     processed_to: ProcessedTo,
 ) -> SerializedQueueDiff {
+    tracing::info!(target: "COLLATOR", "serialize diff for block {:?}, min_message: {}, max_message: {}, prev_hash: {}, processed_to: {:?}",
+        block_id_short, min_message, max_message, prev_hash, processed_to);
     QueueDiffStuff::builder(block_id_short.shard, block_id_short.seqno, prev_hash)
         .with_processed_to(processed_to)
         .with_messages(
