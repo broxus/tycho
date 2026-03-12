@@ -1783,10 +1783,19 @@ impl CollatorStdImpl {
                             // time elapsed from prev anchor
                             let elapsed_from_prev_anchor = self.anchor_timer.elapsed();
                             self.anchor_timer = std::time::Instant::now();
-                            metrics::histogram!("tycho_collator_from_prev_anchor_time", &labels)
-                                .record(elapsed_from_prev_anchor);
+                            metrics::histogram!(
+                                "tycho_collator_from_prev_anchor_time_high",
+                                &labels
+                            )
+                            .record(elapsed_from_prev_anchor);
 
                             working_state.wu_used_from_last_anchor = 0;
+
+                            // time between anchors
+                            let elapsed_between_anchors =
+                                next_anchor.chain_time - last_imported_chain_time;
+                            metrics::gauge!("tycho_collator_time_between_anchors", &labels)
+                                .set(elapsed_between_anchors as f64);
 
                             last_imported_anchor_id = next_anchor.id;
                             last_imported_chain_time = next_anchor.chain_time;
@@ -1841,7 +1850,7 @@ impl CollatorStdImpl {
 
         let top_processed_to_anchor = working_state.mc_data.top_processed_to_anchor;
 
-        let (last_imported_anchor_id, last_imported_chain_time) = self
+        let (mut last_imported_anchor_id, mut last_imported_chain_time) = self
             .anchors_cache
             .get_last_imported_anchor_id_and_ct()
             .unwrap_or_default();
@@ -1962,16 +1971,24 @@ impl CollatorStdImpl {
                     // time elapsed from prev anchor
                     let elapsed_from_prev_anchor = self.anchor_timer.elapsed();
                     self.anchor_timer = std::time::Instant::now();
-                    metrics::histogram!("tycho_collator_from_prev_anchor_time", &labels)
+                    metrics::histogram!("tycho_collator_from_prev_anchor_time_high", &labels)
                         .record(elapsed_from_prev_anchor);
 
                     working_state.wu_used_from_last_anchor = 0;
 
+                    // time between anchors
+                    let elapsed_between_anchors = next_anchor.chain_time - last_imported_chain_time;
+                    metrics::gauge!("tycho_collator_time_between_anchors", &labels)
+                        .set(elapsed_between_anchors as f64);
+
+                    last_imported_anchor_id = next_anchor.id;
+                    last_imported_chain_time = next_anchor.chain_time;
+
                     tracing::debug!(target: tracing_targets::COLLATOR,
                         force_mc_block = false,
                         top_processed_to_anchor,
-                        last_imported_anchor_id = next_anchor.id,
-                        last_imported_chain_time = next_anchor.chain_time,
+                        last_imported_anchor_id,
+                        last_imported_chain_time,
                         has_externals = has_our_externals,
                         "imported next anchor, will notify collation manager",
                     );
@@ -2092,7 +2109,7 @@ impl CollatorStdImpl {
                 let wu_used_to_import_next_anchor =
                     working_state.collation_config.wu_used_to_import_next_anchor;
                 let should_import_anchor_by_used_wu =
-                    wu_used_from_last_anchor > wu_used_to_import_next_anchor;
+                    wu_used_from_last_anchor >= wu_used_to_import_next_anchor;
 
                 // report wu used related metrics
                 metrics::gauge!("tycho_collator_wu_used_from_last_anchor", &[(
@@ -2111,7 +2128,7 @@ impl CollatorStdImpl {
                     .set(can_import_anchors_count as f64);
 
                 // decide if should import anchors
-                let (last_imported_anchor_id, last_imported_chain_time) = self
+                let (mut last_imported_anchor_id, mut last_imported_chain_time) = self
                     .anchors_cache
                     .get_last_imported_anchor_id_and_ct()
                     .unwrap_or_default();
@@ -2243,10 +2260,19 @@ impl CollatorStdImpl {
                                 let elapsed_from_prev_anchor = self.anchor_timer.elapsed();
                                 self.anchor_timer = std::time::Instant::now();
                                 metrics::histogram!(
-                                    "tycho_collator_from_prev_anchor_time",
+                                    "tycho_collator_from_prev_anchor_time_high",
                                     &labels
                                 )
                                 .record(elapsed_from_prev_anchor);
+
+                                // time between anchors
+                                let elapsed_between_anchors =
+                                    anchor.chain_time - last_imported_chain_time;
+                                metrics::gauge!("tycho_collator_time_between_anchors", &labels)
+                                    .set(elapsed_between_anchors as f64);
+
+                                last_imported_anchor_id = anchor.id;
+                                last_imported_chain_time = anchor.chain_time;
 
                                 metrics::gauge!("tycho_collator_shard_blocks_count_btw_anchors")
                                     .set(self.shard_blocks_count_from_last_anchor);
