@@ -673,7 +673,10 @@ impl ShardStateStorage {
             drop(guard);
 
             // NOTE: Cell tree is still alive, just in case couple the ref handle lifetime with it.
-            Reclaimer::instance().drop((root_cell, prev_ref_mc_state_handle));
+            // Reclaimer::instance().drop((root_cell, prev_ref_mc_state_handle));
+
+            drop(root_cell);
+            drop(prev_ref_mc_state_handle);
 
             block_handles.set_has_shard_state(&handle);
 
