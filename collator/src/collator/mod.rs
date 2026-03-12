@@ -665,9 +665,7 @@ impl CollatorStdImpl {
                         self.state_node_adapter.clone(),
                         LoadStateHint {
                             allow_ignore_direct: false,
-                            bypass_shard_state_cache: self
-                                .reload_prev_data_count
-                                .is_multiple_of(10),
+                            bypass_shard_state_cache: false,
                             caller: LoadStateCaller::CollatorReloadPrevData,
                         },
                     )

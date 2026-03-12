@@ -1160,6 +1160,8 @@ impl StorageCell {
             );
         }
 
+        metrics::gauge!("tycho_storage_alive_storage_cells").increment(1);
+
         Some(Self {
             cell_storage,
             bit_len,
@@ -1480,6 +1482,8 @@ impl CellImpl for StorageCell {
 
 impl Drop for StorageCell {
     fn drop(&mut self) {
+        metrics::gauge!("tycho_storage_alive_storage_cells").decrement(1);
+
         _ = unsafe {
             Box::from_raw(std::ptr::slice_from_raw_parts_mut(
                 self.data_ptr.cast_mut(),
