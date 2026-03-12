@@ -567,6 +567,7 @@ impl ShardStateStorage {
             // Resolve root if needed.
             let virtual_cell_count;
             let prev_ref_mc_state_handle;
+            let prev_applier;
             let root_cell = match root_cell {
                 // We already know the state so use it.
                 DirectStoreRoot::Exact {
@@ -575,6 +576,7 @@ impl ShardStateStorage {
                 } => {
                     virtual_cell_count = 0;
                     prev_ref_mc_state_handle = ref_mc_state_handle;
+                    prev_applier = None;
                     root
                 }
                 // The most common case when we just use the applier to get the next state.
@@ -594,9 +596,12 @@ impl ShardStateStorage {
                     );
                     virtual_cell_count = prev.applier.new_virtual_cells();
                     prev_ref_mc_state_handle = prev.applier.ref_mc_state_handle().clone();
-                    prev.applier
+                    let applier = prev.applier.clone();
+                    let root = applier
                         .make_next_state(partial_root)
-                        .context("failed to make next direct state")?
+                        .context("failed to make next direct state")?;
+                    prev_applier = Some(applier);
+                    root
                 }
             };
             drop(prev);
@@ -675,6 +680,9 @@ impl ShardStateStorage {
             // NOTE: Cell tree is still alive, just in case couple the ref handle lifetime with it.
             // Reclaimer::instance().drop((root_cell, prev_ref_mc_state_handle));
 
+            if let Some(applier) = prev_applier {
+                applier.clear_new_cells();
+            }
             drop(root_cell);
             drop(prev_ref_mc_state_handle);
 
@@ -1518,6 +1526,10 @@ impl MerkleUpdateApplier {
 
     fn ref_mc_state_handle(&self) -> &RefMcStateHandle {
         &self.0.ref_mc_state_handle
+    }
+
+    fn clear_new_cells(&self) {
+        self.0.applier.new_cells.clear();
     }
 
     fn make_next_state(&self, partial_new_root: Cell) -> Result<Cell, tycho_types::error::Error> {
