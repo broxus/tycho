@@ -1367,12 +1367,19 @@ impl ShardStatesCache {
                 let pivot_block_seqno = res.applier.pivot_block_seqno();
                 item.state = CachedState::Stored(res);
 
-                // Reset cache tail on each saved block.
+                // Clear all cached states on direct store to ensure clean states
+                // on next load (like master did with shard_states_cache).
+                // Without this, StorageCells with accumulated lazy-loaded children
+                // persist across pivot cycles, causing unbounded memory growth.
                 if !item.is_virtual && pivot_block_seqno > self.pivot_block_seqno {
                     self.pivot_block_seqno = pivot_block_seqno;
 
-                    self.states
-                        .retain(|_, item| item.block_id.seqno >= pivot_block_seqno);
+                    let current = self.states.remove(&block_id.root_hash);
+                    let old = std::mem::take(&mut self.states);
+                    if let Some(current) = current {
+                        self.states.insert(block_id.root_hash, current);
+                    }
+                    Reclaimer::instance().drop(old);
 
                     let labels = [("workchain", block_id.shard.workchain().to_string())];
                     metrics::gauge!(Self::METRIC_PIVOT_SEQNO, &labels).set(pivot_block_seqno);
