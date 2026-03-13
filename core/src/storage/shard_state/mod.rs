@@ -1474,7 +1474,7 @@ struct MerkleCellsProvider {
 
 impl FindCell for MerkleCellsProvider {
     fn find_cell(&self, hash: &HashBytes) -> Option<Cell> {
-        let cell = self.storage.load_cell(hash, self.epoch).ok()?;
+        let cell = self.storage.load_cell_nocache(hash, self.epoch).ok()?;
         Some(Cell::from(cell as Arc<_>))
     }
 }

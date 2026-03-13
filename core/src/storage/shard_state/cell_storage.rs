@@ -717,6 +717,48 @@ impl CellStorage {
         Ok(cell)
     }
 
+    /// Load cell bypassing quick_cache insertion (read-only cache check + RocksDB fallback).
+    /// Used for find_cell path to avoid polluting quick_cache with transient reads.
+    pub fn load_cell_nocache(
+        self: &Arc<Self>,
+        hash: &HashBytes,
+        epoch: u32,
+    ) -> Result<Arc<StorageCell>, CellStorageError> {
+        // Check cells_cache first (Weak upgrade, no allocation)
+        if let Some(cell) = self.cells_cache.get(hash)
+            && cell.epoch.saturating_add(self.drop_interval) >= epoch
+            && let Some(cell) = cell.weak.upgrade()
+        {
+            return Ok(cell);
+        }
+
+        // Check quick_cache read-only (no placeholder/guard creation)
+        if let Some(value) = self.raw_cells_cache.peek_raw(hash) {
+            return match StorageCell::deserialize(self.clone(), hash, &value.slice, epoch) {
+                Some(cell) => Ok(Arc::new(cell)),
+                None => Err(CellStorageError::InvalidCell),
+            };
+        }
+
+        // Fallback: read directly from RocksDB, do NOT insert into quick_cache
+        match self.cells_db.cells.get(hash.as_slice()) {
+            Ok(Some(value)) => {
+                let (_, data) = refcount::decode_value_with_rc(value.as_ref());
+                match data {
+                    Some(data) => {
+                        match StorageCell::deserialize(self.clone(), hash, data, epoch) {
+                            Some(cell) => Ok(Arc::new(cell)),
+                            None => Err(CellStorageError::InvalidCell),
+                        }
+                    }
+                    None => Err(CellStorageError::CellNotFound),
+                }
+            }
+            Ok(None) => Err(CellStorageError::CellNotFound),
+            Err(e) => Err(CellStorageError::Internal(e)),
+        }
+    }
+
     pub fn remove_cell_mt(
         &self,
         herd: &Herd,
@@ -1588,6 +1630,11 @@ impl RawCellsCache {
                 "tycho_storage_get_cell_from_rocksdb_time"
             ),
         }
+    }
+
+    /// Read-only peek into quick_cache — no placeholder/guard creation.
+    fn peek_raw(&self, key: &HashBytes) -> Option<RawCellsCacheItem> {
+        self.inner.get(key)
     }
 
     fn get_raw(
