@@ -724,6 +724,9 @@ impl CellStorage {
         hash: &HashBytes,
         epoch: u32,
     ) -> Result<Arc<StorageCell>, CellStorageError> {
+        #[cfg(feature = "cells-metrics")]
+        let _histogram = HistogramGuard::begin("tycho_storage_load_cell_nocache_time");
+
         // Check cells_cache first (Weak upgrade, no allocation)
         if let Some(cell) = self.cells_cache.get(hash)
             && cell.epoch.saturating_add(self.drop_interval) >= epoch
@@ -733,30 +736,55 @@ impl CellStorage {
         }
 
         // Check quick_cache read-only (no placeholder/guard creation)
-        if let Some(value) = self.raw_cells_cache.peek_raw(hash) {
-            return match StorageCell::deserialize(self.clone(), hash, &value.slice, epoch) {
-                Some(cell) => Ok(Arc::new(cell)),
-                None => Err(CellStorageError::InvalidCell),
-            };
-        }
-
-        // Fallback: read directly from RocksDB, do NOT insert into quick_cache
-        match self.cells_db.cells.get(hash.as_slice()) {
-            Ok(Some(value)) => {
-                let (_, data) = refcount::decode_value_with_rc(value.as_ref());
-                match data {
-                    Some(data) => {
-                        match StorageCell::deserialize(self.clone(), hash, data, epoch) {
-                            Some(cell) => Ok(Arc::new(cell)),
-                            None => Err(CellStorageError::InvalidCell),
+        let mut cell = if let Some(value) = self.raw_cells_cache.peek_raw(hash) {
+            match StorageCell::deserialize(self.clone(), hash, &value.slice, epoch) {
+                Some(cell) => Arc::new(cell),
+                None => return Err(CellStorageError::InvalidCell),
+            }
+        } else {
+            // Fallback: read directly from RocksDB, do NOT insert into quick_cache
+            match self.cells_db.cells.get(hash.as_slice()) {
+                Ok(Some(value)) => {
+                    let (_, data) = refcount::decode_value_with_rc(value.as_ref());
+                    match data {
+                        Some(data) => {
+                            match StorageCell::deserialize(self.clone(), hash, data, epoch) {
+                                Some(cell) => Arc::new(cell),
+                                None => return Err(CellStorageError::InvalidCell),
+                            }
                         }
+                        None => return Err(CellStorageError::CellNotFound),
                     }
-                    None => Err(CellStorageError::CellNotFound),
+                }
+                Ok(None) => return Err(CellStorageError::CellNotFound),
+                Err(e) => return Err(CellStorageError::Internal(e)),
+            }
+        };
+
+        // Register in cells_cache for deduplication and fast Weak-based lookups
+        match self.cells_cache.entry(*hash) {
+            dashmap::Entry::Vacant(entry) => {
+                entry.insert(CachedCell {
+                    epoch,
+                    weak: Arc::downgrade(&cell),
+                });
+            }
+            dashmap::Entry::Occupied(mut entry) => {
+                if entry.get().epoch >= epoch
+                    && let Some(mut prev) = entry.get().weak.upgrade()
+                {
+                    drop(entry);
+                    std::mem::swap(&mut prev, &mut cell);
+                } else {
+                    entry.insert(CachedCell {
+                        epoch,
+                        weak: Arc::downgrade(&cell),
+                    });
                 }
             }
-            Ok(None) => Err(CellStorageError::CellNotFound),
-            Err(e) => Err(CellStorageError::Internal(e)),
-        }
+        };
+
+        Ok(cell)
     }
 
     pub fn remove_cell_mt(
