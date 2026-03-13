@@ -1139,12 +1139,13 @@ fn read_externals_into_buffers(
                     // detect target partition and add message to buffer
                     let target_partition = partition_router.get_partition(None, &ext_msg.info.dst);
                     let par_metrics = metrics_by_partitions.get_mut(target_partition);
+                    par_metrics.add_to_message_groups_timer.start();
                     // we use one anchors cache for all partitions
                     // and read externals into all partitions at once
                     // so we add message to buffer only when it is above processed_to for partition
                     let processed_to = processed_to_by_partitions.get(&target_partition).unwrap();
                     if &curr_ext_key > processed_to {
-                        let reader_state_by_partition =                             reader_state
+                        let reader_state_by_partition = reader_state
                             .by_partitions
                             .get_mut(&target_partition)
                             .with_context(|| format!(
@@ -1274,10 +1275,6 @@ fn read_externals_into_buffers(
 
     // accumulate time metrics
     {
-        metrics_by_partitions
-            .get_mut(QueuePartitionIdx::ZERO)
-            .read_ext_messages_timer
-            .stop();
         let add_to_msgs_groups_total_elapsed =
             metrics_by_partitions.add_to_message_groups_total_elapsed();
         let par_0_metrics = metrics_by_partitions.get_mut(QueuePartitionIdx::ZERO);
