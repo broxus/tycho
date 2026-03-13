@@ -637,7 +637,7 @@ impl FinalizeWu {
     }
 
     pub(super) fn append_elapsed_timings(&mut self, finalize_metrics: &FinalizeMetrics) {
-        self.create_queue_diff_elapsed = finalize_metrics.create_queue_diff_elapsed;
+        self.create_queue_diff_elapsed = finalize_metrics.create_queue_diff_timer.total_elapsed;
         self.apply_queue_diff_elapsed = finalize_metrics.apply_queue_diff_elapsed;
 
         self.update_shard_accounts_elapsed = finalize_metrics.update_shard_accounts_elapsed;
@@ -1307,18 +1307,19 @@ impl DoCollateWu {
     ) {
         self.resume_collation_wu = self
             .calc_resume_collation_wu_base(
+                threads_count,
                 pow_updated_accounts_count,
                 shard_accounts_count_log,
                 pow_shard_accounts_count,
             )
             .saturating_mul(store_state_wu_param as u128)
-            .saturating_div(threads_count as u128)
             .saturating_div(scale)
             .saturating_div(scale) as u64;
     }
 
     fn calc_resume_collation_wu_base(
         &self,
+        threads_count: u64,
         pow_updated_accounts_count: u128,
         shard_accounts_count_log: u64,
         pow_shard_accounts_count: u128,
@@ -1326,6 +1327,7 @@ impl DoCollateWu {
         (self.updated_accounts_count as u128)
             .saturating_mul(pow_updated_accounts_count)
             .saturating_mul(shard_accounts_count_log as u128)
+            .saturating_div(threads_count as u128)
             .saturating_mul(pow_shard_accounts_count)
     }
 
@@ -1339,6 +1341,7 @@ impl DoCollateWu {
         scale: u128,
     ) -> Option<u64> {
         let base = self.calc_resume_collation_wu_base(
+            threads_count,
             pow_updated_accounts_count,
             shard_accounts_count_log,
             pow_shard_accounts_count,
@@ -1350,7 +1353,6 @@ impl DoCollateWu {
             (target_wu as u128)
                 .saturating_mul(scale)
                 .saturating_mul(scale)
-                .saturating_mul(threads_count as u128)
                 .saturating_div(base) as u64,
         )
     }
