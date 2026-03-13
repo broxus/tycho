@@ -1574,6 +1574,9 @@ impl RawCellsCache {
                 .estimated_items_capacity(estimated_cell_cache_capacity as usize)
                 .weight_capacity(size_in_bytes)
                 .hot_allocation(0.8)
+                // Disable ghost entries: cache is only populated via on_insert_cell (writes),
+                // so admission policy is unnecessary. Ghosts would waste LinkedSlab slots.
+                .ghost_allocation(0.0)
                 .build()
                 .unwrap(),
             CellSizeEstimator,
@@ -1590,41 +1593,36 @@ impl RawCellsCache {
         }
     }
 
+    // NOTE: Uses `inner.get()` instead of `inner.get_value_or_guard()` intentionally.
+    // `get_value_or_guard` creates Placeholder + LinkedSlab slot on every cache miss,
+    // and these internal structures never shrink — causing unbounded memory growth
+    // when called on hot paths with many unique transient keys.
     fn get_raw(
         &self,
         db: &CellsDb,
         key: &HashBytes,
     ) -> Result<Option<RawCellsCacheItem>, rocksdb::Error> {
-        use quick_cache::sync::GuardResult;
-
-        match self.inner.get_value_or_guard(key, None) {
-            GuardResult::Value(value) => Ok(Some(value)),
-            GuardResult::Guard(g) => {
-                let value = {
-                    #[cfg(feature = "cells-metrics")]
-                    let _timer = scopeguard::guard(Instant::now(), |started_at| {
-                        self.rocksdb_access_histogram.record(started_at.elapsed());
-                    });
-
-                    db.cells.get(key.as_slice())?
-                };
-
-                Ok(if let Some(value) = value {
-                    let (_, data) = refcount::decode_value_with_rc(value.as_ref());
-                    data.map(|value| {
-                        let value = RawCellsCacheItem::from_header_and_slice(
-                            AtomicI64::new(Self::RC_NAN),
-                            value,
-                        );
-                        _ = g.insert(value.clone());
-                        value
-                    })
-                } else {
-                    None
-                })
-            }
-            GuardResult::Timeout => unreachable!(),
+        // Read-only check of quick_cache (no insertion on miss)
+        if let Some(value) = self.inner.get(key) {
+            return Ok(Some(value));
         }
+
+        // Fallback to RocksDB
+        let value = {
+            #[cfg(feature = "cells-metrics")]
+            let _timer = scopeguard::guard(Instant::now(), |started_at| {
+                self.rocksdb_access_histogram.record(started_at.elapsed());
+            });
+
+            db.cells.get(key.as_slice())?
+        };
+
+        Ok(value.and_then(|value| {
+            let (_, data) = refcount::decode_value_with_rc(value.as_ref());
+            data.map(|data| {
+                RawCellsCacheItem::from_header_and_slice(AtomicI64::new(Self::RC_NAN), data)
+            })
+        }))
     }
 
     fn get_rc_for_insert(
@@ -1737,6 +1735,11 @@ impl RawCellsCache {
 
     fn refresh_metrics(&self) {
         metrics::gauge!("tycho_storage_raw_cells_cache_size").set(self.inner.weight() as f64);
+        let mem = self.inner.memory_used();
+        // Actual LinkedSlab Vec memory (includes Resident, Ghost, free slots)
+        metrics::gauge!("tycho_storage_raw_cells_cache_entries_mem").set(mem.entries as f64);
+        // Actual HashTable memory (grows but never shrinks)
+        metrics::gauge!("tycho_storage_raw_cells_cache_map_mem").set(mem.map as f64);
     }
 }
 
