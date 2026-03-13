@@ -61,24 +61,37 @@ def generate_legend_format(labels: List[str]) -> str:
         legend_format += f" {key}:{{{{{key}}}}}"
     return legend_format
 
+def build_target(
+    expr: Expr,
+    legend_format: str | None = None,
+    scale: float | int | None = None,
+):
+    t = target(expr, legend_format=legend_format)
+
+    actual_scale = 1 if scale in (None, 0) else scale
+    if actual_scale != 1:
+        t.expr = f"({t.expr}) / {actual_scale}"
+
+    return t
 
 def create_gauge_panel(
     expr: Union[str, List[Union[str, Expr]], Expr],
     title: str,
     unit_format=UNITS.NUMBER_FORMAT,
+    scale: float | int | None = None,
     labels=[],
     legend_format: str | None = None,
     legend_placement: str = "right",
 ) -> Panel:
     if isinstance(expr, str):
-        expr = [Expr(metric=expr, label_selectors=labels)]
+        exprs = [Expr(metric=expr, label_selectors=labels)]
     elif isinstance(expr, list):
-        expr = [
+        exprs = [
             Expr(metric=e, label_selectors=labels) if isinstance(e, str) else e
             for e in expr
         ]
     elif isinstance(expr, Expr):
-        expr = [expr]
+        exprs = [expr]
     else:
         raise TypeError(
             "expr must be a string, a list of strings, or a list of Expr objects."
@@ -87,7 +100,10 @@ def create_gauge_panel(
     if legend_format is None:
         legend_format = generate_legend_format(labels)
 
-    targets = [target(e, legend_format=legend_format) for e in expr]
+    targets = [
+        build_target(e, legend_format=legend_format, scale=scale)
+        for e in exprs
+    ]
 
     return timeseries_panel(
         title=title,
@@ -1817,13 +1833,13 @@ def collator_time_metrics() -> RowPanel:
         create_gauge_panel(
             "tycho_do_collate_block_time_diff",
             "Block time diff",
-            UNITS.MILLI_SECONDS,
+            UNITS.SECONDS,
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
             "tycho_do_collate_ext_msgs_time_diff",
             "Externals time diff",
-            UNITS.MILLI_SECONDS,
+            UNITS.SECONDS,
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
@@ -1891,220 +1907,15 @@ def collator_time_metrics() -> RowPanel:
 def collator_wu_metrics() -> RowPanel:
     metrics = [
         create_gauge_panel(
-            "tycho_do_collate_wu_on_prepare",
-            "Wu spent on prepare",
+            "tycho_do_collate_wu_total_full",
+            "Wu spent total on collation and resume per block",
             labels=['workchain=~"$workchain"'],
+            scale=1000000,
+            unit_format="M",
         ),
         create_gauge_panel(
-            "tycho_do_collate_wu_price_on_prepare",
-            "Wu price on prepare",
-            labels=['workchain=~"$workchain"'],
-            unit_format=UNITS.NANO_SECONDS,
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_on_prepare_read_ext_msgs",
-            "Wu spent on read externals",
-            labels=['workchain=~"$workchain"'],
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_price_on_prepare_read_ext_msgs",
-            "Wu price on read externals",
-            labels=['workchain=~"$workchain"'],
-            unit_format=UNITS.NANO_SECONDS,
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_on_prepare_read_existing_int_msgs",
-            "Wu spent on read existing internals",
-            labels=['workchain=~"$workchain"'],
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_price_on_prepare_read_existing_int_msgs",
-            "Wu price on read existing internals",
-            labels=['workchain=~"$workchain"'],
-            unit_format=UNITS.NANO_SECONDS,
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_on_prepare_read_new_int_msgs",
-            "Wu spent on read new internals",
-            labels=['workchain=~"$workchain"'],
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_price_on_prepare_read_new_int_msgs",
-            "Wu price on read new internals",
-            labels=['workchain=~"$workchain"'],
-            unit_format=UNITS.NANO_SECONDS,
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_on_prepare_add_msgs_to_groups",
-            "Wu spent on add msgs to groups",
-            labels=['workchain=~"$workchain"'],
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_price_on_prepare_add_msgs_to_groups",
-            "Wu price on add msgs to groups",
-            labels=['workchain=~"$workchain"'],
-            unit_format=UNITS.NANO_SECONDS,
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_on_execute",
-            "Wu spent on execute",
-            labels=['workchain=~"$workchain"'],
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_price_on_execute",
-            "Wu price on execute",
-            labels=['workchain=~"$workchain"'],
-            unit_format=UNITS.NANO_SECONDS,
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_on_execute_txs",
-            "Wu spent on execute in vm",
-            labels=['workchain=~"$workchain"'],
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_price_on_execute_txs",
-            "Wu price on execute in vm",
-            labels=['workchain=~"$workchain"'],
-            unit_format=UNITS.NANO_SECONDS,
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_on_process_txs",
-            "Wu spent on process executed txs",
-            labels=['workchain=~"$workchain"'],
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_price_on_process_txs",
-            "Wu price on process executed txs",
-            labels=['workchain=~"$workchain"'],
-            unit_format=UNITS.NANO_SECONDS,
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_on_create_queue_diff",
-            "Wu spent on create queue diff",
-            labels=['workchain=~"$workchain"'],
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_price_on_create_queue_diff",
-            "Wu price on create queue diff",
-            labels=['workchain=~"$workchain"'],
-            unit_format=UNITS.NANO_SECONDS,
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_on_apply_queue_diff",
-            "Wu spent on apply queue diff",
-            labels=['workchain=~"$workchain"'],
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_price_on_apply_queue_diff",
-            "Wu price on apply queue diff",
-            labels=['workchain=~"$workchain"'],
-            unit_format=UNITS.NANO_SECONDS,
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_on_finalize_total",
-            "Wu spent on finalize (total)",
-            labels=['workchain=~"$workchain"'],
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_price_on_finalize_total",
-            "Wu price on finalize (total)",
-            labels=['workchain=~"$workchain"'],
-            unit_format=UNITS.NANO_SECONDS,
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_on_finalize_block",
-            "Wu spent on finalize block",
-            labels=['workchain=~"$workchain"'],
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_price_on_finalize_block",
-            "Wu price on finalize block",
-            labels=['workchain=~"$workchain"'],
-            unit_format=UNITS.NANO_SECONDS,
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_on_build_block",
-            "Wu spent on build block",
-            labels=['workchain=~"$workchain"'],
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_price_on_build_block",
-            "Wu price on build block",
-            labels=['workchain=~"$workchain"'],
-            unit_format=UNITS.NANO_SECONDS,
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_on_build_state_update",
-            "Wu spent on build state update (Merkle)",
-            labels=['workchain=~"$workchain"'],
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_price_on_build_state_update",
-            "Wu price on build state update (Merkle)",
-            labels=['workchain=~"$workchain"'],
-            unit_format=UNITS.NANO_SECONDS,
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_on_build_accounts_and_messages",
-            "Wu spent on build accounts and messages in parallel",
-            labels=['workchain=~"$workchain"'],
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_price_on_build_accounts_and_messages",
-            "Wu price on build accounts and messages in parallel",
-            labels=['workchain=~"$workchain"'],
-            unit_format=UNITS.NANO_SECONDS,
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_on_build_in_msgs",
-            "Wu spent on build in messages description",
-            labels=['workchain=~"$workchain"'],
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_price_on_build_in_msgs",
-            "Wu price on build in messages description",
-            labels=['workchain=~"$workchain"'],
-            unit_format=UNITS.NANO_SECONDS,
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_on_build_out_msgs",
-            "Wu spent on build out messages description",
-            labels=['workchain=~"$workchain"'],
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_price_on_build_out_msgs",
-            "Wu price on build out messages description",
-            labels=['workchain=~"$workchain"'],
-            unit_format=UNITS.NANO_SECONDS,
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_on_update_shard_accounts",
-            "Wu spent on update shard accounts",
-            labels=['workchain=~"$workchain"'],
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_price_on_update_shard_accounts",
-            "Wu price on update shard accounts",
-            labels=['workchain=~"$workchain"'],
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_on_build_accounts_blocks",
-            "Wu spent on build accounts blocks description",
-            labels=['workchain=~"$workchain"'],
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_price_on_build_accounts_blocks",
-            "Wu price on build accounts blocks description",
-            labels=['workchain=~"$workchain"'],
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_on_build_accounts",
-            "Wu spent on build accounts",
-            labels=['workchain=~"$workchain"'],
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_wu_price_on_build_accounts",
-            "Wu price on build accounts",
+            "tycho_do_collate_wu_price_total_full",
+            "Wu price total on collation and resume",
             labels=['workchain=~"$workchain"'],
             unit_format=UNITS.NANO_SECONDS,
         ),
@@ -2112,6 +1923,8 @@ def collator_wu_metrics() -> RowPanel:
             "tycho_do_collate_wu_total",
             "Wu spent total on collation",
             labels=['workchain=~"$workchain"'],
+            scale=1000000,
+            unit_format="M",
         ),
         create_gauge_panel(
             "tycho_do_collate_wu_price_total",
@@ -2123,6 +1936,8 @@ def collator_wu_metrics() -> RowPanel:
             "tycho_do_collate_wu_on_resume_collation",
             "Wu spent on resume collation",
             labels=['workchain=~"$workchain"'],
+            scale=1000000,
+            unit_format="M",
         ),
         create_gauge_panel(
             "tycho_do_collate_wu_price_on_resume_collation",
@@ -2131,13 +1946,262 @@ def collator_wu_metrics() -> RowPanel:
             unit_format=UNITS.NANO_SECONDS,
         ),
         create_gauge_panel(
-            "tycho_do_collate_wu_total_full",
-            "Wu spent total on collation and resume per block",
+            "tycho_do_collate_wu_on_prepare",
+            "Wu spent on prepare",
             labels=['workchain=~"$workchain"'],
+            scale=1000000,
+            unit_format="M",
         ),
         create_gauge_panel(
-            "tycho_do_collate_wu_price_total_full",
-            "Wu price total on collation and resume",
+            "tycho_do_collate_wu_price_on_prepare",
+            "Wu price on prepare",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_prepare_read_ext_msgs",
+            "Wu spent on read externals",
+            labels=['workchain=~"$workchain"'],
+            scale=1000000,
+            unit_format="M",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_price_on_prepare_read_ext_msgs",
+            "Wu price on read externals",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_prepare_read_existing_int_msgs",
+            "Wu spent on read existing internals",
+            labels=['workchain=~"$workchain"'],
+            scale=1000000,
+            unit_format="M",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_price_on_prepare_read_existing_int_msgs",
+            "Wu price on read existing internals",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_prepare_read_new_int_msgs",
+            "Wu spent on read new internals",
+            labels=['workchain=~"$workchain"'],
+            scale=1000000,
+            unit_format="M",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_price_on_prepare_read_new_int_msgs",
+            "Wu price on read new internals",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_prepare_add_msgs_to_groups",
+            "Wu spent on add msgs to groups",
+            labels=['workchain=~"$workchain"'],
+            scale=1000000,
+            unit_format="M",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_price_on_prepare_add_msgs_to_groups",
+            "Wu price on add msgs to groups",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_execute",
+            "Wu spent on execute",
+            labels=['workchain=~"$workchain"'],
+            scale=1000000,
+            unit_format="M",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_price_on_execute",
+            "Wu price on execute",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_execute_txs",
+            "Wu spent on execute in vm",
+            labels=['workchain=~"$workchain"'],
+            scale=1000000,
+            unit_format="M",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_price_on_execute_txs",
+            "Wu price on execute in vm",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_process_txs",
+            "Wu spent on process executed txs",
+            labels=['workchain=~"$workchain"'],
+            scale=1000000,
+            unit_format="M",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_price_on_process_txs",
+            "Wu price on process executed txs",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_create_queue_diff",
+            "Wu spent on create queue diff",
+            labels=['workchain=~"$workchain"'],
+            scale=1000000,
+            unit_format="M",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_price_on_create_queue_diff",
+            "Wu price on create queue diff",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_apply_queue_diff",
+            "Wu spent on apply queue diff",
+            labels=['workchain=~"$workchain"'],
+            scale=1000000,
+            unit_format="M",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_price_on_apply_queue_diff",
+            "Wu price on apply queue diff",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_finalize_total",
+            "Wu spent on finalize (total)",
+            labels=['workchain=~"$workchain"'],
+            scale=1000000,
+            unit_format="M",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_price_on_finalize_total",
+            "Wu price on finalize (total)",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_finalize_block",
+            "Wu spent on finalize block",
+            labels=['workchain=~"$workchain"'],
+            scale=1000000,
+            unit_format="M",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_price_on_finalize_block",
+            "Wu price on finalize block",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_build_block",
+            "Wu spent on build block",
+            labels=['workchain=~"$workchain"'],
+            scale=1000000,
+            unit_format="M",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_price_on_build_block",
+            "Wu price on build block",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_build_state_update",
+            "Wu spent on build state update (Merkle)",
+            labels=['workchain=~"$workchain"'],
+            scale=1000000,
+            unit_format="M",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_price_on_build_state_update",
+            "Wu price on build state update (Merkle)",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_build_accounts_and_messages",
+            "Wu spent on build accounts and messages in parallel",
+            labels=['workchain=~"$workchain"'],
+            scale=1000000,
+            unit_format="M",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_price_on_build_accounts_and_messages",
+            "Wu price on build accounts and messages in parallel",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_build_in_msgs",
+            "Wu spent on build in messages description",
+            labels=['workchain=~"$workchain"'],
+            scale=1000000,
+            unit_format="M",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_price_on_build_in_msgs",
+            "Wu price on build in messages description",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_build_out_msgs",
+            "Wu spent on build out messages description",
+            labels=['workchain=~"$workchain"'],
+            scale=1000000,
+            unit_format="M",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_price_on_build_out_msgs",
+            "Wu price on build out messages description",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_update_shard_accounts",
+            "Wu spent on update shard accounts",
+            labels=['workchain=~"$workchain"'],
+            scale=1000000,
+            unit_format="M",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_price_on_update_shard_accounts",
+            "Wu price on update shard accounts",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_build_accounts_blocks",
+            "Wu spent on build accounts blocks description",
+            labels=['workchain=~"$workchain"'],
+            scale=1000000,
+            unit_format="M",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_price_on_build_accounts_blocks",
+            "Wu price on build accounts blocks description",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_build_accounts",
+            "Wu spent on build accounts",
+            labels=['workchain=~"$workchain"'],
+            scale=1000000,
+            unit_format="M",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_price_on_build_accounts",
+            "Wu price on build accounts",
             labels=['workchain=~"$workchain"'],
             unit_format=UNITS.NANO_SECONDS,
         ),
