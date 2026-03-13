@@ -1833,13 +1833,13 @@ def collator_time_metrics() -> RowPanel:
         create_gauge_panel(
             "tycho_do_collate_block_time_diff",
             "Block time diff",
-            UNITS.MILLI_SECONDS,
+            UNITS.SECONDS,
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
             "tycho_do_collate_ext_msgs_time_diff",
             "Externals time diff",
-            UNITS.MILLI_SECONDS,
+            UNITS.SECONDS,
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
@@ -2177,8 +2177,7 @@ def collator_wu_metrics() -> RowPanel:
             "tycho_do_collate_wu_price_on_update_shard_accounts",
             "Wu price on update shard accounts",
             labels=['workchain=~"$workchain"'],
-            scale=1000000,
-            unit_format="M",
+            unit_format=UNITS.NANO_SECONDS,
         ),
         create_gauge_panel(
             "tycho_do_collate_wu_on_build_accounts_blocks",
@@ -2191,8 +2190,7 @@ def collator_wu_metrics() -> RowPanel:
             "tycho_do_collate_wu_price_on_build_accounts_blocks",
             "Wu price on build accounts blocks description",
             labels=['workchain=~"$workchain"'],
-            scale=1000000,
-            unit_format="M",
+            unit_format=UNITS.NANO_SECONDS,
         ),
         create_gauge_panel(
             "tycho_do_collate_wu_on_build_accounts",
