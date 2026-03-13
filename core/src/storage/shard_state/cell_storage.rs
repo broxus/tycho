@@ -1598,8 +1598,15 @@ impl RawCellsCache {
         use quick_cache::sync::GuardResult;
 
         match self.inner.get_value_or_guard(key, None) {
-            GuardResult::Value(value) => Ok(Some(value)),
+            GuardResult::Value(value) => {
+                metrics::counter!("tycho_storage_raw_cells_cache_get_raw", "result" => "hit")
+                    .increment(1);
+                Ok(Some(value))
+            }
             GuardResult::Guard(g) => {
+                metrics::counter!("tycho_storage_raw_cells_cache_get_raw", "result" => "miss")
+                    .increment(1);
+
                 let value = {
                     #[cfg(feature = "cells-metrics")]
                     let _timer = scopeguard::guard(Instant::now(), |started_at| {
