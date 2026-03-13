@@ -637,7 +637,7 @@ impl FinalizeWu {
     }
 
     pub(super) fn append_elapsed_timings(&mut self, finalize_metrics: &FinalizeMetrics) {
-        self.create_queue_diff_elapsed = finalize_metrics.create_queue_diff_elapsed;
+        self.create_queue_diff_elapsed = finalize_metrics.create_queue_diff_timer.total_elapsed;
         self.apply_queue_diff_elapsed = finalize_metrics.apply_queue_diff_elapsed;
 
         self.update_shard_accounts_elapsed = finalize_metrics.update_shard_accounts_elapsed;

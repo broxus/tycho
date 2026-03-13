@@ -487,7 +487,7 @@ impl CollatorStdImpl {
             .extra
             .finalize_metrics
             .create_queue_diff_timer
-            .start();
+            .stop();
 
         let update_queue_task = create_apply_diff_task(
             &mq_adapter,
@@ -1247,7 +1247,7 @@ impl CollatorStdImpl {
             exec_msgs_total = %format_duration(execute_result.execute_wu.execute_groups_vm_only_elapsed),
             process_txs_total = %format_duration(execute_result.execute_wu.process_txs_elapsed),
 
-            create_queue_diff = %format_duration(finalize_result.finalize_metrics.create_queue_diff_elapsed),
+            create_queue_diff = %format_duration(finalize_result.finalize_metrics.create_queue_diff_timer.total_elapsed),
             apply_queue_diff = %format_duration(finalize_result.finalize_metrics.apply_queue_diff_elapsed),
             finalize_block = %format_duration(finalize_result.finalize_metrics.finalize_block_elapsed),
             finalize_total = %format_duration(finalize_result.finalize_metrics.total_timer.total_elapsed),
@@ -1259,7 +1259,7 @@ impl CollatorStdImpl {
         tracing::debug!(
             target: tracing_targets::COLLATOR,
             total_elapsed = %format_duration(finalize_metrics.total_timer.total_elapsed),
-            create_queue_diff = %format_duration(finalize_metrics.create_queue_diff_elapsed),
+            create_queue_diff = %format_duration(finalize_metrics.create_queue_diff_timer.total_elapsed),
             apply_queue_diff = %format_duration(finalize_metrics.apply_queue_diff_elapsed),
             finalize_block = %format_duration(finalize_metrics.finalize_block_elapsed),
             parallel_build_accounts_and_msgs = %format_duration(finalize_metrics.build_accounts_and_messages_in_parallel_elased),
