@@ -1624,8 +1624,11 @@ impl CollatorStdImpl {
                             let elapsed_between_anchors = next_anchor
                                 .chain_time
                                 .saturating_sub(last_imported_chain_time);
-                            metrics::gauge!("tycho_collator_time_between_anchors", &labels)
-                                .set(elapsed_between_anchors as f64);
+                            metrics::histogram!(
+                                "tycho_collator_between_anchors_time_high",
+                                &labels,
+                            )
+                            .record(Duration::from_millis(elapsed_between_anchors));
 
                             last_imported_anchor_id = next_anchor.id;
                             last_imported_chain_time = next_anchor.chain_time;
@@ -1808,8 +1811,8 @@ impl CollatorStdImpl {
 
                     // time between anchors
                     let elapsed_between_anchors = next_anchor.chain_time - last_imported_chain_time;
-                    metrics::gauge!("tycho_collator_time_between_anchors", &labels)
-                        .set(elapsed_between_anchors as f64);
+                    metrics::histogram!("tycho_collator_between_anchors_time_high", &labels,)
+                        .record(Duration::from_millis(elapsed_between_anchors));
 
                     last_imported_anchor_id = next_anchor.id;
                     last_imported_chain_time = next_anchor.chain_time;
@@ -2098,8 +2101,11 @@ impl CollatorStdImpl {
                                 // time between anchors
                                 let elapsed_between_anchors =
                                     anchor.chain_time - last_imported_chain_time;
-                                metrics::gauge!("tycho_collator_time_between_anchors", &labels)
-                                    .set(elapsed_between_anchors as f64);
+                                metrics::histogram!(
+                                    "tycho_collator_between_anchors_time_high",
+                                    &labels,
+                                )
+                                .record(Duration::from_millis(elapsed_between_anchors));
 
                                 last_imported_anchor_id = anchor.id;
                                 last_imported_chain_time = anchor.chain_time;

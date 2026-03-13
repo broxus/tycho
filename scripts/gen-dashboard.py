@@ -1908,10 +1908,9 @@ def collator_time_metrics() -> RowPanel:
             "tycho_collator_try_collate_next_shard_block_time",
             "Try collate next shard block",
         ),
-        create_gauge_panel(
-            "tycho_collator_time_between_anchors",
+        create_heatmap_panel(
+            "tycho_collator_between_anchors_time_high",
             "Time between anchors",
-            UNITS.MILLI_SECONDS,
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
