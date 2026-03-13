@@ -1302,7 +1302,7 @@ impl StorageCell {
         let mut res = Ok(());
         Self::initialize_inner(state, &mut || match self
             .cell_storage
-            .load_cell(unsafe { &(*slot).hash }, self.epoch)
+            .load_cell_nocache(unsafe { &(*slot).hash }, self.epoch)
         {
             Ok(cell) => unsafe {
                 *slot = StorageCellReferenceData {
