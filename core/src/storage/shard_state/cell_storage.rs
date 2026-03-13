@@ -1330,7 +1330,7 @@ impl StorageCell {
         let mut res = Ok(());
         Self::initialize_inner(state, &mut || match self
             .cell_storage
-            .load_cell_nocache(unsafe { &(*slot).hash }, self.epoch)
+            .load_cell(unsafe { &(*slot).hash }, self.epoch)
         {
             Ok(cell) => unsafe {
                 *slot = StorageCellReferenceData {
@@ -1673,8 +1673,14 @@ impl RawCellsCache {
         use quick_cache::sync::GuardResult;
 
         match self.inner.get_value_or_guard(key, None) {
-            GuardResult::Value(value) => Ok(Some(value)),
+            GuardResult::Value(value) => {
+                metrics::counter!("tycho_storage_raw_cells_cache_get_raw", "result" => "hit")
+                    .increment(1);
+                Ok(Some(value))
+            }
             GuardResult::Guard(g) => {
+                metrics::counter!("tycho_storage_raw_cells_cache_get_raw", "result" => "miss")
+                    .increment(1);
                 let value = {
                     #[cfg(feature = "cells-metrics")]
                     let _timer = scopeguard::guard(Instant::now(), |started_at| {
