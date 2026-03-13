@@ -1033,7 +1033,15 @@ def storage() -> RowPanel:
         ),
         create_gauge_panel(
             "tycho_storage_raw_cells_cache_size",
-            "Raw cells cache size",
+            "Raw cells cache weight (resident only)",
+            UNITS.BYTES_IEC,
+        ),
+        create_gauge_panel(
+            [
+                Expr(metric="tycho_storage_raw_cells_cache_entries_mem"),
+                Expr(metric="tycho_storage_raw_cells_cache_map_mem"),
+            ],
+            "Raw cells cache actual memory",
             UNITS.BYTES_IEC,
         ),
         create_heatmap_quantile_panel(
