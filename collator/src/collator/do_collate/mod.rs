@@ -482,6 +482,13 @@ impl CollatorStdImpl {
 
         histogram_serialize_queue_diff.finish();
 
+        // stop counting time on create queue diff (with serialization)
+        finalize_phase
+            .extra
+            .finalize_metrics
+            .create_queue_diff_timer
+            .start();
+
         let update_queue_task = create_apply_diff_task(
             &mq_adapter,
             queue_diff_with_msgs,

@@ -138,6 +138,9 @@ impl Phase<FinalizeState> {
             );
         }
 
+        // start counting time on create queue diff (with serialization)
+        self.extra.finalize_metrics.create_queue_diff_timer.start();
+
         let FinalizedMessagesReader {
             has_unprocessed_messages,
             queue_diff_with_msgs,

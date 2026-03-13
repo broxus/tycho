@@ -1926,7 +1926,9 @@ impl ExecuteMetrics {
 
 #[derive(Debug, Default)]
 pub(super) struct FinalizeMetrics {
+    pub create_queue_diff_timer: MetricsTimer,
     pub create_queue_diff_elapsed: Duration,
+
     pub apply_queue_diff_elapsed: Duration,
 
     pub update_shard_accounts_elapsed: Duration,
