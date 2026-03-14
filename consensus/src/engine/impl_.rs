@@ -35,7 +35,6 @@ pub struct Engine {
     anchors_tx: mpsc::UnboundedSender<MempoolOutput>,
     round_task: RoundTaskReady,
     db_cleaner: DbCleaner,
-    peer_schedule_updater: Task<Never>,
     init_task: Option<Task<FixHistoryFlag>>,
     ctx: EngineCtx,
 }
@@ -102,18 +101,12 @@ impl Engine {
 
         let round_task = RoundTaskReady::new(&store, bind, &consensus_round, net);
 
-        let peer_schedule_updater = engine_ctx.task().spawn({
-            let peer_schedule = net.peer_schedule.clone();
-            peer_schedule.downgrade().run_updater()
-        });
-
         Self {
             dag,
             committer_run,
             anchors_tx: bind.anchors_tx.clone(),
             db_cleaner,
             round_task,
-            peer_schedule_updater,
             init_task: Some(init_task),
             ctx: engine_ctx,
         }
@@ -380,11 +373,6 @@ impl Engine {
             let _round_duration = HistogramGuard::begin("tycho_mempool_engine_round_time");
             // commit may take longer than a round if it ends with a jump to catch up with consensus
 
-            if self.peer_schedule_updater.is_finished() {
-                match self.peer_schedule_updater.await {
-                    Err(e) => return Err(e.into()), // never Ok
-                }
-            }
             if db_clean_task.is_finished() {
                 match db_clean_task.await {
                     Err(e) => return Err(e.into()), // never Ok
