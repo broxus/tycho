@@ -49,6 +49,7 @@ impl Engine {
         fix_history: FixHistoryFlag,
     ) -> Engine {
         let conf = &merged_conf.conf;
+        net.moderator.apply_mempool_config(conf);
         let genesis = merged_conf.genesis();
 
         Point::parse(genesis.serialized().to_vec())

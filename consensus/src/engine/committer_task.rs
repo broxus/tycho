@@ -267,7 +267,7 @@ impl RoundCtx {
         }
 
         for (peer_id, stats) in &reduced {
-            let labels = [("peer_id", format!("{:.4}", peer_id))];
+            let labels = [("peer_id", format!("{}", peer_id))];
             metrics::counter!("tycho_mempool_stats_filled_rounds", &labels)
                 .increment(u64::from(stats.filled_rounds()));
             if let Some(counters) = stats.counters() {
