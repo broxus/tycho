@@ -46,6 +46,9 @@ impl LastAnchorFile {
     }
 
     pub fn update(&mut self, anchor: u32) -> anyhow::Result<()> {
+        self.file.set_len(0).context("truncate last anchor file")?;
+        (self.file.seek(SeekFrom::Start(0)))
+            .context("reset last anchor file cursor before write")?;
         self.file
             .write_all(anchor.to_string().as_bytes())
             .context("write last anchor file")?;
@@ -88,6 +91,19 @@ mod test {
         file.update(4).context("write 4")?;
         anyhow::ensure!(file.read().context("4 read")? == 4, "read 4");
         anyhow::ensure!(file.read().context("4 read ++")? == 4, "read 4 again");
+
+        file.update(300).context("write 300")?;
+        anyhow::ensure!(file.read().context("300 read")? == 300, "read 300");
+
+        // If the new decimal value is shorter than the previous one, stale suffix
+        // digits must not survive and seed a bogus larger round on mempool restart.
+        file.update(7).context("write 7")?;
+        anyhow::ensure!(file.read().context("7 read")? == 7, "read 7");
+
+        drop(file);
+
+        let mut file = LastAnchorFile::reopen_in(&file_db).context("reopen after shorten")?;
+        anyhow::ensure!(file.read().context("7 read #")? == 7, "read 7 after reopen");
 
         Ok(())
     }

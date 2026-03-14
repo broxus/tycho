@@ -63,11 +63,11 @@ impl Downloader {
         &self.inner.peer_schedule
     }
 
-    /// 2F "point not found" responses lead to invalidation of all referencing points;
-    /// failed network queries are retried after all peers were queried the same amount of times,
-    /// and only successful responses that point is not found are taken into account.
+    /// 2F unavailable responses lead to invalidation of all referencing points;
+    /// retry-only responses are retried in a round-robin fashion.
     ///
-    /// Reliable peers respond immediately with successfully validated points, or return `None`.
+    /// Reliable responses either provide the point or report it unavailable.
+    /// Unreliable responses also count towards point unavailability.
     pub async fn run(
         &self,
         point_id: &PointId,
@@ -142,7 +142,7 @@ struct DownloadTask {
     query: DownloadQuery,
 
     peer_count: PeerCount,
-    not_found: FastHashSet<PeerId>, // count only responses considered reliable
+    not_found: FastHashSet<PeerId>, // count peers towards `2F` to decide the point is unavailable
 
     updates: broadcast::Receiver<(PeerId, PeerState)>,
 
