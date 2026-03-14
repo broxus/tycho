@@ -2815,7 +2815,6 @@ def mempool_engine() -> RowPanel:
         create_counter_panel(
             expr_sum_increase(
                 "tycho_mempool_engine_produce_skipped",
-                label_selectors=['kind=~"$kind"'],
                 range_selector="$__interval",
                 by_labels=["kind", "instance"],
             ),
@@ -2846,7 +2845,6 @@ def mempool_engine() -> RowPanel:
         create_counter_panel(
             expr_sum_increase(
                 "tycho_mempool_points_verify_err",
-                label_selectors=['kind=~"$kind"'],
                 range_selector="$__interval",
                 by_labels=["kind", "instance"],
             ),
@@ -2856,7 +2854,7 @@ def mempool_engine() -> RowPanel:
         create_counter_panel(
             expr_sum_increase(
                 "tycho_mempool_points_resolved_err",
-                label_selectors=['kind=~"$kind"', 'ord="first"'],
+                label_selectors=['ord="first"'],
                 range_selector="$__interval",
                 by_labels=["kind", "instance"],
             ),
@@ -2876,7 +2874,7 @@ def mempool_engine() -> RowPanel:
         create_counter_panel(
             expr_sum_increase(
                 "tycho_mempool_points_resolved_err",
-                label_selectors=['kind=~"$kind"', 'ord="alt"'],
+                label_selectors=['ord="alt"'],
                 range_selector="$__interval",
                 by_labels=["kind", "instance"],
             ),
@@ -2933,7 +2931,6 @@ def mempool_misc() -> RowPanel:
         create_counter_panel(
             expr_sum_increase(
                 "tycho_mempool_query_limited_responder",
-                label_selectors=['kind=~"$kind"'],
                 range_selector="$__interval",
                 by_labels=["kind", "instance"],
             ),
@@ -2943,7 +2940,6 @@ def mempool_misc() -> RowPanel:
         create_counter_panel(
             expr_sum_increase(
                 "tycho_mempool_query_aborted_responder",
-                label_selectors=['kind=~"$kind"'],
                 range_selector="$__interval",
                 by_labels=["kind", "instance"],
             ),
@@ -2957,7 +2953,6 @@ def mempool_misc() -> RowPanel:
         create_counter_panel(
             expr_sum_increase(
                 "tycho_mempool_stats_merge_errors",
-                label_selectors=['kind=~"$kind"'],
                 range_selector="$__interval",
                 by_labels=["kind", "instance"],
             ),
@@ -3429,16 +3424,6 @@ def templates() -> Templating:
             template(
                 name="partition",
                 query="label_values(tycho_do_collate_processed_upto_int_ranges,par_id)",
-                data_source="${source}",
-                hide=0,
-                regex=None,
-                multi=True,
-                include_all=True,
-                all_value=".*",
-            ),
-            template(
-                name="kind",
-                query="label_values(tycho_mempool_verifier_verify,kind)",
                 data_source="${source}",
                 hide=0,
                 regex=None,
