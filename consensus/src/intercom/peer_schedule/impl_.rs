@@ -4,19 +4,17 @@ use std::sync::{Arc, Weak};
 
 use arc_swap::{ArcSwap, Guard};
 use futures_util::StreamExt;
-use futures_util::never::Never;
 use futures_util::stream::FuturesUnordered;
 use parking_lot::lock_api::{RwLockReadGuard, RwLockWriteGuard};
 use parking_lot::{RawRwLock, RwLock};
 use rand::rng;
-use tokio::sync::broadcast;
 use tycho_crypto::ed25519::KeyPair;
 use tycho_network::{
     KnownPeerHandle, PeerId, PrivateOverlay, PrivateOverlayEntriesEvent,
     PrivateOverlayEntriesReadGuard,
 };
 
-use crate::effects::{AltFmt, AltFormat, Cancelled, Task, TaskResult, TaskTracker};
+use crate::effects::{AltFmt, AltFormat, Cancelled, Task, TaskTracker};
 use crate::engine::MempoolMergedConfig;
 use crate::intercom::peer_schedule::locked::PeerScheduleLocked;
 use crate::intercom::peer_schedule::stateless::PeerScheduleStateless;
@@ -129,6 +127,12 @@ impl PeerSchedule {
             tracing::info!(vset_len = init.next_v_set.len(), "Init next validator set");
             locked.set_next_set(self.downgrade(), &init.next_v_set);
         }
+
+        tracing::info!("starting peer schedule updates");
+
+        let entries = locked.overlay.read_entries();
+        let resolved_waiters = WeakPeerSchedule::resolved_waiters(entries, &locked.local_id);
+        locked.resolve_peers_task = self.downgrade().new_resolve_task(resolved_waiters);
     }
 
     pub fn set_peers(&self, peers: &InitPeers) {
@@ -159,6 +163,20 @@ impl PeerSchedule {
                 "Apply next validator set"
             );
             locked.set_next_set(self.downgrade(), &peers.next_v_set);
+        }
+    }
+
+    pub fn set_banned(&self, peers: &[PeerId]) {
+        if !peers.is_empty() {
+            let mut guard = self.write();
+            guard.set_banned(peers, self.downgrade());
+        }
+    }
+
+    pub fn remove_bans(&self, peers: &[PeerId]) {
+        if !peers.is_empty() {
+            let mut guard = self.write();
+            guard.remove_bans(peers, self.downgrade());
         }
     }
 
@@ -281,86 +299,9 @@ impl WeakPeerSchedule {
         self.0.upgrade().map(PeerSchedule)
     }
 
-    pub async fn run_updater(self) -> TaskResult<Never> {
-        tracing::info!("starting peer schedule updates");
-        scopeguard::defer!(tracing::warn!("peer schedule updater stopped"));
-
-        let (local_id, mut rx) = match self.upgrade() {
-            Some(strong) => {
-                let mut guard = strong.write();
-
-                guard.resolve_peers_task = None;
-                let local_id = guard.local_id;
-                let (rx, resolved_waiters) = {
-                    let entries = guard.overlay.read_entries();
-                    let rx = entries.subscribe();
-                    (rx, Self::resolved_waiters(&local_id, &entries))
-                };
-                guard.resolve_peers_task = self.clone().new_resolve_task(resolved_waiters);
-
-                (local_id, rx)
-            }
-            None => {
-                tracing::warn!("peer schedule dropped, cannot create updater");
-                return Err(Cancelled());
-            }
-        };
-
-        loop {
-            match rx.recv().await {
-                Ok(ref event @ PrivateOverlayEntriesEvent::Removed(peer)) if peer != local_id => {
-                    let Some(strong) = self.upgrade() else {
-                        tracing::warn!("peer schedule dropped, stopping updater");
-                        break Err(Cancelled());
-                    };
-                    let mut guard = strong.write();
-                    let restart = guard.set_state(&peer, PeerState::Unknown);
-                    if restart {
-                        guard.resolve_peers_task = None;
-                        let resolved_waiters = {
-                            let entries = guard.overlay.read_entries();
-                            Self::resolved_waiters(&local_id, &entries)
-                        };
-                        guard.resolve_peers_task = self.clone().new_resolve_task(resolved_waiters);
-                    }
-                    drop(guard);
-                    tracing::info!(
-                        event = display(event.alt()),
-                        peer = display(peer.alt()),
-                        resolve_restarted = restart,
-                        "peer schedule update"
-                    );
-                }
-                Ok(
-                    ref event @ (PrivateOverlayEntriesEvent::Added(peer_id)
-                    | PrivateOverlayEntriesEvent::Removed(peer_id)),
-                ) => {
-                    tracing::debug!(
-                        event = display(event.alt()),
-                        peer = display(peer_id.alt()),
-                        "peer schedule update ignored"
-                    );
-                }
-                Err(broadcast::error::RecvError::Closed) => {
-                    tracing::error!(
-                        "peer info updates channel closed, cannot maintain node connectivity"
-                    );
-                    break Err(Cancelled());
-                }
-                Err(broadcast::error::RecvError::Lagged(amount)) => {
-                    tracing::error!(
-                        amount = amount,
-                        "Lagged peer info updates, node connectivity may suffer. \
-                         Consider increasing channel capacity."
-                    );
-                }
-            }
-        }
-    }
-
     pub(super) fn resolved_waiters(
+        entries: PrivateOverlayEntriesReadGuard<'_>,
         local_id: &PeerId,
-        entries: &PrivateOverlayEntriesReadGuard<'_>,
     ) -> FuturesUnordered<impl Future<Output = KnownPeerHandle> + Sized + Send + 'static> {
         let fut = FuturesUnordered::new();
         for entry in entries.choose_multiple(&mut rng(), entries.len()) {
@@ -398,9 +339,13 @@ impl WeakPeerSchedule {
                     tracing::warn!("peer schedule is dropped, cannot apply resolve update");
                     return Err(Cancelled());
                 };
-                _ = peer_schedule
-                    .write()
-                    .set_state(&known_peer_handle.peer_info().id, PeerState::Resolved);
+                let peer_id = &known_peer_handle.peer_info().id;
+                let mut guard = peer_schedule.write();
+                if guard.banned.contains(peer_id) {
+                    guard.overlay.write_entries().remove(peer_id); // undo
+                } else {
+                    guard.set_resolved(peer_id);
+                }
                 gauge.decrement(1);
             }
             Ok(())
@@ -415,5 +360,103 @@ impl std::fmt::Display for AltFmt<'_, PrivateOverlayEntriesEvent> {
             PrivateOverlayEntriesEvent::Added(_) => "Added",
             PrivateOverlayEntriesEvent::Removed(_) => "Removed",
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv4Addr;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use anyhow::Result;
+    use tokio::time::timeout;
+    use tycho_network::{Address, DhtService, Network, OverlayService, Router};
+
+    use super::*;
+    use crate::intercom::Responder;
+    use crate::test_utils::{default_test_config, make_peer_info};
+
+    #[tokio::test]
+    async fn remove_bans_restores_already_resolved_peer() -> Result<()> {
+        let local_keys = Arc::new(rand::random::<KeyPair>());
+        let remote_keys = Arc::new(rand::random::<KeyPair>());
+
+        let remote_peer = PeerId::from(remote_keys.public_key);
+
+        let (peer_schedule, _handles) = make_peer_schedule(local_keys, &[&*remote_keys])?;
+        assert_eq!(
+            (peer_schedule.read().data).peer_state(&PeerId::from(remote_keys.public_key)),
+            PeerState::Resolved
+        );
+
+        let mut updates = peer_schedule.read().updates();
+
+        peer_schedule.set_banned(&[remote_peer]);
+        peer_schedule.remove_bans(&[remote_peer]);
+
+        let mut seen = Vec::new();
+        loop {
+            match timeout(Duration::from_millis(200), updates.recv()).await {
+                Ok(Ok(update)) => seen.push(update),
+                Ok(Err(err)) => panic!("unexpected update channel state: {err:?}"),
+                Err(_timeout) => break,
+            }
+        }
+        assert_eq!(seen, vec![
+            (remote_peer, PeerState::Unknown),
+            (remote_peer, PeerState::Resolved),
+        ]);
+        assert_eq!(
+            peer_schedule.read().data.peer_state(&remote_peer),
+            PeerState::Resolved
+        );
+
+        Ok(())
+    }
+
+    fn make_peer_schedule(
+        local_keys: Arc<KeyPair>,
+        remote_keys: &[&KeyPair],
+    ) -> Result<(PeerSchedule, (Network, Vec<KnownPeerHandle>))> {
+        let local_id = PeerId::from(local_keys.public_key);
+
+        let (dht_tasks, dht_service) = DhtService::builder(local_id).build();
+        let (overlay_tasks, overlay_service) = OverlayService::builder(local_id)
+            .with_dht_service(dht_service.clone())
+            .build();
+        let router = Router::builder()
+            .route(dht_service.clone())
+            .route(overlay_service.clone())
+            .build();
+        let network = Network::builder()
+            .with_random_private_key()
+            .build((Ipv4Addr::LOCALHOST, 0), router)?;
+
+        dht_tasks.spawn_without_bootstrap(&network);
+        overlay_tasks.spawn(&network);
+
+        let peer_resolver = dht_service.make_peer_resolver().build(&network);
+        let private_overlay = PrivateOverlay::builder(rand::random())
+            .with_peer_resolver(peer_resolver)
+            .build(Responder::default());
+        overlay_service.add_private_overlay(&private_overlay);
+
+        let task_tracker = TaskTracker::default();
+        let peer_schedule = PeerSchedule::new(local_keys, private_overlay, &task_tracker);
+
+        let mut handles = Vec::new();
+        for (i, remote_key) in remote_keys.iter().enumerate() {
+            let address_list = vec![Address::new_ip((Ipv4Addr::LOCALHOST, 10000 + i as u16))];
+            let remote_info = Arc::new(make_peer_info(remote_key, address_list));
+            handles.push(network.known_peers().insert(remote_info, false)?);
+        }
+
+        peer_schedule.init(
+            &default_test_config(),
+            &InitPeers::new((remote_keys.iter().map(|rk| PeerId::from(rk.public_key))).collect()),
+        );
+
+        Ok((peer_schedule, (network, handles)))
     }
 }
