@@ -121,7 +121,6 @@ pub struct StateNodeAdapterStdImpl {
     listener: Arc<dyn StateNodeEventListener>,
     blocks: FastDashMap<ShardIdent, BTreeMap<u32, Arc<BlockStuffForSync>>>,
     shard_blocks: Arc<ShardBlocksMap>,
-    last_stored_state_seqno: Arc<LatestSeqnoMap>,
     storage: CoreStorage,
     broadcaster: broadcast::Sender<BlockId>,
 
@@ -131,8 +130,7 @@ pub struct StateNodeAdapterStdImpl {
     zerostate_id: ZerostateId,
 }
 
-type LatestSeqnoMap = Mutex<FastHashMap<ShardIdent, u32>>;
-type ShardBlocksMap = FastDashMap<ShardIdent, BTreeMap<(u32, HashBytes), ShardBlockData>>;
+type ShardBlocksMap = FastDashMap<ShardIdent, BTreeMap<BlockId, ShardBlockData>>;
 
 impl StateNodeAdapterStdImpl {
     pub fn new(
@@ -149,7 +147,6 @@ impl StateNodeAdapterStdImpl {
             storage,
             blocks: Default::default(),
             shard_blocks: Default::default(),
-            last_stored_state_seqno: Default::default(),
             broadcaster,
             sync_context_tx,
             delayed_state_notifier: DelayedStateNotifier::default(),
@@ -232,7 +229,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
                 self.shard_blocks
                     .get(&block_id.shard)
                     .and_then(|shard_blocks| {
-                        let block = shard_blocks.get(&(block_id.seqno, block_id.root_hash))?;
+                        let block = shard_blocks.get(block_id)?;
                         Some(BlockInfoForApply {
                             prev_block_id: block.prev_id,
                             partial_root_cell: block.state_update.new.clone(),
@@ -266,31 +263,19 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
             }
         }
 
-        fn update_last_stored_seqno(map: Arc<LatestSeqnoMap>, block_id: &BlockId) {
-            let mut latest = map.lock();
-            let entry = latest.entry(block_id.shard).or_default();
-            *entry = std::cmp::max(*entry, block_id.seqno);
-        }
-
         struct StoreOperation {
             _metrics: HistogramOnDrop,
             inner: tycho_core::storage::InitiatedStoreState,
-            last_stored_state_seqno: Arc<LatestSeqnoMap>,
         }
 
         #[async_trait]
         impl InitiatedStoreState for StoreOperation {
             async fn wait_store_only(self: Box<Self>) -> Result<()> {
-                let handle = self.inner.handle().clone();
-                self.inner.wait_store_only().await?;
-                update_last_stored_seqno(self.last_stored_state_seqno, handle.id());
-                Ok(())
+                self.inner.wait_store_only().await
             }
 
             async fn wait_reload(self: Box<Self>) -> Result<ShardStateStuff> {
-                let res = self.inner.wait_reload().await?;
-                update_last_stored_seqno(self.last_stored_state_seqno, res.block_id());
-                Ok(res)
+                self.inner.wait_reload().await
             }
         }
 
@@ -316,7 +301,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
             let shard_blocks = self.shard_blocks.clone();
             move |block_id: &BlockId| {
                 shard_blocks.get(&block_id.shard).and_then(|shard_blocks| {
-                    let block = shard_blocks.get(&(block_id.seqno, block_id.root_hash))?;
+                    let block = shard_blocks.get(block_id)?;
                     Some(BlockInfoForApply {
                         prev_block_id: block.prev_id,
                         partial_root_cell: block.state_update.new.clone(),
@@ -337,7 +322,6 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         Ok(Box::new(StoreOperation {
             _metrics: metrics,
             inner,
-            last_stored_state_seqno: self.last_stored_state_seqno.clone(),
         }))
     }
 
@@ -401,15 +385,15 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
             let state_update = block.block().load_state_update()?;
             let (prev_id, prev_id_alt) = block.construct_prev_id()?;
 
-            self.shard_blocks.entry(block_id.shard).or_default().insert(
-                (block_id.seqno, block_id.root_hash),
-                ShardBlockData {
+            self.shard_blocks
+                .entry(block_id.shard)
+                .or_default()
+                .insert(block_id, ShardBlockData {
                     prev_id,
                     ref_by_mc_seqno,
                     state_update,
                     _prev_id_alt: prev_id_alt,
-                },
-            );
+                });
         }
 
         Ok(())
@@ -498,23 +482,35 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         // Don't wait for drop inside a tokio context.
         Reclaimer::instance().drop(to_drop);
 
-        let mut to_drop = Vec::new();
-        let last_stored = self.last_stored_state_seqno.lock();
-        for (shard, _) in &to_split {
-            let Some(&safe_seqno) = last_stored.get(shard) else {
-                continue;
-            };
-            let safe_seqno = (safe_seqno, HashBytes::ZERO);
+        if shard.is_masterchain() {
+            let handle_storage = self.storage.block_handle_storage();
 
-            if let Some(mut shard_blocks) = self.shard_blocks.get_mut(shard) {
-                let retained = shard_blocks.split_off(&safe_seqno);
-                to_drop.push(std::mem::replace(&mut *shard_blocks, retained));
+            let mut to_drop = Vec::new();
+            for entry in state.shards()?.latest_blocks() {
+                let top_block_id = entry?;
+                let Some(mut sb) = self.shard_blocks.get_mut(&top_block_id.shard) else {
+                    continue;
+                };
+
+                // Find the oldest block that is not yet persisted to storage.
+                // Keep it and everything after to maintain the merkle update chain.
+                let retain_from = sb
+                    .range(..top_block_id)
+                    .find(|(block_id, _)| {
+                        !matches!(
+                            handle_storage.load_handle(block_id),
+                            Some(handle) if handle.has_data()
+                        )
+                    })
+                    .map_or(top_block_id, |(block_id, _)| *block_id);
+
+                let retained = sb.split_off(&retain_from);
+                to_drop.push(std::mem::replace(&mut *sb, retained));
             }
-        }
-        drop(last_stored);
 
-        // Don't wait for drop inside a tokio context.
-        Reclaimer::instance().drop(to_drop);
+            // Don't wait for drop inside a tokio context.
+            Reclaimer::instance().drop(to_drop);
+        }
 
         Ok(())
     }
