@@ -47,8 +47,6 @@ pub struct ShardStateStorage {
     counters: Arc<StoreStateCounters>,
 
     shard_split_depth: u8,
-    // TODO: Use store state threshold
-    #[expect(unused)]
     new_cells_threshold: usize,
     store_shard_state_step: NonZeroU32,
 
@@ -194,15 +192,27 @@ impl ShardStateStorage {
             self.store_shard_state_step
         };
 
-        let store_type = if block_id.seqno.is_multiple_of(direct_store_step.get())
-            || hint.is_top_block == Some(true)
-        {
+        let mut cache = self.shard_states_cache.entry(block_id.shard).or_default();
+
+        if cache.accumulator.blocks.insert(block_id.seqno) {
+            cache.accumulator.new_cells += hint.new_cell_count();
+        }
+
+        let force_store = block_id.seqno.is_multiple_of(direct_store_step.get())
+            || cache.accumulator.new_cells >= self.new_cells_threshold
+            || hint.is_top_block == Some(true);
+
+        let store_type = if force_store {
+            metrics::counter!("tycho_storage_shard_state_stored").increment(1);
+
+            // New cells accumulator reset
+            cache.accumulator.reset();
+
             StoreType::Direct
         } else {
+            metrics::counter!("tycho_storage_shard_state_skipped").increment(1);
             StoreType::Virtual
         };
-
-        let mut cache = self.shard_states_cache.entry(block_id.shard).or_default();
 
         let spawn_cleanup = |task: PendingStoreTask| {
             let this = Arc::downgrade(self);
@@ -1240,7 +1250,23 @@ fn track_max_epoch(epoch: u32) {
 #[derive(Default)]
 struct ShardStatesCache {
     pivot_block_seqno: u32,
+    accumulator: ShardCellsAccumulator,
     states: FastHashMap<HashBytes, ShardStatesCacheItem>,
+}
+
+#[derive(Default)]
+struct ShardCellsAccumulator {
+    new_cells: usize,
+    blocks: FastHashSet<u32>,
+}
+
+impl ShardCellsAccumulator {
+    fn reset(&mut self) {
+        self.new_cells = 0;
+
+        // Reuse allocation
+        self.blocks.clear();
+    }
 }
 
 impl ShardStatesCache {
