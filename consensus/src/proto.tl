@@ -13,6 +13,7 @@ consensus.pointData
     = consensus.PointData;
 
 consensus.pointBody
+    point_bytes:int
     author:transport.PeerId
     round:int
     payload:(vector bytes)

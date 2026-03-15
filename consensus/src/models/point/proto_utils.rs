@@ -38,6 +38,7 @@ pub struct PointBodyWrite<'a, T>
 where
     T: AsRef<[u8]>,
 {
+    pub point_bytes: u32,
     pub author: &'a PeerId,
     pub round: Round,
     pub payload: &'a [T],
@@ -47,6 +48,7 @@ where
 #[derive(TlRead)]
 #[tl(boxed, id = "consensus.pointBody", scheme = "proto.tl")]
 pub struct PointBodyRead<'tl> {
+    _point_bytes: u32,
     pub author: PeerId,
     pub round: Round,
     pub payload: Vec<&'tl [u8]>,
@@ -54,10 +56,21 @@ pub struct PointBodyRead<'tl> {
 }
 
 impl PointRawRead<'_> {
+    pub fn point_bytes(&self) -> TlResult<u32> {
+        #[derive(TlRead)]
+        #[tl(boxed, id = "consensus.pointBody", scheme = "proto.tl")]
+        struct PointBodyPrefix {
+            point_bytes: u32,
+        }
+        let body = <PointBodyPrefix>::read_from(&mut self.body.as_ref())?;
+        Ok(body.point_bytes)
+    }
+
     pub fn author(&self) -> TlResult<&PeerId> {
         #[derive(TlRead)]
         #[tl(boxed, id = "consensus.pointBody", scheme = "proto.tl")]
         struct PointBodyPrefix<'tl> {
+            _point_bytes: u32,
             author: &'tl PeerId,
         }
         let body = <PointBodyPrefix<'_>>::read_from(&mut self.body.as_ref())?;
@@ -68,6 +81,7 @@ impl PointRawRead<'_> {
         #[derive(TlRead)]
         #[tl(boxed, id = "consensus.pointBody", scheme = "proto.tl")]
         struct PointBodyPrefix<'tl> {
+            _point_bytes: u32,
             _author: &'tl PeerId,
             _round: Round,
             payload: Vec<&'tl [u8]>,
