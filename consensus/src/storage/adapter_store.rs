@@ -33,19 +33,13 @@ impl MempoolAdapterStore {
         adata: &AnchorData,
         bump: &'b Bump,
     ) -> Result<Vec<&'b [u8]>> {
-        if adata.history.is_empty() {
-            // history is checked at the end of DAG commit, leave traces in case its broken
-            tracing::warn!(
-                "anchor {:?} has empty history, it's ok only for anchor at DAG bottom round \
-                 immediately after an unrecoverable gap",
-                adata.anchor.id().alt()
-            );
-            Ok(Vec::new())
-        } else {
-            self.load_payload(&adata.history, bump)
-                .with_context(|| Self::history_context(adata))
-                .context("DB expand anchor history")
-        }
+        anyhow::ensure!(
+            !adata.history.is_empty(),
+            "Anchor history must include the anchor itself"
+        );
+        self.load_payload(&adata.history, bump)
+            .with_context(|| Self::history_context(adata))
+            .context("DB expand anchor history")
     }
 
     fn history_context(anchor_data: &AnchorData) -> String {
@@ -78,11 +72,11 @@ impl MempoolAdapterStore {
 
         let mut opt = ReadOptions::default();
 
-        let first = (history.first()).context("anchor history must not be empty")?;
+        let first = (history.first()).context("history includes at least the anchor itself")?;
         PointKey::fill_prefix(first.round(), &mut key_buf);
         opt.set_iterate_lower_bound(key_buf);
 
-        let last = history.last().context("anchor history must not be empty")?;
+        let last = (history.last()).context("history includes at least the anchor itself")?;
         PointKey::fill_prefix(last.round().next(), &mut key_buf);
         opt.set_iterate_upper_bound(key_buf);
 
@@ -228,7 +222,9 @@ impl MempoolAdapterStore {
             let has_gap = last_visited.is_some() && last_visited != adata.prev_anchor;
             if has_gap {
                 anyhow::ensure!(adata.prev_anchor.is_some(), "don't expect genesis");
-                let adata_bottom = adata.history.first().unwrap_or(&adata.anchor).round();
+                let adata_bottom = (adata.history.first())
+                    .context("anchor history must include the anchor itself")?
+                    .round();
                 let full_history_bottom = if adata_bottom
                     <= conf.genesis_round + conf.consensus.commit_history_rounds.get()
                 {
