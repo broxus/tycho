@@ -16,6 +16,7 @@ use crate::models::point::{Digest, PointData, Signature};
 use crate::models::{PointId, PointInfo, Round};
 
 #[derive(Debug, thiserror::Error)]
+#[allow(clippy::enum_variant_names, reason = "intuitive")]
 pub enum PointIntegrityError {
     #[error("hash mismatch")]
     BadHash,
@@ -24,6 +25,8 @@ pub enum PointIntegrityError {
     /// do not use the author from point's body
     #[error("signature does not match author")]
     BadSig,
+    #[error("declared point length is wrong")]
+    BadLen,
 }
 
 #[derive(Debug, Copy, Clone, thiserror::Error)]
@@ -105,6 +108,7 @@ impl Point {
             digest: &Digest::ZERO,
             signature: &Signature::ZERO,
             body: PointBodyWrite {
+                point_bytes: 0,
                 author: &author,
                 round,
                 payload,
@@ -114,6 +118,9 @@ impl Point {
         .write_to(&mut serialized);
 
         let body_offset = 4 + Digest::MAX_TL_BYTES + Signature::MAX_TL_BYTES;
+
+        let point_bytes = serialized.len() as u32;
+        serialized[body_offset + 4..body_offset + 8].copy_from_slice(&point_bytes.to_le_bytes());
 
         let id = PointId {
             digest: Digest::new(&serialized[body_offset..]),
@@ -189,6 +196,10 @@ impl Point {
         if *raw.digest != Digest::new(raw.body.as_ref()) {
             return Ok(Err(PointIntegrityError::BadHash));
         };
+
+        if raw.point_bytes()? as usize != serialized.len() {
+            return Ok(Err(PointIntegrityError::BadLen));
+        }
 
         let point = Self::from_bytes(serialized)?;
 
@@ -407,17 +418,20 @@ mod tests {
 
         let mut data = Vec::<u8>::with_capacity(conf.point_max_bytes);
         let timer = Instant::now();
-        PointWrite {
+
+        let mut point_write = PointWrite {
             digest: info.digest(),
             signature: info.signature(),
             body: PointBodyWrite {
+                point_bytes: 0,
                 author: info.author(),
                 round: info.round(),
                 payload: &payload,
                 data: info.data(),
             },
-        }
-        .write_to(&mut data);
+        };
+        point_write.body.point_bytes = point_write.max_size_hint() as u32;
+        point_write.write_to(&mut data);
         let tl_elapsed = timer.elapsed();
 
         println!(
@@ -508,17 +522,19 @@ mod tests {
         const POINTS_LEN: u32 = 100;
         for _ in 0..POINTS_LEN {
             data.clear();
-            PointWrite {
+            let mut point_write = PointWrite {
                 digest: &Digest::ZERO,
                 signature: &Signature::ZERO,
                 body: PointBodyWrite {
+                    point_bytes: 0,
                     author: info.author(),
                     round: info.round(),
                     payload: &payload,
                     data: info.data(),
                 },
-            }
-            .write_to(&mut data);
+            };
+            point_write.body.point_bytes = point_write.max_size_hint() as u32;
+            point_write.write_to(&mut data);
         }
 
         let elapsed = timer.elapsed();

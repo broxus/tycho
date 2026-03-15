@@ -1,5 +1,5 @@
 use bytes::{Buf, Bytes};
-use tl_proto::{RawBytes, TlError, TlRead, TlWrite};
+use tl_proto::{TlError, TlRead, TlWrite};
 use tycho_network::PrefixedRequest;
 
 use crate::intercom::Dispatcher;
@@ -26,7 +26,7 @@ impl QueryRequest {
     pub fn broadcast(dispatcher: &Dispatcher, point: &Point) -> PrefixedRequest {
         dispatcher.request_from_tl(QueryRequestWrite {
             tag: QueryRequestTag::Broadcast,
-            body: &RawBytes::<tl_proto::Boxed>::new(point.serialized()),
+            body: &point.serialized(),
         })
     }
 
@@ -54,9 +54,8 @@ struct QueryRequestWrite<'a, T> {
 
 #[derive(TlRead, Debug)]
 #[tl(boxed, id = "intercom.queryRequest", scheme = "proto.tl")]
-struct QueryRequestRead<'tl> {
+struct QueryRequestTagRead {
     tag: QueryRequestTag,
-    body: RawBytes<'tl, tl_proto::Boxed>,
 }
 
 pub struct QueryRequestRaw {
@@ -66,15 +65,30 @@ pub struct QueryRequestRaw {
 
 impl QueryRequestRaw {
     pub fn new(mut request_body: Bytes) -> Result<Self, TlError> {
-        let QueryRequestRead { tag, body } = tl_proto::deserialize::<_>(&request_body)?;
-        let data_offset = request_body.len() - body.as_ref().len();
-        request_body.advance(data_offset);
+        let mut remaining = &request_body[..];
+
+        let QueryRequestTagRead { tag } = <_>::read_from(&mut remaining)?;
+
+        request_body.advance(request_body.len() - remaining.len());
+
         Ok(Self { request_body, tag })
     }
 
-    pub fn parse(self) -> Result<QueryRequestMedium, TlError> {
+    pub fn parse(mut self) -> Result<QueryRequestMedium, TlError> {
         Ok(match self.tag {
-            QueryRequestTag::Broadcast => QueryRequestMedium::Broadcast(self.request_body),
+            QueryRequestTag::Broadcast => {
+                let mut remaining = &self.request_body[..];
+                let data = <&[u8]>::read_from(&mut remaining)?;
+
+                let data_len = data.len();
+                let data_end = self.request_body.len() - remaining.len();
+                let data_start = data_end - data.len();
+
+                self.request_body.advance(data_start);
+                self.request_body.truncate(data_len);
+
+                QueryRequestMedium::Broadcast(self.request_body)
+            }
             QueryRequestTag::Signature => {
                 QueryRequestMedium::Signature(tl_proto::deserialize(&self.request_body)?)
             }

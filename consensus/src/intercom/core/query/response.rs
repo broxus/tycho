@@ -169,16 +169,21 @@ impl QueryResponse {
     }
 
     pub fn parse_download(mut response: Response) -> Result<DownloadResponse<Bytes>, TlError> {
-        let interim = DownloadResponse::<&[u8]>::read_from(&mut &response.body[..])?;
-        Ok(match interim {
+        let mut remaining = &response.body[..];
+        let parsed = match DownloadResponse::<&[u8]>::read_from(&mut remaining)? {
             DownloadResponse::Defined(data) => {
-                let data_offset = response.body.len() - data.len();
-                response.body.advance(data_offset);
+                let data_len = data.len();
+                let data_end = response.body.len() - remaining.len();
+                let data_start = data_end - data_len;
+
+                response.body.advance(data_start);
+                response.body.truncate(data_len);
                 DownloadResponse::Defined(response.body)
             }
             DownloadResponse::DefinedNone => DownloadResponse::DefinedNone,
             DownloadResponse::TryLater => DownloadResponse::TryLater,
-        })
+        };
+        Ok(parsed)
     }
 }
 
@@ -194,8 +199,8 @@ impl Display for AltFmt<'_, SignatureResponse> {
     }
 }
 
-impl<T: AsRef<[u8]>> AltFormat for DownloadResponse<T> {}
-impl<T: AsRef<[u8]>> Display for AltFmt<'_, DownloadResponse<T>> {
+impl<T> AltFormat for DownloadResponse<T> {}
+impl<T> Display for AltFmt<'_, DownloadResponse<T>> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match AltFormat::unpack(self) {
             DownloadResponse::Defined(_) => f.write_str("Some"),
