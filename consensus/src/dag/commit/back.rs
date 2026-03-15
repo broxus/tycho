@@ -377,18 +377,17 @@ impl DagBack {
             .max(anchor.round() - conf.consensus.commit_history_rounds.get());
 
         let mut r = array::from_fn::<_, 3, _>(|_| FastHashMap::new()); // [r+0, r-1, r-2]
-        extend(&mut r[0], anchor.includes()); // points @ r+0
-        extend(&mut r[1], anchor.witness()); // points @ r-1
+        r[0].insert(*anchor.digest(), *anchor.author());
 
         let mut rng = rand_pcg::Pcg64::from_seed(*anchor.digest().inner());
         let mut uncommitted = VecDeque::new();
 
         let rev_iter = self
             .rounds
-            .range(RangeInclusive::new(history_limit, anchor.round().prev()))
+            .range(RangeInclusive::new(history_limit, anchor.round()))
             .rev();
 
-        let mut next_round = anchor.round();
+        let mut next_round = anchor.round().next();
         for (_, point_round /* r+0 */) in rev_iter {
             assert_eq!(
                 point_round.round().next(),
@@ -421,7 +420,6 @@ impl DagBack {
         // we should commit first anchors at COMMIT_ROUNDS from bottom (inclusive), discarding them
         // (because some history may be lost) in adapter when bottom is not genesis
         // (in case dag bottom is moved after a large gap or severe collator lag behind consensus);
-        // note inclusive bound (`bottom`, not `after`) because anchor payload not committed
         if history_limit >= full_history_bottom {
             assert_eq!(
                 next_round,
