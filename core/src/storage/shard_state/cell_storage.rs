@@ -1574,9 +1574,6 @@ impl RawCellsCache {
                 .estimated_items_capacity(estimated_cell_cache_capacity as usize)
                 .weight_capacity(size_in_bytes)
                 .hot_allocation(0.8)
-                // Disable ghost entries: cache is only populated via on_insert_cell (writes),
-                // so admission policy is unnecessary. Ghosts would waste LinkedSlab slots.
-                .ghost_allocation(0.0)
                 .build()
                 .unwrap(),
             CellSizeEstimator,
@@ -1593,10 +1590,14 @@ impl RawCellsCache {
         }
     }
 
-    // NOTE: Uses `inner.get()` instead of `inner.get_value_or_guard()` intentionally.
-    // `get_value_or_guard` creates Placeholder + LinkedSlab slot on every cache miss,
-    // and these internal structures never shrink — causing unbounded memory growth
-    // when called on hot paths with many unique transient keys.
+    // NOTE: Does not populate cache on miss (read-only via `inner.get()`).
+    //
+    // Previously used `get_value_or_guard` which inserts into cache on miss.
+    // This caused two problems:
+    // 1. Memory leak: `get_value_or_guard` allocates a Placeholder in LinkedSlab
+    //    BEFORE eviction runs (unlike `insert()` which evicts first).
+    // 2. Performance: `get_value_or_guard` holds the shard lock while the caller
+    //    reads from RocksDB, blocking all other operations on the same shard.
     fn get_raw(
         &self,
         db: &CellsDb,

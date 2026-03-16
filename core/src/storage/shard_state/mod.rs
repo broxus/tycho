@@ -195,8 +195,14 @@ impl ShardStateStorage {
         let mut cache = self.shard_states_cache.entry(block_id.shard).or_default();
 
         if cache.accumulator.blocks.insert(block_id.seqno) {
-            cache.accumulator.new_cells += hint.new_cell_count();
+            cache.accumulator.new_cells = cache
+                .accumulator
+                .new_cells
+                .saturating_add(hint.new_cell_count());
         }
+
+        metrics::histogram!("tycho_storage_shard_state_accumulated_new_cells")
+            .record(cache.accumulator.new_cells as f64);
 
         let force_store = block_id.seqno.is_multiple_of(direct_store_step.get())
             || cache.accumulator.new_cells >= self.new_cells_threshold
