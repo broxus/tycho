@@ -1098,6 +1098,11 @@ def storage() -> RowPanel:
             "tycho_storage_shard_state_skipped + tycho_storage_shard_state_stored",
             "Shard states skip ratio",
         ),
+        create_heatmap_quantile_panel(
+            "tycho_storage_shard_state_accumulated_new_cells",
+            "Accumulated new cells between direct stores",
+            quantile="0.999",
+        ),
         create_heatmap_panel("tycho_gc_states_time", "Time to garbage collect state"),
         timeseries_panel(
             targets=[
