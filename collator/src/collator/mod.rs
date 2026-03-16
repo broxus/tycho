@@ -2105,7 +2105,7 @@ impl CollatorStdImpl {
 
                 // calculate mc block max interval threshold after the previous mc block
                 let mc_block_max_interval_threshold = working_state.mc_data.gen_chain_time
-                    + working_state.collation_config.mc_block_max_interval_ms as u64;
+                    + 3 * working_state.collation_config.mc_block_max_interval_ms as u64;
 
                 // check if should import anchor after fixed wu used by blocks collation
                 let wu_used_from_last_anchor = working_state.wu_used_from_last_anchor;
