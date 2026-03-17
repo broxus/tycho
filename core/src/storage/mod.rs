@@ -86,6 +86,7 @@ impl CoreStorage {
             cells_db.clone(),
             block_handle_storage.clone(),
             block_storage.clone(),
+            block_connection_storage.clone(),
             ctx.temp_files().clone(),
             &config,
         )?;
