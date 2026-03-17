@@ -267,29 +267,13 @@ impl CollatorStdImpl {
                                     Ok(collation_result)
                                 }
                                 Err(e) => {
-                                    drop(reader_guard);
-                                    drop(anchor_cache_tx);
+                                    // rollback reader_state and anchors_cache on drop
                                     Err(e)
                                 }
                             }
                         }
-                        // if collation failed, rollback reader and anchors cache transactions
+                        // rollback reader_state and anchors_cache on drop
                         Err(e) => {
-                            {
-                                let _h = HistogramGuard::begin_with_labels(
-                                    "tycho_do_collate_reader_state_rollback_time",
-                                    &labels,
-                                );
-                                drop(reader_guard);
-                            }
-
-                            {
-                                let _h = HistogramGuard::begin_with_labels(
-                                    "tycho_do_collate_anchors_cache_rollback_time",
-                                    &labels,
-                                );
-                                drop(anchor_cache_tx);
-                            }
                             Err(e)
                         }
                     }
