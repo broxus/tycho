@@ -125,6 +125,10 @@ struct ZerostateConfig {
     #[serde(default, with = "Boc", skip_serializing_if = "Option::is_none")]
     elector_code: Option<Cell>,
 
+    slasher_balance: Tokens,
+    #[serde(default, with = "Boc", skip_serializing_if = "Option::is_none")]
+    slasher_code: Option<Cell>,
+
     #[serde(with = "serde_account_states")]
     accounts: FastHashMap<HashBytes, OptionalAccount>,
 
@@ -209,6 +213,9 @@ impl ZerostateConfig {
             fundamental_addresses.set(elector_address, ())?;
             if let Some(minter_address) = minter_address {
                 fundamental_addresses.set(minter_address, ())?;
+            }
+            if let Some(slasher_params) = self.params.get::<ConfigParam666>()? {
+                fundamental_addresses.set(slasher_params.address, ())?;
             }
 
             self.params.set::<ConfigParam31>(&fundamental_addresses)?;
@@ -309,6 +316,25 @@ impl ZerostateConfig {
                 "full elector account state cannot be specified manually, \
                 use \"elector_code\" param instead"
             );
+        }
+
+        // Slasher
+        if let Some(slasher_params) = self.params.get::<ConfigParam666>()? {
+            let prev = self.accounts.insert(
+                slasher_params.address,
+                build_slasher_account(
+                    &slasher_params.address,
+                    self.slasher_balance,
+                    self.slasher_code.clone(),
+                )?
+                .into(),
+            );
+            if prev.is_some() {
+                anyhow::bail!(
+                    "full slasher account state cannot be specified manually, \
+                    use \"slasher_code\" param instead"
+                );
+            }
         }
 
         // Minter
@@ -500,10 +526,12 @@ impl Default for ZerostateConfig {
             global_id: 0,
             config_public_key: *zero_public_key(),
             minter_public_key: None,
-            config_balance: Tokens::new(500_000_000_000), // 500
+            config_balance: default_special_account_balance(),
             config_code: None,
-            elector_balance: Tokens::new(500_000_000_000), // 500
+            elector_balance: default_special_account_balance(),
             elector_code: None,
+            slasher_balance: default_special_account_balance(),
+            slasher_code: None,
             accounts: Default::default(),
             validators: Default::default(),
             params: make_default_params().unwrap(),
@@ -944,6 +972,38 @@ fn build_elector_account(
     Ok(account)
 }
 
+fn build_slasher_account(
+    address: &HashBytes,
+    balance: Tokens,
+    custom_code: Option<Cell>,
+) -> Result<Account> {
+    const SLASHER_CODE: &[u8] = include_bytes!("../../../res/slasher_code.boc");
+
+    let code = custom_code.unwrap_or_else(|| Boc::decode(SLASHER_CODE).unwrap());
+
+    let mut data = CellBuilder::new();
+    data.store_u64(0)?;
+    let data = data.build()?;
+
+    let mut account = Account {
+        address: StdAddr::new(-1, *address).into(),
+        storage_stat: Default::default(),
+        last_trans_lt: 0,
+        balance: balance.into(),
+        state: AccountState::Active(StateInit {
+            split_depth: None,
+            special: None,
+            code: Some(code),
+            data: Some(data),
+            libraries: Dict::new(),
+        }),
+    };
+
+    account.storage_stat.used = compute_storage_used(&account)?;
+
+    Ok(account)
+}
+
 fn build_minter_account(pubkey: &ed25519::PublicKey, address: &HashBytes) -> Result<Account> {
     const MINTER_STATE: &[u8] = include_bytes!("../../../res/minter_state.boc");
 
@@ -974,6 +1034,10 @@ fn build_minter_account(pubkey: &ed25519::PublicKey, address: &HashBytes) -> Res
 fn zero_public_key() -> &'static ed25519::PublicKey {
     static KEY: OnceLock<ed25519::PublicKey> = OnceLock::new();
     KEY.get_or_init(|| ed25519::PublicKey::from_bytes([0; 32]).unwrap())
+}
+
+fn default_special_account_balance() -> Tokens {
+    Tokens::new(500_000_000_000) // 500
 }
 
 mod serde_account_states {
