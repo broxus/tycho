@@ -38,9 +38,11 @@ pub mod collector {
 
 mod bc;
 mod storage;
+mod tracing_targets;
 mod util;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialConfig)]
+#[serde(default)]
 pub struct SlasherConfig {
     /// TTL of messages to the slasher contract.
     ///
@@ -152,11 +154,16 @@ impl Slasher {
             vset_switch_round,
             catchain_seqno,
         };
-        tracing::trace!(?slasher_params, ?current_session_id);
+        tracing::trace!(
+            target: tracing_targets::SLASHER,
+            ?slasher_params,
+            ?current_session_id
+        );
 
         // TODO: Add metrics.
         if current_session_id != this.known_session_id.load() {
             tracing::info!(
+                target: tracing_targets::SLASHER,
                 old_session_id = ?this.known_session_id.load(),
                 ?current_session_id,
                 "slasher observed validation session change",
@@ -168,12 +175,18 @@ impl Slasher {
         let subscription = match this.subscription.load_full() {
             Some(s) if s.address() == &slasher_address => s,
             _ => {
-                tracing::info!(%slasher_address, "slasher address changed");
+                tracing::info!(
+                    target: tracing_targets::SLASHER,
+                    %slasher_address,
+                    "slasher address changed"
+                );
                 let s = Arc::new(ContractSubscription::new(&slasher_address));
                 this.subscription.store(Some(s.clone()));
                 s
             }
         };
+
+        subscription.cleanup_expired_messages(cx.block.load_info()?.gen_utime);
 
         let extra = cx.block.load_extra()?.account_blocks.load()?;
         if let Some((_, account_block)) = extra.get(slasher_address.address)? {
@@ -183,16 +196,36 @@ impl Slasher {
                 let tx = tx.load()?;
 
                 tracing::debug!(
+                    target: tracing_targets::SLASHER,
                     %tx_hash,
                     msg_hash = ?tx.in_msg.as_ref().map(|msg| msg.repr_hash()),
                     "found slasher transaction",
                 );
 
-                subscription.handle_account_transaction(tx_hash, &tx)?;
+                let matched_own_message = subscription.handle_account_transaction(tx_hash, &tx)?;
 
                 match self.shared.contract.decode_event(&tx) {
                     Ok(Some(event)) => match event {
                         bc::SlasherContractEvent::SubmitBlocksBatch(submitted) => {
+                            let batch = &submitted.blocks_batch;
+                            tracing::info!(
+                                target: tracing_targets::SLASHER,
+                                %tx_hash,
+                                session_id = ?submitted.session_id,
+                                validator_idx = submitted.validator_idx,
+                                batch_start_seqno = batch.start_seqno(),
+                                batch_seqno_after = batch.seqno_after(),
+                                batch_slots = batch.committed_blocks.len(),
+                                committed_blocks = batch.committed_block_count(),
+                                validators = batch.validator_count(),
+                                "{}",
+                                if matched_own_message {
+                                    "own blocks batch committed by slasher"
+                                } else {
+                                    "received blocks batch from validator"
+                                }
+                            );
+
                             // TODO: Move into blocking.
                             if let Some(report) = this.storage.store_blocks_batch(
                                 submitted.session_id,
@@ -205,7 +238,11 @@ impl Slasher {
                         }
                     },
                     Ok(None) => {}
-                    Err(e) => tracing::warn!(%tx_hash, "failed to parse slasher event: {e:?}"),
+                    Err(e) => tracing::warn!(
+                        target: tracing_targets::SLASHER,
+                        %tx_hash,
+                        "failed to parse slasher event: {e:?}"
+                    ),
                 }
             }
         }
@@ -217,9 +254,17 @@ impl Slasher {
             .pop_session_to_init(mc_seqno)
         {
             let session_id = session_info.session_id;
-            tracing::info!(?session_id, "found session to init");
+            tracing::info!(
+                target: tracing_targets::SLASHER,
+                ?session_id,
+                "found session to init"
+            );
             if !session_info.can_participate(&this.node_keys.public_key) {
-                tracing::info!(?session_id, "skipping session");
+                tracing::info!(
+                    target: tracing_targets::SLASHER,
+                    ?session_id,
+                    "skipping session"
+                );
                 continue;
             }
 
@@ -229,7 +274,11 @@ impl Slasher {
                 slasher_params.blocks_batch_size,
                 tx,
             ) {
-                tracing::warn!(?session_id, "session removed before init");
+                tracing::warn!(
+                    target: tracing_targets::SLASHER,
+                    ?session_id,
+                    "session removed before init"
+                );
                 continue;
             }
 
@@ -299,8 +348,8 @@ impl SlasherSharedState {
         info: ValidatorSessionInfo,
         mut rx: collector::BlocksBatchRx,
     ) {
-        tracing::info!("started");
-        scopeguard::defer!(tracing::info!("finished"));
+        tracing::info!(target: tracing_targets::SLASHER, "started");
+        scopeguard::defer!(tracing::info!(target: tracing_targets::SLASHER, "finished"));
 
         let mut send_task = None;
 
@@ -309,7 +358,10 @@ impl SlasherSharedState {
                 && let Some(timeout) = self.config.prev_delivery_timeout
                 && tokio::time::timeout(timeout, send_task).await.is_err()
             {
-                tracing::warn!("timeout on waiting for the previous batch to be delivered");
+                tracing::warn!(
+                    target: tracing_targets::SLASHER,
+                    "timeout on waiting for the previous batch to be delivered"
+                );
             }
 
             send_task = Some(JoinTask::new(self.clone().deliver_batch_message(
@@ -328,7 +380,7 @@ impl SlasherSharedState {
     ) {
         loop {
             let Some(subscription) = self.subscription.load_full() else {
-                tracing::warn!("no slasher contract subscription");
+                tracing::warn!(target: tracing_targets::SLASHER, "no slasher contract subscription");
                 break;
             };
 
@@ -345,7 +397,10 @@ impl SlasherSharedState {
             let signed = match self.contract.encode_blocks_batch_message(&params) {
                 Ok(signed) => signed,
                 Err(e) => {
-                    tracing::error!("failed to encode batch message: {e:?}");
+                    tracing::error!(
+                        target: tracing_targets::SLASHER,
+                        "failed to encode batch message: {e:?}"
+                    );
                     return;
                 }
             };
@@ -355,13 +410,17 @@ impl SlasherSharedState {
             match subscription.track_message(&msg_hash, signed.expire_at) {
                 Ok(res) => {
                     tracing::info!(
+                        target: tracing_targets::SLASHER,
                         %msg_hash,
                         address = %params.address,
                         session_id = ?params.session_id,
                         validator_idx = params.validator_idx,
-                        batch_seqno = batch.start_seqno,
-                        block_count = batch.committed_blocks.len(),
-                        "sending blocks batch"
+                        batch_start_seqno = batch.start_seqno(),
+                        batch_seqno_after = batch.seqno_after(),
+                        batch_slots = batch.committed_blocks.len(),
+                        committed_blocks = batch.committed_block_count(),
+                        validators = batch.validator_count(),
+                        "sending own blocks batch to slasher"
                     );
                     self.blockchain_rpc_client
                         .broadcast_external_message(&boc)
@@ -370,17 +429,34 @@ impl SlasherSharedState {
 
                     match res.await {
                         Ok(MessageDeliveryStatus::Sent { tx_hash }) => {
-                            tracing::info!(%tx_hash, "batch message delivered");
+                            tracing::info!(
+                                target: tracing_targets::SLASHER,
+                                %tx_hash,
+                                session_id = ?params.session_id,
+                                validator_idx = params.validator_idx,
+                                batch_start_seqno = batch.start_seqno(),
+                                batch_seqno_after = batch.seqno_after(),
+                                batch_slots = batch.committed_blocks.len(),
+                                committed_blocks = batch.committed_block_count(),
+                                validators = batch.validator_count(),
+                                "own blocks batch delivered"
+                            );
                             return;
                         }
                         Ok(MessageDeliveryStatus::Expired) => {
                             // TODO: Execute transaction locally to guess the reason.
-                            tracing::warn!("batch message expired");
+                            tracing::warn!(
+                                target: tracing_targets::SLASHER,
+                                "batch message expired"
+                            );
                         }
                         Err(_) => return,
                     }
                 }
-                Err(e) => tracing::warn!("failed to track message: {e:?}"),
+                Err(e) => tracing::warn!(
+                    target: tracing_targets::SLASHER,
+                    "failed to track message: {e:?}"
+                ),
             }
 
             tokio::time::sleep(self.config.message_retry_interval).await;
