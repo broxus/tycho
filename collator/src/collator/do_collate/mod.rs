@@ -198,8 +198,20 @@ impl CollatorStdImpl {
                 let _span = span.enter();
 
                 let result = {
-                    let mut anchor_cache_tx = AnchorsCacheTransaction::new(&mut anchors_cache);
-                    let mut reader_guard = TransactionGuard::new(&mut reader_state);
+                    let mut anchor_cache_tx = {
+                        let _h = HistogramGuard::begin_with_labels(
+                            "tycho_do_collate_anchor_cache_tx_open_time",
+                            &labels,
+                        );
+                        AnchorsCacheTransaction::new(&mut anchors_cache)
+                    };
+                    let mut reader_guard = {
+                        let _h = HistogramGuard::begin_with_labels(
+                            "tycho_do_collate_reader_state_tx_open_time",
+                            &labels,
+                        );
+                        TransactionGuard::new(&mut reader_state)
+                    };
 
                     let collation_is_cancelled = state.collation_is_cancelled.clone();
 

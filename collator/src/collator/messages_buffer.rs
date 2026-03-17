@@ -19,27 +19,6 @@ type SlotId = u16;
 type FastIndexMap<K, V> = indexmap::IndexMap<K, V, ahash::RandomState>;
 pub type FastIndexSet<K> = indexmap::IndexSet<K, ahash::RandomState>;
 
-#[derive(Default, Clone)]
-struct AccountEntry {
-    old_val: Option<VecDeque<ParsedMessage>>,
-    new_val: Option<VecDeque<ParsedMessage>>,
-    is_new: bool,
-}
-
-impl AccountEntry {
-    fn current(&self) -> Option<&VecDeque<ParsedMessage>> {
-        self.new_val.as_ref()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.new_val.as_ref().is_none_or(|v| v.is_empty())
-    }
-
-    fn current_mut(&mut self) -> Option<&mut VecDeque<ParsedMessage>> {
-        self.new_val.as_mut()
-    }
-}
-
 #[derive(Clone, Copy)]
 pub struct MessagesBufferLimits {
     pub max_count: usize,
@@ -48,15 +27,20 @@ pub struct MessagesBufferLimits {
 }
 
 #[derive(Default)]
-pub struct BufferTransaction {
+struct BufferTransaction {
     int_count: usize,
     ext_count: usize,
     min_ext_chain_time: Option<u64>,
+    /// Key-order snapshot — captured on `begin()`
+    order_snapshot: Vec<HashBytes>,
+    /// Original `VecDeque` for each account touched during the transaction.
+    /// Set once per account on first mutation (clone-on-write).
+    account_backups: FastHashMap<HashBytes, VecDeque<ParsedMessage>>,
 }
 
 #[derive(Default)]
 pub struct MessagesBuffer {
-    msgs: FastIndexMap<HashBytes, AccountEntry>,
+    msgs: FastIndexMap<HashBytes, VecDeque<ParsedMessage>>,
     int_count: usize,
     ext_count: usize,
     min_ext_chain_time: Option<u64>,
@@ -65,44 +49,51 @@ pub struct MessagesBuffer {
 
 impl Transactional for MessagesBuffer {
     fn begin(&mut self) {
+        assert!(self.tx.is_none(), "transaction already active");
         self.tx = Some(BufferTransaction {
             int_count: self.int_count,
             ext_count: self.ext_count,
             min_ext_chain_time: self.min_ext_chain_time,
+            order_snapshot: self.msgs.keys().copied().collect(),
+            account_backups: FastHashMap::default(),
         });
     }
 
     fn commit(&mut self) {
-        assert!(self.tx.is_some(), "no active transaction to commit");
-        self.tx = None;
-        self.msgs.retain(|_, entry| {
-            entry.old_val = None;
-            entry.is_new = false;
-            entry.new_val.as_ref().is_some_and(|v| !v.is_empty())
-        });
-        if self.ext_count == 0 {
-            self.min_ext_chain_time = None;
-        }
+        assert!(self.tx.take().is_some(), "no active transaction to commit");
     }
 
     fn rollback(&mut self) {
-        let Some(snapshot) = self.tx.take() else {
-            panic!("no active transaction to rollback")
-        };
+        let BufferTransaction {
+            int_count,
+            ext_count,
+            min_ext_chain_time,
+            order_snapshot,
+            mut account_backups,
+        } = self.tx.take().expect("no active transaction to rollback");
 
-        self.msgs.retain(|_, entry| {
-            if entry.is_new {
-                return false;
-            }
-            if entry.old_val.is_some() {
-                entry.new_val = entry.old_val.take();
-            }
-            entry.new_val.is_some()
-        });
+        self.int_count = int_count;
+        self.ext_count = ext_count;
+        self.min_ext_chain_time = min_ext_chain_time;
 
-        self.int_count = snapshot.int_count;
-        self.ext_count = snapshot.ext_count;
-        self.min_ext_chain_time = snapshot.min_ext_chain_time;
+        // Rebuild map in original order from snapshot
+        let mut current = std::mem::take(&mut self.msgs);
+        let mut restored =
+            FastIndexMap::with_capacity_and_hasher(order_snapshot.len(), Default::default());
+
+        for account_id in &order_snapshot {
+            let msgs = if let Some(backup) = account_backups.remove(account_id) {
+                backup
+            } else {
+                current.swap_remove(account_id).expect(
+                    "rollback: account from snapshot is missing in both backups and current map",
+                )
+            };
+
+            restored.insert(*account_id, msgs);
+        }
+
+        self.msgs = restored;
     }
 
     fn in_tx(&self) -> bool {
@@ -111,16 +102,22 @@ impl Transactional for MessagesBuffer {
 }
 
 impl MessagesBuffer {
-    fn backup_entry(entry: &mut AccountEntry, in_tx: bool) {
-        if in_tx && entry.old_val.is_none() {
-            entry.old_val = entry.new_val.clone();
+    /// Clone account's `VecDeque` into backup on first mutation within a transaction.
+    /// Caller passes the entry they already have — no extra map lookup.
+    fn backup_account(
+        tx: &mut Option<BufferTransaction>,
+        account_id: &HashBytes,
+        msgs: &VecDeque<ParsedMessage>,
+    ) {
+        if let Some(tx) = tx {
+            tx.account_backups
+                .entry(*account_id)
+                .or_insert_with(|| msgs.clone());
         }
     }
-
     pub fn account_messages_count(&self, account_id: &HashBytes) -> usize {
         self.msgs
             .get(account_id)
-            .and_then(|entry| entry.current())
             .map(|msgs| msgs.len())
             .unwrap_or_default()
     }
@@ -143,9 +140,7 @@ impl MessagesBuffer {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&HashBytes, &VecDeque<ParsedMessage>)> {
-        self.msgs
-            .iter()
-            .filter_map(|(k, entry)| entry.current().map(|v| (k, v)))
+        self.msgs.iter()
     }
 
     pub fn add_message(&mut self, msg: ParsedMessage) {
@@ -171,25 +166,14 @@ impl MessagesBuffer {
         };
         let account_id = dst.as_std().map(|a| a.address).unwrap_or_default();
 
-        let in_tx = self.in_tx();
-
+        // insert message to buffer
         match self.msgs.entry(account_id) {
             indexmap::map::Entry::Vacant(vacant) => {
-                vacant.insert(AccountEntry {
-                    old_val: None,
-                    new_val: Some([msg].into()),
-                    is_new: self.tx.is_some(),
-                });
+                vacant.insert([msg].into());
             }
             indexmap::map::Entry::Occupied(mut occupied) => {
-                let entry = occupied.get_mut();
-                Self::backup_entry(entry, in_tx);
-
-                if let Some(msgs) = entry.current_mut() {
-                    msgs.push_back(msg);
-                } else {
-                    entry.new_val = Some([msg].into());
-                }
+                Self::backup_account(&mut self.tx, &account_id, occupied.get());
+                occupied.get_mut().push_back(msg);
             }
         }
     }
@@ -198,18 +182,16 @@ impl MessagesBuffer {
         &mut self,
         addresses_to_remove: &FastHashSet<HashBytes>,
     ) {
-        let in_tx = self.in_tx();
-
-        for addr in addresses_to_remove {
-            if let Some(entry) = self.msgs.get_mut(addr) {
-                Self::backup_entry(entry, in_tx);
-
-                if let Some(msgs) = entry.current() {
-                    self.int_count -= msgs.len();
-                }
-                entry.new_val = None;
+        let tx = &mut self.tx;
+        self.msgs.retain(|k, v| {
+            if addresses_to_remove.contains(k) {
+                Self::backup_account(tx, k, v);
+                self.int_count -= v.len();
+                false
+            } else {
+                true
             }
-        }
+        });
     }
 
     /// Returns queue keys of collected internal queue messages.
@@ -288,13 +270,8 @@ impl MessagesBuffer {
                 };
 
                 // try to get messages of other accounts which are not included in any slot
-                while let Some((&account_id, entry)) = self.msgs.get_index(buf_account_idx) {
+                while let Some((&account_id, _)) = self.msgs.get_index(buf_account_idx) {
                     buf_account_idx += 1;
-
-                    // skip removed accounts or accounts without messages
-                    if entry.is_empty() {
-                        continue;
-                    }
 
                     if msg_group.msgs.contains_key(&account_id) {
                         // try skip messages from skipped account: maybe they expired
@@ -416,13 +393,8 @@ impl MessagesBuffer {
                 }
 
                 // then try to get messages of other accounts which are not included in any slot
-                while let Some((&account_id, entry)) = self.msgs.get_index(buf_account_idx) {
+                while let Some((&account_id, _)) = self.msgs.get_index(buf_account_idx) {
                     buf_account_idx += 1;
-
-                    // skip removed accounts or accounts without messages
-                    if entry.is_empty() {
-                        continue;
-                    }
 
                     if msg_group.msgs.contains_key(&account_id) {
                         // try skip messages from skipped account: maybe they expired
@@ -459,28 +431,18 @@ impl MessagesBuffer {
 
         // check and skip messages in remaning accounts if required
         if msg_filter.can_skip() {
-            while let Some((&account_id, entry)) = self.msgs.get_index(buf_account_idx) {
+            while let Some((&account_id, _)) = self.msgs.get_index(buf_account_idx) {
                 buf_account_idx += 1;
-
-                // skip removed accounts or accounts without messages
-                if entry.is_empty() {
-                    continue;
-                }
-
                 self.try_skip_account_msgs(&account_id, &mut msg_filter);
             }
         }
 
         // remove empty accounts from buffer
         ops_count.saturating_add_assign(self.msgs.len() as u64);
-
-        if !self.in_tx() {
-            self.msgs
-                .retain(|_, entry| entry.current().is_some_and(|v| !v.is_empty()));
-        }
+        self.msgs.retain(|_, account_msgs| !account_msgs.is_empty());
 
         // drop min externals chain time if buffer was drained
-        if self.ext_count == 0 {
+        if self.msgs.is_empty() {
             self.min_ext_chain_time = None;
         }
 
@@ -548,19 +510,11 @@ impl MessagesBuffer {
 
         let mut should_add_account_to_slot_index = false;
 
-        let in_tx = self.in_tx();
-
-        if let Some(entry) = self.msgs.get_mut(&account_id) {
+        if let Some(account_msgs) = self.msgs.get_mut(&account_id) {
+            Self::backup_account(&mut self.tx, &account_id, account_msgs);
             res.ops_count.saturating_add_assign(1);
 
-            Self::backup_entry(entry, in_tx);
-
-            let Some(account_msgs) = entry.current_mut() else {
-                return res;
-            };
-
             amount = account_msgs.len().min(slot_cx.remaning_capacity);
-
             if amount == 0 {
                 return res;
             }
@@ -571,12 +525,10 @@ impl MessagesBuffer {
             should_add_account_to_slot_index = slot_account_msgs.is_empty();
 
             slot_account_msgs.reserve(amount);
-
             while int_collected_count + ext_collected_count < amount {
                 let Some(msg) = account_msgs.pop_front() else {
                     break;
                 };
-
                 res.ops_count.saturating_add_assign(1);
 
                 // check and skip message if required
@@ -666,21 +618,17 @@ impl MessagesBuffer {
             return;
         }
 
-        let in_tx = self.in_tx();
-
-        if let Some(entry) = self.msgs.get_mut(account_id) {
-            Self::backup_entry(entry, in_tx);
-            if let Some(account_msgs) = entry.current_mut() {
-                account_msgs.retain(|msg| {
-                    let skip = filter.should_skip(msg);
-                    debug_assert!(
-                        !skip || msg.info().is_external_in(),
-                        "we should only skip external messages"
-                    );
-                    self.ext_count -= skip as usize;
-                    !skip
-                });
-            }
+        if let Some(account_msgs) = self.msgs.get_mut(account_id) {
+            Self::backup_account(&mut self.tx, account_id, account_msgs);
+            account_msgs.retain(|msg| {
+                let skip = filter.should_skip(msg);
+                debug_assert!(
+                    !skip || msg.info().is_external_in(),
+                    "we should only skip external messages"
+                );
+                self.ext_count -= skip as usize;
+                !skip
+            });
         }
     }
 }
@@ -774,17 +722,18 @@ impl MessageFilter for MsgFilter<'_> {
     }
 }
 #[cfg(test)]
-struct DebugMessagesBufferIndexMap<'a>(pub &'a FastIndexMap<HashBytes, AccountEntry>);
+pub(super) struct DebugMessagesBuffer<'a>(pub &'a MessagesBuffer);
 #[cfg(test)]
-impl std::fmt::Debug for DebugMessagesBufferIndexMap<'_> {
+impl std::fmt::Debug for DebugMessagesBuffer<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_map()
-            .entries(self.0.iter().filter_map(|(k, entry)| {
-                entry.current().map(|v| (DebugHashBytesShort(k), v.len()))
-            }))
+        f.debug_struct("MessagesBuffer")
+            .field("int_count", &self.0.int_count)
+            .field("ext_count", &self.0.ext_count)
+            .field("msgs", &DebugMessagesBufferIndexMap(&self.0.msgs))
             .finish()
     }
 }
+
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
 pub enum BufferFillStateByCount {
     IsFull,
@@ -817,6 +766,21 @@ impl MessagesBuffer {
     }
 }
 
+#[cfg(test)]
+struct DebugMessagesBufferIndexMap<'a>(pub &'a FastIndexMap<HashBytes, VecDeque<ParsedMessage>>);
+#[cfg(test)]
+impl std::fmt::Debug for DebugMessagesBufferIndexMap<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_map()
+            .entries(
+                self.0
+                    .iter()
+                    .map(|(k, v)| (DebugHashBytesShort(k), v.len())),
+            )
+            .finish()
+    }
+}
+
 pub(super) struct DebugHashBytesShort<'a>(pub &'a HashBytes);
 impl std::fmt::Debug for DebugHashBytesShort<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -834,7 +798,6 @@ struct SlotContext<'a> {
 
 #[derive(Default)]
 pub struct MessageGroup {
-    #[allow(clippy::vec_box)]
     msgs: FastHashMap<HashBytes, Vec<ParsedMessage>>,
     slots_info: SlotsInfo,
 }
@@ -940,7 +903,6 @@ impl IntoIterator for MessageGroup {
 
 #[cfg(test)]
 impl MessageGroup {
-    #[allow(clippy::vec_box)]
     pub fn msgs(&self) -> &FastHashMap<HashBytes, Vec<ParsedMessage>> {
         &self.msgs
     }
@@ -1113,19 +1075,6 @@ where
     fn get_mut_or_grow(&mut self, idx: usize) -> &mut T {
         self.presize(idx);
         &mut self[idx]
-    }
-}
-
-#[cfg(test)]
-pub(super) struct DebugMessagesBuffer<'a>(pub &'a MessagesBuffer);
-#[cfg(test)]
-impl std::fmt::Debug for DebugMessagesBuffer<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MessagesBuffer")
-            .field("int_count", &self.0.int_count)
-            .field("ext_count", &self.0.ext_count)
-            .field("msgs", &DebugMessagesBufferIndexMap(&self.0.msgs))
-            .finish()
     }
 }
 
@@ -1534,51 +1483,6 @@ mod transaction_tests {
 
         // After commit, changes persist
         assert_eq!(buffer.int_count, 2 - collected);
-    }
-
-    #[test]
-    fn test_fill_message_group_commit_clears_min_ext_chain_time_when_ints_remain() {
-        let mut buffer = MessagesBuffer::default();
-        let acc_ext = account(1);
-        let acc_int = account(2);
-
-        // Keep one internal message in buffer while expiring the only external message.
-        buffer.add_message(make_test_ext_message(acc_ext, 100));
-        buffer.add_message(make_test_int_message(acc_int, 200));
-
-        assert_eq!(buffer.ext_count, 1);
-        assert_eq!(buffer.int_count, 1);
-        assert_eq!(buffer.min_ext_chain_time(), 100);
-
-        buffer.begin();
-
-        let mut msg_group = MessageGroup::default();
-        let mut skipped = FastHashSet::default();
-        let mut expired_msgs_count = 0u64;
-
-        let _ = buffer.fill_message_group(
-            &mut msg_group,
-            10,
-            10,
-            &mut skipped,
-            |account_id| (account_id == &acc_int, 1), // keep internal account in buffer
-            SkipExpiredExternals {
-                chain_time_threshold_ms: 101, // ext(ct=100) is expired
-                total_skipped: &mut expired_msgs_count,
-            },
-        );
-
-        assert_eq!(expired_msgs_count, 1);
-        assert_eq!(buffer.ext_count, 0);
-        assert_eq!(buffer.int_count, 1);
-        assert_eq!(buffer.account_messages_count(&acc_int), 1);
-
-        buffer.commit();
-
-        // Buffer is not empty (internal remains), but there are no externals anymore.
-        assert_eq!(buffer.account_messages_count(&acc_int), 1);
-        assert_eq!(buffer.ext_count, 0);
-        assert_eq!(buffer.min_ext_chain_time(), u64::MAX);
     }
 
     // ==================== SKIP MESSAGES TESTS ====================

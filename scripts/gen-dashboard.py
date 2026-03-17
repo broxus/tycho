@@ -2448,6 +2448,16 @@ def collator_core_operations_metrics() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
+            "tycho_do_collate_anchor_cache_tx_open_time",
+            "Anchor cache transaction open",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
+            "tycho_do_collate_reader_state_tx_open_time",
+            "Reader state transaction open",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
             "tycho_do_collate_queue_diff_commit_time",
             "Queue diff commit (RocksDB write)",
             labels=['workchain=~"$workchain"'],
