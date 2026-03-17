@@ -208,6 +208,29 @@ impl BlockStorage {
         }
     }
 
+    pub fn blocking_load_block_data(&self, handle: &BlockHandle) -> Result<BlockStuff> {
+        metrics::counter!(METRIC_LOAD_BLOCK_TOTAL).increment(1);
+
+        let _histogram = HistogramGuard::begin("tycho_storage_load_block_data_time");
+
+        anyhow::ensure!(
+            handle.has_data(),
+            BlockStorageError::BlockDataNotFound(handle.id().as_short_id())
+        );
+
+        // Fast path - lookup in cache
+        if let Some(block) = self.blocks_cache.get(handle.id()) {
+            metrics::counter!(METRIC_BLOCK_CACHE_HIT_TOTAL).increment(1);
+            return Ok(block.clone());
+        }
+
+        let data = self
+            .blob_storage
+            .blocking_get_block_data_decompressed(handle, &PackageEntryKey::block(handle.id()))?;
+
+        BlockStuff::deserialize(handle.id(), data.as_ref())
+    }
+
     pub async fn load_block_data_decompressed(&self, handle: &BlockHandle) -> Result<Bytes> {
         anyhow::ensure!(
             handle.has_data(),
