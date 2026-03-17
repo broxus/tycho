@@ -28,7 +28,11 @@ use weedb::rocksdb;
 
 use self::cell_storage::*;
 use self::store_state_raw::StoreStateContext;
-use super::{BlockHandle, BlockHandleStorage, BlockStorage, CellsDb, CoreStorageConfig};
+use super::{
+    BlockConnectionStorage, BlockHandle, BlockHandleStorage, BlockStorage, CellsDb,
+    CoreStorageConfig,
+};
+use crate::storage::BlockConnection;
 
 mod cell_storage;
 mod entries_buffer;
@@ -40,6 +44,7 @@ pub struct ShardStateStorage {
     block_handle_storage: Arc<BlockHandleStorage>,
     block_storage: Arc<BlockStorage>,
     cell_storage: Arc<CellStorage>,
+    block_connections: Arc<BlockConnectionStorage>,
     temp_file_storage: TempFileStorage,
 
     gc_lock: Arc<tokio::sync::Mutex<()>>,
@@ -59,6 +64,7 @@ impl ShardStateStorage {
         cells_db: CellsDb,
         block_handle_storage: Arc<BlockHandleStorage>,
         block_storage: Arc<BlockStorage>,
+        block_connections: Arc<BlockConnectionStorage>,
         temp_file_storage: TempFileStorage,
         config: &CoreStorageConfig,
     ) -> Result<Arc<Self>> {
@@ -74,6 +80,7 @@ impl ShardStateStorage {
             block_storage,
             temp_file_storage,
             cell_storage,
+            block_connections,
             shard_split_depth: config.shard_split_depth,
             new_cells_threshold: config.max_new_cells_threshold,
             store_shard_state_step: config.store_shard_state_step,
@@ -348,7 +355,7 @@ impl ShardStateStorage {
 
                     entry.insert(ShardStatesCacheItem {
                         prev_block_id: *prev_block_id,
-                        block_id: *block_id,
+                        block_id: block_id.as_short_id(),
                         is_virtual,
                         partial_root_cell: merkle_update.new.clone(),
                         state: CachedState::Pending(task.clone()),
@@ -388,6 +395,7 @@ impl ShardStateStorage {
         let block_id = *block_id;
         let block_handles = self.block_handle_storage.clone();
         let blocks = self.block_storage.clone();
+        let block_connections = self.block_connections.clone();
         let cell_storage = self.cell_storage.clone();
         let tracker = self.min_ref_mc_state.clone();
 
@@ -407,24 +415,26 @@ impl ShardStateStorage {
                         ref_by_mc_seqno,
                         &pivot_block_id,
                         &block_handles,
-                        &blocks,
+                        &block_connections,
                         &cell_storage,
                         &tracker,
                         get_merkle_update,
                     )
-                    .await
                     .context("failed to load state or update on first access")?;
 
                     match res {
                         None => break,
                         Some(FromStorage::Virtual(f)) => {
-                            to_apply.push(f.partial_root_cell);
+                            to_apply.push(f.partial_root);
                             pivot_block_id = f.prev_block_id;
                         }
                         Some(FromStorage::Applied(applied)) => {
                             break 'pivot Some(applied);
                         }
                     }
+
+                    // Split long executor stalls.
+                    tokio::task::yield_now().await;
                 }
 
                 None
@@ -441,23 +451,10 @@ impl ShardStateStorage {
                 return Ok(StateWithApplier { state, applier });
             }
 
-            let ref_mc_state_handle = state.ref_mc_state_handle().clone();
-            let mut pivot_root = state.root_cell().clone();
-            drop(state);
+            // Full case with applies.
+            let state =
+                apply_updates_chain(&block_id, state, to_apply, applier.clone(), blocks).await?;
 
-            while let Some(partial_new_root) = to_apply.pop() {
-                pivot_root = applier
-                    .make_next_state(partial_new_root)
-                    .context("failed to apply next state for chain from storage")?;
-            }
-
-            let shard_state = pivot_root.parse::<Box<ShardStateUnsplit>>()?;
-            let state = ShardStateStuff::from_state_and_root(
-                &block_id,
-                shard_state,
-                pivot_root,
-                ref_mc_state_handle,
-            )?;
             Ok(StateWithApplier { state, applier })
         }
     }
@@ -496,9 +493,6 @@ impl ShardStateStorage {
         }
     }
 
-    /// Spawns a task for storing the specified root into the storage.
-    ///
-    /// Returns `false` if that was already present in storage.
     fn make_store_state_root_direct_task(
         &self,
         handle: BlockHandle,
@@ -766,17 +760,16 @@ impl ShardStateStorage {
             anyhow::anyhow!("unable to load a state that failed to save with error: {error:?}")
         }
 
-        let try_load_from_storage = async |block_id: &BlockId| {
+        let try_load_from_storage = |block_id: &BlockId| {
             load_state_or_update(
                 ref_by_mc_seqno,
                 block_id,
                 &self.block_handle_storage,
-                &self.block_storage,
+                &self.block_connections,
                 &self.cell_storage,
                 &self.min_ref_mc_state,
                 &get_merkle_update,
             )
-            .await
         };
 
         let max_tail = self.store_shard_state_step.get() as usize;
@@ -820,7 +813,7 @@ impl ShardStateStorage {
                         // Continue searching back for the first item with "pending virtual"
                         // or "stored" state (or we will find something in storage).
                         CachedState::Pending(_) => {
-                            to_apply.push(item.partial_root_cell.clone());
+                            to_apply.push(ToApply::Loaded(item.partial_root_cell.clone()));
                             pivot_block_id = item.prev_block_id;
                         }
                     }
@@ -828,12 +821,12 @@ impl ShardStateStorage {
                     // NOTE: `cache` must be dropped here (we rely on Rust edition 2024 behavior).
 
                     // There was no such state in cache so we search in storage.
-                    match try_load_from_storage(&pivot_block_id).await? {
+                    match try_load_from_storage(&pivot_block_id)? {
                         // No handle or provided state for this id means that we can stop here.
                         None => break,
                         // Only merkle update was found for this block.
                         Some(FromStorage::Virtual(f)) => {
-                            to_apply.push(f.partial_root_cell);
+                            to_apply.push(f.partial_root);
                             pivot_block_id = f.prev_block_id;
                         }
                         // A directly stored state was found for this block so we
@@ -842,6 +835,9 @@ impl ShardStateStorage {
                             break 'pivot Some(applied);
                         }
                     }
+
+                    // Split long executor stalls.
+                    tokio::task::yield_now().await;
                 }
             }
 
@@ -860,21 +856,15 @@ impl ShardStateStorage {
             return Ok(state);
         }
 
-        let ref_mc_state_handle = state.ref_mc_state_handle().clone();
-        let mut pivot_root = state.root_cell().clone();
-        drop(state);
-
         // Full case with applies.
-        let pivot_root = rayon_run(move || {
-            while let Some(partial_new_root) = to_apply.pop() {
-                pivot_root = applier.make_next_state(partial_new_root)?;
-            }
-            Ok::<_, anyhow::Error>(pivot_root)
-        })
-        .await?;
-
-        let shard_state = pivot_root.parse::<Box<ShardStateUnsplit>>()?;
-        ShardStateStuff::from_state_and_root(block_id, shard_state, pivot_root, ref_mc_state_handle)
+        apply_updates_chain(
+            block_id,
+            state,
+            to_apply,
+            applier,
+            self.block_storage.clone(),
+        )
+        .await
     }
 
     pub fn load_state_root_hash(&self, block_id: &BlockId) -> Result<HashBytes> {
@@ -1148,16 +1138,21 @@ fn load_state_root_hash_opt(cells_db: &CellsDb, block_id: &BlockId) -> Result<Op
     Ok(Some(HashBytes::from_slice(&root[..32])))
 }
 
-enum FromStorage {
-    Applied(StateWithApplier),
-    Virtual(BlockInfoForApply),
+enum ToApply {
+    Loaded(Cell),
+    Deferred(BlockHandle),
 }
 
-async fn load_state_or_update<F>(
+enum FromStorage {
+    Applied(StateWithApplier),
+    Virtual(VirtualBlockInfo),
+}
+
+fn load_state_or_update<F>(
     ref_by_mc_seqno: u32,
     block_id: &BlockId,
     block_handles: &BlockHandleStorage,
-    blocks: &BlockStorage,
+    block_connections: &BlockConnectionStorage,
     cell_storage: &Arc<CellStorage>,
     tracker: &MinRefMcStateTracker,
     get_merkle_update: F,
@@ -1182,27 +1177,74 @@ where
 
     let handle = match block_handles.load_handle(block_id) {
         Some(handle) => handle,
-        None => return Ok(get_merkle_update(block_id).map(FromStorage::Virtual)),
+        None => {
+            return Ok(get_merkle_update(block_id).map(|f| {
+                FromStorage::Virtual(VirtualBlockInfo {
+                    prev_block_id: f.prev_block_id,
+                    partial_root: ToApply::Loaded(f.partial_root_cell),
+                })
+            }));
+        }
     };
 
-    let mut res = get_merkle_update(block_id);
-    if res.is_none() {
-        let block = blocks.load_block_data(&handle).await?;
-        let merkle_update = block.as_ref().state_update.load()?;
+    Ok(Some(FromStorage::Virtual(
+        match get_merkle_update(block_id) {
+            Some(f) => VirtualBlockInfo {
+                prev_block_id: f.prev_block_id,
+                partial_root: ToApply::Loaded(f.partial_root_cell),
+            },
+            None => {
+                if !handle.has_data() {
+                    return Ok(None);
+                }
 
-        let (prev_id, prev_id_alt) = block.construct_prev_id()?;
-        anyhow::ensure!(
-            prev_id_alt.is_none(),
-            "split/merge is not supported for now"
-        );
+                let Some(prev_block_id) =
+                    block_connections.load_connection(block_id, BlockConnection::Prev1)
+                else {
+                    anyhow::bail!("prev block id not found for {block_id}");
+                };
 
-        res = Some(BlockInfoForApply {
-            prev_block_id: prev_id,
-            partial_root_cell: merkle_update.new,
-        });
-    }
+                VirtualBlockInfo {
+                    prev_block_id,
+                    partial_root: ToApply::Deferred(handle),
+                }
+            }
+        },
+    )))
+}
 
-    Ok(res.map(FromStorage::Virtual))
+async fn apply_updates_chain(
+    block_id: &BlockId,
+    pivot_state: ShardStateStuff,
+    mut to_apply: Vec<ToApply>,
+    applier: Arc<MerkleUpdateApplier>,
+    blocks: Arc<BlockStorage>,
+) -> Result<ShardStateStuff> {
+    let ref_mc_state_handle = pivot_state.ref_mc_state_handle().clone();
+    let mut pivot_root = pivot_state.root_cell().clone();
+    drop(pivot_state);
+
+    let pivot_root = rayon_run(move || {
+        while let Some(item) = to_apply.pop() {
+            let partial_new_root = match item {
+                ToApply::Loaded(cell) => cell,
+                ToApply::Deferred(handle) => {
+                    let block = blocks.blocking_load_block_data(&handle)?;
+                    block.as_ref().load_state_update()?.new
+                }
+            };
+
+            pivot_root = applier
+                .make_next_state(partial_new_root)
+                .context("failed to apply next state for chain from storage")?;
+        }
+
+        Ok::<_, anyhow::Error>(pivot_root)
+    })
+    .await?;
+
+    let shard_state = pivot_root.parse::<Box<ShardStateUnsplit>>()?;
+    ShardStateStuff::from_state_and_root(block_id, shard_state, pivot_root, ref_mc_state_handle)
 }
 
 pub struct InitiatedStoreState {
@@ -1321,7 +1363,7 @@ enum DirectStoreRoot {
 
 struct ShardStatesCacheItem {
     prev_block_id: BlockId,
-    block_id: BlockId,
+    block_id: BlockIdShort,
     is_virtual: bool,
     partial_root_cell: Cell,
     state: CachedState,
@@ -1579,6 +1621,11 @@ pub struct BlockInfoForApply {
 }
 
 type FnGetBlockInfoForApply = dyn Fn(&BlockId) -> Option<BlockInfoForApply> + Send + Sync + 'static;
+
+struct VirtualBlockInfo {
+    prev_block_id: BlockId,
+    partial_root: ToApply,
+}
 
 #[cfg(test)]
 mod tests {
