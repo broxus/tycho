@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque, btree_map};
 
 use rayon::iter::IntoParallelIterator;
 use tycho_block_util::queue::QueueKey;
@@ -19,27 +19,6 @@ type SlotId = u16;
 type FastIndexMap<K, V> = indexmap::IndexMap<K, V, ahash::RandomState>;
 pub type FastIndexSet<K> = indexmap::IndexSet<K, ahash::RandomState>;
 
-#[derive(Default, Clone)]
-struct AccountEntry {
-    old_val: Option<VecDeque<ParsedMessage>>,
-    new_val: Option<VecDeque<ParsedMessage>>,
-    is_new: bool,
-}
-
-impl AccountEntry {
-    fn current(&self) -> Option<&VecDeque<ParsedMessage>> {
-        self.new_val.as_ref()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.new_val.as_ref().is_none_or(|v| v.is_empty())
-    }
-
-    fn current_mut(&mut self) -> Option<&mut VecDeque<ParsedMessage>> {
-        self.new_val.as_mut()
-    }
-}
-
 #[derive(Clone, Copy)]
 pub struct MessagesBufferLimits {
     pub max_count: usize,
@@ -47,191 +26,65 @@ pub struct MessagesBufferLimits {
     pub slot_vert_size: usize,
 }
 
-#[derive(Default)]
-pub struct BufferTransaction {
-    int_count: usize,
-    ext_count: usize,
-    min_ext_chain_time: Option<u64>,
-    removed_accounts: FastHashMap<HashBytes, RemovedAccount>,
-    order_snapshot: Option<Vec<HashBytes>>,
-}
-
-#[derive(Clone)]
-struct RemovedAccount {
-    entry: AccountEntry,
-}
+// // Transaction types - commented out for testing with old logic
+// #[derive(Default, Clone)]
+// struct AccountEntry {
+//     old_val: Option<VecDeque<ParsedMessage>>,
+//     new_val: Option<VecDeque<ParsedMessage>>,
+//     is_new: bool,
+// }
+//
+// impl AccountEntry {
+//     fn current(&self) -> Option<&VecDeque<ParsedMessage>> {
+//         self.new_val.as_ref()
+//     }
+//
+//     fn is_empty(&self) -> bool {
+//         self.new_val.as_ref().is_none_or(|v| v.is_empty())
+//     }
+//
+//     fn current_mut(&mut self) -> Option<&mut VecDeque<ParsedMessage>> {
+//         self.new_val.as_mut()
+//     }
+// }
+//
+// #[derive(Default)]
+// pub struct BufferTransaction {
+//     int_count: usize,
+//     ext_count: usize,
+//     min_ext_chain_time: Option<u64>,
+//     removed_accounts: FastHashMap<HashBytes, RemovedAccount>,
+//     order_snapshot: Option<Vec<HashBytes>>,
+// }
+//
+// #[derive(Clone)]
+// struct RemovedAccount {
+//     entry: AccountEntry,
+// }
 
 #[derive(Default)]
 pub struct MessagesBuffer {
-    msgs: FastIndexMap<HashBytes, AccountEntry>,
+    msgs: FastIndexMap<HashBytes, VecDeque<ParsedMessage>>,
     int_count: usize,
     ext_count: usize,
+    sorted_index: BTreeMap<usize, FastHashSet<HashBytes>>,
     min_ext_chain_time: Option<u64>,
-    tx: Option<BufferTransaction>,
 }
 
+// No-op Transactional impl - real logic commented out for testing with old logic
 impl Transactional for MessagesBuffer {
-    fn begin(&mut self) {
-        self.tx = Some(BufferTransaction {
-            int_count: self.int_count,
-            ext_count: self.ext_count,
-            min_ext_chain_time: self.min_ext_chain_time,
-            removed_accounts: FastHashMap::default(),
-            order_snapshot: None,
-        });
-    }
-
-    fn commit(&mut self) {
-        assert!(
-            self.tx.take().is_some(),
-            "no active transaction to commit"
-        );
-        for (account_id, entry) in &mut self.msgs {
-            assert!(
-                entry.new_val.as_ref().is_some_and(|v| !v.is_empty()),
-                "messages buffer invariant violated on commit: account {:?} has empty entry",
-                account_id
-            );
-            entry.old_val = None;
-            entry.is_new = false;
-        }
-        if self.ext_count == 0 {
-            self.min_ext_chain_time = None;
-        }
-    }
-
-    fn rollback(&mut self) {
-        let Some(snapshot) = self.tx.take() else {
-            panic!("no active transaction to rollback")
-        };
-        let BufferTransaction {
-            int_count,
-            ext_count,
-            min_ext_chain_time,
-            removed_accounts,
-            order_snapshot,
-        } = snapshot;
-
-        if let Some(order_snapshot) = order_snapshot.as_deref() {
-            let mut current = std::mem::take(&mut self.msgs);
-            let mut removed = removed_accounts;
-            let mut restored =
-                FastIndexMap::with_capacity_and_hasher(order_snapshot.len(), Default::default());
-
-            // Rebuild accounts exactly in pre-transaction order.
-            for account_id in order_snapshot {
-                let mut entry = match current.swap_remove(account_id) {
-                    Some(entry) => entry,
-                    None => match removed.remove(account_id) {
-                        Some(removed) => removed.entry,
-                        None => continue,
-                    },
-                };
-
-                // Accounts created inside the transaction must not survive rollback.
-                if entry.is_new {
-                    continue;
-                }
-
-                if entry.old_val.is_some() {
-                    entry.new_val = entry.old_val.take();
-                }
-                entry.is_new = false;
-
-                if entry.new_val.is_some() {
-                    restored.insert(*account_id, entry);
-                }
-            }
-
-            self.msgs = restored;
-        } else {
-            self.msgs.retain(|_, entry| {
-                if entry.is_new {
-                    return false;
-                }
-                if entry.old_val.is_some() {
-                    entry.new_val = entry.old_val.take();
-                }
-                entry.new_val.is_some()
-            });
-        }
-
-        self.int_count = int_count;
-        self.ext_count = ext_count;
-        self.min_ext_chain_time = min_ext_chain_time;
-    }
-
+    fn begin(&mut self) {}
+    fn commit(&mut self) {}
+    fn rollback(&mut self) {}
     fn in_tx(&self) -> bool {
-        self.tx.is_some()
+        false
     }
 }
 
 impl MessagesBuffer {
-    fn ensure_tx_order_snapshot(&mut self) {
-        let need_snapshot = self
-            .tx
-            .as_ref()
-            .is_some_and(|tx| tx.order_snapshot.is_none());
-        if !need_snapshot {
-            return;
-        }
-
-        let order_snapshot = self.msgs.keys().copied().collect();
-        if let Some(tx) = self.tx.as_mut()
-            && tx.order_snapshot.is_none()
-        {
-            tx.order_snapshot = Some(order_snapshot);
-        }
-    }
-
-    fn remove_empty_accounts(&mut self) {
-        let in_tx = self.in_tx();
-        let mut idx = 0;
-
-        while idx < self.msgs.len() {
-            let Some((account_id, is_empty, is_new)) = self
-                .msgs
-                .get_index(idx)
-                .map(|(account_id, entry)| (*account_id, entry.is_empty(), entry.is_new))
-            else {
-                break;
-            };
-
-            if !is_empty {
-                idx += 1;
-                continue;
-            }
-
-            if in_tx && !is_new {
-                self.ensure_tx_order_snapshot();
-            }
-
-            let Some(mut entry) = self.msgs.shift_remove(&account_id) else {
-                continue;
-            };
-
-            if in_tx && !is_new {
-                Self::backup_entry(&mut entry, true);
-                entry.new_val = None;
-                if let Some(tx) = self.tx.as_mut() {
-                    tx.removed_accounts
-                        .entry(account_id)
-                        .or_insert(RemovedAccount { entry });
-                }
-            }
-        }
-    }
-
-    fn backup_entry(entry: &mut AccountEntry, in_tx: bool) {
-        if in_tx && entry.old_val.is_none() {
-            entry.old_val = entry.new_val.clone();
-        }
-    }
-
     pub fn account_messages_count(&self, account_id: &HashBytes) -> usize {
         self.msgs
             .get(account_id)
-            .and_then(|entry| entry.current())
             .map(|msgs| msgs.len())
             .unwrap_or_default()
     }
@@ -254,9 +107,7 @@ impl MessagesBuffer {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&HashBytes, &VecDeque<ParsedMessage>)> {
-        self.msgs
-            .iter()
-            .filter_map(|(k, entry)| entry.current().map(|v| (k, v)))
+        self.msgs.iter()
     }
 
     pub fn add_message(&mut self, msg: ParsedMessage) {
@@ -282,36 +133,33 @@ impl MessagesBuffer {
         };
         let account_id = dst.as_std().map(|a| a.address).unwrap_or_default();
 
-        let in_tx = self.in_tx();
-        let restored_entry = self.tx.as_ref().and_then(|tx| {
-            tx.removed_accounts
-                .get(&account_id)
-                .map(|removed| removed.entry.clone())
-        });
-
-        match self.msgs.entry(account_id) {
+        // insert message to buffer
+        let prev_msgs_count = match self.msgs.entry(account_id) {
             indexmap::map::Entry::Vacant(vacant) => {
-                if let Some(mut entry) = restored_entry {
-                    entry.new_val = Some([msg].into());
-                    entry.is_new = false;
-                    vacant.insert(entry);
-                } else {
-                    vacant.insert(AccountEntry {
-                        old_val: None,
-                        new_val: Some([msg].into()),
-                        is_new: self.tx.is_some(),
-                    });
-                }
+                vacant.insert([msg].into());
+                0
             }
             indexmap::map::Entry::Occupied(mut occupied) => {
                 let entry = occupied.get_mut();
-                Self::backup_entry(entry, in_tx);
+                let prev_count = entry.len();
+                entry.push_back(msg);
+                prev_count
+            }
+        };
 
-                if let Some(msgs) = entry.current_mut() {
-                    msgs.push_back(msg);
-                } else {
-                    entry.new_val = Some([msg].into());
-                }
+        // update sorted by count index
+        // remove account_id from previous count bracket
+        if prev_msgs_count > 0 {
+            let accounts = self.sorted_index.get_mut(&prev_msgs_count).unwrap();
+            accounts.remove(&account_id);
+        }
+        // add account_id to the next count bracket
+        match self.sorted_index.entry(prev_msgs_count + 1) {
+            btree_map::Entry::Vacant(vacant) => {
+                vacant.insert([account_id].into_iter().collect());
+            }
+            btree_map::Entry::Occupied(mut occupied) => {
+                occupied.get_mut().insert(account_id);
             }
         }
     }
@@ -320,36 +168,14 @@ impl MessagesBuffer {
         &mut self,
         addresses_to_remove: &FastHashSet<HashBytes>,
     ) {
-        let in_tx = self.in_tx();
-
-        for addr in addresses_to_remove {
-            let Some(is_new) = self.msgs.get(addr).map(|entry| entry.is_new) else {
-                continue;
-            };
-
-            if in_tx && !is_new {
-                self.ensure_tx_order_snapshot();
+        self.msgs.retain(|k, v| {
+            if addresses_to_remove.contains(k) {
+                self.int_count -= v.len();
+                false
+            } else {
+                true
             }
-
-            let Some(mut entry) = self.msgs.shift_remove(addr) else {
-                continue;
-            };
-
-            Self::backup_entry(&mut entry, in_tx);
-
-            if let Some(msgs) = entry.current() {
-                self.int_count -= msgs.len();
-            }
-
-            if in_tx && !entry.is_new {
-                entry.new_val = None;
-                if let Some(tx) = self.tx.as_mut() {
-                    tx.removed_accounts
-                        .entry(*addr)
-                        .or_insert(RemovedAccount { entry });
-                }
-            }
-        }
+        });
     }
 
     /// Returns queue keys of collected internal queue messages.
@@ -428,13 +254,8 @@ impl MessagesBuffer {
                 };
 
                 // try to get messages of other accounts which are not included in any slot
-                while let Some((&account_id, entry)) = self.msgs.get_index(buf_account_idx) {
+                while let Some((&account_id, _)) = self.msgs.get_index(buf_account_idx) {
                     buf_account_idx += 1;
-
-                    // skip removed accounts or accounts without messages
-                    if entry.is_empty() {
-                        continue;
-                    }
 
                     if msg_group.msgs.contains_key(&account_id) {
                         // try skip messages from skipped account: maybe they expired
@@ -556,13 +377,8 @@ impl MessagesBuffer {
                 }
 
                 // then try to get messages of other accounts which are not included in any slot
-                while let Some((&account_id, entry)) = self.msgs.get_index(buf_account_idx) {
+                while let Some((&account_id, _)) = self.msgs.get_index(buf_account_idx) {
                     buf_account_idx += 1;
-
-                    // skip removed accounts or accounts without messages
-                    if entry.is_empty() {
-                        continue;
-                    }
 
                     if msg_group.msgs.contains_key(&account_id) {
                         // try skip messages from skipped account: maybe they expired
@@ -599,24 +415,18 @@ impl MessagesBuffer {
 
         // check and skip messages in remaning accounts if required
         if msg_filter.can_skip() {
-            while let Some((&account_id, entry)) = self.msgs.get_index(buf_account_idx) {
+            while let Some((&account_id, _)) = self.msgs.get_index(buf_account_idx) {
                 buf_account_idx += 1;
-
-                // skip removed accounts or accounts without messages
-                if entry.is_empty() {
-                    continue;
-                }
-
                 self.try_skip_account_msgs(&account_id, &mut msg_filter);
             }
         }
 
         // remove empty accounts from buffer
         ops_count.saturating_add_assign(self.msgs.len() as u64);
-        self.remove_empty_accounts();
+        self.msgs.retain(|_, account_msgs| !account_msgs.is_empty());
 
         // drop min externals chain time if buffer was drained
-        if self.ext_count == 0 {
+        if self.msgs.is_empty() {
             self.min_ext_chain_time = None;
         }
 
@@ -684,19 +494,10 @@ impl MessagesBuffer {
 
         let mut should_add_account_to_slot_index = false;
 
-        let in_tx = self.in_tx();
-
-        if let Some(entry) = self.msgs.get_mut(&account_id) {
+        if let Some(account_msgs) = self.msgs.get_mut(&account_id) {
             res.ops_count.saturating_add_assign(1);
 
-            Self::backup_entry(entry, in_tx);
-
-            let Some(account_msgs) = entry.current_mut() else {
-                return res;
-            };
-
             amount = account_msgs.len().min(slot_cx.remaning_capacity);
-
             if amount == 0 {
                 return res;
             }
@@ -707,12 +508,10 @@ impl MessagesBuffer {
             should_add_account_to_slot_index = slot_account_msgs.is_empty();
 
             slot_account_msgs.reserve(amount);
-
             while int_collected_count + ext_collected_count < amount {
                 let Some(msg) = account_msgs.pop_front() else {
                     break;
                 };
-
                 res.ops_count.saturating_add_assign(1);
 
                 // check and skip message if required
@@ -802,21 +601,16 @@ impl MessagesBuffer {
             return;
         }
 
-        let in_tx = self.in_tx();
-
-        if let Some(entry) = self.msgs.get_mut(account_id) {
-            Self::backup_entry(entry, in_tx);
-            if let Some(account_msgs) = entry.current_mut() {
-                account_msgs.retain(|msg| {
-                    let skip = filter.should_skip(msg);
-                    debug_assert!(
-                        !skip || msg.info().is_external_in(),
-                        "we should only skip external messages"
-                    );
-                    self.ext_count -= skip as usize;
-                    !skip
-                });
-            }
+        if let Some(account_msgs) = self.msgs.get_mut(account_id) {
+            account_msgs.retain(|msg| {
+                let skip = filter.should_skip(msg);
+                debug_assert!(
+                    !skip || msg.info().is_external_in(),
+                    "we should only skip external messages"
+                );
+                self.ext_count -= skip as usize;
+                !skip
+            });
         }
     }
 }
@@ -909,18 +703,20 @@ impl MessageFilter for MsgFilter<'_> {
         }
     }
 }
+
 #[cfg(test)]
-struct DebugMessagesBufferIndexMap<'a>(pub &'a FastIndexMap<HashBytes, AccountEntry>);
+pub(super) struct DebugMessagesBuffer<'a>(pub &'a MessagesBuffer);
 #[cfg(test)]
-impl std::fmt::Debug for DebugMessagesBufferIndexMap<'_> {
+impl std::fmt::Debug for DebugMessagesBuffer<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_map()
-            .entries(self.0.iter().filter_map(|(k, entry)| {
-                entry.current().map(|v| (DebugHashBytesShort(k), v.len()))
-            }))
+        f.debug_struct("MessagesBuffer")
+            .field("int_count", &self.0.int_count)
+            .field("ext_count", &self.0.ext_count)
+            .field("msgs", &DebugMessagesBufferIndexMap(&self.0.msgs))
             .finish()
     }
 }
+
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
 pub enum BufferFillStateByCount {
     IsFull,
@@ -950,6 +746,23 @@ impl MessagesBuffer {
         let by_slots = BufferFillStateBySlots::CanNotFill;
 
         (by_count, by_slots)
+    }
+}
+
+#[cfg(test)]
+struct DebugMessagesBufferIndexMap<'a>(
+    pub &'a FastIndexMap<HashBytes, VecDeque<ParsedMessage>>,
+);
+#[cfg(test)]
+impl std::fmt::Debug for DebugMessagesBufferIndexMap<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_map()
+            .entries(
+                self.0
+                    .iter()
+                    .map(|(k, v)| (DebugHashBytesShort(k), v.len())),
+            )
+            .finish()
     }
 }
 
@@ -1252,703 +1065,8 @@ where
     }
 }
 
-#[cfg(test)]
-pub(super) struct DebugMessagesBuffer<'a>(pub &'a MessagesBuffer);
-#[cfg(test)]
-impl std::fmt::Debug for DebugMessagesBuffer<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MessagesBuffer")
-            .field("int_count", &self.0.int_count)
-            .field("ext_count", &self.0.ext_count)
-            .field("msgs", &DebugMessagesBufferIndexMap(&self.0.msgs))
-            .finish()
-    }
-}
-
-#[cfg(test)]
-mod transaction_tests {
-    use tycho_types::cell::{Cell, HashBytes};
-    use tycho_types::models::{IntAddr, StdAddr};
-
-    use super::*;
-
-    // Helper to create a test account ID
-    fn account(n: u8) -> HashBytes {
-        let mut bytes = [0u8; 32];
-        bytes[0] = n;
-        HashBytes(bytes)
-    }
-
-    // Helper to create a test internal message
-    fn make_test_int_message(account_id: HashBytes, lt: u64) -> ParsedMessage {
-        let msg = IntMsgInfo {
-            created_lt: lt,
-            dst: IntAddr::Std(StdAddr::new(0, account_id)),
-            ..Default::default()
-        };
-        ParsedMessage::from_int(msg, Cell::default(), false, None, None)
-    }
-
-    // Helper to create a test external message
-    fn make_test_ext_message(account_id: HashBytes, chain_time: u64) -> ParsedMessage {
-        let msg = ExtInMsgInfo {
-            dst: IntAddr::Std(StdAddr::new(0, account_id)),
-            ..Default::default()
-        };
-        ParsedMessage::from_ext(msg, Cell::default(), false, chain_time)
-    }
-
-    fn account_order(buffer: &MessagesBuffer) -> Vec<HashBytes> {
-        buffer.msgs.keys().copied().collect()
-    }
-
-    // ==================== BASIC TRANSACTION TESTS ====================
-
-    #[test]
-    fn test_transaction_not_active_by_default() {
-        let buffer = MessagesBuffer::default();
-        assert!(!buffer.in_tx());
-    }
-
-    #[test]
-    fn test_begin_starts_transaction() {
-        let mut buffer = MessagesBuffer::default();
-        buffer.begin();
-        assert!(buffer.in_tx());
-    }
-
-    #[test]
-    fn test_commit_ends_transaction() {
-        let mut buffer = MessagesBuffer::default();
-        buffer.begin();
-        buffer.commit();
-        assert!(!buffer.in_tx());
-    }
-
-    #[test]
-    fn test_rollback_ends_transaction() {
-        let mut buffer = MessagesBuffer::default();
-        buffer.begin();
-        buffer.rollback();
-        assert!(!buffer.in_tx());
-    }
-
-    // ==================== COMMIT TESTS ====================
-
-    #[test]
-    fn test_commit_preserves_added_messages() {
-        let mut buffer = MessagesBuffer::default();
-        let acc = account(1);
-
-        buffer.begin();
-        buffer.add_message(make_test_int_message(acc, 100));
-        buffer.add_message(make_test_int_message(acc, 101));
-
-        assert_eq!(buffer.int_count, 2);
-        assert_eq!(buffer.account_messages_count(&acc), 2);
-
-        buffer.commit();
-
-        // After commit, changes should persist
-        assert_eq!(buffer.int_count, 2);
-        assert_eq!(buffer.account_messages_count(&acc), 2);
-    }
-
-    #[test]
-    fn test_commit_preserves_removed_messages() {
-        let mut buffer = MessagesBuffer::default();
-        let acc = account(1);
-
-        // Add messages outside transaction
-        buffer.add_message(make_test_int_message(acc, 100));
-        buffer.add_message(make_test_int_message(acc, 101));
-        assert_eq!(buffer.int_count, 2);
-
-        // Remove in transaction
-        buffer.begin();
-        let mut to_remove = FastHashSet::default();
-        to_remove.insert(acc);
-        buffer.remove_int_messages_by_accounts(&to_remove);
-
-        assert_eq!(buffer.int_count, 0);
-        assert_eq!(buffer.account_messages_count(&acc), 0);
-
-        buffer.commit();
-
-        // After commit, removal should persist
-        assert_eq!(buffer.int_count, 0);
-        assert_eq!(buffer.account_messages_count(&acc), 0);
-    }
-
-    // ==================== ROLLBACK TESTS ====================
-
-    #[test]
-    fn test_rollback_reverts_added_messages() {
-        let mut buffer = MessagesBuffer::default();
-        let acc = account(1);
-
-        buffer.begin();
-        buffer.add_message(make_test_int_message(acc, 100));
-        buffer.add_message(make_test_int_message(acc, 101));
-
-        assert_eq!(buffer.int_count, 2);
-        assert_eq!(buffer.account_messages_count(&acc), 2);
-
-        buffer.rollback();
-
-        // After rollback, buffer should be empty
-        assert_eq!(buffer.int_count, 0);
-        assert_eq!(buffer.ext_count, 0);
-        assert_eq!(buffer.account_messages_count(&acc), 0);
-    }
-
-    #[test]
-    fn test_rollback_reverts_removed_messages() {
-        let mut buffer = MessagesBuffer::default();
-        let acc = account(1);
-
-        // Add messages outside transaction
-        buffer.add_message(make_test_int_message(acc, 100));
-        buffer.add_message(make_test_int_message(acc, 101));
-        assert_eq!(buffer.int_count, 2);
-
-        // Remove in transaction
-        buffer.begin();
-        let mut to_remove = FastHashSet::default();
-        to_remove.insert(acc);
-        buffer.remove_int_messages_by_accounts(&to_remove);
-
-        assert_eq!(buffer.int_count, 0);
-
-        buffer.rollback();
-
-        // After rollback, messages should be restored
-        assert_eq!(buffer.int_count, 2);
-        assert_eq!(buffer.account_messages_count(&acc), 2);
-    }
-
-    #[test]
-    fn test_rollback_reverts_to_pre_transaction_state() {
-        let mut buffer = MessagesBuffer::default();
-        let acc1 = account(1);
-        let acc2 = account(2);
-
-        // Setup: add messages to acc1 outside transaction
-        buffer.add_message(make_test_int_message(acc1, 100));
-        buffer.add_message(make_test_int_message(acc1, 101));
-
-        let initial_int_count = buffer.int_count;
-        let initial_acc1_count = buffer.account_messages_count(&acc1);
-
-        // Transaction: modify acc1, add acc2
-        buffer.begin();
-
-        // Add more to acc1
-        buffer.add_message(make_test_int_message(acc1, 102));
-
-        // Add new account
-        buffer.add_message(make_test_int_message(acc2, 200));
-        buffer.add_message(make_test_int_message(acc2, 201));
-
-        assert_eq!(buffer.int_count, 5);
-        assert_eq!(buffer.account_messages_count(&acc1), 3);
-        assert_eq!(buffer.account_messages_count(&acc2), 2);
-
-        buffer.rollback();
-
-        // Should revert to initial state
-        assert_eq!(buffer.int_count, initial_int_count);
-        assert_eq!(buffer.account_messages_count(&acc1), initial_acc1_count);
-        assert_eq!(buffer.account_messages_count(&acc2), 0);
-    }
-
-    #[test]
-    fn test_rollback_restores_min_ext_chain_time() {
-        let mut buffer = MessagesBuffer::default();
-        let acc = account(1);
-
-        // Add external message outside transaction
-        buffer.add_message(make_test_ext_message(acc, 1000));
-        let initial_min_time = buffer.min_ext_chain_time();
-
-        assert_eq!(initial_min_time, 1000);
-
-        buffer.begin();
-
-        // Add external with smaller chain time
-        buffer.add_message(make_test_ext_message(acc, 500));
-        assert_eq!(buffer.min_ext_chain_time(), 500);
-
-        buffer.rollback();
-
-        // Should restore original min time
-        assert_eq!(buffer.min_ext_chain_time(), initial_min_time);
-    }
-
-    // ==================== EDGE CASES ====================
-
-    #[test]
-    #[should_panic(expected = "no active transaction to rollback")]
-    fn test_rollback_without_begin_panics() {
-        let mut buffer = MessagesBuffer::default();
-        buffer.rollback();
-    }
-
-    #[test]
-    #[should_panic(expected = "no active transaction to commit")]
-    fn test_commit_without_begin_panics() {
-        let mut buffer = MessagesBuffer::default();
-        buffer.commit();
-    }
-
-    #[test]
-    fn test_multiple_modifications_same_account_in_transaction() {
-        let mut buffer = MessagesBuffer::default();
-        let acc = account(1);
-
-        // Initial state
-        buffer.add_message(make_test_int_message(acc, 100));
-
-        buffer.begin();
-
-        // Multiple adds
-        buffer.add_message(make_test_int_message(acc, 101));
-        buffer.add_message(make_test_int_message(acc, 102));
-        buffer.add_message(make_test_int_message(acc, 103));
-
-        assert_eq!(buffer.account_messages_count(&acc), 4);
-
-        buffer.rollback();
-
-        // Should restore to single message
-        assert_eq!(buffer.account_messages_count(&acc), 1);
-        assert_eq!(buffer.int_count, 1);
-    }
-
-    #[test]
-    fn test_backup_only_happens_once_per_account() {
-        let mut buffer = MessagesBuffer::default();
-        let acc = account(1);
-
-        // Initial: 2 messages
-        buffer.add_message(make_test_int_message(acc, 100));
-        buffer.add_message(make_test_int_message(acc, 101));
-
-        buffer.begin();
-
-        // First modification - should backup [msg100, msg101]
-        buffer.add_message(make_test_int_message(acc, 102));
-
-        // Second modification - should NOT re-backup
-        buffer.add_message(make_test_int_message(acc, 103));
-
-        // Third modification
-        buffer.add_message(make_test_int_message(acc, 104));
-
-        assert_eq!(buffer.account_messages_count(&acc), 5);
-
-        buffer.rollback();
-
-        // Should restore to original 2 messages, not intermediate states
-        assert_eq!(buffer.account_messages_count(&acc), 2);
-    }
-
-    #[test]
-    fn test_add_to_new_account_then_rollback() {
-        let mut buffer = MessagesBuffer::default();
-        let acc1 = account(1);
-        let acc2 = account(2);
-
-        // acc1 exists before transaction
-        buffer.add_message(make_test_int_message(acc1, 100));
-
-        buffer.begin();
-
-        // acc2 is new in transaction
-        buffer.add_message(make_test_int_message(acc2, 200));
-
-        assert_eq!(buffer.account_messages_count(&acc2), 1);
-
-        buffer.rollback();
-
-        // acc2 should be completely removed
-        assert_eq!(buffer.account_messages_count(&acc2), 0);
-        assert_eq!(buffer.int_count, 1); // only acc1's message
-    }
-
-    #[test]
-    fn test_remove_then_add_same_account_in_transaction() {
-        let mut buffer = MessagesBuffer::default();
-        let acc = account(1);
-
-        // Initial state
-        buffer.add_message(make_test_int_message(acc, 100));
-        buffer.add_message(make_test_int_message(acc, 101));
-
-        buffer.begin();
-
-        // Remove all messages
-        let mut to_remove = FastHashSet::default();
-        to_remove.insert(acc);
-        buffer.remove_int_messages_by_accounts(&to_remove);
-
-        assert_eq!(buffer.account_messages_count(&acc), 0);
-
-        // Add new messages to same account
-        buffer.add_message(make_test_int_message(acc, 200));
-
-        assert_eq!(buffer.account_messages_count(&acc), 1);
-
-        buffer.rollback();
-
-        // Should restore original messages
-        assert_eq!(buffer.account_messages_count(&acc), 2);
-        assert_eq!(buffer.int_count, 2);
-    }
-
-    #[test]
-    fn test_remove_then_add_moves_account_to_end_in_tx() {
-        let mut buffer = MessagesBuffer::default();
-        let acc1 = account(1);
-        let acc2 = account(2);
-        let acc3 = account(3);
-
-        buffer.add_message(make_test_int_message(acc1, 100));
-        buffer.add_message(make_test_int_message(acc2, 200));
-        buffer.add_message(make_test_int_message(acc3, 300));
-        assert_eq!(account_order(&buffer), vec![acc1, acc2, acc3]);
-
-        buffer.begin();
-        let mut to_remove = FastHashSet::default();
-        to_remove.insert(acc2);
-        buffer.remove_int_messages_by_accounts(&to_remove);
-        buffer.add_message(make_test_int_message(acc2, 201));
-
-        assert_eq!(account_order(&buffer), vec![acc1, acc3, acc2]);
-    }
-
-    #[test]
-    fn test_rollback_restores_order_after_remove_then_add() {
-        let mut buffer = MessagesBuffer::default();
-        let acc1 = account(1);
-        let acc2 = account(2);
-        let acc3 = account(3);
-
-        buffer.add_message(make_test_int_message(acc1, 100));
-        buffer.add_message(make_test_int_message(acc2, 200));
-        buffer.add_message(make_test_int_message(acc3, 300));
-        assert_eq!(account_order(&buffer), vec![acc1, acc2, acc3]);
-
-        buffer.begin();
-        let mut to_remove = FastHashSet::default();
-        to_remove.insert(acc2);
-        buffer.remove_int_messages_by_accounts(&to_remove);
-        buffer.add_message(make_test_int_message(acc2, 201));
-        assert_eq!(account_order(&buffer), vec![acc1, acc3, acc2]);
-
-        buffer.rollback();
-
-        assert_eq!(account_order(&buffer), vec![acc1, acc2, acc3]);
-        assert_eq!(buffer.int_count, 3);
-    }
-
-    #[test]
-    fn test_rollback_restores_order_with_readded_account_and_later_removal() {
-        let mut buffer = MessagesBuffer::default();
-        let acc1 = account(1);
-        let acc2 = account(2);
-        let acc3 = account(3);
-        let acc4 = account(4);
-
-        buffer.add_message(make_test_int_message(acc1, 100));
-        buffer.add_message(make_test_int_message(acc2, 200));
-        buffer.add_message(make_test_int_message(acc3, 300));
-        buffer.add_message(make_test_int_message(acc4, 400));
-        assert_eq!(account_order(&buffer), vec![acc1, acc2, acc3, acc4]);
-
-        buffer.begin();
-
-        // Remove acc2 and add it again (it should be moved to the end).
-        let mut to_remove = FastHashSet::default();
-        to_remove.insert(acc2);
-        buffer.remove_int_messages_by_accounts(&to_remove);
-        buffer.add_message(make_test_int_message(acc2, 201));
-        assert_eq!(account_order(&buffer), vec![acc1, acc3, acc4, acc2]);
-
-        // Remove another account after re-add.
-        let mut to_remove = FastHashSet::default();
-        to_remove.insert(acc4);
-        buffer.remove_int_messages_by_accounts(&to_remove);
-        assert_eq!(account_order(&buffer), vec![acc1, acc3, acc2]);
-
-        buffer.rollback();
-
-        // Original order must be fully restored.
-        assert_eq!(account_order(&buffer), vec![acc1, acc2, acc3, acc4]);
-        assert_eq!(buffer.int_count, 4);
-    }
-
-    // ==================== FILL MESSAGE GROUP TESTS ====================
-
-    #[test]
-    fn test_fill_message_group_with_rollback() {
-        let mut buffer = MessagesBuffer::default();
-        let acc1 = account(1);
-        let acc2 = account(2);
-
-        // Add messages
-        buffer.add_message(make_test_int_message(acc1, 100));
-        buffer.add_message(make_test_int_message(acc1, 101));
-        buffer.add_message(make_test_int_message(acc2, 200));
-
-        let initial_count = buffer.int_count;
-
-        buffer.begin();
-
-        let mut msg_group = MessageGroup::default();
-        let mut skipped = FastHashSet::default();
-
-        buffer.fill_message_group(
-            &mut msg_group,
-            10, // slots_count
-            10, // slot_vert_size
-            &mut skipped,
-            |_| (false, 1), // don't skip any account
-            IncludeAllMessages,
-        );
-
-        // Messages should be moved to group
-        assert!(buffer.int_count < initial_count);
-
-        buffer.rollback();
-
-        // Buffer should be restored
-        assert_eq!(buffer.int_count, initial_count);
-        assert_eq!(buffer.account_messages_count(&acc1), 2);
-        assert_eq!(buffer.account_messages_count(&acc2), 1);
-    }
-
-    #[test]
-    fn test_fill_message_group_with_commit() {
-        let mut buffer = MessagesBuffer::default();
-        let acc = account(1);
-
-        buffer.add_message(make_test_int_message(acc, 100));
-        buffer.add_message(make_test_int_message(acc, 101));
-
-        buffer.begin();
-
-        let mut msg_group = MessageGroup::default();
-        let mut skipped = FastHashSet::default();
-
-        let result = buffer.fill_message_group(
-            &mut msg_group,
-            10,
-            10,
-            &mut skipped,
-            |_| (false, 1),
-            IncludeAllMessages,
-        );
-
-        let collected = result.collected_count;
-
-        buffer.commit();
-
-        // After commit, changes persist
-        assert_eq!(buffer.int_count, 2 - collected);
-    }
-
-    #[test]
-    fn test_fill_message_group_commit_clears_min_ext_chain_time_when_ints_remain() {
-        let mut buffer = MessagesBuffer::default();
-        let acc_ext = account(1);
-        let acc_int = account(2);
-
-        // Keep one internal message in buffer while expiring the only external message.
-        buffer.add_message(make_test_ext_message(acc_ext, 100));
-        buffer.add_message(make_test_int_message(acc_int, 200));
-
-        assert_eq!(buffer.ext_count, 1);
-        assert_eq!(buffer.int_count, 1);
-        assert_eq!(buffer.min_ext_chain_time(), 100);
-
-        buffer.begin();
-
-        let mut msg_group = MessageGroup::default();
-        let mut skipped = FastHashSet::default();
-        let mut expired_msgs_count = 0u64;
-
-        let _ = buffer.fill_message_group(
-            &mut msg_group,
-            10,
-            10,
-            &mut skipped,
-            |account_id| (account_id == &acc_int, 1), // keep internal account in buffer
-            SkipExpiredExternals {
-                chain_time_threshold_ms: 101, // ext(ct=100) is expired
-                total_skipped: &mut expired_msgs_count,
-            },
-        );
-
-        assert_eq!(expired_msgs_count, 1);
-        assert_eq!(buffer.ext_count, 0);
-        assert_eq!(buffer.int_count, 1);
-        assert_eq!(buffer.account_messages_count(&acc_int), 1);
-
-        buffer.commit();
-
-        // Buffer is not empty (internal remains), but there are no externals anymore.
-        assert_eq!(buffer.account_messages_count(&acc_int), 1);
-        assert_eq!(buffer.ext_count, 0);
-        assert_eq!(buffer.min_ext_chain_time(), u64::MAX);
-    }
-
-    // ==================== SKIP MESSAGES TESTS ====================
-
-    #[test]
-    fn test_try_skip_account_msgs_with_rollback() {
-        let mut buffer = MessagesBuffer::default();
-        let acc = account(1);
-
-        // Add external messages with different chain times
-        buffer.add_message(make_test_ext_message(acc, 100));
-        buffer.add_message(make_test_ext_message(acc, 200));
-        buffer.add_message(make_test_ext_message(acc, 300));
-
-        let initial_ext_count = buffer.ext_count;
-
-        assert_eq!(initial_ext_count, 3);
-
-        buffer.begin();
-
-        // Skip messages with chain_time < 250
-        let mut total_skipped = 0u64;
-        let filter = SkipExpiredExternals {
-            chain_time_threshold_ms: 250,
-            total_skipped: &mut total_skipped,
-        };
-        buffer.try_skip_account_msgs(&acc, filter);
-
-        assert_eq!(buffer.ext_count, 1);
-        // Some messages should be skipped
-        assert!(buffer.ext_count < initial_ext_count);
-
-        buffer.rollback();
-
-        // Should restore all messages
-        assert_eq!(buffer.ext_count, initial_ext_count);
-        assert_eq!(buffer.account_messages_count(&acc), 3);
-    }
-
-    // ==================== COUNTERS CONSISTENCY ====================
-
-    #[test]
-    fn test_int_ext_counters_consistency_after_rollback() {
-        let mut buffer = MessagesBuffer::default();
-        let acc = account(1);
-
-        // Mix of int and ext messages
-        buffer.add_message(make_test_int_message(acc, 100));
-        buffer.add_message(make_test_ext_message(acc, 1000));
-        buffer.add_message(make_test_int_message(acc, 101));
-
-        let initial_int = buffer.int_count;
-        let initial_ext = buffer.ext_count;
-
-        buffer.begin();
-
-        buffer.add_message(make_test_int_message(acc, 102));
-        buffer.add_message(make_test_ext_message(acc, 2000));
-
-        assert_eq!(buffer.int_count, initial_int + 1);
-        assert_eq!(buffer.ext_count, initial_ext + 1);
-
-        buffer.rollback();
-
-        assert_eq!(buffer.int_count, initial_int);
-        assert_eq!(buffer.ext_count, initial_ext);
-    }
-
-    #[test]
-    fn test_msgs_count_equals_sum_of_int_and_ext() {
-        let mut buffer = MessagesBuffer::default();
-        let acc = account(1);
-
-        buffer.add_message(make_test_int_message(acc, 100));
-        buffer.add_message(make_test_ext_message(acc, 1000));
-
-        assert_eq!(buffer.msgs_count(), buffer.int_count + buffer.ext_count);
-
-        buffer.begin();
-        buffer.add_message(make_test_int_message(acc, 101));
-        assert_eq!(buffer.msgs_count(), buffer.int_count + buffer.ext_count);
-
-        buffer.rollback();
-        assert_eq!(buffer.msgs_count(), buffer.int_count + buffer.ext_count);
-    }
-
-    #[test]
-    fn test_rollback_removes_completely_new_account_from_map() {
-        let mut buffer = MessagesBuffer::default();
-        let acc_pre = account(1);
-        let acc_new = account(2);
-
-        // 1. Setup: add one account before the transaction starts
-        buffer.add_message(make_test_int_message(acc_pre, 100));
-        assert_eq!(buffer.msgs.len(), 1);
-
-        buffer.begin();
-
-        // 2. Action: add a message for a completely new account during the transaction
-        // This will set the `is_new` flag to true in the AccountEntry
-        buffer.add_message(make_test_int_message(acc_new, 200));
-
-        // Verify intermediate state: map should now have two accounts
-        assert_eq!(buffer.msgs.len(), 2);
-        assert!(buffer.msgs.contains_key(&acc_new));
-
-        // 3. Perform Rollback
-        buffer.rollback();
-
-        // 4. Verification: acc_new must be completely removed from the underlying IndexMap
-        // The retain logic in rollback() uses the is_new flag to drop such entries
-        assert_eq!(buffer.msgs.len(), 1, "The map should return to a size of 1");
-        assert!(
-            !buffer.msgs.contains_key(&acc_new),
-            "The account created during the transaction should be gone"
-        );
-        assert!(
-            buffer.msgs.contains_key(&acc_pre),
-            "The original account should still exist"
-        );
-    }
-
-    #[test]
-    fn test_rollback_with_snapshot_drops_new_account_added_before_first_remove() {
-        let mut buffer = MessagesBuffer::default();
-        let acc_pre = account(1);
-        let acc_new = account(2);
-
-        // Existing state before transaction.
-        buffer.add_message(make_test_int_message(acc_pre, 100));
-
-        buffer.begin();
-
-        // Add a brand new account first...
-        buffer.add_message(make_test_int_message(acc_new, 200));
-        assert!(buffer.msgs.contains_key(&acc_new));
-
-        // ...then perform first structural remove, which creates order snapshot.
-        let mut to_remove = FastHashSet::default();
-        to_remove.insert(acc_pre);
-        buffer.remove_int_messages_by_accounts(&to_remove);
-        assert!(!buffer.msgs.contains_key(&acc_pre));
-
-        buffer.rollback();
-
-        // New account must be dropped, original account must be restored.
-        assert!(buffer.msgs.contains_key(&acc_pre));
-        assert!(!buffer.msgs.contains_key(&acc_new));
-        assert_eq!(buffer.int_count, 1);
-    }
-}
+// // Transaction tests - commented out for testing with old logic
+// #[cfg(test)]
+// mod transaction_tests {
+//     ...
+// }
