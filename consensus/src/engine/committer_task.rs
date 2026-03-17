@@ -156,12 +156,6 @@ impl Inner {
                 }
             };
 
-            if let Some(new_bottom) = committer.full_history_bottom_reset() {
-                anchors_tx
-                    .send(MempoolOutput::NewStartAfterGap(new_bottom))
-                    .map_err(|_closed| Cancelled())?;
-            }
-
             if let Some(committed) = committed {
                 round_ctx.log_committed(&committed);
                 let anchor_rounds =

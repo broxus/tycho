@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use tycho_consensus::prelude::{
-    MempoolAdapterStore, MempoolConfigBuilder, MempoolDb, MempoolNodeConfig, MempoolOutput,
+    MempoolAdapterStore, MempoolConfigBuilder, MempoolDb, MempoolNodeConfig,
 };
 use tycho_network::PeerId;
 use tycho_storage::StorageContext;
@@ -88,38 +88,25 @@ impl DumpAnchors {
         let mut shuttle = Box::new(Shuttle {
             store: self.store,
             parser: Parser::new(conf.consensus.deduplicate_rounds),
-            first_after_gap: Some(top_processed_to_anchor),
             set_committed_in_db: false,
         });
 
         let mut results = Vec::new();
 
-        for output in outputs {
-            match output {
-                MempoolOutput::NewStartAfterGap(anchors_full_bottom) => {
-                    let first_to_execute =
-                        (anchors_full_bottom + conf.consensus.deduplicate_rounds).0;
-                    shuttle.parser = Parser::new(conf.consensus.deduplicate_rounds);
-                    shuttle.first_after_gap = Some(first_to_execute);
-
-                    tracing::info!(
-                        target: tracing_targets::MEMPOOL_ADAPTER,
-                        new_bottom = anchors_full_bottom.0,
-                        first_after_gap = first_to_execute,
-                        "unrecoverable gap in anchor chain",
-                    );
-                }
-                MempoolOutput::NextAnchor(adata) => {
-                    let (output, dirty) = shuttle.handle(adata).await?;
-                    if let Some(anchor) = output {
-                        results.push(anchor);
-                    };
-                    shuttle = dirty.clean().await?;
-                }
-                MempoolOutput::CommitFinished(_)
-                | MempoolOutput::Running
-                | MempoolOutput::Paused => {}
-            }
+        for adata in outputs {
+            if adata.needs_empty_cache {
+                shuttle.parser = Parser::new(conf.consensus.deduplicate_rounds);
+                tracing::info!(
+                    target: tracing_targets::MEMPOOL_ADAPTER,
+                    is_executable = adata.is_executable,
+                    "deduplication state dropped",
+                );
+            };
+            let (output, dirty) = shuttle.handle(Box::new(adata)).await?;
+            if let Some(anchor) = output {
+                results.push(anchor);
+            };
+            shuttle = dirty.clean().await?;
         }
 
         Ok(results)

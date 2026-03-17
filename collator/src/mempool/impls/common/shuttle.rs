@@ -12,8 +12,6 @@ use crate::tracing_targets;
 pub struct Shuttle {
     pub store: MempoolAdapterStore,
     pub parser: Parser,
-    /// value set from outside, but cleaned inside
-    pub first_after_gap: Option<MempoolAnchorId>,
     pub set_committed_in_db: bool,
 }
 
@@ -34,8 +32,6 @@ impl Shuttle {
         metrics::gauge!("tycho_mempool_last_anchor_round").set(anchor_id);
 
         let chain_time = committed.anchor.time().millis();
-        let is_executable =
-            (self.first_after_gap.as_ref()).is_none_or(|first_id| anchor_id >= *first_id);
 
         let task = tokio::task::spawn_blocking(move || {
             let bump = Bump::with_capacity(
@@ -54,30 +50,13 @@ impl Shuttle {
 
             let unique_messages_len = unique_messages.len();
 
-            let output = if is_executable {
-                // don't link to prev anchor in case there was a gap
-                let prev_id = if self.first_after_gap.is_some() {
-                    self.first_after_gap = None;
-                    None
-                } else {
-                    committed.prev_anchor.map(|round| round.0)
-                };
-                Some(MempoolAnchor {
-                    id: anchor_id,
-                    prev_id,
-                    chain_time,
-                    author: *committed.anchor.author(),
-                    externals: unique_messages,
-                })
-            } else {
-                None
-            };
-
-            let dirty = DirtyShuttle {
-                shuttle: self,
-                committed,
-                bump,
-            };
+            let output = committed.is_executable.then(|| MempoolAnchor {
+                id: anchor_id,
+                prev_id: committed.prev_anchor.map(|round| round.0),
+                chain_time,
+                author: *committed.anchor.author(),
+                externals: unique_messages,
+            });
 
             metrics::counter!("tycho_mempool_msgs_unique_count")
                 .increment(unique_messages_len as _);
@@ -96,12 +75,19 @@ impl Shuttle {
             tracing::info!(
                 target: tracing_targets::MEMPOOL_ADAPTER,
                 id = anchor_id,
-                %is_executable,
+                is_executable = committed.is_executable,
+                needs_empty_cache = committed.needs_empty_cache,
                 time = chain_time,
                 externals_unique = unique_messages_len,
                 externals_skipped = total_messages - unique_messages_len,
                 "new anchor"
             );
+
+            let dirty = DirtyShuttle {
+                shuttle: self,
+                committed,
+                bump,
+            };
 
             Ok((output, dirty))
         });

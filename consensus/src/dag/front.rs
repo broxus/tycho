@@ -1,5 +1,6 @@
 use crate::dag::{Committer, DagHead, DagRound};
 use crate::effects::{AltFmt, AltFormat, Ctx, EngineCtx, RoundCtx};
+use crate::engine::lifecycle::FixHistoryFlag;
 use crate::engine::{ConsensusConfigExt, MempoolConfig};
 use crate::intercom::PeerSchedule;
 use crate::models::Round;
@@ -24,10 +25,15 @@ impl Default for DagFront {
 }
 
 impl DagFront {
-    pub fn init(&mut self, dag_bottom_round: DagRound, conf: &MempoolConfig) -> Committer {
+    pub fn init(
+        &mut self,
+        dag_bottom_round: DagRound,
+        fix_history: FixHistoryFlag,
+        conf: &MempoolConfig,
+    ) -> Committer {
         assert!(self.rounds.is_empty(), "DAG already initialized");
         let mut committer = Committer::default();
-        committer.init(&dag_bottom_round, conf);
+        committer.init(&dag_bottom_round, fix_history.0, conf);
         self.last_back_bottom = dag_bottom_round.round();
         self.rounds.push(dag_bottom_round);
         assert_eq!(
@@ -101,7 +107,7 @@ impl DagFront {
             if self.has_pending_back_reset {
                 self.has_pending_back_reset = false;
                 *committer = Committer::default();
-                committer.init(self.rounds.first().expect("must be init"), conf);
+                committer.init(self.rounds.first().expect("must be init"), true, conf);
                 assert_eq!(
                     self.last_back_bottom,
                     committer.bottom_round(),

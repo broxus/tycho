@@ -41,7 +41,6 @@ impl StdAnchorHandler {
         let mut shuttle = Box::new(Shuttle {
             store: MempoolAdapterStore::new(mempool_db),
             parser: Parser::new(self.deduplicate_rounds),
-            first_after_gap: None,
             set_committed_in_db: true,
         });
         while let Some(output) = self.anchor_rx.recv().await {
@@ -57,6 +56,16 @@ impl StdAnchorHandler {
     ) -> Result<Box<Shuttle>> {
         match output {
             MempoolOutput::NextAnchor(adata) => {
+                if adata.needs_empty_cache {
+                    shuttle.parser = Parser::new(self.deduplicate_rounds);
+                    // every anchor is repeatable, i.e. enough tail is preserved
+                    self.commit_finished.set_max_raw(adata.anchor.round().0);
+                    tracing::info!(
+                        target: tracing_targets::MEMPOOL_ADAPTER,
+                        is_executable = adata.is_executable,
+                        "deduplication state dropped",
+                    );
+                };
                 let (output, dirty) = shuttle.handle(adata).await?;
                 if let Some(anchor) = output {
                     self.cache.push(Arc::new(anchor))?;
@@ -66,22 +75,6 @@ impl StdAnchorHandler {
             MempoolOutput::CommitFinished(round) => {
                 // history payloads are read from DB and marked committed, so ready to be removed
                 self.commit_finished.set_max(round);
-            }
-            MempoolOutput::NewStartAfterGap(anchors_full_bottom) => {
-                let first_to_execute = (anchors_full_bottom + self.deduplicate_rounds).0;
-
-                shuttle.parser = Parser::new(self.deduplicate_rounds);
-                shuttle.first_after_gap = Some(first_to_execute);
-
-                // set as committed because every anchor is repeatable, i.e. enough tail is preserved
-                self.commit_finished.set_max_raw(first_to_execute);
-
-                tracing::info!(
-                    target: tracing_targets::MEMPOOL_ADAPTER,
-                    new_bottom = anchors_full_bottom.0,
-                    first_after_gap = first_to_execute,
-                    "externals cache dropped",
-                );
             }
             MempoolOutput::Running => self.cache.set_paused(false),
             MempoolOutput::Paused => self.cache.set_paused(true),

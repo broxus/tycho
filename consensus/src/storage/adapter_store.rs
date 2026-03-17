@@ -12,11 +12,11 @@ use weedb::rocksdb::{ReadOptions, WriteBatch};
 
 use super::MempoolStore;
 use crate::effects::AltFormat;
-use crate::engine::{ConsensusConfigExt, MempoolConfig};
+use crate::engine::MempoolConfig;
 use crate::models::point_status::{
     AnchorFlags, CommitHistoryPart, PointStatusCommittable, PointStatusStore,
 };
-use crate::models::{AnchorData, MempoolOutput, Point, PointInfo, PointKey, PointRestore, Round};
+use crate::models::{AnchorData, Point, PointInfo, PointKey, PointRestore, Round};
 use crate::storage::MempoolDb;
 
 #[derive(Clone)]
@@ -199,17 +199,20 @@ impl MempoolAdapterStore {
         Ok(db.write(batch)?)
     }
 
+    /// no overlay id check: do not rewrite db state, just try to load data
     pub async fn restore_committed(
         &self,
         top_processed_to_anchor: u32,
         conf: &MempoolConfig,
-    ) -> Result<Vec<MempoolOutput>> {
-        // no overlay id check: do not rewrite db state, just try to load data
+    ) -> Result<Vec<AnchorData>> {
+        let top_known_anchor = Round(top_processed_to_anchor);
 
-        let bottom_round = (conf.genesis_round)
-            .max(Round(top_processed_to_anchor) - conf.consensus.replay_anchor_rounds());
+        let bottom_round = (conf.genesis_round).max(
+            (top_known_anchor - conf.consensus.commit_history_rounds.get())
+                - conf.consensus.deduplicate_rounds,
+        );
 
-        let anchors = self
+        let mut anchors = self
             .load_history_since(bottom_round, conf)
             .context("load history")?;
 
@@ -218,22 +221,41 @@ impl MempoolAdapterStore {
             "anchors must be restored in order"
         );
 
-        let mut output = Vec::<MempoolOutput>::new();
         let mut last_visited = None;
+        let mut first_executable = Some(top_known_anchor);
 
-        for adata in anchors {
+        for adata in &mut anchors {
             let has_gap = last_visited.is_some() && last_visited != adata.prev_anchor;
             if has_gap {
                 anyhow::ensure!(adata.prev_anchor.is_some(), "don't expect genesis");
                 let adata_bottom = adata.history.first().unwrap_or(&adata.anchor).round();
-                let full_history_bottom = adata_bottom + conf.consensus.commit_history_rounds.get();
-                output.push(MempoolOutput::NewStartAfterGap(full_history_bottom));
+                let full_history_bottom = if adata_bottom
+                    <= conf.genesis_round + conf.consensus.commit_history_rounds.get()
+                {
+                    adata_bottom
+                } else {
+                    adata_bottom + conf.consensus.commit_history_rounds.get()
+                };
+                first_executable = Some(
+                    top_known_anchor.max(full_history_bottom + conf.consensus.deduplicate_rounds),
+                );
+                adata.needs_empty_cache = true; // for any one, either executable or not
             };
+            if let Some(first_to_execute) = first_executable {
+                if adata.anchor.round() < first_to_execute {
+                    adata.is_executable = false;
+                } else {
+                    first_executable = None;
+                    adata.prev_anchor = None; // unlink first executable
+                    adata.is_executable = true;
+                }
+            } else {
+                adata.is_executable = true;
+            }
             last_visited = Some(adata.anchor.round());
-            output.push(MempoolOutput::NextAnchor(Box::new(adata)));
         }
 
-        Ok(output)
+        Ok(anchors)
     }
 
     fn load_history_since(
@@ -301,6 +323,8 @@ impl MempoolAdapterStore {
                     .filter(|r| *r > conf.genesis_round)
                     .map(|r| r.prev()),
                 history: keyed_vec.into_iter().map(|(_, info)| info).collect(),
+                is_executable: false,     // define later
+                needs_empty_cache: false, // define later
             });
         }
         Ok(result)

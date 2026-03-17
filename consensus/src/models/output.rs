@@ -7,16 +7,14 @@ use crate::models::{MempoolPeerStats, PointInfo, PointKey, Round};
 pub struct AnchorData {
     pub proof_key: PointKey,
     pub anchor: PointInfo,
-    // first anchor after Genesis is not linked to previous one
+    /// first anchor after Genesis is not linked to previous one
     pub prev_anchor: Option<Round>,
     pub history: Vec<PointInfo>,
+    pub is_executable: bool,
+    pub needs_empty_cache: bool,
 }
 
 pub enum MempoolOutput {
-    // tells the mempool adapter which anchors to skip because some first ones after a gap
-    // have incomplete history that should not be taken into account
-    // (it's no harm to use it for deduplication - it will be evicted after buffer is refilled)
-    NewStartAfterGap(Round),
     NextAnchor(Box<AnchorData>),
     // must be sent after NextAnchor to make data available for GC
     CommitFinished(Round),
