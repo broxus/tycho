@@ -883,6 +883,7 @@ impl Phase<FinalizeState> {
 
             validator_info = session_update.apply(
                 &mut consensus_info,
+                prev_state_extra.validator_info.catchain_seqno,
                 next_session_start_round,
                 session_start.is_curr_switch_after_pause,
             )?;
@@ -1599,6 +1600,7 @@ mod vset_update_start {
         pub fn apply(
             &self,
             consensus_info: &mut ConsensusInfo,
+            prev_catchain_seqno: u32,
             next_session_start_round: u32,
             is_curr_switch_after_pause: bool,
         ) -> Result<Option<ValidatorInfo>> {
@@ -1607,6 +1609,10 @@ mod vset_update_start {
             if is_vset_same && is_shuffle_same {
                 return Ok(None);
             }
+
+            let catchain_seqno = prev_catchain_seqno
+                .checked_add(1)
+                .context("catchain seqno overflow")?;
 
             // simultaneously update session_seqno in collation and consensus if v_(sub)_set changes;
             // genesis change (recovery or config) should not rotate validators by itself, so it
@@ -1625,12 +1631,12 @@ mod vset_update_start {
 
             // calculate next validator subset and hash
             let current_vset = self.current_vset.parse::<ValidatorSet>()?;
-            let Some((_, validator_list_hash_short)) = current_vset
-                .compute_mc_subset(next_session_start_round, self.shuffle_mc_validators)
+            let Some((_, validator_list_hash_short)) =
+                current_vset.compute_mc_subset(catchain_seqno, self.shuffle_mc_validators)
             else {
                 anyhow::bail!(
                     "Error calculating subset of validators for next session \
-                         (shard_id = {}, session_seqno = {next_session_start_round})",
+                         (shard_id = {}, catchain_seqno = {catchain_seqno})",
                     ShardIdent::MASTERCHAIN,
                 );
             };
@@ -1638,7 +1644,7 @@ mod vset_update_start {
             Ok(Some(ValidatorInfo {
                 validator_list_hash_short,
                 // TODO: rename field in types
-                catchain_seqno: next_session_start_round,
+                catchain_seqno,
                 nx_cc_updated: true,
             }))
         }
@@ -1777,12 +1783,17 @@ mod vset_update_start {
             assert_eq!(next_1, after_pause_round);
 
             let validator_info = stub_update
-                .apply(&mut cons_info, next_1, start_1.is_curr_switch_after_pause)
+                .apply(
+                    &mut cons_info,
+                    10,
+                    next_1,
+                    start_1.is_curr_switch_after_pause,
+                )
                 .unwrap()
                 .unwrap();
             assert_eq!(cons_info.prev_vset_switch_round, 0);
             assert_eq!(cons_info.vset_switch_round, after_pause_round);
-            assert_eq!(validator_info.catchain_seqno, next_1);
+            assert_eq!(validator_info.catchain_seqno, 11);
 
             // Second vset change while switch is still "applied/too close": push by full history.
 
@@ -1802,12 +1813,17 @@ mod vset_update_start {
             assert_eq!(next_2, (next_1 + cons_conf.max_total_rounds() + 1));
 
             let validator_info = stub_update
-                .apply(&mut cons_info, next_2, start_2.is_curr_switch_after_pause)
+                .apply(
+                    &mut cons_info,
+                    validator_info.catchain_seqno,
+                    next_2,
+                    start_2.is_curr_switch_after_pause,
+                )
                 .unwrap()
                 .unwrap();
             assert_eq!(cons_info.prev_vset_switch_round, next_1);
             assert_eq!(cons_info.vset_switch_round, next_2);
-            assert_eq!(validator_info.catchain_seqno, next_2);
+            assert_eq!(validator_info.catchain_seqno, 12);
 
             // Third vset change while switch is far in the future: keep the same switch round.
 
@@ -1828,12 +1844,17 @@ mod vset_update_start {
             assert_eq!(next_3, next_2);
 
             let validator_info = stub_update
-                .apply(&mut cons_info, next_3, start_3.is_curr_switch_after_pause)
+                .apply(
+                    &mut cons_info,
+                    validator_info.catchain_seqno,
+                    next_3,
+                    start_3.is_curr_switch_after_pause,
+                )
                 .unwrap()
                 .unwrap();
             assert_eq!(cons_info.prev_vset_switch_round, next_1);
             assert_eq!(cons_info.vset_switch_round, next_2);
-            assert_eq!(validator_info.catchain_seqno, next_2);
+            assert_eq!(validator_info.catchain_seqno, 13);
         }
 
         #[test]
@@ -1849,7 +1870,9 @@ mod vset_update_start {
             let mut cons_info = random_consensus_info();
             let before = cons_info;
 
-            let validator_info = update.apply(&mut cons_info, random(), true).unwrap();
+            let validator_info = update
+                .apply(&mut cons_info, random(), random(), true)
+                .unwrap();
 
             assert!(validator_info.is_none(), "{update:?} {cons_info:?}");
             assert_eq!(cons_info, before, "{update:?} {cons_info:?}");
