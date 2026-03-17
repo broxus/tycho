@@ -3988,6 +3988,7 @@ dependencies = [
  "tempfile",
  "tikv-jemalloc-ctl",
  "tikv-jemallocator",
+ "tl-proto",
  "tokio",
  "tracing",
  "tracing-subscriber",

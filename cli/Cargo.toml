@@ -39,6 +39,7 @@ serde_json = { workspace = true, features = ["preserve_order"] }
 serde_path_to_error = { workspace = true }
 tabled = { workspace = true, default-features = false, features = ["std"] }
 tempfile = { workspace = true }
+tl-proto = { workspace = true }
 tikv-jemalloc-ctl = { workspace = true, optional = true }
 tikv-jemallocator = { workspace = true, features = [
     "unprefixed_malloc_on_supported_platforms",
