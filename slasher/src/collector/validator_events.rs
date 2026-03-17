@@ -12,6 +12,7 @@ use tycho_types::models::{BlockId, IndexedValidatorDescription};
 use tycho_util::{DashMapEntry, FastDashMap};
 
 use crate::bc::BlocksBatch;
+use crate::tracing_targets;
 
 const INIT_QUEUE_CAPACITY: usize = 3;
 
@@ -77,7 +78,11 @@ impl ValidatorEventsCollector {
         if items.len() >= self.init_queue_capacity
             && let Some(info) = items.pop_front()
         {
-            tracing::warn!(session_id = ?info.session_id, "session info dropped from init queue");
+            tracing::warn!(
+                target: tracing_targets::SLASHER,
+                session_id = ?info.session_id,
+                "session info dropped from init queue"
+            );
         }
         items.push_back(info);
     }
@@ -127,7 +132,11 @@ impl ValidatorEventsListener for ValidatorEventsCollector {
         own_validator_idx: u16,
         validators: &[IndexedValidatorDescription],
     ) {
-        tracing::debug!(first_mc_seqno, "on_session_started");
+        tracing::debug!(
+            target: tracing_targets::SLASHER,
+            first_mc_seqno,
+            "on_session_started"
+        );
 
         let validator_indices = validators
             .iter()
@@ -157,17 +166,20 @@ impl ValidatorEventsListener for ValidatorEventsCollector {
                 validators,
             });
         } else {
-            tracing::warn!("duplicate session");
+            tracing::warn!(target: tracing_targets::SLASHER, "duplicate session");
         }
     }
 
     #[instrument(skip_all, fields(session_id = ?session_id))]
     fn on_session_finished(&self, session_id: ValidationSessionId) {
-        tracing::debug!("on_session_finished");
+        tracing::debug!(target: tracing_targets::SLASHER, "on_session_finished");
         if let Some((_, session)) = self.sessions.remove(&session_id)
             && let Err(e) = session.commit_final_batch()
         {
-            tracing::warn!("failed to commit blocks batch on finish: {e:?}");
+            tracing::warn!(
+                target: tracing_targets::SLASHER,
+                "failed to commit blocks batch on finish: {e:?}"
+            );
         }
     }
 
@@ -183,9 +195,16 @@ impl ValidatorEventsListener for ValidatorEventsCollector {
             return;
         }
 
-        tracing::debug!(%block_id, "on_block_validated");
+        tracing::debug!(
+            target: tracing_targets::SLASHER,
+            %block_id,
+            "on_block_validated"
+        );
         let Some(mut session) = self.sessions.get_mut(&session_id) else {
-            tracing::warn!("session not found, ignoring on_block_validated event");
+            tracing::warn!(
+                target: tracing_targets::SLASHER,
+                "session not found, ignoring on_block_validated event"
+            );
             return;
         };
         session.handle_block(block_id.seqno, Some(signatures.as_ref()));
@@ -198,9 +217,16 @@ impl ValidatorEventsListener for ValidatorEventsCollector {
             return;
         }
 
-        tracing::debug!(%block_id, "on_block_skipped");
+        tracing::debug!(
+            target: tracing_targets::SLASHER,
+            %block_id,
+            "on_block_skipped"
+        );
         let Some(mut session) = self.sessions.get_mut(&session_id) else {
-            tracing::warn!("session not found, ignoring on_block_skipped event");
+            tracing::warn!(
+                target: tracing_targets::SLASHER,
+                "session not found, ignoring on_block_skipped event"
+            );
             return;
         };
         session.handle_block(block_id.seqno, None);
@@ -244,7 +270,11 @@ impl SessionState {
         if let Some(batch) = to_commit
             && let Err(e) = self.commit_batch(batch)
         {
-            tracing::error!(event_type, "failed to commit blocks batch: {e:?}");
+            tracing::error!(
+                target: tracing_targets::SLASHER,
+                event_type,
+                "failed to commit blocks batch: {e:?}"
+            );
         }
         true
     }
