@@ -1,4 +1,5 @@
 use std::collections::hash_map;
+use std::num::NonZeroU8;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -836,6 +837,12 @@ fn make_default_params() -> Result<BlockchainConfigParams> {
 
     // Param 31
     params.set_fundamental_addresses(&[HashBytes([0x00; 32]), HashBytes([0x33; 32])])?;
+
+    // Param 666
+    params.set::<ConfigParam666>(&SlasherParamsConfig {
+        address: HashBytes([0x66; 32]),
+        batch_size: NonZeroU8::new(100).unwrap(),
+    })?;
 
     // Param 43
     params.set_size_limits(&SizeLimitsConfig {
