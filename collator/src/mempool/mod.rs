@@ -120,7 +120,7 @@ impl ExternalMessage {
 #[derive(Debug)]
 pub struct MempoolAnchor {
     pub id: MempoolAnchorId,
-    // None for first after Genesis
+    /// `None` for right after any of: either Genesis or an unrecoverable gap
     pub prev_id: Option<MempoolAnchorId>,
     pub author: PeerId,
     pub chain_time: u64,

@@ -11,7 +11,6 @@ use crate::engine::lifecycle::{
 };
 use crate::engine::{Engine, MempoolMergedConfig};
 use crate::intercom::{InitPeers, WeakPeerSchedule};
-use crate::models::MempoolOutput;
 
 pub struct EngineRecoverLoop {
     // to create new engine run
@@ -108,13 +107,6 @@ impl EngineRecoverLoop {
                 }
             }
             engine_restart_tka = Some(current_tka);
-
-            // tell the mempool adapter to drop its cache until mempool restores the history
-            (self.bind.anchors_tx)
-                .send(MempoolOutput::NewStartAfterGap(
-                    current_tka - self.merged_conf.conf.consensus.deduplicate_rounds,
-                ))
-                .ok();
 
             let (task_tracker, net) = {
                 let mut guard = self.run_attrs.lock();

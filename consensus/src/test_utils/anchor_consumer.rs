@@ -63,15 +63,17 @@ impl AnchorConsumer {
     fn drain_anchor(&mut self, file: &mut LastAnchorFile, commit_result: MempoolOutput) {
         let round = match commit_result {
             MempoolOutput::Running | MempoolOutput::Paused => return,
-            MempoolOutput::NewStartAfterGap(round) => {
-                tracing::warn!("gap in anchor chain, next to commit: {}", round.0);
-                round
-            }
-            MempoolOutput::NextAnchor(anchor_data) => {
-                let round = anchor_data.anchor.round();
+            MempoolOutput::NextAnchor(adata) => {
+                if adata.needs_empty_cache {
+                    tracing::warn!(
+                        "gap in anchor chain, first to commit: {}",
+                        adata.anchor.round().0
+                    );
+                }
+                let round = adata.anchor.round();
                 tracing::info!("committed anchor {}", round.0);
                 metrics::gauge!("tycho_mempool_last_anchor_round").set(round.0);
-                tycho_util::mem::Reclaimer::instance().drop(anchor_data);
+                tycho_util::mem::Reclaimer::instance().drop(adata);
                 round
             }
             MempoolOutput::CommitFinished(round) => {
@@ -99,11 +101,15 @@ impl AnchorConsumer {
             MempoolOutput::Running | MempoolOutput::Paused => {
                 return;
             }
-            MempoolOutput::NewStartAfterGap(round) => {
-                tracing::warn!("unrecoverable gap at {} for {}", round.0, peer_id.alt());
-                return;
+            MempoolOutput::NextAnchor(adata) => {
+                if adata.needs_empty_cache {
+                    tracing::warn!(
+                        "gap in anchor chain, first to commit: {}",
+                        adata.anchor.round().0
+                    );
+                }
+                (adata.anchor, adata.history)
             }
-            MempoolOutput::NextAnchor(data) => (data.anchor, data.history),
             MempoolOutput::CommitFinished(round) => {
                 // while MempoolAdapter sets commit_round at this event,
                 // here in simulation we check that every NextAnchor is followed by CommitFinished

@@ -38,7 +38,9 @@ pub struct Committer {
     // some anchors won't contain full history after a gap (filled with sync),
     // so this determines least round at which fully reproducible anchor may be produced
     full_history_bottom: Round,
-    full_history_bottom_reset: Option<Round>,
+    /// `None` for disarmed, `false` for non-executable and `true` for executable
+    emit_first_after_gap: Option<bool>,
+    pub first_executable: Round,
     inspector: RoundInspector,
 }
 
@@ -48,23 +50,35 @@ impl Default for Committer {
             dag: Default::default(),
             anchor_chain: Default::default(),
             full_history_bottom: Round::BOTTOM,
-            full_history_bottom_reset: None,
+            emit_first_after_gap: None,
+            first_executable: Round::BOTTOM,
             inspector: Default::default(),
         }
     }
 }
 
 impl Committer {
-    pub fn init(&mut self, bottom_round: &DagRound, conf: &MempoolConfig) {
+    /// `true` for a path same as mempool restart: commit offset anchors for `Deduplicator` state
+    pub fn init(&mut self, bottom_round: &DagRound, is_after_gap: bool, conf: &MempoolConfig) {
         assert_eq!(
             self.full_history_bottom,
             Round::BOTTOM,
             "already initialized"
         );
         self.dag.init(bottom_round);
-        self.full_history_bottom =
-            bottom_round.round() + conf.consensus.commit_history_rounds.get();
-        self.full_history_bottom_reset = Some(self.full_history_bottom);
+        self.full_history_bottom = if bottom_round.round()
+            <= conf.genesis_round + conf.consensus.commit_history_rounds.get()
+        {
+            bottom_round.round()
+        } else {
+            bottom_round.round() + conf.consensus.commit_history_rounds.get()
+        };
+        self.emit_first_after_gap = is_after_gap.then_some(false);
+        self.first_executable = if is_after_gap {
+            self.full_history_bottom + conf.consensus.deduplicate_rounds
+        } else {
+            bottom_round.round()
+        }
     }
 
     pub fn top_round(&self) -> Round {
@@ -98,12 +112,9 @@ impl Committer {
             tycho_util::mem::Reclaimer::instance().drop(drained);
         }
         self.full_history_bottom = actual_bottom + conf.consensus.commit_history_rounds.get();
-        self.full_history_bottom_reset = Some(self.full_history_bottom);
+        self.emit_first_after_gap = Some(false);
+        self.first_executable = self.full_history_bottom + conf.consensus.deduplicate_rounds;
         actual_bottom == new_bottom_round
-    }
-
-    pub fn full_history_bottom_reset(&mut self) -> Option<Round> {
-        self.full_history_bottom_reset.take()
     }
 
     pub fn remove_committed(
@@ -114,9 +125,13 @@ impl Committer {
         // in case previous anchor was triggered directly - rounds are already dropped
         let drained =
             (self.dag).drain_upto(last_anchor - conf.consensus.commit_history_rounds.get());
+        let last_non_executable = self.first_executable.prev().max(conf.genesis_round);
         for r_0 in &drained {
-            if r_0.round() > conf.genesis_round {
+            if r_0.round() >= last_non_executable {
                 self.inspector.inspect(r_0)?;
+            }
+            if r_0.round() == last_non_executable {
+                self.inspector.take_stats(); // was used only to refill state
             }
         }
         let drained = drained
@@ -281,13 +296,32 @@ impl Committer {
                 committable.info().clone()
             })
             .collect::<Vec<_>>();
+
+        let is_executable = next.anchor.round() >= self.first_executable;
+        let (is_first_executable, needs_empty_cache) =
+            match (is_executable, self.emit_first_after_gap) {
+                (false, Some(false)) => {
+                    self.emit_first_after_gap = Some(true);
+                    (false, true)
+                }
+                (true, Some(cache_reset_signalled)) => {
+                    // if first after gap is executable, then there was no non-executable stage
+                    self.emit_first_after_gap = None;
+                    (true, !cache_reset_signalled)
+                }
+                _ => (false, false),
+            };
+
         Ok(AnchorData {
-            prev_anchor: Some(next.prev_proof_round)
-                .filter(|r| *r > conf.genesis_round)
-                .map(|r| r.prev()),
+            // both first executable anchor and one right after genesis
+            // don't have link to previous anchor; others do
+            prev_anchor: Some(next.prev_proof_round.prev())
+                .filter(|r| *r > conf.genesis_round && !is_first_executable),
             anchor: next.anchor,
             proof_key: next.proof.key(),
             history: committed,
+            is_executable,
+            needs_empty_cache,
         })
     }
 }
@@ -332,6 +366,7 @@ mod test {
     use crate::dag::DagFront;
     use crate::dag::dag_location::DagLocation;
     use crate::effects::{AltFormat, Ctx, RoundCtx};
+    use crate::engine::lifecycle::FixHistoryFlag;
     use crate::models::{AnchorData, AnchorStageRole, Round};
     use crate::storage::MempoolStore;
     use crate::test_utils;
@@ -367,7 +402,7 @@ mod test {
             .expect("cannot be closed");
 
         let mut dag = DagFront::default();
-        let mut committer = dag.init(genesis_round, conf);
+        let mut committer = dag.init(genesis_round, FixHistoryFlag(false), conf);
 
         for round in (0..100).map(Round) {
             // println!("{}", round.0);
@@ -378,7 +413,8 @@ mod test {
             round_ctx = RoundCtx::new(&engine_ctx, round);
 
             dag.fill_to_top(round, Some(&mut committer), &peer_schedule, &round_ctx);
-            if let Some(skip_to) = committer.full_history_bottom_reset() {
+            if let Some(false) = committer.emit_first_after_gap {
+                let skip_to = committer.first_executable;
                 println!("gap: next anchor with full history not earlier than {skip_to:?}");
             };
 

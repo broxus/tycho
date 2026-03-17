@@ -79,6 +79,7 @@ impl Engine {
         let mut dag = DagFront::default();
         let mut committer = dag.init(
             DagRound::new_bottom(conf.genesis_round.prev(), &net.peer_schedule, conf),
+            fix_history,
             conf,
         );
         dag.fill_to_top(
@@ -173,6 +174,7 @@ impl Engine {
                 (top_known_anchor - conf.consensus.replay_anchor_rounds()).max(conf.genesis_round),
                 conf,
             );
+            committer.first_executable = top_known_anchor;
             committer.bottom_round()
         };
         // preload and sign last rounds if node may still participate in consensus
@@ -263,8 +265,6 @@ impl Engine {
             &self.round_task.state.peer_schedule,
             &round_ctx,
         );
-        // don't notify collator of new bottom: it requests TKA or later, and we've handled genesis
-        committer.full_history_bottom_reset();
 
         self.round_task.state.consensus_round.set_max(new_top_round);
 
