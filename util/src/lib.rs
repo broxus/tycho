@@ -50,8 +50,10 @@ pub mod mem {
 pub mod num {
     pub use self::median::{StreamingUnsignedMedian, VecOfStreamingUnsignedMedian};
     pub use self::safe_avg::{SafeSignedAvg, SafeUnsignedAvg, SafeUnsignedVecAvg};
+    pub use self::safe_accum::SafeAccum;
 
     mod median;
+    mod safe_accum;
     mod safe_avg;
 }
 
