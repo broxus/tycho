@@ -12,8 +12,10 @@ use tycho_collator::types::processed_upto::BlockSeqno;
 use tycho_types::models::{ShardIdent, WorkUnitsParams};
 use tycho_util::FastHashSet;
 use tycho_util::num::{SafeSignedAvg, SafeUnsignedAvg, SafeUnsignedVecAvg};
+use tycho_util::time::RollingP2Estimator;
 
 use crate::config::{WuTuneType, WuTunerConfig};
+use crate::rolling_percentile::RollingPercentiles;
 use crate::updater::WuParamsUpdater;
 use crate::{MempoolAnchorLag, WuEvent, WuEventData, WuMetrics};
 
@@ -82,20 +84,27 @@ impl AnchorsLagSpan {
         }
     }
 
-    pub fn accum(&mut self, v: MempoolAnchorLag, seqno: u32) -> Result<()> {
+    pub fn accum<F>(&mut self, v: MempoolAnchorLag, seqno: u32, clip_value: F) -> Result<()>
+    where
+        F: FnMut(i64) -> i64,
+    {
         if self.last_seqno != seqno {
             // accum lag value only for the last anchor after block seqno
-            self.accum_last()?;
+            self.accum_last(clip_value)?;
             self.last_seqno = seqno;
         }
         self.last = Some(v);
         Ok(())
     }
 
-    fn accum_last(&mut self) -> Result<()> {
+    fn accum_last<F>(&mut self, mut clip_value: F) -> Result<()>
+    where
+        F: FnMut(i64) -> i64,
+    {
         if let Some(last) = self.last.take() {
+            let lag_clip = clip_value(last.lag());
             match &mut self.avg {
-                AnchorsLagSpanValue::Accum(accum) => accum.accum(last.lag()),
+                AnchorsLagSpanValue::Accum(accum) => accum.accum(lag_clip),
                 AnchorsLagSpanValue::Result(_) => {
                     anyhow::bail!("AnchorsLagSpan.avg should be Accum here")
                 }
@@ -104,10 +113,14 @@ impl AnchorsLagSpan {
         Ok(())
     }
 
-    pub fn get_result(&mut self) -> i64 {
+    pub fn get_result<F>(&mut self, mut clip_value: F) -> i64
+    where
+        F: FnMut(i64) -> i64,
+    {
         if let AnchorsLagSpanValue::Accum(accum) = &mut self.avg {
             if let Some(last) = self.last.take() {
-                accum.accum(last.lag());
+                let lag_clip = clip_value(last.lag());
+                accum.accum(lag_clip);
             }
             self.avg = AnchorsLagSpanValue::Result(accum.get_avg() as i64);
         }
@@ -120,21 +133,39 @@ impl AnchorsLagSpan {
     }
 }
 
-#[derive(Default)]
+const DEFAULT_PERCENTILE_WINDOW: usize = 100;
+
 pub struct WuHistory {
     metrics: BTreeMap<BlockSeqno, WuMetricsSpan>,
+    metrics_min_seqno: Option<u32>,
     avg_metrics: BTreeMap<BlockSeqno, WuMetrics>,
+    avg_metrics_last_calculated_on_seqno: u32,
     anchors_lag: BTreeMap<BlockSeqno, AnchorsLagSpan>,
+    anchors_lag_min_seqno: Option<u32>,
+    anchors_lag_pct: RollingPercentiles<i64>,
     avg_anchors_lag: BTreeMap<BlockSeqno, i64>,
-    last_calculated_avg_anchors_lag_seqno: u32,
+    avg_anchors_lag_last_calculated_on_seqno: u32,
 }
 
 impl WuHistory {
+    fn new(percentile_window: usize) -> Self {
+        let anchors_lag_pct = RollingPercentiles::new(percentile_window);
+        Self {
+            metrics: Default::default(),
+            metrics_min_seqno: None,
+            avg_metrics: Default::default(),
+            avg_metrics_last_calculated_on_seqno: Default::default(),
+            anchors_lag: Default::default(),
+            anchors_lag_min_seqno: None,
+            anchors_lag_pct,
+            avg_anchors_lag: Default::default(),
+            avg_anchors_lag_last_calculated_on_seqno: Default::default(),
+        }
+    }
+
     fn clear(&mut self) {
-        self.metrics.clear();
-        self.avg_metrics.clear();
-        self.anchors_lag.clear();
-        self.avg_anchors_lag.clear();
+        let percentile_window = self.anchors_lag_pct.window();
+        *self = Self::new(percentile_window);
     }
 
     fn gc_wu_metrics(&mut self, gc_boundary: u32) {
@@ -193,10 +224,10 @@ impl TunerParams {
         let tune_seqno = seqno / tune_interval * tune_interval;
 
         // normilized seqno for calculations
-        // e.g. seqno = 244
-        let wu_span_seqno = seqno / wu_span * wu_span; // 240
+        // e.g. seqno = 254
+        let wu_span_seqno = seqno / wu_span * wu_span; // 250
         let wu_ma_seqno = seqno / wu_ma_interval * wu_ma_interval; // 240
-        let lag_span_seqno = seqno / lag_span * lag_span; // 240
+        let lag_span_seqno = seqno / lag_span * lag_span; // 250
         let lag_ma_seqno = seqno / lag_ma_interval * lag_ma_interval; // 240
         let wu_params_ma_seqno = seqno / wu_params_ma_interval * wu_params_ma_interval; // 240
 
@@ -226,7 +257,7 @@ where
     config: Arc<WuTunerConfig>,
     updater: U,
     history: BTreeMap<ShardIdent, WuHistory>,
-    last_calculated_wu_params_seqno: u32,
+    wu_params_last_calculated_on_seqno: u32,
     wu_params_last_updated_on_seqno: u32,
     wu_once_reported: FastHashSet<ShardIdent>,
     lag_once_reported: bool,
@@ -242,7 +273,7 @@ where
             config,
             updater,
             history: Default::default(),
-            last_calculated_wu_params_seqno: 0,
+            wu_params_last_calculated_on_seqno: 0,
             wu_params_last_updated_on_seqno: 0,
             wu_once_reported: Default::default(),
             lag_once_reported: false,
@@ -284,7 +315,10 @@ where
             ..
         } = TunerParams::calculate(&self.config, seqno);
 
-        let history = self.history.entry(shard).or_default();
+        let history = self
+            .history
+            .entry(shard)
+            .or_insert_with(|| WuHistory::new(DEFAULT_PERCENTILE_WINDOW));
 
         let has_pending_messages = metrics.has_pending_messages;
 
@@ -345,6 +379,7 @@ where
                 span.accum(metrics)?;
             }
         }
+        let wu_metrics_history_min_seqno = *history.metrics_min_seqno.get_or_insert(seqno);
 
         tracing::trace!(
             %shard, seqno,
@@ -355,7 +390,14 @@ where
 
         // calculate MA wu metrics both on wu MA seqno and anchors lag MA seqno
         let ma_seqno = std::cmp::max(wu_ma_seqno, lag_ma_seqno);
-        if seqno != ma_seqno {
+
+        // avoid the MA recalculation on the same bucket
+        if ma_seqno == 0 || history.avg_metrics_last_calculated_on_seqno == ma_seqno {
+            return Ok(());
+        }
+
+        // do not calculate MA until the required range of samples is collected
+        if ma_seqno.saturating_sub(wu_metrics_history_min_seqno) < wu_ma_range {
             return Ok(());
         }
 
@@ -380,6 +422,8 @@ where
 
         // store avg wu metrics
         history.avg_metrics.insert(ma_seqno, avg);
+
+        history.avg_metrics_last_calculated_on_seqno = ma_seqno;
 
         // clear outdated history
         let gc_boundary = wu_ma_seqno.saturating_sub(tune_interval); // e.g. seqno = 240 -> gc_boundary = 40
@@ -413,7 +457,10 @@ where
             ..
         } = tuner_params;
 
-        let history = self.history.entry(shard).or_default();
+        let history = self
+            .history
+            .entry(shard)
+            .or_insert_with(|| WuHistory::new(DEFAULT_PERCENTILE_WINDOW));
 
         // report current anchors lag on the start to avoid empty graphs
         if !self.lag_once_reported {
@@ -428,9 +475,13 @@ where
             }
             std::collections::btree_map::Entry::Occupied(mut occupied) => {
                 let span = occupied.get_mut();
-                span.accum(anchor_lag.clone(), seqno)?;
+                span.accum(anchor_lag.clone(), seqno, |lag| {
+                    // clip anchor lag by P1..P99 percentile
+                    history.anchors_lag_pct.push_and_clip(lag, 1, 99)
+                })?;
             }
         }
+        let anchors_lag_history_min_seqno = *history.anchors_lag_min_seqno.get_or_insert(seqno);
 
         tracing::trace!(
             %shard, seqno,
@@ -441,10 +492,18 @@ where
         );
 
         // calculate MA lag
-        if seqno < lag_ma_seqno
-            || lag_ma_seqno == 0
-            || history.last_calculated_avg_anchors_lag_seqno == lag_ma_seqno
-        {
+        // avoid the MA recalculation on the same bucket
+        if lag_ma_seqno == 0 || history.avg_anchors_lag_last_calculated_on_seqno == lag_ma_seqno {
+            return Ok(());
+        }
+
+        // do not calculate MA until the required range of samples is collected
+        if lag_ma_seqno.saturating_sub(anchors_lag_history_min_seqno) < lag_ma_range {
+            return Ok(());
+        }
+
+        // do not calculate MA until the percentile windows is filled
+        if !history.anchors_lag_pct.window_is_filled() {
             return Ok(());
         }
 
@@ -454,10 +513,12 @@ where
             Bound::Included(avg_from_boundary),
             Bound::Excluded(lag_ma_seqno),
         ));
-        let Some(avg_lag) = safe_anchors_lag_avg(avg_range) else {
+        let Some(avg_lag) = safe_anchors_lag_avg(avg_range, |lag| {
+            // clip anchor lag by P1..P99 percentile
+            history.anchors_lag_pct.push_and_clip(lag, 1, 99)
+        }) else {
             return Ok(());
         };
-        history.last_calculated_avg_anchors_lag_seqno = lag_ma_seqno;
 
         // report avg anchor importing lag to metrics
         report_anchor_lag_to_metrics(&shard, avg_lag);
@@ -472,6 +533,8 @@ where
 
         // store avg lag
         history.avg_anchors_lag.insert(lag_ma_seqno, avg_lag);
+
+        history.avg_anchors_lag_last_calculated_on_seqno = lag_ma_seqno;
 
         // clear outdated history
         let gc_boundary = lag_ma_seqno.saturating_sub(tune_interval); // e.g. seqno = 244 -> gc_boundary = 40
@@ -510,27 +573,30 @@ where
             ..
         } = tuner_params;
 
-        let history = self.history.entry(shard).or_default();
+        let history = self
+            .history
+            .entry(shard)
+            .or_insert_with(|| WuHistory::new(DEFAULT_PERCENTILE_WINDOW));
 
-        if seqno < wu_params_ma_seqno
-            || wu_params_ma_seqno == 0
-            || self.last_calculated_wu_params_seqno == wu_params_ma_seqno
+        // calculate MA target wu params
+        // avoid the MA recalculation on the same bucket
+        if wu_params_ma_seqno == 0 || self.wu_params_last_calculated_on_seqno == wu_params_ma_seqno
         {
             return Ok(());
         }
 
-        // get MA from MA lag on 1/2 of tune interval
-        let avg_from_boundary = wu_params_ma_seqno.saturating_sub(tune_interval / 2);
-        let avg_range = history.avg_anchors_lag.range((
-            Bound::Included(avg_from_boundary),
-            Bound::Excluded(wu_params_ma_seqno),
+        // take last recorder avg lag not ahead of target params calculation seqno
+        let search_from_boundary = wu_params_ma_seqno.saturating_sub(tune_interval);
+        let search_range = history.avg_anchors_lag.range((
+            Bound::Included(search_from_boundary),
+            Bound::Included(wu_params_ma_seqno),
         ));
-        let Some(avg_lag) = safe_anchors_lag_avg_2(avg_range) else {
+        let Some((&lag_ma_seqno, &avg_lag)) = search_range.last() else {
             return Ok(());
         };
 
-        // take just last avg wu metrics
-        let Some((_, avg_wu_metrics)) = history.avg_metrics.last_key_value() else {
+        // take avg wu metrics at the same seqno
+        let Some(avg_wu_metrics) = history.avg_metrics.get(&lag_ma_seqno) else {
             return Ok(());
         };
 
@@ -627,6 +693,8 @@ where
         if let Some(target_wu_params) = target_wu_params {
             // report target wu params to metrics
             report_wu_params(&avg_wu_metrics.wu_params, &target_wu_params);
+
+            self.wu_params_last_calculated_on_seqno = wu_params_ma_seqno;
 
             // needs to collect history more then 1/2 of tune interval to be able to perform update
             let tune_half_seqno = tune_seqno.saturating_sub(tune_interval / 2);
@@ -1106,13 +1174,14 @@ impl WuMetricsAvg {
     }
 }
 
-fn safe_anchors_lag_avg<'a, I>(range: I) -> Option<i64>
+fn safe_anchors_lag_avg<'a, I, F>(range: I, mut clip_value: F) -> Option<i64>
 where
     I: Iterator<Item = (&'a u32, &'a mut AnchorsLagSpan)>,
+    F: FnMut(i64) -> i64,
 {
     let mut avg = SafeSignedAvg::default();
     for (_, v) in range {
-        avg.accum(v.get_result());
+        avg.accum(v.get_result(&mut clip_value));
     }
 
     avg.get_avg_checked().map(|v| v as i64)
