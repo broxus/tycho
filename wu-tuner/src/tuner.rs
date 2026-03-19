@@ -11,8 +11,7 @@ use tycho_collator::collator::work_units::{
 use tycho_collator::types::processed_upto::BlockSeqno;
 use tycho_types::models::{ShardIdent, WorkUnitsParams};
 use tycho_util::FastHashSet;
-use tycho_util::num::{SafeSignedAvg, SafeUnsignedAvg, SafeUnsignedVecAvg};
-use tycho_util::time::RollingP2Estimator;
+use tycho_util::num::{SafeSignedAvg, SafeUnsignedAvg};
 
 use crate::config::{WuTuneType, WuTunerConfig};
 use crate::rolling_percentile::RollingPercentiles;
@@ -20,7 +19,7 @@ use crate::updater::WuParamsUpdater;
 use crate::{MempoolAnchorLag, WuEvent, WuEventData, WuMetrics};
 
 pub enum WuMetricsSpanValue {
-    Accum(WuMetricsAvg),
+    Accum(Box<WuMetricsAvg>),
     Result(Box<WuMetrics>),
 }
 
@@ -34,7 +33,7 @@ impl WuMetricsSpan {
         let mut avg = WuMetricsAvg::new();
         avg.accum(&metrics);
         Self {
-            avg: WuMetricsSpanValue::Accum(avg),
+            avg: WuMetricsSpanValue::Accum(Box::new(avg)),
             last: metrics,
         }
     }
@@ -986,194 +985,6 @@ where
     avg.get_avg()
 }
 
-macro_rules! avg_accum {
-    ($self:ident, $field:expr) => {
-        $self.avg.accum_next($field);
-    };
-}
-
-macro_rules! avg_accum_list {
-    ($self:ident; $($field:expr),* $(,)?) => {
-        $( avg_accum!($self, $field); )*
-    };
-}
-
-pub struct WuMetricsAvg {
-    last_wu_params: WorkUnitsParams,
-    last_shard_accounts_count: u64,
-    had_pending_messages: bool,
-    avg: SafeUnsignedVecAvg,
-}
-
-impl WuMetricsAvg {
-    pub fn new() -> Self {
-        Self {
-            last_wu_params: Default::default(),
-            last_shard_accounts_count: 0,
-            had_pending_messages: true,
-            avg: SafeUnsignedVecAvg::new(53),
-        }
-    }
-
-    pub fn accum(&mut self, v: &WuMetrics) {
-        self.last_wu_params = v.wu_params.clone();
-        self.had_pending_messages = self.had_pending_messages && v.has_pending_messages;
-
-        self.last_shard_accounts_count = v.wu_on_finalize.shard_accounts_count;
-
-        self.avg.accum(0, v.wu_on_finalize.updated_accounts_count);
-        avg_accum_list!(self;
-            v.wu_on_finalize.in_msgs_len,
-            v.wu_on_finalize.out_msgs_len,
-            v.wu_on_execute.inserted_new_msgs_count,
-        );
-
-        // wu_on_prepare_msg_groups
-        avg_accum_list!(self;
-            v.wu_on_prepare_msg_groups.fixed_part,
-            v.wu_on_prepare_msg_groups.read_ext_msgs_count,
-            v.wu_on_prepare_msg_groups.read_ext_msgs_wu,
-            v.wu_on_prepare_msg_groups.read_ext_msgs_elapsed.as_nanos(),
-            v.wu_on_prepare_msg_groups.read_existing_int_msgs_count,
-            v.wu_on_prepare_msg_groups.read_existing_int_msgs_wu,
-            v.wu_on_prepare_msg_groups.read_existing_int_msgs_elapsed.as_nanos(),
-            v.wu_on_prepare_msg_groups.read_new_int_msgs_count,
-            v.wu_on_prepare_msg_groups.read_new_int_msgs_wu,
-            v.wu_on_prepare_msg_groups.read_new_int_msgs_elapsed.as_nanos(),
-            v.wu_on_prepare_msg_groups.add_to_msgs_groups_ops_count,
-            v.wu_on_prepare_msg_groups.add_msgs_to_groups_wu,
-            v.wu_on_prepare_msg_groups.add_msgs_to_groups_elapsed.as_nanos(),
-            v.wu_on_prepare_msg_groups.total_elapsed.as_nanos(),
-        );
-
-        // wu_on_execute
-        avg_accum_list!(self;
-            v.wu_on_execute.groups_count,
-            v.wu_on_execute.sum_gas,
-            v.wu_on_execute.avg_group_accounts_count.get_avg_checked().unwrap_or_default(),
-            v.wu_on_execute.avg_threads_count.get_avg_checked().unwrap_or_default(),
-            v.wu_on_execute.execute_groups_vm_only_wu,
-            v.wu_on_execute.execute_groups_vm_only_elapsed.as_nanos(),
-            v.wu_on_execute.process_txs_wu,
-            v.wu_on_execute.process_txs_elapsed.as_nanos(),
-        );
-
-        // wu_on_finalize
-        avg_accum_list!(self;
-            v.wu_on_finalize.diff_msgs_count,
-            v.wu_on_finalize.create_queue_diff_wu,
-            v.wu_on_finalize.create_queue_diff_elapsed.as_nanos(),
-            v.wu_on_finalize.apply_queue_diff_wu,
-            v.wu_on_finalize.apply_queue_diff_elapsed.as_nanos(),
-            v.wu_on_finalize.update_shard_accounts_wu,
-            v.wu_on_finalize.update_shard_accounts_elapsed.as_nanos(),
-            v.wu_on_finalize.build_accounts_blocks_wu,
-            v.wu_on_finalize.build_accounts_blocks_elapsed.as_nanos(),
-            v.wu_on_finalize.build_accounts_elapsed.as_nanos(),
-            v.wu_on_finalize.build_in_msgs_wu,
-            v.wu_on_finalize.build_in_msgs_elapsed.as_nanos(),
-            v.wu_on_finalize.build_out_msgs_wu,
-            v.wu_on_finalize.build_out_msgs_elapsed.as_nanos(),
-            v.wu_on_finalize.build_accounts_and_messages_in_parallel_elased.as_nanos(),
-            v.wu_on_finalize.build_state_update_wu,
-            v.wu_on_finalize.build_state_update_elapsed.as_nanos(),
-            v.wu_on_finalize.build_block_wu,
-            v.wu_on_finalize.build_block_elapsed.as_nanos(),
-            v.wu_on_finalize.finalize_block_elapsed.as_nanos(),
-            v.wu_on_finalize.total_elapsed.as_nanos(),
-        );
-
-        // wu_on_do_collate
-        avg_accum_list!(self;
-            v.wu_on_do_collate.resume_collation_wu,
-            v.wu_on_do_collate.resume_collation_elapsed.as_nanos(),
-            v.wu_on_do_collate.resume_collation_wu_per_block,
-            v.wu_on_do_collate.resume_collation_elapsed_per_block_ns,
-            v.wu_on_do_collate.collation_total_elapsed.as_nanos(),
-        );
-    }
-
-    pub fn get_avg(&mut self) -> Option<WuMetrics> {
-        let updated_accounts_count = self.avg.get_avg_checked(0).map(|v| v as u64)?;
-
-        let in_msgs_len = self.avg.get_avg_next() as u64;
-        let out_msgs_len = self.avg.get_avg_next() as u64;
-        let inserted_new_msgs_count = self.avg.get_avg_next() as u64;
-
-        Some(WuMetrics {
-            wu_params: self.last_wu_params.clone(),
-            wu_on_prepare_msg_groups: PrepareMsgGroupsWu {
-                fixed_part: self.avg.get_avg_next() as u64,
-                read_ext_msgs_count: self.avg.get_avg_next() as u64,
-                read_ext_msgs_wu: self.avg.get_avg_next() as u64,
-                read_ext_msgs_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
-                read_existing_int_msgs_count: self.avg.get_avg_next() as u64,
-                read_existing_int_msgs_wu: self.avg.get_avg_next() as u64,
-                read_existing_int_msgs_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
-                read_new_int_msgs_count: self.avg.get_avg_next() as u64,
-                read_new_int_msgs_wu: self.avg.get_avg_next() as u64,
-                read_new_int_msgs_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
-                add_to_msgs_groups_ops_count: self.avg.get_avg_next() as u64,
-                add_msgs_to_groups_wu: self.avg.get_avg_next() as u64,
-                add_msgs_to_groups_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
-                total_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
-            },
-            wu_on_execute: ExecuteWu {
-                in_msgs_len,
-                out_msgs_len,
-                inserted_new_msgs_count,
-                groups_count: self.avg.get_avg_next() as u64,
-                sum_gas: self.avg.get_avg_next(),
-                avg_group_accounts_count: SafeUnsignedAvg::with_initial(self.avg.get_avg_next()),
-                avg_threads_count: SafeUnsignedAvg::with_initial(self.avg.get_avg_next()),
-                execute_groups_vm_only_wu: self.avg.get_avg_next() as u64,
-                execute_groups_vm_only_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
-                process_txs_wu: self.avg.get_avg_next() as u64,
-                process_txs_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
-            },
-            wu_on_finalize: FinalizeWu {
-                shard_accounts_count: self.last_shard_accounts_count,
-                diff_msgs_count: self.avg.get_avg_next() as u64,
-                create_queue_diff_wu: self.avg.get_avg_next() as u64,
-                create_queue_diff_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
-                apply_queue_diff_wu: self.avg.get_avg_next() as u64,
-                apply_queue_diff_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
-                updated_accounts_count,
-                in_msgs_len,
-                out_msgs_len,
-                update_shard_accounts_wu: self.avg.get_avg_next() as u64,
-                update_shard_accounts_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
-                build_accounts_blocks_wu: self.avg.get_avg_next() as u64,
-                build_accounts_blocks_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
-                build_accounts_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
-                build_in_msgs_wu: self.avg.get_avg_next() as u64,
-                build_in_msgs_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
-                build_out_msgs_wu: self.avg.get_avg_next() as u64,
-                build_out_msgs_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
-                build_accounts_and_messages_in_parallel_elased: Duration::from_nanos(
-                    self.avg.get_avg_next() as u64,
-                ),
-                build_state_update_wu: self.avg.get_avg_next() as u64,
-                build_state_update_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
-                build_block_wu: self.avg.get_avg_next() as u64,
-                build_block_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
-                finalize_block_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
-                total_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
-            },
-            wu_on_do_collate: DoCollateWu {
-                shard_accounts_count: self.last_shard_accounts_count,
-                updated_accounts_count,
-                resume_collation_wu: self.avg.get_avg_next() as u64,
-                resume_collation_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
-                resume_collation_wu_per_block: self.avg.get_avg_next() as u64,
-                resume_collation_elapsed_per_block_ns: self.avg.get_avg_next(),
-                collation_total_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
-            },
-            has_pending_messages: self.had_pending_messages,
-        })
-    }
-}
-
 fn safe_anchors_lag_avg<'a, I, F>(range: I, mut clip_value: F) -> Option<i64>
 where
     I: Iterator<Item = (&'a u32, &'a mut AnchorsLagSpan)>,
@@ -1197,6 +1008,468 @@ where
     }
 
     avg.get_avg_checked().map(|v| v as i64)
+}
+
+#[derive(Default)]
+struct PrepareMsgGroupsWuAvg {
+    fixed_part: SafeUnsignedAvg,
+
+    read_ext_msgs_count: SafeUnsignedAvg,
+    read_ext_msgs_wu: SafeUnsignedAvg,
+    read_ext_msgs_elapsed_ns: SafeUnsignedAvg,
+
+    read_existing_int_msgs_count: SafeUnsignedAvg,
+    read_existing_int_msgs_wu: SafeUnsignedAvg,
+    read_existing_int_msgs_elapsed_ns: SafeUnsignedAvg,
+
+    read_new_int_msgs_count: SafeUnsignedAvg,
+    read_new_int_msgs_wu: SafeUnsignedAvg,
+    read_new_int_msgs_elapsed_ns: SafeUnsignedAvg,
+
+    add_to_msgs_groups_ops_count: SafeUnsignedAvg,
+    add_msgs_to_groups_wu: SafeUnsignedAvg,
+    add_msgs_to_groups_elapsed_ns: SafeUnsignedAvg,
+
+    total_elapsed_ns: SafeUnsignedAvg,
+}
+
+impl PrepareMsgGroupsWuAvg {
+    fn accum(&mut self, v: &PrepareMsgGroupsWu) {
+        self.fixed_part.accum(v.fixed_part);
+
+        self.read_ext_msgs_count.accum(v.read_ext_msgs_count);
+        self.read_ext_msgs_wu.accum(v.read_ext_msgs_wu);
+        self.read_ext_msgs_elapsed_ns
+            .accum(v.read_ext_msgs_elapsed.as_nanos());
+
+        self.read_existing_int_msgs_count
+            .accum(v.read_existing_int_msgs_count);
+        self.read_existing_int_msgs_wu
+            .accum(v.read_existing_int_msgs_wu);
+        self.read_existing_int_msgs_elapsed_ns
+            .accum(v.read_existing_int_msgs_elapsed.as_nanos());
+
+        self.read_new_int_msgs_count
+            .accum(v.read_new_int_msgs_count);
+        self.read_new_int_msgs_wu.accum(v.read_new_int_msgs_wu);
+        self.read_new_int_msgs_elapsed_ns
+            .accum(v.read_new_int_msgs_elapsed.as_nanos());
+
+        self.add_to_msgs_groups_ops_count
+            .accum(v.add_to_msgs_groups_ops_count);
+        self.add_msgs_to_groups_wu.accum(v.add_msgs_to_groups_wu);
+        self.add_msgs_to_groups_elapsed_ns
+            .accum(v.add_msgs_to_groups_elapsed.as_nanos());
+
+        self.total_elapsed_ns.accum(v.total_elapsed.as_nanos());
+    }
+}
+
+#[derive(Default)]
+struct ExecuteWuAvg {
+    inserted_new_msgs_count: SafeUnsignedAvg,
+
+    groups_count: SafeUnsignedAvg,
+
+    avg_group_accounts_count: SafeUnsignedAvg,
+    avg_threads_count: SafeUnsignedAvg,
+
+    sum_gas: SafeUnsignedAvg,
+
+    execute_groups_vm_only_wu: SafeUnsignedAvg,
+    execute_groups_vm_only_elapsed_ns: SafeUnsignedAvg,
+
+    process_txs_wu: SafeUnsignedAvg,
+    process_txs_elapsed_ns: SafeUnsignedAvg,
+}
+
+impl ExecuteWuAvg {
+    fn accum(&mut self, v: &ExecuteWu) {
+        self.inserted_new_msgs_count
+            .accum(v.inserted_new_msgs_count);
+
+        self.groups_count.accum(v.groups_count);
+
+        self.avg_group_accounts_count.accum(
+            v.avg_group_accounts_count
+                .get_avg_checked()
+                .unwrap_or_default(),
+        );
+        self.avg_threads_count
+            .accum(v.avg_threads_count.get_avg_checked().unwrap_or_default());
+
+        self.sum_gas.accum(v.sum_gas);
+
+        self.execute_groups_vm_only_wu
+            .accum(v.execute_groups_vm_only_wu);
+        self.execute_groups_vm_only_elapsed_ns
+            .accum(v.execute_groups_vm_only_elapsed.as_nanos());
+
+        self.process_txs_wu.accum(v.process_txs_wu);
+        self.process_txs_elapsed_ns
+            .accum(v.process_txs_elapsed.as_nanos());
+    }
+}
+
+#[derive(Default)]
+struct FinalizeWuAvg {
+    diff_msgs_count: SafeUnsignedAvg,
+
+    create_queue_diff_wu: SafeUnsignedAvg,
+    create_queue_diff_elapsed_ns: SafeUnsignedAvg,
+
+    apply_queue_diff_wu: SafeUnsignedAvg,
+    apply_queue_diff_elapsed_ns: SafeUnsignedAvg,
+
+    updated_accounts_count: SafeUnsignedAvg,
+    in_msgs_len: SafeUnsignedAvg,
+    out_msgs_len: SafeUnsignedAvg,
+
+    update_shard_accounts_wu: SafeUnsignedAvg,
+    update_shard_accounts_elapsed_ns: SafeUnsignedAvg,
+
+    build_accounts_blocks_wu: SafeUnsignedAvg,
+    build_accounts_blocks_elapsed_ns: SafeUnsignedAvg,
+
+    build_accounts_elapsed_ns: SafeUnsignedAvg,
+
+    build_in_msgs_wu: SafeUnsignedAvg,
+    build_in_msgs_elapsed_ns: SafeUnsignedAvg,
+
+    build_out_msgs_wu: SafeUnsignedAvg,
+    build_out_msgs_elapsed_ns: SafeUnsignedAvg,
+
+    build_accounts_and_messages_in_parallel_elased_ns: SafeUnsignedAvg,
+
+    build_state_update_wu: SafeUnsignedAvg,
+    build_state_update_elapsed_ns: SafeUnsignedAvg,
+
+    build_block_wu: SafeUnsignedAvg,
+    build_block_elapsed_ns: SafeUnsignedAvg,
+
+    finalize_block_elapsed_ns: SafeUnsignedAvg,
+
+    total_elapsed_ns: SafeUnsignedAvg,
+}
+
+impl FinalizeWuAvg {
+    fn accum(&mut self, v: &FinalizeWu) {
+        self.diff_msgs_count.accum(v.diff_msgs_count);
+
+        self.create_queue_diff_wu.accum(v.create_queue_diff_wu);
+        self.create_queue_diff_elapsed_ns
+            .accum(v.create_queue_diff_elapsed.as_nanos());
+
+        self.apply_queue_diff_wu.accum(v.apply_queue_diff_wu);
+        self.apply_queue_diff_elapsed_ns
+            .accum(v.apply_queue_diff_elapsed.as_nanos());
+
+        self.updated_accounts_count.accum(v.updated_accounts_count);
+        self.in_msgs_len.accum(v.in_msgs_len);
+        self.out_msgs_len.accum(v.out_msgs_len);
+
+        self.update_shard_accounts_wu
+            .accum(v.update_shard_accounts_wu);
+        self.update_shard_accounts_elapsed_ns
+            .accum(v.update_shard_accounts_elapsed.as_nanos());
+
+        self.build_accounts_blocks_wu
+            .accum(v.build_accounts_blocks_wu);
+        self.build_accounts_blocks_elapsed_ns
+            .accum(v.build_accounts_blocks_elapsed.as_nanos());
+
+        self.build_accounts_elapsed_ns
+            .accum(v.build_accounts_elapsed.as_nanos());
+
+        self.build_in_msgs_wu.accum(v.build_in_msgs_wu);
+        self.build_in_msgs_elapsed_ns
+            .accum(v.build_in_msgs_elapsed.as_nanos());
+
+        self.build_out_msgs_wu.accum(v.build_out_msgs_wu);
+        self.build_out_msgs_elapsed_ns
+            .accum(v.build_out_msgs_elapsed.as_nanos());
+
+        self.build_accounts_and_messages_in_parallel_elased_ns
+            .accum(v.build_accounts_and_messages_in_parallel_elased.as_nanos());
+
+        self.build_state_update_wu.accum(v.build_state_update_wu);
+        self.build_state_update_elapsed_ns
+            .accum(v.build_state_update_elapsed.as_nanos());
+
+        self.build_block_wu.accum(v.build_block_wu);
+        self.build_block_elapsed_ns
+            .accum(v.build_block_elapsed.as_nanos());
+
+        self.finalize_block_elapsed_ns
+            .accum(v.finalize_block_elapsed.as_nanos());
+
+        self.total_elapsed_ns.accum(v.total_elapsed.as_nanos());
+    }
+}
+
+#[derive(Default)]
+struct DoCollateWuAvg {
+    resume_collation_wu: SafeUnsignedAvg,
+    resume_collation_elapsed_ns: SafeUnsignedAvg,
+
+    resume_collation_wu_per_block: SafeUnsignedAvg,
+    resume_collation_elapsed_per_block_ns: SafeUnsignedAvg,
+
+    collation_total_elapsed_ns: SafeUnsignedAvg,
+}
+
+impl DoCollateWuAvg {
+    fn accum(&mut self, v: &DoCollateWu) {
+        self.resume_collation_wu.accum(v.resume_collation_wu);
+        self.resume_collation_elapsed_ns
+            .accum(v.resume_collation_elapsed.as_nanos());
+
+        self.resume_collation_wu_per_block
+            .accum(v.resume_collation_wu_per_block);
+        self.resume_collation_elapsed_per_block_ns
+            .accum(v.resume_collation_elapsed_per_block_ns);
+
+        self.collation_total_elapsed_ns
+            .accum(v.collation_total_elapsed.as_nanos());
+    }
+}
+
+#[derive(Default)]
+struct WuMetricsAvgInner {
+    prepare: PrepareMsgGroupsWuAvg,
+    execute: ExecuteWuAvg,
+    finalize: FinalizeWuAvg,
+    do_collate: DoCollateWuAvg,
+}
+
+impl WuMetricsAvgInner {
+    fn accum(&mut self, v: &WuMetrics) {
+        self.prepare.accum(&v.wu_on_prepare_msg_groups);
+        self.execute.accum(&v.wu_on_execute);
+        self.finalize.accum(&v.wu_on_finalize);
+        self.do_collate.accum(&v.wu_on_do_collate);
+    }
+}
+
+pub struct WuMetricsAvg {
+    last_wu_params: WorkUnitsParams,
+    last_shard_accounts_count: u64,
+    had_pending_messages: bool,
+    avg: WuMetricsAvgInner,
+}
+
+impl WuMetricsAvg {
+    pub fn new() -> Self {
+        Self {
+            last_wu_params: Default::default(),
+            last_shard_accounts_count: 0,
+            had_pending_messages: true,
+            avg: WuMetricsAvgInner::default(),
+        }
+    }
+
+    pub fn accum(&mut self, v: &WuMetrics) {
+        self.last_wu_params = v.wu_params.clone();
+        self.had_pending_messages = self.had_pending_messages && v.has_pending_messages;
+        self.last_shard_accounts_count = v.wu_on_finalize.shard_accounts_count;
+        self.avg.accum(v);
+    }
+}
+
+impl WuMetricsAvg {
+    pub fn get_avg(&mut self) -> Option<WuMetrics> {
+        let (wu_on_prepare_msg_groups, wu_on_execute, wu_on_finalize, wu_on_do_collate) =
+            self.avg.get_avg(self.last_shard_accounts_count)?;
+
+        Some(WuMetrics {
+            wu_params: self.last_wu_params.clone(),
+            wu_on_prepare_msg_groups,
+            wu_on_execute,
+            wu_on_finalize,
+            wu_on_do_collate,
+            has_pending_messages: self.had_pending_messages,
+        })
+    }
+}
+
+impl WuMetricsAvgInner {
+    fn get_avg(
+        &self,
+        last_shard_accounts_count: u64,
+    ) -> Option<(PrepareMsgGroupsWu, ExecuteWu, FinalizeWu, DoCollateWu)> {
+        let wu_on_prepare_msg_groups = self.prepare.get_avg();
+        let wu_on_finalize = self.finalize.get_avg(last_shard_accounts_count)?;
+        let wu_on_execute = self
+            .execute
+            .get_avg(wu_on_finalize.in_msgs_len, wu_on_finalize.out_msgs_len);
+        let wu_on_do_collate = self.do_collate.get_avg(
+            last_shard_accounts_count,
+            wu_on_finalize.updated_accounts_count,
+        );
+
+        Some((
+            wu_on_prepare_msg_groups,
+            wu_on_execute,
+            wu_on_finalize,
+            wu_on_do_collate,
+        ))
+    }
+}
+
+impl PrepareMsgGroupsWuAvg {
+    fn get_avg(&self) -> PrepareMsgGroupsWu {
+        let avg_u64 = |avg: &SafeUnsignedAvg| avg.get_avg_checked().unwrap_or_default() as u64;
+
+        PrepareMsgGroupsWu {
+            fixed_part: avg_u64(&self.fixed_part),
+
+            read_ext_msgs_count: avg_u64(&self.read_ext_msgs_count),
+            read_ext_msgs_wu: avg_u64(&self.read_ext_msgs_wu),
+            read_ext_msgs_elapsed: Duration::from_nanos(avg_u64(&self.read_ext_msgs_elapsed_ns)),
+
+            read_existing_int_msgs_count: avg_u64(&self.read_existing_int_msgs_count),
+            read_existing_int_msgs_wu: avg_u64(&self.read_existing_int_msgs_wu),
+            read_existing_int_msgs_elapsed: Duration::from_nanos(avg_u64(
+                &self.read_existing_int_msgs_elapsed_ns,
+            )),
+
+            read_new_int_msgs_count: avg_u64(&self.read_new_int_msgs_count),
+            read_new_int_msgs_wu: avg_u64(&self.read_new_int_msgs_wu),
+            read_new_int_msgs_elapsed: Duration::from_nanos(avg_u64(
+                &self.read_new_int_msgs_elapsed_ns,
+            )),
+
+            add_to_msgs_groups_ops_count: avg_u64(&self.add_to_msgs_groups_ops_count),
+            add_msgs_to_groups_wu: avg_u64(&self.add_msgs_to_groups_wu),
+            add_msgs_to_groups_elapsed: Duration::from_nanos(avg_u64(
+                &self.add_msgs_to_groups_elapsed_ns,
+            )),
+
+            total_elapsed: Duration::from_nanos(avg_u64(&self.total_elapsed_ns)),
+        }
+    }
+}
+
+impl ExecuteWuAvg {
+    fn get_avg(&self, avg_in_msgs_len: u64, avg_out_msgs_len: u64) -> ExecuteWu {
+        let avg_u64 = |avg: &SafeUnsignedAvg| avg.get_avg_checked().unwrap_or_default() as u64;
+        let avg_u128 = |avg: &SafeUnsignedAvg| avg.get_avg_checked().unwrap_or_default();
+
+        ExecuteWu {
+            in_msgs_len: avg_in_msgs_len,
+            out_msgs_len: avg_out_msgs_len,
+            inserted_new_msgs_count: avg_u64(&self.inserted_new_msgs_count),
+
+            groups_count: avg_u64(&self.groups_count),
+
+            avg_group_accounts_count: SafeUnsignedAvg::with_initial(avg_u128(
+                &self.avg_group_accounts_count,
+            )),
+            avg_threads_count: SafeUnsignedAvg::with_initial(avg_u128(&self.avg_threads_count)),
+
+            sum_gas: avg_u128(&self.sum_gas),
+
+            execute_groups_vm_only_wu: avg_u64(&self.execute_groups_vm_only_wu),
+            execute_groups_vm_only_elapsed: Duration::from_nanos(avg_u64(
+                &self.execute_groups_vm_only_elapsed_ns,
+            )),
+
+            process_txs_wu: avg_u64(&self.process_txs_wu),
+            process_txs_elapsed: Duration::from_nanos(avg_u64(&self.process_txs_elapsed_ns)),
+        }
+    }
+}
+
+impl FinalizeWuAvg {
+    fn get_avg(&self, last_shard_accounts_count: u64) -> Option<FinalizeWu> {
+        let avg_u64 = |avg: &SafeUnsignedAvg| avg.get_avg_checked().unwrap_or_default() as u64;
+
+        Some(FinalizeWu {
+            diff_msgs_count: avg_u64(&self.diff_msgs_count),
+
+            create_queue_diff_wu: avg_u64(&self.create_queue_diff_wu),
+            create_queue_diff_elapsed: Duration::from_nanos(avg_u64(
+                &self.create_queue_diff_elapsed_ns,
+            )),
+
+            apply_queue_diff_wu: avg_u64(&self.apply_queue_diff_wu),
+            apply_queue_diff_elapsed: Duration::from_nanos(avg_u64(
+                &self.apply_queue_diff_elapsed_ns,
+            )),
+
+            shard_accounts_count: last_shard_accounts_count,
+            updated_accounts_count: self
+                .updated_accounts_count
+                .get_avg_checked()
+                .map(|v| v as u64)?,
+            in_msgs_len: avg_u64(&self.in_msgs_len),
+            out_msgs_len: avg_u64(&self.out_msgs_len),
+
+            update_shard_accounts_wu: avg_u64(&self.update_shard_accounts_wu),
+            update_shard_accounts_elapsed: Duration::from_nanos(avg_u64(
+                &self.update_shard_accounts_elapsed_ns,
+            )),
+
+            build_accounts_blocks_wu: avg_u64(&self.build_accounts_blocks_wu),
+            build_accounts_blocks_elapsed: Duration::from_nanos(avg_u64(
+                &self.build_accounts_blocks_elapsed_ns,
+            )),
+
+            build_accounts_elapsed: Duration::from_nanos(avg_u64(&self.build_accounts_elapsed_ns)),
+
+            build_in_msgs_wu: avg_u64(&self.build_in_msgs_wu),
+            build_in_msgs_elapsed: Duration::from_nanos(avg_u64(&self.build_in_msgs_elapsed_ns)),
+
+            build_out_msgs_wu: avg_u64(&self.build_out_msgs_wu),
+            build_out_msgs_elapsed: Duration::from_nanos(avg_u64(&self.build_out_msgs_elapsed_ns)),
+
+            build_accounts_and_messages_in_parallel_elased: Duration::from_nanos(avg_u64(
+                &self.build_accounts_and_messages_in_parallel_elased_ns,
+            )),
+
+            build_state_update_wu: avg_u64(&self.build_state_update_wu),
+            build_state_update_elapsed: Duration::from_nanos(avg_u64(
+                &self.build_state_update_elapsed_ns,
+            )),
+
+            build_block_wu: avg_u64(&self.build_block_wu),
+            build_block_elapsed: Duration::from_nanos(avg_u64(&self.build_block_elapsed_ns)),
+
+            finalize_block_elapsed: Duration::from_nanos(avg_u64(&self.finalize_block_elapsed_ns)),
+
+            total_elapsed: Duration::from_nanos(avg_u64(&self.total_elapsed_ns)),
+        })
+    }
+}
+
+impl DoCollateWuAvg {
+    fn get_avg(
+        &self,
+        last_shard_accounts_count: u64,
+        avg_updated_accounts_count: u64,
+    ) -> DoCollateWu {
+        let avg_u64 = |avg: &SafeUnsignedAvg| avg.get_avg_checked().unwrap_or_default() as u64;
+        let avg_u128 = |avg: &SafeUnsignedAvg| avg.get_avg_checked().unwrap_or_default();
+
+        DoCollateWu {
+            shard_accounts_count: last_shard_accounts_count,
+            updated_accounts_count: avg_updated_accounts_count,
+
+            resume_collation_wu: avg_u64(&self.resume_collation_wu),
+            resume_collation_elapsed: Duration::from_nanos(avg_u64(
+                &self.resume_collation_elapsed_ns,
+            )),
+
+            resume_collation_wu_per_block: avg_u64(&self.resume_collation_wu_per_block),
+            resume_collation_elapsed_per_block_ns: avg_u128(
+                &self.resume_collation_elapsed_per_block_ns,
+            ),
+
+            collation_total_elapsed: Duration::from_nanos(avg_u64(
+                &self.collation_total_elapsed_ns,
+            )),
+        }
+    }
 }
 
 fn report_wu_price(
@@ -1324,4 +1597,156 @@ fn report_wu_params(curr_wu_params: &WorkUnitsParams, target_wu_params: &WorkUni
         .set(curr_wu_params.finalize.diff_tail_len as f64);
     metrics::gauge!("tycho_do_collate_wu_param_finalize_resume_collation_target")
         .set(target_wu_params.finalize.diff_tail_len as f64);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_metrics(
+        base: u64,
+        has_pending_messages: bool,
+        execute_prepare: u32,
+        shard_accounts_count: u64,
+    ) -> WuMetrics {
+        let mut metrics = WuMetrics::default();
+        metrics.wu_params.execute.prepare = execute_prepare;
+        metrics.has_pending_messages = has_pending_messages;
+        metrics.wu_on_prepare_msg_groups.fixed_part = base + 1;
+        metrics.wu_on_prepare_msg_groups.read_ext_msgs_count = base + 2;
+        metrics.wu_on_prepare_msg_groups.read_ext_msgs_wu = base + 3;
+        metrics.wu_on_prepare_msg_groups.read_ext_msgs_elapsed = Duration::from_nanos(base + 4);
+        metrics
+            .wu_on_prepare_msg_groups
+            .read_existing_int_msgs_count = base + 5;
+        metrics.wu_on_prepare_msg_groups.read_existing_int_msgs_wu = base + 6;
+        metrics
+            .wu_on_prepare_msg_groups
+            .read_existing_int_msgs_elapsed = Duration::from_nanos(base + 7);
+        metrics.wu_on_prepare_msg_groups.read_new_int_msgs_count = base + 8;
+        metrics.wu_on_prepare_msg_groups.read_new_int_msgs_wu = base + 9;
+        metrics.wu_on_prepare_msg_groups.read_new_int_msgs_elapsed =
+            Duration::from_nanos(base + 10);
+        metrics
+            .wu_on_prepare_msg_groups
+            .add_to_msgs_groups_ops_count = base + 11;
+        metrics.wu_on_prepare_msg_groups.add_msgs_to_groups_wu = base + 12;
+        metrics.wu_on_prepare_msg_groups.add_msgs_to_groups_elapsed =
+            Duration::from_nanos(base + 13);
+        metrics.wu_on_prepare_msg_groups.total_elapsed = Duration::from_nanos(base + 14);
+        metrics.wu_on_execute.in_msgs_len = base + 200;
+        metrics.wu_on_execute.out_msgs_len = base + 201;
+        metrics.wu_on_execute.inserted_new_msgs_count = base + 15;
+        metrics.wu_on_execute.groups_count = base + 16;
+        metrics.wu_on_execute.avg_group_accounts_count =
+            SafeUnsignedAvg::with_initial((base + 17) as u128);
+        metrics.wu_on_execute.avg_threads_count =
+            SafeUnsignedAvg::with_initial((base + 18) as u128);
+        metrics.wu_on_execute.sum_gas = (base as u128) + 5000;
+        metrics.wu_on_execute.execute_groups_vm_only_wu = base + 19;
+        metrics.wu_on_execute.execute_groups_vm_only_elapsed = Duration::from_nanos(base + 20);
+        metrics.wu_on_execute.process_txs_wu = base + 21;
+        metrics.wu_on_execute.process_txs_elapsed = Duration::from_nanos(base + 22);
+        metrics.wu_on_finalize.diff_msgs_count = base + 23;
+        metrics.wu_on_finalize.create_queue_diff_wu = base + 24;
+        metrics.wu_on_finalize.create_queue_diff_elapsed = Duration::from_nanos(base + 25);
+        metrics.wu_on_finalize.apply_queue_diff_wu = base + 26;
+        metrics.wu_on_finalize.apply_queue_diff_elapsed = Duration::from_nanos(base + 27);
+        metrics.wu_on_finalize.shard_accounts_count = shard_accounts_count;
+        metrics.wu_on_finalize.updated_accounts_count = base + 28;
+        metrics.wu_on_finalize.in_msgs_len = base + 29;
+        metrics.wu_on_finalize.out_msgs_len = base + 30;
+        metrics.wu_on_finalize.update_shard_accounts_wu = base + 31;
+        metrics.wu_on_finalize.update_shard_accounts_elapsed = Duration::from_nanos(base + 32);
+        metrics.wu_on_finalize.build_accounts_blocks_wu = base + 33;
+        metrics.wu_on_finalize.build_accounts_blocks_elapsed = Duration::from_nanos(base + 34);
+        metrics.wu_on_finalize.build_accounts_elapsed = Duration::from_nanos(base + 35);
+        metrics.wu_on_finalize.build_in_msgs_wu = base + 36;
+        metrics.wu_on_finalize.build_in_msgs_elapsed = Duration::from_nanos(base + 37);
+        metrics.wu_on_finalize.build_out_msgs_wu = base + 38;
+        metrics.wu_on_finalize.build_out_msgs_elapsed = Duration::from_nanos(base + 39);
+        metrics
+            .wu_on_finalize
+            .build_accounts_and_messages_in_parallel_elased = Duration::from_nanos(base + 40);
+        metrics.wu_on_finalize.build_state_update_wu = base + 41;
+        metrics.wu_on_finalize.build_state_update_elapsed = Duration::from_nanos(base + 42);
+        metrics.wu_on_finalize.build_block_wu = base + 43;
+        metrics.wu_on_finalize.build_block_elapsed = Duration::from_nanos(base + 44);
+        metrics.wu_on_finalize.finalize_block_elapsed = Duration::from_nanos(base + 45);
+        metrics.wu_on_finalize.total_elapsed = Duration::from_nanos(base + 46);
+        metrics.wu_on_do_collate.resume_collation_wu = base + 47;
+        metrics.wu_on_do_collate.resume_collation_elapsed = Duration::from_nanos(base + 48);
+        metrics.wu_on_do_collate.resume_collation_wu_per_block = base + 49;
+        metrics
+            .wu_on_do_collate
+            .resume_collation_elapsed_per_block_ns = (base as u128) + 6000;
+        metrics.wu_on_do_collate.collation_total_elapsed = Duration::from_nanos(base + 50);
+        metrics
+    }
+
+    #[test]
+    fn wu_metrics_avg_inner_accumulates_fields() {
+        let mut inner = WuMetricsAvgInner::default();
+        let first = sample_metrics(10, true, 11, 1000);
+        let second = sample_metrics(30, false, 22, 2000);
+        inner.accum(&first);
+        inner.accum(&second);
+        assert_eq!(
+            inner.finalize.updated_accounts_count.get_avg_checked(),
+            Some(48)
+        );
+        assert_eq!(inner.prepare.total_elapsed_ns.get_avg_checked(), Some(34));
+        assert_eq!(inner.execute.sum_gas.get_avg_checked(), Some(5020));
+        assert_eq!(
+            inner
+                .finalize
+                .build_accounts_and_messages_in_parallel_elased_ns
+                .get_avg_checked(),
+            Some(60),
+        );
+        assert_eq!(
+            inner
+                .do_collate
+                .resume_collation_elapsed_per_block_ns
+                .get_avg_checked(),
+            Some(6020),
+        );
+    }
+
+    #[test]
+    fn wu_metrics_avg_get_avg_preserves_mapping() {
+        let mut avg = WuMetricsAvg::new();
+        avg.accum(&sample_metrics(10, true, 11, 1000));
+        avg.accum(&sample_metrics(30, false, 22, 2000));
+        let result = avg.get_avg().expect("average should exist");
+        assert_eq!(result.wu_params.execute.prepare, 22);
+        assert!(!result.has_pending_messages);
+        assert_eq!(result.wu_on_finalize.shard_accounts_count, 2000);
+        assert_eq!(result.wu_on_finalize.updated_accounts_count, 48);
+        assert_eq!(result.wu_on_finalize.in_msgs_len, 49);
+        assert_eq!(result.wu_on_finalize.out_msgs_len, 50);
+        assert_eq!(result.wu_on_execute.in_msgs_len, 49);
+        assert_eq!(result.wu_on_execute.out_msgs_len, 50);
+        assert_eq!(result.wu_on_execute.inserted_new_msgs_count, 35);
+        assert_eq!(result.wu_on_prepare_msg_groups.fixed_part, 21);
+        assert_eq!(result.wu_on_execute.sum_gas, 5020);
+        assert_eq!(
+            result
+                .wu_on_execute
+                .avg_group_accounts_count
+                .get_avg_checked(),
+            Some(37),
+        );
+        assert_eq!(
+            result
+                .wu_on_do_collate
+                .resume_collation_elapsed_per_block_ns,
+            6020,
+        );
+        assert_eq!(result.wu_on_finalize.total_elapsed.as_nanos(), 66);
+        assert_eq!(
+            result.wu_on_do_collate.collation_total_elapsed.as_nanos(),
+            70
+        );
+    }
 }
