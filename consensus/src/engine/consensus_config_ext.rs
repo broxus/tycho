@@ -1,8 +1,9 @@
 use std::num::NonZeroU64;
 
+use anyhow::{Result, ensure};
 use tycho_types::models::{ConsensusConfig, GenesisInfo};
 
-use crate::dag::AnchorStage;
+use crate::dag::{AnchorStage, WAVE_ROUNDS};
 
 /// ```text
 ///    RESET_ROUNDS      DagFront.top() == DagHead.next()
@@ -49,43 +50,45 @@ pub trait ConsensusConfigExt {
     fn max_total_rounds(&self) -> u32;
 
     fn min_round_duration_millis(&self) -> NonZeroU64;
+
+    fn validate(&self) -> Result<()>;
 }
 
+/// 2 bottommost dag rounds after a dag bottom reset (gap or restore from DB) have invalid points:
+/// their dependencies have no `DagRound`; but their dependers are trans-invalid and committable.
+/// This offset allow to drop/ignore 2 bottommost rounds of DAG to resume validation and commits.
+pub const DAG_ROUNDS_TO_DROP: u32 = 2;
+
 impl ConsensusConfigExt for ConsensusConfig {
+    /// includes additional [`DAG_ROUNDS_TO_DROP`] for invalid deps below trans-invalid decay
     fn min_front_rounds(&self) -> u32 {
         // to validate for commit;
         // notice that procedure happens at round start, before new local point's dependencies
         // finished their validation, a new 'next' dag round will appear and so no `-1` below
         3 // new current, includes and witness rounds to validate
             + self.commit_history_rounds.get() as u32 // all committable history for every point
-            + 2 // bottommost includes and witness may not have dag round, so dependers are invalid
+            + DAG_ROUNDS_TO_DROP // not dropped, contain old invalid deps for valid broadcasts
     }
 
+    /// includes additional [`DAG_ROUNDS_TO_DROP`] dag rounds just to be dropped from DAG
     fn replay_anchor_rounds(&self) -> u32 {
         self.commit_history_rounds.get() as u32 // to take full first anchor history
             + self.deduplicate_rounds as u32 // to discard full anchor history after restart
-            + 2 // bottommost includes and witness may not have dag round, so dependers are invalid
-            + 2 // invalid but certified dependers are not eligible to be committed
+            + DAG_ROUNDS_TO_DROP
     }
 
+    /// includes additional [`DAG_ROUNDS_TO_DROP`] dag rounds just to be dropped from DAG
     fn reset_rounds(&self) -> u32 {
         // we could `-1` to use both top and bottom as inclusive range bounds for lag rounds,
         // but collator may re-request TKA from collator, not only the next one
         self.max_consensus_lag_rounds.get() as u32 // assumed to contain at least one TKA
-            + self.commit_history_rounds.get() as u32 // to take full first anchor history
-            + self.deduplicate_rounds as u32 // to discard full anchor history after restart
-            + 2 // includes and witness will not have dag round, so dependers are invalid
-            + 2 // invalid but certified dependers are not eligible to be committed
+            + self.replay_anchor_rounds()
     }
 
     fn max_total_rounds(&self) -> u32 {
-        // we could `-1` to use both top and bottom as inclusive range bounds for lag rounds,
-        // but collator may re-request TKA from collator, not only the next one;
-        // next `2 + 2` is for dropped rounds as in methods above, just implementation detail
-        (self.sync_support_rounds.get() as u32).max(2 + 2) // to follow consensus during sync
-            + self.max_consensus_lag_rounds.get() as u32 // assumed to contain at least one TKA
-            + self.commit_history_rounds.get() as u32 // to take full first anchor history
-            + self.deduplicate_rounds as u32 // to discard full anchor history after restart
+        self.sync_support_rounds.get() as u32 // to follow consensus during sync
+            + self.reset_rounds()
+            - DAG_ROUNDS_TO_DROP // pure config math: ignore implementation detail
     }
 
     /// applicable only if mempool is configured for stable round rate and it is not paused
@@ -95,6 +98,35 @@ impl ConsensusConfigExt for ConsensusConfig {
             .max(1) // .. until it is the single attempt which duration is unpredictable
          + 33; // observed duration for last sign attempt and round switch
         value.try_into().expect("math: cannot be zero")
+    }
+
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            self.commit_history_rounds.get() as u32 >= WAVE_ROUNDS,
+            "commit depth must be at least WAVE_ROUNDS={WAVE_ROUNDS}"
+        );
+
+        ensure!(
+            self.max_consensus_lag_rounds >= self.commit_history_rounds.into(),
+            "max consensus lag must be at least commit depth"
+        );
+
+        ensure!(
+            self.max_total_rounds() >= self.max_consensus_lag_rounds.get() as u32 * 2,
+            "max_total_rounds() must include at least two `TopKnownAnchor`s"
+        );
+
+        ensure!(
+            self.sync_support_rounds.get() as u32 >= DAG_ROUNDS_TO_DROP,
+            "sync_support_rounds must include DAG_ROUNDS_TO_DROP={DAG_ROUNDS_TO_DROP}"
+        );
+
+        ensure!(
+            self.payload_buffer_bytes >= self.payload_batch_bytes,
+            "no need to evict cached externals if can send them in one message"
+        );
+
+        Ok(())
     }
 }
 

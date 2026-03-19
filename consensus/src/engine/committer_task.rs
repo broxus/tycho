@@ -10,7 +10,9 @@ use crate::dag::{Committer, HistoryConflict};
 use crate::effects::{AltFormat, Cancelled, Ctx, EngineCtx, RoundCtx, Task};
 use crate::engine::lifecycle::EngineError;
 use crate::engine::round_watch::{RoundWatch, TopKnownAnchor};
-use crate::engine::{ConsensusConfigExt, EngineResult, MempoolConfig, NodeConfig};
+use crate::engine::{
+    ConsensusConfigExt, DAG_ROUNDS_TO_DROP, EngineResult, MempoolConfig, NodeConfig,
+};
 use crate::models::{
     AnchorData, MempoolOutput, MempoolPeerStats, MempoolStatsMergeError, MempoolStatsOutput,
     PointInfo, Round,
@@ -105,13 +107,13 @@ impl Inner {
             let start_dag_len = committer.dag_len();
 
             let rounds_drop_allowed = |conflict_at: Round| {
-                // reset and replay offsets both include 2 additional rounds just to be dropped
-                let to_reset =
-                    (top_round - conflict_at.0).0 > round_ctx.conf().consensus.reset_rounds() - 2;
+                // reset and replay offsets both include additional rounds just to be dropped
+                let to_reset = (top_round - conflict_at.0).0
+                    > round_ctx.conf().consensus.reset_rounds() - DAG_ROUNDS_TO_DROP;
                 let min_dag_len =
                     (top_round - conflict_at.0).0 > round_ctx.conf().consensus.min_front_rounds();
-                let replay_since =
-                    top_known_anchor - (round_ctx.conf().consensus.replay_anchor_rounds() - 2);
+                let replay_since = top_known_anchor
+                    - (round_ctx.conf().consensus.replay_anchor_rounds() - DAG_ROUNDS_TO_DROP);
                 to_reset || (min_dag_len && conflict_at < replay_since)
             };
 
