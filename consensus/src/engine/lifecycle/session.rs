@@ -5,13 +5,11 @@ use tokio::sync::oneshot;
 use tokio_util::task::AbortOnDropHandle;
 use tycho_types::models::GenesisInfo;
 
-use crate::effects::{Cancelled, TaskTracker};
+use crate::effects::TaskTracker;
+use crate::engine::MempoolMergedConfig;
 use crate::engine::lifecycle::recover::{EngineRecoverLoop, RunAttributes};
 use crate::engine::lifecycle::session::isolated::SpanFields;
-use crate::engine::lifecycle::{
-    EngineBinding, EngineError, EngineNetwork, EngineNetworkArgs, FixHistoryFlag,
-};
-use crate::engine::{Engine, MempoolMergedConfig};
+use crate::engine::lifecycle::{EngineBinding, EngineNetwork, EngineNetworkArgs};
 use crate::intercom::InitPeers;
 
 pub struct EngineSession {
@@ -34,13 +32,6 @@ impl EngineSession {
 
         let task_tracker = TaskTracker::default();
         let net = EngineNetwork::new(net_args, &task_tracker, merged_conf, &init_peers);
-        let engine = Engine::new(
-            &task_tracker,
-            &bind,
-            &net,
-            merged_conf,
-            FixHistoryFlag::default(),
-        );
         let peer_schedule = net.peer_schedule.downgrade();
         let run_attrs = Arc::new(Mutex::new(RunAttributes {
             tracker: task_tracker.clone(),
@@ -68,12 +59,7 @@ impl EngineSession {
                 merged_conf: merged_conf.clone(),
                 run_attrs: run_attrs.clone(),
             }
-            .run_loop(task_tracker.ctx().spawn(async move {
-                match engine.run().await {
-                    Err(EngineError::Cancelled) => Err(Cancelled()),
-                    Err(EngineError::HistoryConflict(e)) => Ok(Err(e)),
-                }
-            })),
+            .run_loop(task_tracker, net),
         ));
 
         Self {

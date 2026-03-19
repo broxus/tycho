@@ -1,11 +1,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures_util::never::Never;
 use parking_lot::Mutex;
 
-use crate::dag::HistoryConflict;
-use crate::effects::{AltFormat, Cancelled, Task, TaskTracker};
+use crate::effects::{AltFormat, Cancelled, TaskTracker};
 use crate::engine::lifecycle::{
     EngineBinding, EngineError, EngineNetwork, EngineNetworkArgs, FixHistoryFlag,
 };
@@ -35,15 +33,34 @@ pub struct RunAttributes {
     pub peer_schedule: WeakPeerSchedule,
     pub last_peers: InitPeers,
     #[cfg(feature = "mock-feedback")]
-    pub mock_feedback: Task<Never>,
+    pub mock_feedback: crate::effects::Task<futures_util::never::Never>,
 }
 
 impl EngineRecoverLoop {
-    pub async fn run_loop(self, mut engine_run: Task<Result<Never, HistoryConflict>>) {
+    pub async fn run_loop(self, mut task_tracker: TaskTracker, mut net: EngineNetwork) {
         let mut top_known_anchor_recv = self.bind.top_known_anchor.receiver();
-        let mut engine_restart_tka = None;
+        let mut engine_start_tka;
+        let mut fix_history_flag = FixHistoryFlag(false);
 
         loop {
+            let engine = Engine::new(
+                net,
+                &task_tracker,
+                &self.bind,
+                &self.merged_conf,
+                fix_history_flag,
+            );
+
+            // prevent restart-loop: Engine will fail the same way until TKA changes
+            engine_start_tka = top_known_anchor_recv.get();
+
+            let engine_run = task_tracker.ctx().spawn(async move {
+                match engine.run().await {
+                    Err(EngineError::Cancelled) => Err(Cancelled()),
+                    Err(EngineError::HistoryConflict(e)) => Ok(e),
+                }
+            });
+
             tracing::info!(
                 peer_id = %self.net_args.network.peer_id().alt(),
                 overlay_id = %self.merged_conf.overlay_id,
@@ -63,22 +80,17 @@ impl EngineRecoverLoop {
                 .overlay_service
                 .remove_private_overlay(&self.merged_conf.overlay_id);
 
-            let task_tracker = {
-                let guard = self.run_attrs.lock();
-                guard.tracker.clone()
-            };
-
             task_tracker.stop().await;
             drop(task_tracker);
 
             let history_conflict = match never_ok {
                 Err(Cancelled()) => return,
-                Ok(Err(history_conflict)) => history_conflict,
+                Ok(history_conflict) => history_conflict,
             };
 
             // prevent restart-loop: Engine will fail the same way until TKA changes
             let mut current_tka = top_known_anchor_recv.get();
-            if engine_restart_tka.is_some_and(|last| last == current_tka) {
+            if engine_start_tka == current_tka {
                 tracing::warn!(
                     peer_id = %self.net_args.network.peer_id().alt(),
                     overlay_id = %self.merged_conf.overlay_id,
@@ -106,9 +118,9 @@ impl EngineRecoverLoop {
                     }
                 }
             }
-            engine_restart_tka = Some(current_tka);
 
-            let (task_tracker, net) = {
+            fix_history_flag = FixHistoryFlag(true);
+            (task_tracker, net) = {
                 let mut guard = self.run_attrs.lock();
                 if guard.is_stopping {
                     return; // do not update task tracker
@@ -137,21 +149,6 @@ impl EngineRecoverLoop {
 
                 (guard.tracker.clone(), net)
             };
-
-            let engine = Engine::new(
-                &task_tracker,
-                &self.bind,
-                &net,
-                &self.merged_conf,
-                FixHistoryFlag(true),
-            );
-
-            engine_run = task_tracker.ctx().spawn(async move {
-                match engine.run().await {
-                    Err(EngineError::Cancelled) => Err(Cancelled()),
-                    Err(EngineError::HistoryConflict(e)) => Ok(Err(e)),
-                }
-            });
         }
     }
 }

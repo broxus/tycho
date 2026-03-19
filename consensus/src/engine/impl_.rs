@@ -40,10 +40,11 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// pass [`EngineNetwork`] by value: it has tracker-spawned tasks to drop with engine
     pub fn new(
+        net: EngineNetwork,
         task_tracker: &TaskTracker,
         bind: &EngineBinding,
-        net: &EngineNetwork,
         merged_conf: &MempoolMergedConfig,
         fix_history: FixHistoryFlag,
     ) -> Engine {
@@ -100,7 +101,7 @@ impl Engine {
             }
         });
 
-        let round_task = RoundTaskReady::new(&store, bind, &consensus_round, net);
+        let round_task = RoundTaskReady::new(&store, bind, &consensus_round, &net);
 
         Self {
             dag,

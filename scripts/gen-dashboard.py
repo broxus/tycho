@@ -2753,6 +2753,10 @@ def mempool_payload_rates() -> RowPanel:
             "tycho_mempool_adapter_parse_anchor_history_time",
             "Adapter: parse anchor history into cells",
         ),
+        create_heatmap_panel(
+            "tycho_mempool_commit_point_latency_time",
+            "Adapter: committed point life time",
+        ),
     ]
     return create_row("Mempool payload rates", metrics)
 
