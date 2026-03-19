@@ -1,13 +1,14 @@
 use std::num::{NonZeroU8, NonZeroU16};
 use std::sync::OnceLock;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use tycho_crypto::ed25519::{KeyPair, SecretKey};
 use tycho_network::{OverlayId, PeerId};
 use tycho_types::models::{ConsensusConfig, GenesisInfo};
 
 use crate::dag::AnchorStage;
+use crate::engine::ConsensusConfigExt;
 use crate::models::{AnchorLink, ChainedAnchorProof, Point, PointData, Round, UnixTime};
 
 // replace with `ArcSwapOption` + copy on get() if need to change in runtime
@@ -92,16 +93,7 @@ impl MempoolConfigBuilder {
     }
 
     pub fn set_consensus_config(&mut self, consensus_config: &ConsensusConfig) -> Result<()> {
-        ensure!(
-            consensus_config.max_consensus_lag_rounds
-                >= consensus_config.commit_history_rounds.into(),
-            "max consensus lag must be greater than commit depth"
-        );
-
-        ensure!(
-            consensus_config.payload_buffer_bytes >= consensus_config.payload_batch_bytes,
-            "no need to evict cached externals if can send them in one message"
-        );
+        consensus_config.validate()?;
 
         self.consensus_config = Some(consensus_config.clone());
         Ok(())

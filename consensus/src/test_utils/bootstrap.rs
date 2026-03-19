@@ -8,7 +8,9 @@ use tycho_network::{
 use tycho_types::models::{ConsensusConfig, GenesisInfo};
 use tycho_util::time::now_sec;
 
-use crate::engine::{MempoolConfigBuilder, MempoolMergedConfig, MempoolNodeConfig};
+use crate::engine::{
+    ConsensusConfigExt, MempoolConfigBuilder, MempoolMergedConfig, MempoolNodeConfig,
+};
 
 pub fn default_test_config() -> MempoolMergedConfig {
     let consensus_config = ConsensusConfig {
@@ -26,6 +28,8 @@ pub fn default_test_config() -> MempoolMergedConfig {
         download_peer_queries: 1.try_into().unwrap(),
         sync_support_rounds: 15.try_into().unwrap(),
     };
+
+    (consensus_config.validate()).expect("consensus config must be valid");
 
     let node_config = MempoolNodeConfig {
         clean_db_period_rounds: NonZeroU16::new(10).unwrap(),

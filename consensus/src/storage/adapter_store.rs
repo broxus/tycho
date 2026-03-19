@@ -12,7 +12,7 @@ use weedb::rocksdb::{ReadOptions, WriteBatch};
 
 use super::MempoolStore;
 use crate::effects::AltFormat;
-use crate::engine::MempoolConfig;
+use crate::engine::{ConsensusConfigExt, DAG_ROUNDS_TO_DROP, MempoolConfig};
 use crate::models::point_status::{
     AnchorFlags, CommitHistoryPart, PointStatusCommittable, PointStatusStore,
 };
@@ -208,8 +208,8 @@ impl MempoolAdapterStore {
         let top_known_anchor = Round(top_processed_to_anchor);
 
         let bottom_round = (conf.genesis_round).max(
-            (top_known_anchor - conf.consensus.commit_history_rounds.get())
-                - conf.consensus.deduplicate_rounds,
+            // we don't restore a dag with `DagRound`s to drop, remove that extra
+            top_known_anchor - (conf.consensus.replay_anchor_rounds() - DAG_ROUNDS_TO_DROP),
         );
 
         let mut anchors = self

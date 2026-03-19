@@ -1738,7 +1738,12 @@ mod vset_update_start {
                 temp.deduplicate_rounds = 140;
                 temp.max_consensus_lag_rounds = 210.try_into().unwrap();
                 temp.sync_support_rounds = 850.try_into().unwrap();
-                assert_eq!(temp.max_total_rounds(), 20_u32 + 140 + 210 + 850);
+                assert_eq!(
+                    temp.max_total_rounds(),
+                    20_u32 + 140 + 210 + 850,
+                    "if consensus round math changes - consider a new genesis to safely migrate \
+                     even the minority, otherwise they may produce wrong key blocks later"
+                );
                 temp
             };
 

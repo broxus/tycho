@@ -64,17 +64,14 @@ impl AnchorConsumer {
         let round = match commit_result {
             MempoolOutput::Running | MempoolOutput::Paused => return,
             MempoolOutput::NextAnchor(adata) => {
+                let round = adata.anchor.round().0;
                 if adata.needs_empty_cache {
-                    tracing::warn!(
-                        "gap in anchor chain, first to commit: {}",
-                        adata.anchor.round().0
-                    );
+                    tracing::warn!("gap in anchor chain, first to commit: {round}");
                 }
-                let round = adata.anchor.round();
-                tracing::info!("committed anchor {}", round.0);
-                metrics::gauge!("tycho_mempool_last_anchor_round").set(round.0);
+                tracing::info!("committed anchor {round}");
+                metrics::gauge!("tycho_mempool_last_anchor_round").set(round);
                 tycho_util::mem::Reclaimer::instance().drop(adata);
-                round
+                Round(round)
             }
             MempoolOutput::CommitFinished(round) => {
                 // while MempoolAdapter sets commit_round at this event,
@@ -102,11 +99,9 @@ impl AnchorConsumer {
                 return;
             }
             MempoolOutput::NextAnchor(adata) => {
+                let round = adata.anchor.round().0;
                 if adata.needs_empty_cache {
-                    tracing::warn!(
-                        "gap in anchor chain, first to commit: {}",
-                        adata.anchor.round().0
-                    );
+                    tracing::warn!("gap in anchor chain, first to commit: {round}");
                 }
                 (adata.anchor, adata.history)
             }
