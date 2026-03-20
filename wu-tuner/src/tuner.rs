@@ -5,26 +5,21 @@ use std::time::Duration;
 
 use anyhow::Result;
 use tycho_collator::collator::work_units::{
-    DoCollateWu, ExecuteWu, FinalizeWu, PrepareMsgGroupsWu, calc_threads_count,
-    report_anchor_lag_to_metrics,
+    DoCollateWu, ExecuteWu, FinalizeWu, PrepareMsgGroupsWu, calc_target_scaled_wu_param_from_sums,
+    calc_target_wu_param_from_sums, report_anchor_lag_to_metrics,
 };
 use tycho_collator::types::processed_upto::BlockSeqno;
 use tycho_types::models::{ShardIdent, WorkUnitsParams};
 use tycho_util::FastHashSet;
-use tycho_util::num::{SafeSignedAvg, SafeUnsignedAvg};
+use tycho_util::num::{SafeAccum, SafeSignedAvg, SafeUnsignedAvg};
 
 use crate::config::{WuTuneType, WuTunerConfig};
 use crate::rolling_percentile::RollingPercentiles;
 use crate::updater::WuParamsUpdater;
 use crate::{MempoolAnchorLag, WuEvent, WuEventData, WuMetrics};
 
-pub enum WuMetricsSpanValue {
-    Accum(Box<WuMetricsAvg>),
-    Result(Box<WuMetrics>),
-}
-
 pub struct WuMetricsSpan {
-    pub avg: WuMetricsSpanValue,
+    pub avg: Box<WuMetricsAvg>,
     pub last: Box<WuMetrics>,
 }
 
@@ -33,33 +28,15 @@ impl WuMetricsSpan {
         let mut avg = WuMetricsAvg::new();
         avg.accum(&metrics);
         Self {
-            avg: WuMetricsSpanValue::Accum(Box::new(avg)),
+            avg: Box::new(avg),
             last: metrics,
         }
     }
 
     pub fn accum(&mut self, v: Box<WuMetrics>) -> Result<()> {
-        match &mut self.avg {
-            WuMetricsSpanValue::Accum(avg) => avg.accum(&v),
-            WuMetricsSpanValue::Result(_) => {
-                anyhow::bail!("WuMetricsSpan.avg should be Accum here")
-            }
-        }
+        self.avg.accum(&v);
         self.last = v;
         Ok(())
-    }
-
-    pub fn get_result(&mut self) -> Option<&WuMetrics> {
-        if let WuMetricsSpanValue::Accum(accum) = &mut self.avg {
-            let avg = accum.get_avg()?;
-            self.avg = WuMetricsSpanValue::Result(Box::new(avg));
-        }
-
-        let WuMetricsSpanValue::Result(avg) = &self.avg else {
-            unreachable!()
-        };
-
-        Some(avg)
     }
 }
 
@@ -137,7 +114,7 @@ const DEFAULT_PERCENTILE_WINDOW: usize = 100;
 pub struct WuHistory {
     metrics: BTreeMap<BlockSeqno, WuMetricsSpan>,
     metrics_min_seqno: Option<u32>,
-    avg_metrics: BTreeMap<BlockSeqno, WuMetrics>,
+    avg_metrics: BTreeMap<BlockSeqno, WuMetricsAvg>,
     avg_metrics_last_calculated_on_seqno: u32,
     anchors_lag: BTreeMap<BlockSeqno, AnchorsLagSpan>,
     anchors_lag_min_seqno: Option<u32>,
@@ -409,9 +386,12 @@ where
         let Some(avg) = safe_metrics_avg(avg_range) else {
             return Ok(());
         };
+        let Some(avg_metrics_res) = avg.get_avg() else {
+            return Ok(());
+        };
 
         // report avg wu metrics
-        avg.report_metrics(&shard);
+        avg_metrics_res.report_metrics(&shard);
 
         tracing::trace!(
             %shard, seqno,
@@ -598,12 +578,15 @@ where
         let Some(avg_wu_metrics) = history.avg_metrics.get(&lag_ma_seqno) else {
             return Ok(());
         };
+        let Some(avg_wu_metrics_res) = avg_wu_metrics.get_avg() else {
+            return Ok(());
+        };
 
         // calculate target wu params if avg lag does not fit bounds
         let mut target_wu_params = None;
 
         // get actual wu price
-        let actual_wu_price = avg_wu_metrics.collation_total_wu_price();
+        let actual_wu_price = avg_wu_metrics_res.collation_total_wu_price();
 
         // get wu price from last adjustment
         let last_adjustment_wu_price = self
@@ -619,7 +602,7 @@ where
         let lag_upper_bound = self.config.lag_bounds_ms.1 as i64;
 
         // it is okay when lag is negative but we do not have messages
-        if (avg_wu_metrics.wu_on_execute.groups_count > 0 || avg_lag >= 0)
+        if (avg_wu_metrics_res.wu_on_execute.groups_count > 0 || avg_lag >= 0)
             && !(lag_lower_bound..lag_upper_bound).contains(&avg_lag)
         {
             // get prev wu price from last adjustment or actual
@@ -665,15 +648,19 @@ where
             }
 
             // calculate target wu params
-            let target_params = Self::calculate_target_wu_params(target_wu_price, avg_wu_metrics);
+            let target_params = Self::calculate_target_wu_params(
+                target_wu_price,
+                avg_wu_metrics,
+                &avg_wu_metrics_res,
+            );
 
             tracing::debug!(
                 %shard, seqno,
-                has_pending_messages = avg_wu_metrics.has_pending_messages,
+                has_pending_messages = avg_wu_metrics_res.has_pending_messages,
                 avg_lag, lag_bounds = ?self.config.lag_bounds_ms,
-                current_wu_price = avg_wu_metrics.collation_total_wu_price(),
+                current_wu_price = actual_wu_price,
                 prev_wu_price, adaptive_wu_price, target_wu_price,
-                current_build_in_msg_wu_param = avg_wu_metrics.wu_params.finalize.build_in_msg,
+                current_build_in_msg_wu_param = avg_wu_metrics_res.wu_params.finalize.build_in_msg,
                 target_build_in_msg_wu_param = target_params.finalize.build_in_msg,
                 "calculated target wu params",
             );
@@ -691,7 +678,7 @@ where
         // if target wu params calculated
         if let Some(target_wu_params) = target_wu_params {
             // report target wu params to metrics
-            report_wu_params(&avg_wu_metrics.wu_params, &target_wu_params);
+            report_wu_params(&avg_wu_metrics_res.wu_params, &target_wu_params);
 
             self.wu_params_last_calculated_on_seqno = wu_params_ma_seqno;
 
@@ -738,223 +725,158 @@ where
         Ok(())
     }
 
-    fn calculate_target_wu_params(target_wu_price: f64, wu_metrics: &WuMetrics) -> WorkUnitsParams {
-        let mut target_wu_params = wu_metrics.wu_params.clone();
+    fn calculate_target_wu_params(
+        target_wu_price: f64,
+        wu_metrics_avg: &WuMetricsAvg,
+        wu_metrics_avg_res: &WuMetrics,
+    ) -> WorkUnitsParams {
+        let mut target_wu_params = wu_metrics_avg_res.wu_params.clone();
 
         // FINALIZE WU PARAMS
 
-        // calculate target build_in_msgs_wu and target wu param for it
-        let target_build_in_msgs_wu = wu_metrics
-            .wu_on_finalize
-            .calc_target_build_in_msgs_wu_by_price(target_wu_price);
-        if let Some(target_wu_param) = wu_metrics
-            .wu_on_finalize
-            .calc_target_build_in_msg_wu_param(target_build_in_msgs_wu)
-        {
-            target_wu_params.finalize.build_in_msg = target_wu_param as u16;
-        }
+        let target_build_in_msg_wu_param = calc_target_wu_param_from_sums(
+            target_wu_price,
+            &wu_metrics_avg.finalize.build_in_msg_sums_accum,
+        )
+        .unwrap_or(wu_metrics_avg_res.wu_params.finalize.build_in_msg as u64);
+        target_wu_params.finalize.build_in_msg = sat_u16_from_u64(target_build_in_msg_wu_param);
 
-        // calculate target build_out_msgs_wu and param
-        let target_build_out_msgs_wu = wu_metrics
-            .wu_on_finalize
-            .calc_target_build_out_msgs_wu_by_price(target_wu_price);
-        if let Some(target_wu_param) = wu_metrics
-            .wu_on_finalize
-            .calc_target_build_out_msg_wu_param(target_build_out_msgs_wu)
-        {
-            target_wu_params.finalize.build_out_msg = target_wu_param as u16;
-        }
+        let target_build_out_msg_wu_param = calc_target_wu_param_from_sums(
+            target_wu_price,
+            &wu_metrics_avg.finalize.build_out_msg_sums_accum,
+        )
+        .unwrap_or(wu_metrics_avg_res.wu_params.finalize.build_out_msg as u64);
+        target_wu_params.finalize.build_out_msg = sat_u16_from_u64(target_build_out_msg_wu_param);
 
-        // calculate target build_accounts_blocks_wu and param
-        let threads_count = calc_threads_count(
-            wu_metrics.wu_params.execute.subgroup_size as u64,
-            wu_metrics.wu_on_finalize.updated_accounts_count,
-        );
-        let target_build_accounts_blocks_wu = wu_metrics
-            .wu_on_finalize
-            .calc_target_build_accounts_blocks_wu_by_price(target_wu_price);
-        if let Some(target_wu_param) = wu_metrics
-            .wu_on_finalize
-            .calc_target_build_accounts_blocks_wu_param(
-                target_build_accounts_blocks_wu,
-                threads_count,
-            )
-        {
-            target_wu_params.finalize.build_transactions = target_wu_param as u16;
-        }
+        let target_build_accounts_blocks_wu_param = calc_target_wu_param_from_sums(
+            target_wu_price,
+            &wu_metrics_avg.finalize.build_accounts_blocks_sums_accum,
+        )
+        .unwrap_or(wu_metrics_avg_res.wu_params.finalize.build_transactions as u64);
+        target_wu_params.finalize.build_transactions =
+            sat_u16_from_u64(target_build_accounts_blocks_wu_param);
 
         // calculate target update_shard_accounts_wu and param
-        let shard_accounts_count_log = wu_metrics.wu_on_finalize.shard_accounts_count_log();
         let scale = 10;
-        let pow_shard_accounts_count = wu_metrics
-            .wu_on_finalize
-            .pow_shard_accounts_count(wu_metrics.wu_params.finalize.state_update_msg, scale);
-        let target_update_shard_accounts_wu = wu_metrics
-            .wu_on_finalize
-            .calc_target_update_shard_accounts_wu_by_price(target_wu_price);
-        if let Some(target_wu_param) = wu_metrics
-            .wu_on_finalize
-            .calc_target_update_shard_accounts_wu_param(
-                target_update_shard_accounts_wu,
-                threads_count,
-                shard_accounts_count_log,
-                pow_shard_accounts_count,
-                scale,
-            )
-        {
-            target_wu_params.finalize.build_accounts = target_wu_param as u16;
-        }
+        let target_update_shard_accounts_wu_param = calc_target_scaled_wu_param_from_sums(
+            target_wu_price,
+            scale,
+            &wu_metrics_avg.finalize.update_shard_accounts_sums_accum,
+        )
+        .unwrap_or(wu_metrics_avg_res.wu_params.finalize.build_accounts as u64);
+        target_wu_params.finalize.build_accounts =
+            sat_u16_from_u64(target_update_shard_accounts_wu_param);
 
         // calculate target build_state_update_wu and param
-        let target_build_state_update_wu = wu_metrics
-            .wu_on_finalize
-            .calc_target_build_state_update_wu_by_price(target_wu_price);
-        if let Some(target_wu_param) = wu_metrics
-            .wu_on_finalize
-            .calc_target_build_state_update_wu_param(
-                target_build_state_update_wu,
-                threads_count,
-                shard_accounts_count_log,
-                pow_shard_accounts_count,
-                scale,
-                target_wu_params.finalize.state_update_min as u64,
-                target_wu_params.finalize.state_update_accounts as u64,
-            )
-        {
-            target_wu_params.finalize.state_update_accounts = target_wu_param as u16;
-        }
+        let target_build_state_update_wu_param = calc_target_scaled_wu_param_from_sums(
+            target_wu_price,
+            scale,
+            &wu_metrics_avg.finalize.build_state_update_sums_accum,
+        )
+        .unwrap_or(wu_metrics_avg_res.wu_params.finalize.state_update_accounts as u64);
+        target_wu_params.finalize.state_update_accounts =
+            sat_u16_from_u64(target_build_state_update_wu_param);
 
         // calculate target build_block_wu and param
-        let target_build_block_wu = wu_metrics
-            .wu_on_finalize
-            .calc_target_build_block_wu_by_price(target_wu_price);
-        if let Some(target_wu_param) = wu_metrics.wu_on_finalize.calc_target_build_block_wu_param(
-            target_build_block_wu,
-            target_wu_params.finalize.serialize_min as u64,
-            target_wu_params.finalize.serialize_accounts as u64,
+        if let Some(target_wu_param) = calc_target_wu_param_from_sums(
+            target_wu_price,
+            &wu_metrics_avg.finalize.build_block_sums_accum,
         ) {
-            target_wu_params.finalize.serialize_accounts = target_wu_param as u16;
+            target_wu_params.finalize.serialize_accounts = sat_u16_from_u64(target_wu_param);
             target_wu_params.finalize.serialize_msg = target_wu_params.finalize.serialize_accounts;
+        } else {
+            target_wu_params.finalize.serialize_accounts =
+                wu_metrics_avg_res.wu_params.finalize.serialize_accounts;
+            target_wu_params.finalize.serialize_msg =
+                wu_metrics_avg_res.wu_params.finalize.serialize_msg;
         }
 
-        // calculate target create_queue_diff_wu and param
-        let target_create_queue_diff_wu = wu_metrics
-            .wu_on_finalize
-            .calc_target_create_queue_diff_wu_by_price(target_wu_price);
-        if let Some(target_wu_param) = wu_metrics
-            .wu_on_finalize
-            .calc_target_create_queue_diff_wu_param(target_create_queue_diff_wu)
-        {
-            target_wu_params.finalize.create_diff = target_wu_param as u16;
-        }
+        let target_create_queue_diff_wu_param = calc_target_wu_param_from_sums(
+            target_wu_price,
+            &wu_metrics_avg.finalize.create_diff_sums_accum,
+        )
+        .unwrap_or(wu_metrics_avg_res.wu_params.finalize.create_diff as u64);
+        target_wu_params.finalize.create_diff = sat_u16_from_u64(target_create_queue_diff_wu_param);
 
-        // calculate target apply_queue_diff_wu and param
-        let target_apply_queue_diff_wu = wu_metrics
-            .wu_on_finalize
-            .calc_target_apply_queue_diff_wu_by_price(target_wu_price);
-        if let Some(target_wu_param) = wu_metrics
-            .wu_on_finalize
-            .calc_target_apply_queue_diff_wu_param(target_apply_queue_diff_wu)
-        {
-            target_wu_params.finalize.apply_diff = target_wu_param as u16;
-        }
+        let target_apply_queue_diff_wu_param = calc_target_wu_param_from_sums(
+            target_wu_price,
+            &wu_metrics_avg.finalize.apply_diff_sums_accum,
+        )
+        .unwrap_or(wu_metrics_avg_res.wu_params.finalize.apply_diff as u64);
+        target_wu_params.finalize.apply_diff = sat_u16_from_u64(target_apply_queue_diff_wu_param);
 
         // READ MSGS GROUPS (PREPARE) WU PARAMS
 
-        // calulate target read_ext_msgs_wu and param
-        let target_read_ext_msgs_wu = wu_metrics
-            .wu_on_prepare_msg_groups
-            .calc_target_read_ext_msgs_wu_by_price(target_wu_price);
-        if let Some(target_wu_param) = wu_metrics
-            .wu_on_prepare_msg_groups
-            .calc_target_read_ext_msgs_wu_param(target_read_ext_msgs_wu)
-        {
-            target_wu_params.prepare.read_ext_msgs = target_wu_param as u16;
-        }
+        let target_read_ext_msgs_wu_param = calc_target_wu_param_from_sums(
+            target_wu_price,
+            &wu_metrics_avg.prepare.read_ext_msgs_sums_accum,
+        )
+        .unwrap_or(wu_metrics_avg_res.wu_params.prepare.read_ext_msgs as u64);
+        target_wu_params.prepare.read_ext_msgs = sat_u16_from_u64(target_read_ext_msgs_wu_param);
 
-        // calulate target read_existing_int_msgs_wu and param
-        let target_read_existing_int_msgs_wu = wu_metrics
-            .wu_on_prepare_msg_groups
-            .calc_target_read_existing_int_msgs_wu_by_price(target_wu_price);
-        if let Some(target_wu_param) = wu_metrics
-            .wu_on_prepare_msg_groups
-            .calc_target_read_existing_int_msgs_wu_param(target_read_existing_int_msgs_wu)
-        {
-            target_wu_params.prepare.read_int_msgs = target_wu_param as u16;
-        }
+        let target_read_existing_int_msgs_wu_param = calc_target_wu_param_from_sums(
+            target_wu_price,
+            &wu_metrics_avg.prepare.read_existing_int_msgs_sums_accum,
+        )
+        .unwrap_or(wu_metrics_avg_res.wu_params.prepare.read_int_msgs as u64);
+        target_wu_params.prepare.read_int_msgs =
+            sat_u16_from_u64(target_read_existing_int_msgs_wu_param);
 
-        // calulate target read_new_int_msgs_wu and param
-        let target_read_new_int_msgs_wu = wu_metrics
-            .wu_on_prepare_msg_groups
-            .calc_target_read_new_int_msgs_wu_by_price(target_wu_price);
-        if let Some(target_wu_param) = wu_metrics
-            .wu_on_prepare_msg_groups
-            .calc_target_read_new_int_msgs_wu_param(target_read_new_int_msgs_wu)
-        {
-            target_wu_params.prepare.read_new_msgs = target_wu_param as u16;
-        }
+        let target_read_new_int_msgs_wu_param = calc_target_wu_param_from_sums(
+            target_wu_price,
+            &wu_metrics_avg.prepare.read_new_int_msgs_sums_accum,
+        )
+        .unwrap_or(wu_metrics_avg_res.wu_params.prepare.read_new_msgs as u64);
+        target_wu_params.prepare.read_new_msgs =
+            sat_u16_from_u64(target_read_new_int_msgs_wu_param);
 
-        // calulate target add_msgs_to_groups_wu and param
-        let target_add_msgs_to_groups_wu = wu_metrics
-            .wu_on_prepare_msg_groups
-            .calc_target_add_msgs_to_groups_wu_by_price(target_wu_price);
-        if let Some(target_wu_param) = wu_metrics
-            .wu_on_prepare_msg_groups
-            .calc_target_add_msgs_to_groups_wu_param(target_add_msgs_to_groups_wu)
-        {
-            target_wu_params.prepare.add_to_msg_groups = target_wu_param as u16;
-        }
+        let target_add_msgs_to_groups_wu_param = calc_target_wu_param_from_sums(
+            target_wu_price,
+            &wu_metrics_avg.prepare.add_msgs_to_groups_sums_accum,
+        )
+        .unwrap_or(wu_metrics_avg_res.wu_params.prepare.add_to_msg_groups as u64);
+        target_wu_params.prepare.add_to_msg_groups =
+            sat_u16_from_u64(target_add_msgs_to_groups_wu_param);
 
         // EXECUTE WU PARAMS
 
-        // calulate target execute_groups_vm_only_wu and param
-        let target_execute_groups_vm_only_wu = wu_metrics
-            .wu_on_execute
-            .calc_target_execute_groups_vm_only_wu_by_price(target_wu_price);
-        if let Some(target_wu_param) = wu_metrics.wu_on_execute.calc_target_execute_wu_param(
-            target_execute_groups_vm_only_wu,
+        let target_execute_wu_param = ExecuteWu::calc_target_execute_wu_param(
+            target_wu_price,
             target_wu_params.execute.prepare as u64,
             target_wu_params.execute.execute_delimiter as u64,
-        ) {
-            target_wu_params.execute.execute = target_wu_param as u16;
-        }
+            &wu_metrics_avg.execute.execute_groups_vm_sums_accum,
+        )
+        .unwrap_or(wu_metrics_avg_res.wu_params.execute.execute as u64);
+        target_wu_params.execute.execute = sat_u16_from_u64(target_execute_wu_param);
 
-        // calulate target target_process_txs_wu and param
-        let target_process_txs_wu = wu_metrics
-            .wu_on_execute
-            .calc_target_process_txs_wu_by_price(target_wu_price);
-        if let Some(target_wu_param) = wu_metrics
-            .wu_on_execute
-            .calc_target_process_txs_wu_param(target_process_txs_wu)
-        {
-            let target_wu_param = target_wu_param as u16;
+        let target_process_txs_wu_param = calc_target_wu_param_from_sums(
+            target_wu_price,
+            &wu_metrics_avg.execute.process_txs_sums_accum,
+        );
+        if let Some(target_wu_param) = target_process_txs_wu_param {
+            let target_wu_param = sat_u16_from_u64(target_wu_param);
             target_wu_params.execute.serialize_enqueue = target_wu_param;
             target_wu_params.execute.serialize_dequeue = target_wu_param;
             target_wu_params.execute.insert_new_msgs = target_wu_param;
+        } else {
+            target_wu_params.execute.serialize_enqueue =
+                wu_metrics_avg_res.wu_params.execute.serialize_enqueue;
+            target_wu_params.execute.serialize_dequeue =
+                wu_metrics_avg_res.wu_params.execute.serialize_dequeue;
+            target_wu_params.execute.insert_new_msgs =
+                wu_metrics_avg_res.wu_params.execute.insert_new_msgs;
         }
 
         // DO COLLATE WU PARAMS
 
-        // calculate target resume_collation_wu and param
-        let target_resume_collation_wu = wu_metrics
-            .wu_on_do_collate
-            .calc_target_resume_collation_wu_by_price(target_wu_price);
-        let pow_updated_accounts_count = wu_metrics
-            .wu_on_do_collate
-            .pow_updated_accounts_count(wu_metrics.wu_params.finalize.serialize_diff, scale);
-        if let Some(target_wu_param) = wu_metrics
-            .wu_on_do_collate
-            .calc_target_resume_collation_wu_param(
-                target_resume_collation_wu,
-                threads_count,
-                pow_updated_accounts_count,
-                shard_accounts_count_log,
-                pow_shard_accounts_count,
-                scale,
-            )
-        {
-            target_wu_params.finalize.diff_tail_len = target_wu_param as u16;
-        }
+        let target_resume_collation_wu_param = calc_target_scaled_wu_param_from_sums(
+            target_wu_price,
+            scale * scale,
+            &wu_metrics_avg.do_collate.resume_collation_sums_accum,
+        )
+        .unwrap_or(wu_metrics_avg_res.wu_params.finalize.diff_tail_len as u64);
+        target_wu_params.finalize.diff_tail_len =
+            sat_u16_from_u64(target_resume_collation_wu_param);
 
         target_wu_params
     }
@@ -970,19 +892,23 @@ impl SaturatingAddFloor for f64 {
     }
 }
 
-fn safe_metrics_avg<'a, I>(range: I) -> Option<WuMetrics>
+fn sat_u16_from_u64(v: u64) -> u16 {
+    v.min(u16::MAX as u64) as u16
+}
+
+fn safe_metrics_avg<'a, I>(range: I) -> Option<WuMetricsAvg>
 where
     I: Iterator<Item = (&'a u32, &'a mut WuMetricsSpan)>,
 {
     let mut avg = WuMetricsAvg::new();
+    let mut has_merged = false;
     for (_, v) in range {
-        let Some(span_res) = v.get_result() else {
+        let Some(()) = avg.merge_span_avg(&v.avg) else {
             continue;
         };
-        avg.accum(span_res);
+        has_merged = true;
     }
-
-    avg.get_avg()
+    has_merged.then_some(avg)
 }
 
 fn safe_anchors_lag_avg<'a, I, F>(range: I, mut clip_value: F) -> Option<i64>
@@ -1010,6 +936,102 @@ where
     avg.get_avg_checked().map(|v| v as i64)
 }
 
+fn trunc_sat_u128_from_f64(value: f64) -> Option<u128> {
+    if !value.is_finite() || value < 0.0 {
+        return None;
+    }
+    if value >= u128::MAX as f64 {
+        return Some(u128::MAX);
+    }
+    Some(value.trunc() as u128)
+}
+
+fn clip_elapsed_ns_by_unit_cost<F>(
+    base: u128,
+    elapsed_ns: u128,
+    mut clamp_unit_cost: F,
+) -> Option<u128>
+where
+    F: FnMut(f64) -> f64,
+{
+    if base == 0 {
+        return None;
+    }
+    let unit_cost_raw = elapsed_ns as f64 / base as f64;
+    if !unit_cost_raw.is_finite() || unit_cost_raw < 0.0 {
+        return None;
+    }
+    let unit_cost_clip = clamp_unit_cost(unit_cost_raw);
+    if !unit_cost_clip.is_finite() || unit_cost_clip < 0.0 {
+        return None;
+    }
+    let elapsed_clip_ns_f64 = unit_cost_clip * base as f64;
+    if !elapsed_clip_ns_f64.is_finite() || elapsed_clip_ns_f64 < 0.0 {
+        return None;
+    }
+    trunc_sat_u128_from_f64(elapsed_clip_ns_f64)
+}
+
+fn clamp_prepare_read_ext_msgs_unit_cost(v: f64) -> f64 {
+    v
+}
+
+fn clamp_prepare_read_existing_int_msgs_unit_cost(v: f64) -> f64 {
+    v
+}
+
+fn clamp_prepare_read_new_int_msgs_unit_cost(v: f64) -> f64 {
+    v
+}
+
+fn clamp_prepare_add_msgs_to_groups_unit_cost(v: f64) -> f64 {
+    v
+}
+
+fn clamp_execute_ub(ub: f64) -> f64 {
+    ub
+}
+
+fn clamp_process_txs_unit_cost(unit_cost: f64) -> f64 {
+    unit_cost
+}
+
+fn clamp_build_in_msg_unit_cost(v: f64) -> f64 {
+    v
+}
+
+fn clamp_build_out_msg_unit_cost(v: f64) -> f64 {
+    v
+}
+
+fn clamp_build_accounts_blocks_unit_cost(v: f64) -> f64 {
+    v
+}
+
+fn clamp_update_shard_accounts_unit_cost(v: f64) -> f64 {
+    v
+}
+
+fn clamp_build_state_update_unit_cost(v: f64) -> f64 {
+    v
+}
+
+fn clamp_build_block_unit_cost(v: f64) -> f64 {
+    v
+}
+
+fn clamp_create_diff_unit_cost(v: f64) -> f64 {
+    v
+}
+
+fn clamp_apply_diff_unit_cost(v: f64) -> f64 {
+    v
+}
+
+fn clamp_resume_collation_unit_cost(v: f64) -> f64 {
+    v
+}
+
 #[derive(Default)]
 struct PrepareMsgGroupsWuAvg {
     fixed_part: SafeUnsignedAvg,
@@ -1017,51 +1039,112 @@ struct PrepareMsgGroupsWuAvg {
     read_ext_msgs_count: SafeUnsignedAvg,
     read_ext_msgs_wu: SafeUnsignedAvg,
     read_ext_msgs_elapsed_ns: SafeUnsignedAvg,
+    read_ext_msgs_base: SafeUnsignedAvg,
 
     read_existing_int_msgs_count: SafeUnsignedAvg,
     read_existing_int_msgs_wu: SafeUnsignedAvg,
     read_existing_int_msgs_elapsed_ns: SafeUnsignedAvg,
+    read_existing_int_msgs_base: SafeUnsignedAvg,
 
     read_new_int_msgs_count: SafeUnsignedAvg,
     read_new_int_msgs_wu: SafeUnsignedAvg,
     read_new_int_msgs_elapsed_ns: SafeUnsignedAvg,
+    read_new_int_msgs_base: SafeUnsignedAvg,
 
     add_to_msgs_groups_ops_count: SafeUnsignedAvg,
     add_msgs_to_groups_wu: SafeUnsignedAvg,
     add_msgs_to_groups_elapsed_ns: SafeUnsignedAvg,
+    add_msgs_to_groups_base: SafeUnsignedAvg,
+
+    read_ext_msgs_sums_accum: SafeAccum<(u128, u128)>,
+    read_existing_int_msgs_sums_accum: SafeAccum<(u128, u128)>,
+    read_new_int_msgs_sums_accum: SafeAccum<(u128, u128)>,
+    add_msgs_to_groups_sums_accum: SafeAccum<(u128, u128)>,
 
     total_elapsed_ns: SafeUnsignedAvg,
 }
 
 impl PrepareMsgGroupsWuAvg {
     fn accum(&mut self, v: &PrepareMsgGroupsWu) {
-        self.fixed_part.accum(v.fixed_part);
+        self.accum_avg_result(v);
+        self.accum_raw_sums(v);
+    }
 
+    fn accum_avg_result(&mut self, v: &PrepareMsgGroupsWu) {
+        self.fixed_part.accum(v.fixed_part);
         self.read_ext_msgs_count.accum(v.read_ext_msgs_count);
         self.read_ext_msgs_wu.accum(v.read_ext_msgs_wu);
         self.read_ext_msgs_elapsed_ns
             .accum(v.read_ext_msgs_elapsed.as_nanos());
-
+        self.read_ext_msgs_base.accum(v.read_ext_msgs_base);
         self.read_existing_int_msgs_count
             .accum(v.read_existing_int_msgs_count);
         self.read_existing_int_msgs_wu
             .accum(v.read_existing_int_msgs_wu);
         self.read_existing_int_msgs_elapsed_ns
             .accum(v.read_existing_int_msgs_elapsed.as_nanos());
-
+        self.read_existing_int_msgs_base
+            .accum(v.read_existing_int_msgs_base);
         self.read_new_int_msgs_count
             .accum(v.read_new_int_msgs_count);
         self.read_new_int_msgs_wu.accum(v.read_new_int_msgs_wu);
         self.read_new_int_msgs_elapsed_ns
             .accum(v.read_new_int_msgs_elapsed.as_nanos());
-
+        self.read_new_int_msgs_base.accum(v.read_new_int_msgs_base);
         self.add_to_msgs_groups_ops_count
             .accum(v.add_to_msgs_groups_ops_count);
         self.add_msgs_to_groups_wu.accum(v.add_msgs_to_groups_wu);
         self.add_msgs_to_groups_elapsed_ns
             .accum(v.add_msgs_to_groups_elapsed.as_nanos());
-
+        self.add_msgs_to_groups_base
+            .accum(v.add_msgs_to_groups_base);
         self.total_elapsed_ns.accum(v.total_elapsed.as_nanos());
+    }
+
+    fn accum_raw_sums(&mut self, v: &PrepareMsgGroupsWu) {
+        if let Some(elapsed_clip_ns) = clip_elapsed_ns_by_unit_cost(
+            v.read_ext_msgs_base,
+            v.read_ext_msgs_elapsed.as_nanos(),
+            clamp_prepare_read_ext_msgs_unit_cost,
+        ) {
+            self.read_ext_msgs_sums_accum
+                .add((elapsed_clip_ns, v.read_ext_msgs_base));
+        }
+        if let Some(elapsed_clip_ns) = clip_elapsed_ns_by_unit_cost(
+            v.read_existing_int_msgs_base,
+            v.read_existing_int_msgs_elapsed.as_nanos(),
+            clamp_prepare_read_existing_int_msgs_unit_cost,
+        ) {
+            self.read_existing_int_msgs_sums_accum
+                .add((elapsed_clip_ns, v.read_existing_int_msgs_base));
+        }
+        if let Some(elapsed_clip_ns) = clip_elapsed_ns_by_unit_cost(
+            v.read_new_int_msgs_base,
+            v.read_new_int_msgs_elapsed.as_nanos(),
+            clamp_prepare_read_new_int_msgs_unit_cost,
+        ) {
+            self.read_new_int_msgs_sums_accum
+                .add((elapsed_clip_ns, v.read_new_int_msgs_base));
+        }
+        if let Some(elapsed_clip_ns) = clip_elapsed_ns_by_unit_cost(
+            v.add_msgs_to_groups_base,
+            v.add_msgs_to_groups_elapsed.as_nanos(),
+            clamp_prepare_add_msgs_to_groups_unit_cost,
+        ) {
+            self.add_msgs_to_groups_sums_accum
+                .add((elapsed_clip_ns, v.add_msgs_to_groups_base));
+        }
+    }
+
+    fn merge_sums_accum(&mut self, other: &Self) {
+        self.read_ext_msgs_sums_accum
+            .merge(&other.read_ext_msgs_sums_accum);
+        self.read_existing_int_msgs_sums_accum
+            .merge(&other.read_existing_int_msgs_sums_accum);
+        self.read_new_int_msgs_sums_accum
+            .merge(&other.read_new_int_msgs_sums_accum);
+        self.add_msgs_to_groups_sums_accum
+            .merge(&other.add_msgs_to_groups_sums_accum);
     }
 }
 
@@ -1071,49 +1154,79 @@ struct ExecuteWuAvg {
 
     groups_count: SafeUnsignedAvg,
 
-    avg_group_accounts_count: SafeUnsignedAvg,
-    avg_threads_count: SafeUnsignedAvg,
-
-    sum_gas: SafeUnsignedAvg,
+    execute_groups_vm_sum_accounts_over_threads: SafeUnsignedAvg,
+    execute_groups_vm_sum_gas_over_threads: SafeUnsignedAvg,
 
     execute_groups_vm_only_wu: SafeUnsignedAvg,
     execute_groups_vm_only_elapsed_ns: SafeUnsignedAvg,
 
+    process_txs_base: SafeUnsignedAvg,
     process_txs_wu: SafeUnsignedAvg,
     process_txs_elapsed_ns: SafeUnsignedAvg,
+
+    execute_groups_vm_sums_accum: SafeAccum<(u128, u128, u128)>,
+    process_txs_sums_accum: SafeAccum<(u128, u128)>,
 }
 
 impl ExecuteWuAvg {
     fn accum(&mut self, v: &ExecuteWu) {
+        self.accum_avg_result(v);
+        self.accum_raw_sums(v);
+    }
+
+    fn accum_avg_result(&mut self, v: &ExecuteWu) {
         self.inserted_new_msgs_count
             .accum(v.inserted_new_msgs_count);
-
         self.groups_count.accum(v.groups_count);
-
-        self.avg_group_accounts_count.accum(
-            v.avg_group_accounts_count
-                .get_avg_checked()
-                .unwrap_or_default(),
-        );
-        self.avg_threads_count
-            .accum(v.avg_threads_count.get_avg_checked().unwrap_or_default());
-
-        self.sum_gas.accum(v.sum_gas);
-
+        self.execute_groups_vm_sum_accounts_over_threads
+            .accum(v.execute_groups_vm_sum_accounts_over_threads);
+        self.execute_groups_vm_sum_gas_over_threads
+            .accum(v.execute_groups_vm_sum_gas_over_threads);
         self.execute_groups_vm_only_wu
             .accum(v.execute_groups_vm_only_wu);
         self.execute_groups_vm_only_elapsed_ns
             .accum(v.execute_groups_vm_only_elapsed.as_nanos());
-
+        self.process_txs_base.accum(v.process_txs_base);
         self.process_txs_wu.accum(v.process_txs_wu);
         self.process_txs_elapsed_ns
             .accum(v.process_txs_elapsed.as_nanos());
+    }
+
+    fn accum_raw_sums(&mut self, v: &ExecuteWu) {
+        if let Some(execute_groups_vm_elapsed_clip_ns) = clip_elapsed_ns_by_unit_cost(
+            v.execute_groups_vm_sum_gas_over_threads,
+            v.execute_groups_vm_only_elapsed.as_nanos(),
+            clamp_execute_ub,
+        ) {
+            self.execute_groups_vm_sums_accum.add((
+                execute_groups_vm_elapsed_clip_ns,
+                v.execute_groups_vm_sum_accounts_over_threads,
+                v.execute_groups_vm_sum_gas_over_threads,
+            ));
+        }
+        if let Some(process_txs_elapsed_clip_ns) = clip_elapsed_ns_by_unit_cost(
+            v.process_txs_base,
+            v.process_txs_elapsed.as_nanos(),
+            clamp_process_txs_unit_cost,
+        ) {
+            self.process_txs_sums_accum
+                .add((process_txs_elapsed_clip_ns, v.process_txs_base));
+        }
+    }
+
+    fn merge_sums_accum(&mut self, other: &Self) {
+        self.execute_groups_vm_sums_accum
+            .merge(&other.execute_groups_vm_sums_accum);
+        self.process_txs_sums_accum
+            .merge(&other.process_txs_sums_accum);
     }
 }
 
 #[derive(Default)]
 struct FinalizeWuAvg {
     diff_msgs_count: SafeUnsignedAvg,
+    create_diff_base: SafeUnsignedAvg,
+    apply_diff_base: SafeUnsignedAvg,
 
     create_queue_diff_wu: SafeUnsignedAvg,
     create_queue_diff_elapsed_ns: SafeUnsignedAvg,
@@ -1127,83 +1240,199 @@ struct FinalizeWuAvg {
 
     update_shard_accounts_wu: SafeUnsignedAvg,
     update_shard_accounts_elapsed_ns: SafeUnsignedAvg,
+    update_shard_accounts_base: SafeUnsignedAvg,
 
     build_accounts_blocks_wu: SafeUnsignedAvg,
     build_accounts_blocks_elapsed_ns: SafeUnsignedAvg,
+    build_accounts_blocks_base: SafeUnsignedAvg,
 
     build_accounts_elapsed_ns: SafeUnsignedAvg,
 
     build_in_msgs_wu: SafeUnsignedAvg,
     build_in_msgs_elapsed_ns: SafeUnsignedAvg,
+    build_in_msg_base: SafeUnsignedAvg,
 
     build_out_msgs_wu: SafeUnsignedAvg,
     build_out_msgs_elapsed_ns: SafeUnsignedAvg,
+    build_out_msg_base: SafeUnsignedAvg,
 
     build_accounts_and_messages_in_parallel_elased_ns: SafeUnsignedAvg,
 
     build_state_update_wu: SafeUnsignedAvg,
     build_state_update_elapsed_ns: SafeUnsignedAvg,
+    build_state_update_base: SafeUnsignedAvg,
 
     build_block_wu: SafeUnsignedAvg,
     build_block_elapsed_ns: SafeUnsignedAvg,
+    build_block_base: SafeUnsignedAvg,
 
     finalize_block_elapsed_ns: SafeUnsignedAvg,
+
+    build_in_msg_sums_accum: SafeAccum<(u128, u128)>,
+    build_out_msg_sums_accum: SafeAccum<(u128, u128)>,
+    build_accounts_blocks_sums_accum: SafeAccum<(u128, u128)>,
+    update_shard_accounts_sums_accum: SafeAccum<(u128, u128)>,
+    build_state_update_sums_accum: SafeAccum<(u128, u128)>,
+    build_block_sums_accum: SafeAccum<(u128, u128)>,
+    create_diff_sums_accum: SafeAccum<(u128, u128)>,
+    apply_diff_sums_accum: SafeAccum<(u128, u128)>,
 
     total_elapsed_ns: SafeUnsignedAvg,
 }
 
 impl FinalizeWuAvg {
-    fn accum(&mut self, v: &FinalizeWu) {
-        self.diff_msgs_count.accum(v.diff_msgs_count);
+    fn accum(&mut self, v: &FinalizeWu, state_update_min_wu: u64, serialize_min_wu: u64) {
+        self.accum_avg_result(v);
+        self.accum_raw_sums(v, state_update_min_wu, serialize_min_wu);
+    }
 
+    fn accum_avg_result(&mut self, v: &FinalizeWu) {
+        self.diff_msgs_count.accum(v.diff_msgs_count);
+        self.create_diff_base.accum(v.create_diff_base);
+        self.apply_diff_base.accum(v.apply_diff_base);
         self.create_queue_diff_wu.accum(v.create_queue_diff_wu);
         self.create_queue_diff_elapsed_ns
             .accum(v.create_queue_diff_elapsed.as_nanos());
-
         self.apply_queue_diff_wu.accum(v.apply_queue_diff_wu);
         self.apply_queue_diff_elapsed_ns
             .accum(v.apply_queue_diff_elapsed.as_nanos());
-
         self.updated_accounts_count.accum(v.updated_accounts_count);
         self.in_msgs_len.accum(v.in_msgs_len);
         self.out_msgs_len.accum(v.out_msgs_len);
-
         self.update_shard_accounts_wu
             .accum(v.update_shard_accounts_wu);
         self.update_shard_accounts_elapsed_ns
             .accum(v.update_shard_accounts_elapsed.as_nanos());
-
+        self.update_shard_accounts_base
+            .accum(v.update_shard_accounts_base);
         self.build_accounts_blocks_wu
             .accum(v.build_accounts_blocks_wu);
         self.build_accounts_blocks_elapsed_ns
             .accum(v.build_accounts_blocks_elapsed.as_nanos());
-
+        self.build_accounts_blocks_base
+            .accum(v.build_accounts_blocks_base);
         self.build_accounts_elapsed_ns
             .accum(v.build_accounts_elapsed.as_nanos());
-
         self.build_in_msgs_wu.accum(v.build_in_msgs_wu);
         self.build_in_msgs_elapsed_ns
             .accum(v.build_in_msgs_elapsed.as_nanos());
-
+        self.build_in_msg_base.accum(v.build_in_msg_base);
         self.build_out_msgs_wu.accum(v.build_out_msgs_wu);
         self.build_out_msgs_elapsed_ns
             .accum(v.build_out_msgs_elapsed.as_nanos());
-
+        self.build_out_msg_base.accum(v.build_out_msg_base);
         self.build_accounts_and_messages_in_parallel_elased_ns
             .accum(v.build_accounts_and_messages_in_parallel_elased.as_nanos());
-
         self.build_state_update_wu.accum(v.build_state_update_wu);
         self.build_state_update_elapsed_ns
             .accum(v.build_state_update_elapsed.as_nanos());
-
+        self.build_state_update_base
+            .accum(v.build_state_update_base);
         self.build_block_wu.accum(v.build_block_wu);
         self.build_block_elapsed_ns
             .accum(v.build_block_elapsed.as_nanos());
-
+        self.build_block_base.accum(v.build_block_base);
         self.finalize_block_elapsed_ns
             .accum(v.finalize_block_elapsed.as_nanos());
-
         self.total_elapsed_ns.accum(v.total_elapsed.as_nanos());
+    }
+
+    fn accum_raw_sums(&mut self, v: &FinalizeWu, state_update_min_wu: u64, serialize_min_wu: u64) {
+        if let Some(create_diff_elapsed_clip_ns) = clip_elapsed_ns_by_unit_cost(
+            v.create_diff_base,
+            v.create_queue_diff_elapsed.as_nanos(),
+            clamp_create_diff_unit_cost,
+        ) {
+            self.create_diff_sums_accum
+                .add((create_diff_elapsed_clip_ns, v.create_diff_base));
+        }
+        if let Some(apply_diff_elapsed_clip_ns) = clip_elapsed_ns_by_unit_cost(
+            v.apply_diff_base,
+            v.apply_queue_diff_elapsed.as_nanos(),
+            clamp_apply_diff_unit_cost,
+        ) {
+            self.apply_diff_sums_accum
+                .add((apply_diff_elapsed_clip_ns, v.apply_diff_base));
+        }
+        if let Some(update_shard_accounts_elapsed_clip_ns) = clip_elapsed_ns_by_unit_cost(
+            v.update_shard_accounts_base,
+            v.update_shard_accounts_elapsed.as_nanos(),
+            clamp_update_shard_accounts_unit_cost,
+        ) {
+            self.update_shard_accounts_sums_accum.add((
+                update_shard_accounts_elapsed_clip_ns,
+                v.update_shard_accounts_base,
+            ));
+        }
+        if let Some(build_accounts_blocks_elapsed_clip_ns) = clip_elapsed_ns_by_unit_cost(
+            v.build_accounts_blocks_base,
+            v.build_accounts_blocks_elapsed.as_nanos(),
+            clamp_build_accounts_blocks_unit_cost,
+        ) {
+            self.build_accounts_blocks_sums_accum.add((
+                build_accounts_blocks_elapsed_clip_ns,
+                v.build_accounts_blocks_base,
+            ));
+        }
+        if let Some(build_in_msg_elapsed_clip_ns) = clip_elapsed_ns_by_unit_cost(
+            v.build_in_msg_base,
+            v.build_in_msgs_elapsed.as_nanos(),
+            clamp_build_in_msg_unit_cost,
+        ) {
+            self.build_in_msg_sums_accum
+                .add((build_in_msg_elapsed_clip_ns, v.build_in_msg_base));
+        }
+        if let Some(build_out_msg_elapsed_clip_ns) = clip_elapsed_ns_by_unit_cost(
+            v.build_out_msg_base,
+            v.build_out_msgs_elapsed.as_nanos(),
+            clamp_build_out_msg_unit_cost,
+        ) {
+            self.build_out_msg_sums_accum
+                .add((build_out_msg_elapsed_clip_ns, v.build_out_msg_base));
+        }
+        if v.build_state_update_base > 0
+            && v.build_state_update_wu > state_update_min_wu
+            && let Some(build_state_update_elapsed_clip_ns) = clip_elapsed_ns_by_unit_cost(
+                v.build_state_update_base,
+                v.build_state_update_elapsed.as_nanos(),
+                clamp_build_state_update_unit_cost,
+            )
+        {
+            self.build_state_update_sums_accum.add((
+                build_state_update_elapsed_clip_ns,
+                v.build_state_update_base,
+            ));
+        }
+        if v.build_block_base > 0
+            && v.build_block_wu > serialize_min_wu
+            && let Some(build_block_elapsed_clip_ns) = clip_elapsed_ns_by_unit_cost(
+                v.build_block_base,
+                v.build_block_elapsed.as_nanos(),
+                clamp_build_block_unit_cost,
+            )
+        {
+            self.build_block_sums_accum
+                .add((build_block_elapsed_clip_ns, v.build_block_base));
+        }
+    }
+
+    fn merge_sums_accum(&mut self, other: &Self) {
+        self.build_in_msg_sums_accum
+            .merge(&other.build_in_msg_sums_accum);
+        self.build_out_msg_sums_accum
+            .merge(&other.build_out_msg_sums_accum);
+        self.build_accounts_blocks_sums_accum
+            .merge(&other.build_accounts_blocks_sums_accum);
+        self.update_shard_accounts_sums_accum
+            .merge(&other.update_shard_accounts_sums_accum);
+        self.build_state_update_sums_accum
+            .merge(&other.build_state_update_sums_accum);
+        self.build_block_sums_accum
+            .merge(&other.build_block_sums_accum);
+        self.create_diff_sums_accum
+            .merge(&other.create_diff_sums_accum);
+        self.apply_diff_sums_accum
+            .merge(&other.apply_diff_sums_accum);
     }
 }
 
@@ -1211,6 +1440,8 @@ impl FinalizeWuAvg {
 struct DoCollateWuAvg {
     resume_collation_wu: SafeUnsignedAvg,
     resume_collation_elapsed_ns: SafeUnsignedAvg,
+    resume_collation_base: SafeUnsignedAvg,
+    resume_collation_sums_accum: SafeAccum<(u128, u128)>,
 
     resume_collation_wu_per_block: SafeUnsignedAvg,
     resume_collation_elapsed_per_block_ns: SafeUnsignedAvg,
@@ -1220,34 +1451,37 @@ struct DoCollateWuAvg {
 
 impl DoCollateWuAvg {
     fn accum(&mut self, v: &DoCollateWu) {
+        self.accum_avg_result(v);
+        self.accum_raw_sums(v);
+    }
+
+    fn accum_avg_result(&mut self, v: &DoCollateWu) {
         self.resume_collation_wu.accum(v.resume_collation_wu);
         self.resume_collation_elapsed_ns
             .accum(v.resume_collation_elapsed.as_nanos());
-
+        self.resume_collation_base.accum(v.resume_collation_base);
         self.resume_collation_wu_per_block
             .accum(v.resume_collation_wu_per_block);
         self.resume_collation_elapsed_per_block_ns
             .accum(v.resume_collation_elapsed_per_block_ns);
-
         self.collation_total_elapsed_ns
             .accum(v.collation_total_elapsed.as_nanos());
     }
-}
 
-#[derive(Default)]
-struct WuMetricsAvgInner {
-    prepare: PrepareMsgGroupsWuAvg,
-    execute: ExecuteWuAvg,
-    finalize: FinalizeWuAvg,
-    do_collate: DoCollateWuAvg,
-}
+    fn accum_raw_sums(&mut self, v: &DoCollateWu) {
+        if let Some(resume_collation_elapsed_clip_ns) = clip_elapsed_ns_by_unit_cost(
+            v.resume_collation_base,
+            v.resume_collation_elapsed.as_nanos(),
+            clamp_resume_collation_unit_cost,
+        ) {
+            self.resume_collation_sums_accum
+                .add((resume_collation_elapsed_clip_ns, v.resume_collation_base));
+        }
+    }
 
-impl WuMetricsAvgInner {
-    fn accum(&mut self, v: &WuMetrics) {
-        self.prepare.accum(&v.wu_on_prepare_msg_groups);
-        self.execute.accum(&v.wu_on_execute);
-        self.finalize.accum(&v.wu_on_finalize);
-        self.do_collate.accum(&v.wu_on_do_collate);
+    fn merge_sums_accum(&mut self, other: &Self) {
+        self.resume_collation_sums_accum
+            .merge(&other.resume_collation_sums_accum);
     }
 }
 
@@ -1255,7 +1489,10 @@ pub struct WuMetricsAvg {
     last_wu_params: WorkUnitsParams,
     last_shard_accounts_count: u64,
     had_pending_messages: bool,
-    avg: WuMetricsAvgInner,
+    prepare: PrepareMsgGroupsWuAvg,
+    execute: ExecuteWuAvg,
+    finalize: FinalizeWuAvg,
+    do_collate: DoCollateWuAvg,
 }
 
 impl WuMetricsAvg {
@@ -1264,7 +1501,10 @@ impl WuMetricsAvg {
             last_wu_params: Default::default(),
             last_shard_accounts_count: 0,
             had_pending_messages: true,
-            avg: WuMetricsAvgInner::default(),
+            prepare: PrepareMsgGroupsWuAvg::default(),
+            execute: ExecuteWuAvg::default(),
+            finalize: FinalizeWuAvg::default(),
+            do_collate: DoCollateWuAvg::default(),
         }
     }
 
@@ -1272,14 +1512,51 @@ impl WuMetricsAvg {
         self.last_wu_params = v.wu_params.clone();
         self.had_pending_messages = self.had_pending_messages && v.has_pending_messages;
         self.last_shard_accounts_count = v.wu_on_finalize.shard_accounts_count;
-        self.avg.accum(v);
+        let state_update_min_wu = v.wu_params.finalize.state_update_min as u64;
+        let serialize_min_wu = v.wu_params.finalize.serialize_min as u64;
+        self.prepare.accum(&v.wu_on_prepare_msg_groups);
+        self.execute.accum(&v.wu_on_execute);
+        self.finalize
+            .accum(&v.wu_on_finalize, state_update_min_wu, serialize_min_wu);
+        self.do_collate.accum(&v.wu_on_do_collate);
+    }
+
+    fn accum_avg_result(&mut self, v: &WuMetrics) {
+        self.last_wu_params = v.wu_params.clone();
+        self.had_pending_messages = self.had_pending_messages && v.has_pending_messages;
+        self.last_shard_accounts_count = v.wu_on_finalize.shard_accounts_count;
+        self.prepare.accum_avg_result(&v.wu_on_prepare_msg_groups);
+        self.execute.accum_avg_result(&v.wu_on_execute);
+        self.finalize.accum_avg_result(&v.wu_on_finalize);
+        self.do_collate.accum_avg_result(&v.wu_on_do_collate);
+    }
+
+    fn merge_sums_accum(&mut self, other: &Self) {
+        self.prepare.merge_sums_accum(&other.prepare);
+        self.execute.merge_sums_accum(&other.execute);
+        self.finalize.merge_sums_accum(&other.finalize);
+        self.do_collate.merge_sums_accum(&other.do_collate);
+    }
+
+    fn merge_span_avg(&mut self, other: &WuMetricsAvg) -> Option<()> {
+        let span_result = other.get_avg()?;
+        self.merge_sums_accum(other);
+        self.accum_avg_result(&span_result);
+        Some(())
     }
 }
 
 impl WuMetricsAvg {
-    pub fn get_avg(&mut self) -> Option<WuMetrics> {
-        let (wu_on_prepare_msg_groups, wu_on_execute, wu_on_finalize, wu_on_do_collate) =
-            self.avg.get_avg(self.last_shard_accounts_count)?;
+    pub fn get_avg(&self) -> Option<WuMetrics> {
+        let wu_on_prepare_msg_groups = self.prepare.get_avg();
+        let wu_on_finalize = self.finalize.get_avg(self.last_shard_accounts_count)?;
+        let wu_on_execute = self
+            .execute
+            .get_avg(wu_on_finalize.in_msgs_len, wu_on_finalize.out_msgs_len);
+        let wu_on_do_collate = self.do_collate.get_avg(
+            self.last_shard_accounts_count,
+            wu_on_finalize.updated_accounts_count,
+        );
 
         Some(WuMetrics {
             wu_params: self.last_wu_params.clone(),
@@ -1292,33 +1569,10 @@ impl WuMetricsAvg {
     }
 }
 
-impl WuMetricsAvgInner {
-    fn get_avg(
-        &self,
-        last_shard_accounts_count: u64,
-    ) -> Option<(PrepareMsgGroupsWu, ExecuteWu, FinalizeWu, DoCollateWu)> {
-        let wu_on_prepare_msg_groups = self.prepare.get_avg();
-        let wu_on_finalize = self.finalize.get_avg(last_shard_accounts_count)?;
-        let wu_on_execute = self
-            .execute
-            .get_avg(wu_on_finalize.in_msgs_len, wu_on_finalize.out_msgs_len);
-        let wu_on_do_collate = self.do_collate.get_avg(
-            last_shard_accounts_count,
-            wu_on_finalize.updated_accounts_count,
-        );
-
-        Some((
-            wu_on_prepare_msg_groups,
-            wu_on_execute,
-            wu_on_finalize,
-            wu_on_do_collate,
-        ))
-    }
-}
-
 impl PrepareMsgGroupsWuAvg {
     fn get_avg(&self) -> PrepareMsgGroupsWu {
         let avg_u64 = |avg: &SafeUnsignedAvg| avg.get_avg_checked().unwrap_or_default() as u64;
+        let avg_u128 = |avg: &SafeUnsignedAvg| avg.get_avg_checked().unwrap_or_default();
 
         PrepareMsgGroupsWu {
             fixed_part: avg_u64(&self.fixed_part),
@@ -1326,24 +1580,28 @@ impl PrepareMsgGroupsWuAvg {
             read_ext_msgs_count: avg_u64(&self.read_ext_msgs_count),
             read_ext_msgs_wu: avg_u64(&self.read_ext_msgs_wu),
             read_ext_msgs_elapsed: Duration::from_nanos(avg_u64(&self.read_ext_msgs_elapsed_ns)),
+            read_ext_msgs_base: avg_u128(&self.read_ext_msgs_base),
 
             read_existing_int_msgs_count: avg_u64(&self.read_existing_int_msgs_count),
             read_existing_int_msgs_wu: avg_u64(&self.read_existing_int_msgs_wu),
             read_existing_int_msgs_elapsed: Duration::from_nanos(avg_u64(
                 &self.read_existing_int_msgs_elapsed_ns,
             )),
+            read_existing_int_msgs_base: avg_u128(&self.read_existing_int_msgs_base),
 
             read_new_int_msgs_count: avg_u64(&self.read_new_int_msgs_count),
             read_new_int_msgs_wu: avg_u64(&self.read_new_int_msgs_wu),
             read_new_int_msgs_elapsed: Duration::from_nanos(avg_u64(
                 &self.read_new_int_msgs_elapsed_ns,
             )),
+            read_new_int_msgs_base: avg_u128(&self.read_new_int_msgs_base),
 
             add_to_msgs_groups_ops_count: avg_u64(&self.add_to_msgs_groups_ops_count),
             add_msgs_to_groups_wu: avg_u64(&self.add_msgs_to_groups_wu),
             add_msgs_to_groups_elapsed: Duration::from_nanos(avg_u64(
                 &self.add_msgs_to_groups_elapsed_ns,
             )),
+            add_msgs_to_groups_base: avg_u128(&self.add_msgs_to_groups_base),
 
             total_elapsed: Duration::from_nanos(avg_u64(&self.total_elapsed_ns)),
         }
@@ -1362,18 +1620,19 @@ impl ExecuteWuAvg {
 
             groups_count: avg_u64(&self.groups_count),
 
-            avg_group_accounts_count: SafeUnsignedAvg::with_initial(avg_u128(
-                &self.avg_group_accounts_count,
-            )),
-            avg_threads_count: SafeUnsignedAvg::with_initial(avg_u128(&self.avg_threads_count)),
-
-            sum_gas: avg_u128(&self.sum_gas),
+            execute_groups_vm_sum_accounts_over_threads: avg_u128(
+                &self.execute_groups_vm_sum_accounts_over_threads,
+            ),
+            execute_groups_vm_sum_gas_over_threads: avg_u128(
+                &self.execute_groups_vm_sum_gas_over_threads,
+            ),
 
             execute_groups_vm_only_wu: avg_u64(&self.execute_groups_vm_only_wu),
             execute_groups_vm_only_elapsed: Duration::from_nanos(avg_u64(
                 &self.execute_groups_vm_only_elapsed_ns,
             )),
 
+            process_txs_base: avg_u128(&self.process_txs_base),
             process_txs_wu: avg_u64(&self.process_txs_wu),
             process_txs_elapsed: Duration::from_nanos(avg_u64(&self.process_txs_elapsed_ns)),
         }
@@ -1383,9 +1642,12 @@ impl ExecuteWuAvg {
 impl FinalizeWuAvg {
     fn get_avg(&self, last_shard_accounts_count: u64) -> Option<FinalizeWu> {
         let avg_u64 = |avg: &SafeUnsignedAvg| avg.get_avg_checked().unwrap_or_default() as u64;
+        let avg_u128 = |avg: &SafeUnsignedAvg| avg.get_avg_checked().unwrap_or_default();
 
         Some(FinalizeWu {
             diff_msgs_count: avg_u64(&self.diff_msgs_count),
+            create_diff_base: avg_u128(&self.create_diff_base),
+            apply_diff_base: avg_u128(&self.apply_diff_base),
 
             create_queue_diff_wu: avg_u64(&self.create_queue_diff_wu),
             create_queue_diff_elapsed: Duration::from_nanos(avg_u64(
@@ -1409,19 +1671,23 @@ impl FinalizeWuAvg {
             update_shard_accounts_elapsed: Duration::from_nanos(avg_u64(
                 &self.update_shard_accounts_elapsed_ns,
             )),
+            update_shard_accounts_base: avg_u128(&self.update_shard_accounts_base),
 
             build_accounts_blocks_wu: avg_u64(&self.build_accounts_blocks_wu),
             build_accounts_blocks_elapsed: Duration::from_nanos(avg_u64(
                 &self.build_accounts_blocks_elapsed_ns,
             )),
+            build_accounts_blocks_base: avg_u128(&self.build_accounts_blocks_base),
 
             build_accounts_elapsed: Duration::from_nanos(avg_u64(&self.build_accounts_elapsed_ns)),
 
             build_in_msgs_wu: avg_u64(&self.build_in_msgs_wu),
             build_in_msgs_elapsed: Duration::from_nanos(avg_u64(&self.build_in_msgs_elapsed_ns)),
+            build_in_msg_base: avg_u128(&self.build_in_msg_base),
 
             build_out_msgs_wu: avg_u64(&self.build_out_msgs_wu),
             build_out_msgs_elapsed: Duration::from_nanos(avg_u64(&self.build_out_msgs_elapsed_ns)),
+            build_out_msg_base: avg_u128(&self.build_out_msg_base),
 
             build_accounts_and_messages_in_parallel_elased: Duration::from_nanos(avg_u64(
                 &self.build_accounts_and_messages_in_parallel_elased_ns,
@@ -1431,9 +1697,11 @@ impl FinalizeWuAvg {
             build_state_update_elapsed: Duration::from_nanos(avg_u64(
                 &self.build_state_update_elapsed_ns,
             )),
+            build_state_update_base: avg_u128(&self.build_state_update_base),
 
             build_block_wu: avg_u64(&self.build_block_wu),
             build_block_elapsed: Duration::from_nanos(avg_u64(&self.build_block_elapsed_ns)),
+            build_block_base: avg_u128(&self.build_block_base),
 
             finalize_block_elapsed: Duration::from_nanos(avg_u64(&self.finalize_block_elapsed_ns)),
 
@@ -1459,6 +1727,7 @@ impl DoCollateWuAvg {
             resume_collation_elapsed: Duration::from_nanos(avg_u64(
                 &self.resume_collation_elapsed_ns,
             )),
+            resume_collation_base: avg_u128(&self.resume_collation_base),
 
             resume_collation_wu_per_block: avg_u64(&self.resume_collation_wu_per_block),
             resume_collation_elapsed_per_block_ns: avg_u128(
@@ -1601,7 +1870,34 @@ fn report_wu_params(curr_wu_params: &WorkUnitsParams, target_wu_params: &WorkUni
 
 #[cfg(test)]
 mod tests {
+    use std::future;
+    use std::future::Future;
+    use std::sync::Arc;
+
+    use anyhow::Result;
+
     use super::*;
+
+    struct TestUpdater;
+
+    impl WuParamsUpdater for TestUpdater {
+        fn update_wu_params(
+            &self,
+            _config: Arc<WuTunerConfig>,
+            _target_wu_params: WorkUnitsParams,
+        ) -> impl Future<Output = Result<()>> + Send {
+            future::ready(Ok(()))
+        }
+    }
+
+    fn calc_target_params(target_wu_price: f64, wu_metrics_avg: &WuMetricsAvg) -> WorkUnitsParams {
+        let wu_metrics = wu_metrics_avg.get_avg().expect("average should exist");
+        WuTuner::<TestUpdater>::calculate_target_wu_params(
+            target_wu_price,
+            wu_metrics_avg,
+            &wu_metrics,
+        )
+    }
 
     fn sample_metrics(
         base: u64,
@@ -1616,6 +1912,7 @@ mod tests {
         metrics.wu_on_prepare_msg_groups.read_ext_msgs_count = base + 2;
         metrics.wu_on_prepare_msg_groups.read_ext_msgs_wu = base + 3;
         metrics.wu_on_prepare_msg_groups.read_ext_msgs_elapsed = Duration::from_nanos(base + 4);
+        metrics.wu_on_prepare_msg_groups.read_ext_msgs_base = (base + 2) as u128;
         metrics
             .wu_on_prepare_msg_groups
             .read_existing_int_msgs_count = base + 5;
@@ -1623,26 +1920,29 @@ mod tests {
         metrics
             .wu_on_prepare_msg_groups
             .read_existing_int_msgs_elapsed = Duration::from_nanos(base + 7);
+        metrics.wu_on_prepare_msg_groups.read_existing_int_msgs_base = (base + 5) as u128;
         metrics.wu_on_prepare_msg_groups.read_new_int_msgs_count = base + 8;
         metrics.wu_on_prepare_msg_groups.read_new_int_msgs_wu = base + 9;
         metrics.wu_on_prepare_msg_groups.read_new_int_msgs_elapsed =
             Duration::from_nanos(base + 10);
+        metrics.wu_on_prepare_msg_groups.read_new_int_msgs_base = (base + 8) as u128;
         metrics
             .wu_on_prepare_msg_groups
             .add_to_msgs_groups_ops_count = base + 11;
         metrics.wu_on_prepare_msg_groups.add_msgs_to_groups_wu = base + 12;
         metrics.wu_on_prepare_msg_groups.add_msgs_to_groups_elapsed =
             Duration::from_nanos(base + 13);
+        metrics.wu_on_prepare_msg_groups.add_msgs_to_groups_base = (base + 11) as u128;
         metrics.wu_on_prepare_msg_groups.total_elapsed = Duration::from_nanos(base + 14);
         metrics.wu_on_execute.in_msgs_len = base + 200;
         metrics.wu_on_execute.out_msgs_len = base + 201;
         metrics.wu_on_execute.inserted_new_msgs_count = base + 15;
         metrics.wu_on_execute.groups_count = base + 16;
-        metrics.wu_on_execute.avg_group_accounts_count =
-            SafeUnsignedAvg::with_initial((base + 17) as u128);
-        metrics.wu_on_execute.avg_threads_count =
-            SafeUnsignedAvg::with_initial((base + 18) as u128);
-        metrics.wu_on_execute.sum_gas = (base as u128) + 5000;
+        metrics
+            .wu_on_execute
+            .execute_groups_vm_sum_accounts_over_threads = (base as u128) + 5000;
+        metrics.wu_on_execute.execute_groups_vm_sum_gas_over_threads = (base as u128) + 6000;
+        metrics.wu_on_execute.process_txs_base = (base as u128) + 7000;
         metrics.wu_on_execute.execute_groups_vm_only_wu = base + 19;
         metrics.wu_on_execute.execute_groups_vm_only_elapsed = Duration::from_nanos(base + 20);
         metrics.wu_on_execute.process_txs_wu = base + 21;
@@ -1652,30 +1952,39 @@ mod tests {
         metrics.wu_on_finalize.create_queue_diff_elapsed = Duration::from_nanos(base + 25);
         metrics.wu_on_finalize.apply_queue_diff_wu = base + 26;
         metrics.wu_on_finalize.apply_queue_diff_elapsed = Duration::from_nanos(base + 27);
+        metrics.wu_on_finalize.create_diff_base = (base as u128) + 80;
+        metrics.wu_on_finalize.apply_diff_base = (base as u128) + 81;
         metrics.wu_on_finalize.shard_accounts_count = shard_accounts_count;
         metrics.wu_on_finalize.updated_accounts_count = base + 28;
         metrics.wu_on_finalize.in_msgs_len = base + 29;
         metrics.wu_on_finalize.out_msgs_len = base + 30;
         metrics.wu_on_finalize.update_shard_accounts_wu = base + 31;
         metrics.wu_on_finalize.update_shard_accounts_elapsed = Duration::from_nanos(base + 32);
+        metrics.wu_on_finalize.update_shard_accounts_base = (base as u128) + 82;
         metrics.wu_on_finalize.build_accounts_blocks_wu = base + 33;
         metrics.wu_on_finalize.build_accounts_blocks_elapsed = Duration::from_nanos(base + 34);
+        metrics.wu_on_finalize.build_accounts_blocks_base = (base as u128) + 83;
         metrics.wu_on_finalize.build_accounts_elapsed = Duration::from_nanos(base + 35);
         metrics.wu_on_finalize.build_in_msgs_wu = base + 36;
         metrics.wu_on_finalize.build_in_msgs_elapsed = Duration::from_nanos(base + 37);
+        metrics.wu_on_finalize.build_in_msg_base = (base as u128) + 84;
         metrics.wu_on_finalize.build_out_msgs_wu = base + 38;
         metrics.wu_on_finalize.build_out_msgs_elapsed = Duration::from_nanos(base + 39);
+        metrics.wu_on_finalize.build_out_msg_base = (base as u128) + 85;
         metrics
             .wu_on_finalize
             .build_accounts_and_messages_in_parallel_elased = Duration::from_nanos(base + 40);
         metrics.wu_on_finalize.build_state_update_wu = base + 41;
         metrics.wu_on_finalize.build_state_update_elapsed = Duration::from_nanos(base + 42);
+        metrics.wu_on_finalize.build_state_update_base = (base as u128) + 86;
         metrics.wu_on_finalize.build_block_wu = base + 43;
         metrics.wu_on_finalize.build_block_elapsed = Duration::from_nanos(base + 44);
+        metrics.wu_on_finalize.build_block_base = (base as u128) + 87;
         metrics.wu_on_finalize.finalize_block_elapsed = Duration::from_nanos(base + 45);
         metrics.wu_on_finalize.total_elapsed = Duration::from_nanos(base + 46);
         metrics.wu_on_do_collate.resume_collation_wu = base + 47;
         metrics.wu_on_do_collate.resume_collation_elapsed = Duration::from_nanos(base + 48);
+        metrics.wu_on_do_collate.resume_collation_base = (base as u128) + 88;
         metrics.wu_on_do_collate.resume_collation_wu_per_block = base + 49;
         metrics
             .wu_on_do_collate
@@ -1685,68 +1994,433 @@ mod tests {
     }
 
     #[test]
-    fn wu_metrics_avg_inner_accumulates_fields() {
-        let mut inner = WuMetricsAvgInner::default();
+    fn wu_metrics_avg_accumulates_fields() {
+        let mut avg = WuMetricsAvg::new();
         let first = sample_metrics(10, true, 11, 1000);
         let second = sample_metrics(30, false, 22, 2000);
-        inner.accum(&first);
-        inner.accum(&second);
+        avg.accum(&first);
+        avg.accum(&second);
         assert_eq!(
-            inner.finalize.updated_accounts_count.get_avg_checked(),
-            Some(48)
+            avg.finalize.updated_accounts_count.get_avg_checked(),
+            Some(
+                (first.wu_on_finalize.updated_accounts_count
+                    + second.wu_on_finalize.updated_accounts_count) as u128
+                    / 2,
+            )
         );
-        assert_eq!(inner.prepare.total_elapsed_ns.get_avg_checked(), Some(34));
-        assert_eq!(inner.execute.sum_gas.get_avg_checked(), Some(5020));
         assert_eq!(
-            inner
-                .finalize
+            avg.prepare.total_elapsed_ns.get_avg_checked(),
+            Some(
+                (first.wu_on_prepare_msg_groups.total_elapsed.as_nanos()
+                    + second.wu_on_prepare_msg_groups.total_elapsed.as_nanos())
+                    / 2,
+            ),
+        );
+        assert_eq!(
+            avg.execute
+                .execute_groups_vm_sum_gas_over_threads
+                .get_avg_checked(),
+            Some(
+                (first.wu_on_execute.execute_groups_vm_sum_gas_over_threads
+                    + second.wu_on_execute.execute_groups_vm_sum_gas_over_threads)
+                    / 2,
+            ),
+        );
+        assert_eq!(
+            avg.finalize
                 .build_accounts_and_messages_in_parallel_elased_ns
                 .get_avg_checked(),
-            Some(60),
+            Some(
+                (first
+                    .wu_on_finalize
+                    .build_accounts_and_messages_in_parallel_elased
+                    .as_nanos()
+                    + second
+                        .wu_on_finalize
+                        .build_accounts_and_messages_in_parallel_elased
+                        .as_nanos())
+                    / 2,
+            ),
         );
         assert_eq!(
-            inner
-                .do_collate
+            avg.do_collate
                 .resume_collation_elapsed_per_block_ns
                 .get_avg_checked(),
-            Some(6020),
+            Some(
+                (first.wu_on_do_collate.resume_collation_elapsed_per_block_ns
+                    + second
+                        .wu_on_do_collate
+                        .resume_collation_elapsed_per_block_ns)
+                    / 2,
+            ),
         );
     }
 
     #[test]
     fn wu_metrics_avg_get_avg_preserves_mapping() {
         let mut avg = WuMetricsAvg::new();
-        avg.accum(&sample_metrics(10, true, 11, 1000));
-        avg.accum(&sample_metrics(30, false, 22, 2000));
+        let first = sample_metrics(10, true, 11, 1000);
+        let second = sample_metrics(30, false, 22, 2000);
+        avg.accum(&first);
+        avg.accum(&second);
         let result = avg.get_avg().expect("average should exist");
-        assert_eq!(result.wu_params.execute.prepare, 22);
-        assert!(!result.has_pending_messages);
-        assert_eq!(result.wu_on_finalize.shard_accounts_count, 2000);
-        assert_eq!(result.wu_on_finalize.updated_accounts_count, 48);
-        assert_eq!(result.wu_on_finalize.in_msgs_len, 49);
-        assert_eq!(result.wu_on_finalize.out_msgs_len, 50);
-        assert_eq!(result.wu_on_execute.in_msgs_len, 49);
-        assert_eq!(result.wu_on_execute.out_msgs_len, 50);
-        assert_eq!(result.wu_on_execute.inserted_new_msgs_count, 35);
-        assert_eq!(result.wu_on_prepare_msg_groups.fixed_part, 21);
-        assert_eq!(result.wu_on_execute.sum_gas, 5020);
         assert_eq!(
-            result
-                .wu_on_execute
-                .avg_group_accounts_count
-                .get_avg_checked(),
-            Some(37),
+            result.wu_params.execute.prepare,
+            second.wu_params.execute.prepare
+        );
+        assert_eq!(result.has_pending_messages, second.has_pending_messages);
+        assert_eq!(
+            result.wu_on_finalize.shard_accounts_count,
+            second.wu_on_finalize.shard_accounts_count
+        );
+        assert_eq!(
+            result.wu_on_finalize.updated_accounts_count,
+            (first.wu_on_finalize.updated_accounts_count
+                + second.wu_on_finalize.updated_accounts_count)
+                / 2
+        );
+        assert_eq!(
+            result.wu_on_finalize.in_msgs_len,
+            (first.wu_on_finalize.in_msgs_len + second.wu_on_finalize.in_msgs_len) / 2
+        );
+        assert_eq!(
+            result.wu_on_finalize.out_msgs_len,
+            (first.wu_on_finalize.out_msgs_len + second.wu_on_finalize.out_msgs_len) / 2
+        );
+        assert_eq!(
+            result.wu_on_execute.in_msgs_len,
+            (first.wu_on_finalize.in_msgs_len + second.wu_on_finalize.in_msgs_len) / 2
+        );
+        assert_eq!(
+            result.wu_on_execute.out_msgs_len,
+            (first.wu_on_finalize.out_msgs_len + second.wu_on_finalize.out_msgs_len) / 2
+        );
+        assert_eq!(
+            result.wu_on_execute.inserted_new_msgs_count,
+            (first.wu_on_execute.inserted_new_msgs_count
+                + second.wu_on_execute.inserted_new_msgs_count)
+                / 2
+        );
+        assert_eq!(
+            result.wu_on_prepare_msg_groups.fixed_part,
+            (first.wu_on_prepare_msg_groups.fixed_part
+                + second.wu_on_prepare_msg_groups.fixed_part)
+                / 2
+        );
+        assert_eq!(
+            result.wu_on_execute.execute_groups_vm_sum_gas_over_threads,
+            (first.wu_on_execute.execute_groups_vm_sum_gas_over_threads
+                + second.wu_on_execute.execute_groups_vm_sum_gas_over_threads)
+                / 2
+        );
+        assert_eq!(
+            result.wu_on_execute.process_txs_base,
+            (first.wu_on_execute.process_txs_base + second.wu_on_execute.process_txs_base) / 2
         );
         assert_eq!(
             result
                 .wu_on_do_collate
                 .resume_collation_elapsed_per_block_ns,
-            6020,
+            (first.wu_on_do_collate.resume_collation_elapsed_per_block_ns
+                + second
+                    .wu_on_do_collate
+                    .resume_collation_elapsed_per_block_ns)
+                / 2,
         );
-        assert_eq!(result.wu_on_finalize.total_elapsed.as_nanos(), 66);
+        assert_eq!(
+            result.wu_on_finalize.total_elapsed.as_nanos(),
+            (first.wu_on_finalize.total_elapsed.as_nanos()
+                + second.wu_on_finalize.total_elapsed.as_nanos())
+                / 2,
+        );
         assert_eq!(
             result.wu_on_do_collate.collation_total_elapsed.as_nanos(),
-            70
+            (first.wu_on_do_collate.collation_total_elapsed.as_nanos()
+                + second.wu_on_do_collate.collation_total_elapsed.as_nanos())
+                / 2
+        );
+    }
+
+    #[test]
+    fn safe_metrics_avg_merges_span_result_and_sums() {
+        let mut spans = BTreeMap::new();
+        let mut span1 = WuMetricsSpan::new(Box::new(sample_metrics(10, true, 11, 1000)));
+        span1
+            .accum(Box::new(sample_metrics(12, true, 11, 1000)))
+            .expect("span accum should succeed");
+        let mut span2 = WuMetricsSpan::new(Box::new(sample_metrics(20, true, 11, 1000)));
+        span2
+            .accum(Box::new(sample_metrics(22, true, 11, 1000)))
+            .expect("span accum should succeed");
+        spans.insert(1u32, span1);
+        spans.insert(2u32, span2);
+
+        let avg_range =
+            spans.range_mut((std::ops::Bound::Included(0), std::ops::Bound::Excluded(3)));
+        let avg = safe_metrics_avg(avg_range).expect("average should exist");
+        let avg_metrics = avg.get_avg().expect("average result should exist");
+
+        assert_eq!(avg_metrics.wu_on_prepare_msg_groups.fixed_part, 17);
+        assert_eq!(*avg.prepare.read_ext_msgs_sums_accum, (80, 72));
+    }
+
+    #[test]
+    fn target_methods_return_none_on_zero_denominator() {
+        let sums_2 = SafeAccum::<(u128, u128)>::default();
+        let sums_3 = SafeAccum::<(u128, u128, u128)>::default();
+        assert_eq!(calc_target_wu_param_from_sums(1.0, &sums_2), None);
+
+        assert_eq!(
+            ExecuteWu::calc_target_execute_wu_param(1.0, 10, 10, &sums_3),
+            None
+        );
+        assert_eq!(calc_target_wu_param_from_sums(1.0, &sums_2), None);
+
+        assert_eq!(calc_target_wu_param_from_sums(1.0, &sums_2), None);
+        assert_eq!(
+            calc_target_scaled_wu_param_from_sums(1.0, 10, &sums_2),
+            None
+        );
+        assert_eq!(
+            calc_target_scaled_wu_param_from_sums(1.0, 10, &sums_2),
+            None
+        );
+        assert_eq!(calc_target_wu_param_from_sums(1.0, &sums_2), None);
+
+        assert_eq!(
+            calc_target_scaled_wu_param_from_sums(1.0, 10 * 10, &sums_2),
+            None
+        );
+    }
+
+    #[test]
+    fn clip_elapsed_helper_skips_invalid_numeric_paths() {
+        assert_eq!(clip_elapsed_ns_by_unit_cost(10, 100, |_| f64::NAN), None);
+        assert_eq!(
+            clip_elapsed_ns_by_unit_cost(10, 100, |_| f64::INFINITY),
+            None
+        );
+        assert_eq!(
+            clip_elapsed_ns_by_unit_cost(10, 100, |_| f64::NEG_INFINITY),
+            None
+        );
+        assert_eq!(clip_elapsed_ns_by_unit_cost(10, 100, |_| -1.0), None);
+    }
+
+    #[test]
+    fn calculate_target_wu_params_saturates_and_falls_back() {
+        let mut metrics = WuMetrics::default();
+        metrics.wu_params.prepare.read_ext_msgs = 10;
+        metrics.wu_params.prepare.read_int_msgs = 123;
+        let mut avg = WuMetricsAvg::new();
+        avg.accum_avg_result(&metrics);
+        avg.prepare
+            .read_ext_msgs_sums_accum
+            .add((((u16::MAX as u128) + 100) * 2, 1));
+        let target = calc_target_params(2.0, &avg);
+        assert_eq!(target.prepare.read_ext_msgs, u16::MAX);
+        assert_eq!(
+            target.prepare.read_int_msgs,
+            metrics.wu_params.prepare.read_int_msgs
+        );
+    }
+
+    fn synthetic_metrics_for_expected_params() -> (WuMetricsAvg, f64, WorkUnitsParams) {
+        let target_wu_price = 2.0;
+        let mut metrics = WuMetrics::default();
+        metrics.wu_params.prepare.read_ext_msgs = 7;
+        metrics.wu_params.prepare.read_int_msgs = 9;
+        metrics.wu_params.prepare.read_new_msgs = 5;
+        metrics.wu_params.prepare.add_to_msg_groups = 3;
+        metrics.wu_params.execute.prepare = 5;
+        metrics.wu_params.execute.execute = 30;
+        metrics.wu_params.execute.execute_delimiter = 10;
+        metrics.wu_params.execute.serialize_enqueue = 40;
+        metrics.wu_params.execute.serialize_dequeue = 40;
+        metrics.wu_params.execute.insert_new_msgs = 40;
+        metrics.wu_params.execute.subgroup_size = 8;
+        metrics.wu_params.finalize.build_in_msg = 11;
+        metrics.wu_params.finalize.build_out_msg = 13;
+        metrics.wu_params.finalize.build_transactions = 17;
+        metrics.wu_params.finalize.build_accounts = 19;
+        metrics.wu_params.finalize.state_update_accounts = 23;
+        metrics.wu_params.finalize.serialize_accounts = 29;
+        metrics.wu_params.finalize.serialize_msg = 29;
+        metrics.wu_params.finalize.create_diff = 31;
+        metrics.wu_params.finalize.apply_diff = 37;
+        metrics.wu_params.finalize.diff_tail_len = 41;
+        metrics.wu_params.finalize.state_update_min = 50;
+        metrics.wu_params.finalize.serialize_min = 50;
+        metrics.wu_on_finalize.updated_accounts_count = 1000;
+        metrics.wu_on_finalize.shard_accounts_count = 100_000;
+        metrics.wu_on_do_collate.updated_accounts_count = 1000;
+        metrics.wu_on_do_collate.shard_accounts_count = 100_000;
+
+        let mut avg = WuMetricsAvg::new();
+        avg.accum_avg_result(&metrics);
+        avg.prepare.read_ext_msgs_sums_accum.add((140, 10));
+        avg.prepare.read_existing_int_msgs_sums_accum.add((180, 10));
+        avg.prepare.read_new_int_msgs_sums_accum.add((100, 10));
+        avg.prepare.add_msgs_to_groups_sums_accum.add((60, 10));
+        avg.execute
+            .execute_groups_vm_sums_accum
+            .add((50, 2_000_000, 5_000_000));
+        avg.execute.process_txs_sums_accum.add((1600, 20));
+        avg.finalize.build_in_msg_sums_accum.add((220, 10));
+        avg.finalize.build_out_msg_sums_accum.add((312, 12));
+        avg.finalize.build_accounts_blocks_sums_accum.add((238, 7));
+        avg.finalize.update_shard_accounts_sums_accum.add((190, 50));
+        avg.finalize.build_state_update_sums_accum.add((184, 40));
+        avg.finalize.build_block_sums_accum.add((522, 9));
+        avg.finalize.create_diff_sums_accum.add((496, 8));
+        avg.finalize.apply_diff_sums_accum.add((444, 6));
+        avg.do_collate.resume_collation_sums_accum.add((41, 50));
+        (avg, target_wu_price, metrics.wu_params)
+    }
+
+    #[test]
+    fn calculate_target_wu_params_matches_expected_params() {
+        let (avg_metrics, target_wu_price, expected_params) =
+            synthetic_metrics_for_expected_params();
+        let target = calc_target_params(target_wu_price, &avg_metrics);
+        assert_eq!(
+            target.prepare.read_ext_msgs,
+            expected_params.prepare.read_ext_msgs
+        );
+        assert_eq!(
+            target.prepare.read_int_msgs,
+            expected_params.prepare.read_int_msgs
+        );
+        assert_eq!(
+            target.prepare.read_new_msgs,
+            expected_params.prepare.read_new_msgs
+        );
+        assert_eq!(
+            target.prepare.add_to_msg_groups,
+            expected_params.prepare.add_to_msg_groups
+        );
+        assert_eq!(target.execute.execute, expected_params.execute.execute);
+        assert_eq!(
+            target.execute.serialize_enqueue,
+            expected_params.execute.serialize_enqueue
+        );
+        assert_eq!(
+            target.execute.serialize_dequeue,
+            expected_params.execute.serialize_dequeue
+        );
+        assert_eq!(
+            target.execute.insert_new_msgs,
+            expected_params.execute.insert_new_msgs
+        );
+        assert_eq!(
+            target.finalize.build_in_msg,
+            expected_params.finalize.build_in_msg
+        );
+        assert_eq!(
+            target.finalize.build_out_msg,
+            expected_params.finalize.build_out_msg
+        );
+        assert_eq!(
+            target.finalize.build_transactions,
+            expected_params.finalize.build_transactions
+        );
+        assert_eq!(
+            target.finalize.build_accounts,
+            expected_params.finalize.build_accounts
+        );
+        assert_eq!(
+            target.finalize.state_update_accounts,
+            expected_params.finalize.state_update_accounts
+        );
+        assert_eq!(
+            target.finalize.serialize_accounts,
+            expected_params.finalize.serialize_accounts
+        );
+        assert_eq!(
+            target.finalize.serialize_msg,
+            expected_params.finalize.serialize_msg
+        );
+        assert_eq!(
+            target.finalize.create_diff,
+            expected_params.finalize.create_diff
+        );
+        assert_eq!(
+            target.finalize.apply_diff,
+            expected_params.finalize.apply_diff
+        );
+        assert_eq!(
+            target.finalize.diff_tail_len,
+            expected_params.finalize.diff_tail_len
+        );
+    }
+
+    #[test]
+    fn threshold_filters_are_applied_in_aggregation() {
+        let mut first = WuMetrics::default();
+        first.wu_params.finalize.state_update_min = 100;
+        first.wu_params.finalize.serialize_min = 120;
+        first.wu_params.finalize.state_update_accounts = 200;
+        first.wu_params.finalize.serialize_accounts = 100;
+        first.wu_params.finalize.serialize_msg = 100;
+        first.wu_params.execute.subgroup_size = 4;
+        first.wu_on_finalize.updated_accounts_count = 10;
+        first.wu_on_finalize.shard_accounts_count = 1000;
+        first.wu_on_finalize.build_state_update_base = 10;
+        first.wu_on_finalize.build_state_update_wu = 200;
+        first.wu_on_finalize.build_state_update_elapsed = Duration::from_nanos(200);
+        first.wu_on_finalize.build_block_base = 5;
+        first.wu_on_finalize.build_block_wu = 200;
+        first.wu_on_finalize.build_block_elapsed = Duration::from_nanos(500);
+
+        let mut second = WuMetrics {
+            wu_params: first.wu_params.clone(),
+            ..Default::default()
+        };
+        second.wu_on_finalize.updated_accounts_count = first.wu_on_finalize.updated_accounts_count;
+        second.wu_on_finalize.shard_accounts_count = first.wu_on_finalize.shard_accounts_count;
+        second.wu_on_finalize.build_state_update_base = 20;
+        second.wu_on_finalize.build_state_update_wu = 80;
+        second.wu_on_finalize.build_state_update_elapsed = Duration::from_nanos(10_000);
+        second.wu_on_finalize.build_block_base = 8;
+        second.wu_on_finalize.build_block_wu = 100;
+        second.wu_on_finalize.build_block_elapsed = Duration::from_nanos(8_000);
+
+        let mut avg = WuMetricsAvg::new();
+        avg.accum(&first);
+        avg.accum(&second);
+        assert_eq!(*avg.finalize.build_state_update_sums_accum, (200, 10));
+        assert_eq!(*avg.finalize.build_block_sums_accum, (500, 5));
+        let target = calc_target_params(1.0, &avg);
+        assert_eq!(
+            target.finalize.state_update_accounts,
+            first.wu_params.finalize.state_update_accounts
+        );
+        assert_eq!(
+            target.finalize.serialize_accounts,
+            first.wu_params.finalize.serialize_accounts
+        );
+        assert_eq!(
+            target.finalize.serialize_msg,
+            first.wu_params.finalize.serialize_msg
+        );
+    }
+
+    #[test]
+    fn filtered_samples_lead_to_zero_denominator_and_fallback() {
+        let mut sample = WuMetrics::default();
+        sample.wu_params.prepare.read_ext_msgs = 77;
+        sample.wu_on_finalize.updated_accounts_count = 1;
+        sample.wu_on_finalize.shard_accounts_count = 1;
+        sample.wu_on_prepare_msg_groups.read_ext_msgs_base = 0;
+        sample.wu_on_prepare_msg_groups.read_ext_msgs_elapsed = Duration::from_nanos(100);
+
+        let mut avg = WuMetricsAvg::new();
+        avg.accum(&sample);
+        assert_eq!(*avg.prepare.read_ext_msgs_sums_accum, (0, 0));
+        let target = calc_target_params(1.0, &avg);
+        assert_eq!(
+            target.prepare.read_ext_msgs,
+            sample.wu_params.prepare.read_ext_msgs
         );
     }
 }
