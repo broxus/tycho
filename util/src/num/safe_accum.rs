@@ -168,6 +168,33 @@ impl<T: SafeAccumScalar> SafeAccum<T> {
     pub fn approx_avg(&self) -> Option<T> {
         approx_avg_value(self.value, self.counter, self.shift)
     }
+
+    /// Merges another scalar accumulator into this one preserving shift semantics.
+    pub fn merge(&mut self, other: &Self) {
+        if other.counter == 0 {
+            return;
+        }
+        if self.counter == 0 {
+            self.value = other.value;
+            self.shift = other.shift;
+            self.counter = other.counter;
+            return;
+        }
+        let mut shift = self.shift.max(other.shift);
+        let mut lhs = shr_num(self.value, shift.saturating_sub(self.shift));
+        let mut rhs = shr_num(other.value, shift.saturating_sub(other.shift));
+        loop {
+            if let Some(sum) = lhs.checked_add(rhs) {
+                self.value = sum;
+                self.shift = shift;
+                self.counter = self.counter.saturating_add(other.counter);
+                return;
+            }
+            lhs = lhs >> 1;
+            rhs = rhs >> 1;
+            shift = shift.saturating_add(1);
+        }
+    }
 }
 
 #[allow(private_bounds)]
@@ -241,6 +268,39 @@ macro_rules! impl_safe_accum_tuple_impl {
                     approx_avg_value(self.value.$idx, self.counter, self.shift)
                 }
             )+
+
+            /// Merges another tuple accumulator into this one preserving shared shift semantics.
+            pub fn merge(&mut self, other: &Self) {
+                if other.counter == 0 {
+                    return;
+                }
+                if self.counter == 0 {
+                    self.value = other.value;
+                    self.shift = other.shift;
+                    self.counter = other.counter;
+                    return;
+                }
+                let mut shift = self.shift.max(other.shift);
+                let mut lhs = self.value.shift_all(shift.saturating_sub(self.shift));
+                let mut rhs = other.value.shift_all(shift.saturating_sub(other.shift));
+                'merge_loop: loop {
+                    let mut next = lhs;
+                    $(
+                        if let Some(sum) = lhs.$idx.checked_add(rhs.$idx) {
+                            next.$idx = sum;
+                        } else {
+                            shift = shift.saturating_add(1);
+                            lhs = lhs.shift_all(1);
+                            rhs = rhs.shift_all(1);
+                            continue 'merge_loop;
+                        }
+                    )+
+                    self.value = next;
+                    self.shift = shift;
+                    self.counter = self.counter.saturating_add(other.counter);
+                    break;
+                }
+            }
         }
 
         #[allow(private_bounds)]
@@ -400,5 +460,33 @@ mod tests {
         assert_eq!(accum.approx_avg_0(), Some(12));
         assert_eq!(accum.approx_avg_1(), Some(-12));
         assert_eq!(accum.approx_avg_2(), Some(21));
+    }
+
+    #[test]
+    fn merge_scalar_accumulators_preserves_shift_and_counter() {
+        let mut lhs = SafeAccum::<u128>::new();
+        lhs.add(u128::MAX);
+        lhs.add(2);
+        let mut rhs = SafeAccum::<u128>::new();
+        rhs.add(8);
+        rhs.add(12);
+        lhs.merge(&rhs);
+        assert_eq!(*lhs, (1u128 << 127) + 10);
+        assert_eq!(lhs.shift(), 1);
+        assert_eq!(lhs.counter(), 4);
+    }
+
+    #[test]
+    fn merge_tuple_accumulators_preserves_shared_shift_and_counter() {
+        let mut lhs = SafeAccum::<(u128, u128)>::new();
+        lhs.add((u128::MAX, 10));
+        lhs.add((1, 20));
+        let mut rhs = SafeAccum::<(u128, u128)>::new();
+        rhs.add((8, 40));
+        rhs.add((12, 60));
+        lhs.merge(&rhs);
+        assert_eq!(*lhs, ((u128::MAX >> 1) + 10, 65));
+        assert_eq!(lhs.shift(), 1);
+        assert_eq!(lhs.counter(), 4);
     }
 }
