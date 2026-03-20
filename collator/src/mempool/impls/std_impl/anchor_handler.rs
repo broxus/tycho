@@ -153,9 +153,16 @@ impl Shuttle {
             metrics::counter!("tycho_mempool_msgs_duplicates_bytes")
                 .increment((total_bytes - unique_payload_bytes) as _);
 
-            metrics::histogram!("tycho_mempool_commit_anchor_latency_time").record(
-                Duration::from_millis(now_millis().max(chain_time) - chain_time),
-            );
+            let now = now_millis();
+
+            metrics::histogram!("tycho_mempool_commit_anchor_latency_time")
+                .record(Duration::from_millis(now.max(chain_time) - chain_time));
+
+            for info in &committed.history {
+                let time = info.time().millis();
+                metrics::histogram!("tycho_mempool_commit_point_latency_time")
+                    .record(Duration::from_millis(now.max(time) - time));
+            }
 
             tracing::info!(
                 target: tracing_targets::MEMPOOL_ADAPTER,
