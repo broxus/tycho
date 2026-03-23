@@ -83,8 +83,43 @@ impl<T: Copy + Ord> RollingPercentiles<T> {
     }
 
     pub fn push_and_clip(&mut self, x: T, p_low: u8, p_high: u8) -> T {
+        if !self.window_is_filled() {
+            self.push(x);
+            return x;
+        }
+        let clipped = self
+            .clip(x, p_low, p_high)
+            .expect("percentiles buf should contain at least one value here");
         self.push(x);
-        self.clip(x, p_low, p_high)
-            .expect("percentiles buf should contain at least ona value here")
+        clipped
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RollingPercentiles;
+
+    #[test]
+    fn push_and_clip_returns_input_before_window_is_filled() {
+        let mut pct = RollingPercentiles::new(100);
+        for _ in 0..99 {
+            assert_eq!(pct.push_and_clip(10u128, 1, 99), 10);
+        }
+        assert_eq!(pct.len(), 99);
+        assert_eq!(pct.push_and_clip(100u128, 1, 99), 100);
+        assert_eq!(pct.len(), 100);
+    }
+
+    #[test]
+    fn push_and_clip_clips_against_history_only_when_window_is_filled() {
+        let mut pct = RollingPercentiles::new(100);
+        for _ in 0..99 {
+            assert_eq!(pct.push_and_clip(10u128, 1, 99), 10);
+        }
+        assert_eq!(pct.push_and_clip(100u128, 1, 99), 100);
+        assert_eq!(pct.percentile(99), Some(10));
+        assert_eq!(pct.push_and_clip(1000u128, 1, 99), 10);
+        assert_eq!(pct.len(), 100);
+        assert_eq!(pct.percentile(100), Some(1000));
     }
 }
