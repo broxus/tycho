@@ -11,10 +11,9 @@ use tycho_collator::collator::work_units::{
 use tycho_collator::types::processed_upto::BlockSeqno;
 use tycho_types::models::{ShardIdent, WorkUnitsParams};
 use tycho_util::FastHashSet;
-use tycho_util::num::{SafeAccum, SafeSignedAvg, SafeUnsignedAvg};
+use tycho_util::num::{RollingPercentiles, SafeAccum, SafeSignedAvg, SafeUnsignedAvg};
 
 use crate::config::{WuTuneType, WuTunerConfig};
-use crate::rolling_percentile::RollingPercentiles;
 use crate::updater::WuParamsUpdater;
 use crate::{MempoolAnchorLag, WuEvent, WuEventData, WuMetrics};
 
