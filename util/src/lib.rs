@@ -50,10 +50,12 @@ pub mod mem {
 
 pub mod num {
     pub use self::median::{StreamingUnsignedMedian, VecOfStreamingUnsignedMedian};
-    pub use self::safe_avg::{SafeSignedAvg, SafeUnsignedAvg, SafeUnsignedVecAvg};
+    pub use self::rolling_percentile::RollingPercentiles;
     pub use self::safe_accum::SafeAccum;
+    pub use self::safe_avg::{SafeSignedAvg, SafeUnsignedAvg, SafeUnsignedVecAvg};
 
     mod median;
+    mod rolling_percentile;
     mod safe_accum;
     mod safe_avg;
 }
