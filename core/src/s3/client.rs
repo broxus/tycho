@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use bytesize::ByteSize;
 use object_store::path::Path;
-use object_store::{DynObjectStore, Error, ObjectStore};
+use object_store::{DynObjectStore, Error, ObjectStoreExt};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::archive::ArchiveVerifier;
 use tycho_types::models::BlockId;
