@@ -13,7 +13,7 @@ pub mod test_utils;
 pub mod prelude {
     pub use crate::dag::WAVE_ROUNDS;
     pub use crate::engine::lifecycle::{EngineBinding, EngineNetworkArgs, EngineSession};
-    pub use crate::engine::round_watch::{Commit, RoundWatch, TopKnownAnchor};
+    pub use crate::engine::round_watch::{RoundWatch, TopKnownAnchor};
     pub use crate::engine::{
         ConsensusConfigExt, GenesisInfoExt, InputBuffer, MempoolConfigBuilder, MempoolMergedConfig,
         MempoolNodeConfig,

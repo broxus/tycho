@@ -93,13 +93,10 @@ impl MempoolAdapterStdImpl {
         self.top_known_anchor
             .set_max_raw(ctx.top_processed_to_anchor_id);
 
-        let commit_finished = RoundWatch::default();
-
         let bind = EngineBinding {
             mempool_db: self.mempool_db.clone(),
             input_buffer: self.input_buffer.clone(),
             top_known_anchor: self.top_known_anchor.clone(),
-            commit_finished: commit_finished.clone(),
             anchors_tx,
         };
 
@@ -136,14 +133,10 @@ impl MempoolAdapterStdImpl {
             engine_stop_tx,
         );
 
-        let mut anchors_task = StdAnchorHandler::new(
-            anchors_rx,
-            commit_finished,
-            &self.cache,
-            &merged_conf.conf.consensus,
-        )
-        .run(self.mempool_db.clone())
-        .boxed();
+        let mut anchors_task =
+            StdAnchorHandler::new(anchors_rx, &self.cache, &merged_conf.conf.consensus)
+                .run(self.mempool_db.clone())
+                .boxed();
 
         tokio::spawn(async move {
             tokio::select! {

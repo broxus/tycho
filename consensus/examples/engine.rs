@@ -141,7 +141,6 @@ fn make_network(
         let dht_config = dht_config.clone();
 
         let top_known_anchor = anchor_consumer.top_known_anchor.clone();
-        let commit_finished = anchor_consumer.commit_finished.clone();
 
         let (anchors_tx, anchors_rx) = mpsc::unbounded_channel();
         anchor_consumer.add(peer_id, anchors_rx);
@@ -190,7 +189,6 @@ fn make_network(
                                 &merged_conf.conf.consensus,
                             ),
                             top_known_anchor,
-                            commit_finished,
                             anchors_tx,
                         };
 

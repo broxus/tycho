@@ -2666,42 +2666,38 @@ def mempool_rounds() -> RowPanel:
             "Consensus: round determined by Broadcast Filter",
         ),
         create_gauge_panel(
-            "tycho_mempool_rounds_consensus_ahead_top_known",
-            "Consensus ahead of top known block: pause clause",
+            "tycho_mempool_commit_round",
+            "Consensus: committed round",
         ),
         create_gauge_panel(
             "tycho_mempool_rounds_dag_length",
             "DAG length in memory",
         ),
         create_gauge_panel(
-            "tycho_mempool_rounds_consensus_ahead_committed",
-            "Consensus ahead of committed: commit latency",
+            "tycho_mempool_rounds_consensus_ahead_top_known",
+            "Consensus ahead of top known block: pause clause",
         ),
         create_gauge_panel(
             "tycho_mempool_rounds_engine_ahead_last_trigger",
             "Engine ahead of last anchor trigger: leaders finish 3 rounds in a row",
         ),
         create_gauge_panel(
-            "tycho_mempool_rounds_committed_ahead_top_known",
-            "Committed ahead of top known block: confirm block duration",
+            "tycho_mempool_rounds_consensus_ahead_storage_round",
+            "Consensus ahead of storage: history to keep",
         ),
         create_gauge_panel(
             "tycho_mempool_rounds_engine_ahead_proof_chain",
             "Engine ahead of last linked anchor proof: local gaps in leader chain",
         ),
         create_gauge_panel(
-            "tycho_mempool_rounds_consensus_ahead_storage_round",
-            "Consensus ahead of storage: history to keep",
+            "tycho_mempool_rounds_db_cleaned",
+            "DB: deleted rounds",
+            legend_format="{{instance}} - {{kind}}",
         ),
         create_gauge_panel(
             "tycho_mempool_engine_run_count",
             "Engine: (re)start count at genesis round",
             legend_format="{{instance}} - {{genesis_round}}",
-        ),
-        create_gauge_panel(
-            "tycho_mempool_rounds_db_cleaned",
-            "DB: deleted rounds",
-            legend_format="{{instance}} - {{kind}}",
         ),
     ]
     return create_row("Mempool rounds", metrics)

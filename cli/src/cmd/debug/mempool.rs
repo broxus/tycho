@@ -306,7 +306,6 @@ impl Mempool {
             mempool_db: self.mempool_db.clone(),
             input_buffer: self.input_buffer.clone(),
             top_known_anchor: anchor_consumer.top_known_anchor.clone(),
-            commit_finished: anchor_consumer.commit_finished.clone(),
             anchors_tx,
         };
 
