@@ -24,9 +24,9 @@ impl RollingUnitCostClipper {
             return None;
         }
         let unit_cost_q = quantize_unit_cost(unit_cost_raw)?;
-        let unit_cost_clip_q = self
-            .pct
-            .push_and_clip(unit_cost_q, UNIT_COST_P_LOW, UNIT_COST_P_HIGH);
+        let unit_cost_clip_q =
+            self.pct
+                .push_and_clip(unit_cost_q, UNIT_COST_P_LOW, UNIT_COST_P_HIGH);
         dequantize_elapsed_ns(unit_cost_clip_q, base)
     }
 }
@@ -36,6 +36,7 @@ pub struct PrepareUnitCostClippers {
     pub read_existing_int_msgs: RollingUnitCostClipper,
     pub read_new_int_msgs: RollingUnitCostClipper,
     pub add_msgs_to_groups: RollingUnitCostClipper,
+    pub total_elapsed: RollingUnitCostClipper,
 }
 
 impl PrepareUnitCostClippers {
@@ -45,6 +46,7 @@ impl PrepareUnitCostClippers {
             read_existing_int_msgs: RollingUnitCostClipper::new(window),
             read_new_int_msgs: RollingUnitCostClipper::new(window),
             add_msgs_to_groups: RollingUnitCostClipper::new(window),
+            total_elapsed: RollingUnitCostClipper::new(window),
         }
     }
 }
@@ -68,10 +70,14 @@ pub struct FinalizeUnitCostClippers {
     pub apply_diff: RollingUnitCostClipper,
     pub update_shard_accounts: RollingUnitCostClipper,
     pub build_accounts_blocks: RollingUnitCostClipper,
+    pub build_accounts: RollingUnitCostClipper,
     pub build_in_msg: RollingUnitCostClipper,
     pub build_out_msg: RollingUnitCostClipper,
+    pub build_accounts_and_messages_in_parallel: RollingUnitCostClipper,
     pub build_state_update: RollingUnitCostClipper,
     pub build_block: RollingUnitCostClipper,
+    pub finalize_block: RollingUnitCostClipper,
+    pub total_elapsed: RollingUnitCostClipper,
 }
 
 impl FinalizeUnitCostClippers {
@@ -81,22 +87,30 @@ impl FinalizeUnitCostClippers {
             apply_diff: RollingUnitCostClipper::new(window),
             update_shard_accounts: RollingUnitCostClipper::new(window),
             build_accounts_blocks: RollingUnitCostClipper::new(window),
+            build_accounts: RollingUnitCostClipper::new(window),
             build_in_msg: RollingUnitCostClipper::new(window),
             build_out_msg: RollingUnitCostClipper::new(window),
+            build_accounts_and_messages_in_parallel: RollingUnitCostClipper::new(window),
             build_state_update: RollingUnitCostClipper::new(window),
             build_block: RollingUnitCostClipper::new(window),
+            finalize_block: RollingUnitCostClipper::new(window),
+            total_elapsed: RollingUnitCostClipper::new(window),
         }
     }
 }
 
 pub struct DoCollateUnitCostClippers {
     pub resume_collation: RollingUnitCostClipper,
+    pub resume_collation_per_block: RollingUnitCostClipper,
+    pub collation_total_elapsed: RollingUnitCostClipper,
 }
 
 impl DoCollateUnitCostClippers {
     pub fn new(window: usize) -> Self {
         Self {
             resume_collation: RollingUnitCostClipper::new(window),
+            resume_collation_per_block: RollingUnitCostClipper::new(window),
+            collation_total_elapsed: RollingUnitCostClipper::new(window),
         }
     }
 }

@@ -353,10 +353,8 @@ where
         }
 
         // update history
-        let (metrics_history, unit_cost_clippers) = (
-            &mut history.metrics,
-            &mut history.unit_cost_clippers,
-        );
+        let (metrics_history, unit_cost_clippers) =
+            (&mut history.metrics, &mut history.unit_cost_clippers);
         match metrics_history.entry(wu_span_seqno) {
             std::collections::btree_map::Entry::Vacant(vacant) => {
                 vacant.insert(WuMetricsSpan::new(metrics, unit_cost_clippers));
@@ -948,6 +946,15 @@ where
 }
 
 #[derive(Default)]
+struct PrepareElapsedClipSnapshot {
+    read_ext_msgs_elapsed_ns: Option<u128>,
+    read_existing_int_msgs_elapsed_ns: Option<u128>,
+    read_new_int_msgs_elapsed_ns: Option<u128>,
+    add_msgs_to_groups_elapsed_ns: Option<u128>,
+    total_elapsed_ns: Option<u128>,
+}
+
+#[derive(Default)]
 struct PrepareMsgGroupsWuAvg {
     fixed_part: SafeUnsignedAvg,
 
@@ -981,77 +988,117 @@ struct PrepareMsgGroupsWuAvg {
 
 impl PrepareMsgGroupsWuAvg {
     fn accum(&mut self, v: &PrepareMsgGroupsWu, unit_cost_clippers: &mut UnitCostClippers) {
-        self.accum_avg_result(v);
-        self.accum_raw_sums(v, unit_cost_clippers);
+        let clipped_snapshot = Self::clip_elapsed(v, unit_cost_clippers);
+        self.accum_avg_result(v, &clipped_snapshot);
+        self.accum_raw_sums(v, &clipped_snapshot);
     }
 
-    fn accum_avg_result(&mut self, v: &PrepareMsgGroupsWu) {
+    fn clip_elapsed(
+        v: &PrepareMsgGroupsWu,
+        unit_cost_clippers: &mut UnitCostClippers,
+    ) -> PrepareElapsedClipSnapshot {
+        PrepareElapsedClipSnapshot {
+            read_ext_msgs_elapsed_ns: unit_cost_clippers
+                .prepare
+                .read_ext_msgs
+                .clip_elapsed_ns(v.read_ext_msgs_base, v.read_ext_msgs_elapsed.as_nanos()),
+            read_existing_int_msgs_elapsed_ns: unit_cost_clippers
+                .prepare
+                .read_existing_int_msgs
+                .clip_elapsed_ns(
+                    v.read_existing_int_msgs_base,
+                    v.read_existing_int_msgs_elapsed.as_nanos(),
+                ),
+            read_new_int_msgs_elapsed_ns: unit_cost_clippers
+                .prepare
+                .read_new_int_msgs
+                .clip_elapsed_ns(
+                    v.read_new_int_msgs_base,
+                    v.read_new_int_msgs_elapsed.as_nanos(),
+                ),
+            add_msgs_to_groups_elapsed_ns: unit_cost_clippers
+                .prepare
+                .add_msgs_to_groups
+                .clip_elapsed_ns(
+                    v.add_msgs_to_groups_base,
+                    v.add_msgs_to_groups_elapsed.as_nanos(),
+                ),
+            total_elapsed_ns: unit_cost_clippers
+                .prepare
+                .total_elapsed
+                .clip_elapsed_ns(v.total_wu() as u128, v.total_elapsed.as_nanos()),
+        }
+    }
+
+    fn accum_avg_result(
+        &mut self,
+        v: &PrepareMsgGroupsWu,
+        clipped_snapshot: &PrepareElapsedClipSnapshot,
+    ) {
         self.fixed_part.accum(v.fixed_part);
         self.read_ext_msgs_count.accum(v.read_ext_msgs_count);
         self.read_ext_msgs_wu.accum(v.read_ext_msgs_wu);
-        self.read_ext_msgs_elapsed_ns
-            .accum(v.read_ext_msgs_elapsed.as_nanos());
+        self.read_ext_msgs_elapsed_ns.accum(
+            clipped_snapshot
+                .read_ext_msgs_elapsed_ns
+                .unwrap_or(v.read_ext_msgs_elapsed.as_nanos()),
+        );
         self.read_ext_msgs_base.accum(v.read_ext_msgs_base);
         self.read_existing_int_msgs_count
             .accum(v.read_existing_int_msgs_count);
         self.read_existing_int_msgs_wu
             .accum(v.read_existing_int_msgs_wu);
-        self.read_existing_int_msgs_elapsed_ns
-            .accum(v.read_existing_int_msgs_elapsed.as_nanos());
+        self.read_existing_int_msgs_elapsed_ns.accum(
+            clipped_snapshot
+                .read_existing_int_msgs_elapsed_ns
+                .unwrap_or(v.read_existing_int_msgs_elapsed.as_nanos()),
+        );
         self.read_existing_int_msgs_base
             .accum(v.read_existing_int_msgs_base);
         self.read_new_int_msgs_count
             .accum(v.read_new_int_msgs_count);
         self.read_new_int_msgs_wu.accum(v.read_new_int_msgs_wu);
-        self.read_new_int_msgs_elapsed_ns
-            .accum(v.read_new_int_msgs_elapsed.as_nanos());
+        self.read_new_int_msgs_elapsed_ns.accum(
+            clipped_snapshot
+                .read_new_int_msgs_elapsed_ns
+                .unwrap_or(v.read_new_int_msgs_elapsed.as_nanos()),
+        );
         self.read_new_int_msgs_base.accum(v.read_new_int_msgs_base);
         self.add_to_msgs_groups_ops_count
             .accum(v.add_to_msgs_groups_ops_count);
         self.add_msgs_to_groups_wu.accum(v.add_msgs_to_groups_wu);
-        self.add_msgs_to_groups_elapsed_ns
-            .accum(v.add_msgs_to_groups_elapsed.as_nanos());
+        self.add_msgs_to_groups_elapsed_ns.accum(
+            clipped_snapshot
+                .add_msgs_to_groups_elapsed_ns
+                .unwrap_or(v.add_msgs_to_groups_elapsed.as_nanos()),
+        );
         self.add_msgs_to_groups_base
             .accum(v.add_msgs_to_groups_base);
-        self.total_elapsed_ns.accum(v.total_elapsed.as_nanos());
+        self.total_elapsed_ns.accum(
+            clipped_snapshot
+                .total_elapsed_ns
+                .unwrap_or(v.total_elapsed.as_nanos()),
+        );
     }
 
-    fn accum_raw_sums(&mut self, v: &PrepareMsgGroupsWu, unit_cost_clippers: &mut UnitCostClippers) {
-        if let Some(elapsed_clip_ns) = unit_cost_clippers
-            .prepare
-            .read_ext_msgs
-            .clip_elapsed_ns(v.read_ext_msgs_base, v.read_ext_msgs_elapsed.as_nanos())
-        {
+    fn accum_raw_sums(
+        &mut self,
+        v: &PrepareMsgGroupsWu,
+        clipped_snapshot: &PrepareElapsedClipSnapshot,
+    ) {
+        if let Some(elapsed_clip_ns) = clipped_snapshot.read_ext_msgs_elapsed_ns {
             self.read_ext_msgs_sums_accum
                 .add((elapsed_clip_ns, v.read_ext_msgs_base));
         }
-        if let Some(elapsed_clip_ns) = unit_cost_clippers
-            .prepare
-            .read_existing_int_msgs
-            .clip_elapsed_ns(
-                v.read_existing_int_msgs_base,
-                v.read_existing_int_msgs_elapsed.as_nanos(),
-            )
-        {
+        if let Some(elapsed_clip_ns) = clipped_snapshot.read_existing_int_msgs_elapsed_ns {
             self.read_existing_int_msgs_sums_accum
                 .add((elapsed_clip_ns, v.read_existing_int_msgs_base));
         }
-        if let Some(elapsed_clip_ns) = unit_cost_clippers
-            .prepare
-            .read_new_int_msgs
-            .clip_elapsed_ns(v.read_new_int_msgs_base, v.read_new_int_msgs_elapsed.as_nanos())
-        {
+        if let Some(elapsed_clip_ns) = clipped_snapshot.read_new_int_msgs_elapsed_ns {
             self.read_new_int_msgs_sums_accum
                 .add((elapsed_clip_ns, v.read_new_int_msgs_base));
         }
-        if let Some(elapsed_clip_ns) = unit_cost_clippers
-            .prepare
-            .add_msgs_to_groups
-            .clip_elapsed_ns(
-                v.add_msgs_to_groups_base,
-                v.add_msgs_to_groups_elapsed.as_nanos(),
-            )
-        {
+        if let Some(elapsed_clip_ns) = clipped_snapshot.add_msgs_to_groups_elapsed_ns {
             self.add_msgs_to_groups_sums_accum
                 .add((elapsed_clip_ns, v.add_msgs_to_groups_base));
         }
@@ -1067,6 +1114,12 @@ impl PrepareMsgGroupsWuAvg {
         self.add_msgs_to_groups_sums_accum
             .merge(&other.add_msgs_to_groups_sums_accum);
     }
+}
+
+#[derive(Default)]
+struct ExecuteElapsedClipSnapshot {
+    execute_groups_vm_only_elapsed_ns: Option<u128>,
+    process_txs_elapsed_ns: Option<u128>,
 }
 
 #[derive(Default)]
@@ -1091,11 +1144,31 @@ struct ExecuteWuAvg {
 
 impl ExecuteWuAvg {
     fn accum(&mut self, v: &ExecuteWu, unit_cost_clippers: &mut UnitCostClippers) {
-        self.accum_avg_result(v);
-        self.accum_raw_sums(v, unit_cost_clippers);
+        let clipped_snapshot = Self::clip_elapsed(v, unit_cost_clippers);
+        self.accum_avg_result(v, &clipped_snapshot);
+        self.accum_raw_sums(v, &clipped_snapshot);
     }
 
-    fn accum_avg_result(&mut self, v: &ExecuteWu) {
+    fn clip_elapsed(
+        v: &ExecuteWu,
+        unit_cost_clippers: &mut UnitCostClippers,
+    ) -> ExecuteElapsedClipSnapshot {
+        ExecuteElapsedClipSnapshot {
+            execute_groups_vm_only_elapsed_ns: unit_cost_clippers
+                .execute
+                .execute_groups_vm
+                .clip_elapsed_ns(
+                    v.execute_groups_vm_sum_gas_over_threads,
+                    v.execute_groups_vm_only_elapsed.as_nanos(),
+                ),
+            process_txs_elapsed_ns: unit_cost_clippers
+                .execute
+                .process_txs
+                .clip_elapsed_ns(v.process_txs_base, v.process_txs_elapsed.as_nanos()),
+        }
+    }
+
+    fn accum_avg_result(&mut self, v: &ExecuteWu, clipped_snapshot: &ExecuteElapsedClipSnapshot) {
         self.inserted_new_msgs_count
             .accum(v.inserted_new_msgs_count);
         self.groups_count.accum(v.groups_count);
@@ -1105,22 +1178,23 @@ impl ExecuteWuAvg {
             .accum(v.execute_groups_vm_sum_gas_over_threads);
         self.execute_groups_vm_only_wu
             .accum(v.execute_groups_vm_only_wu);
-        self.execute_groups_vm_only_elapsed_ns
-            .accum(v.execute_groups_vm_only_elapsed.as_nanos());
+        self.execute_groups_vm_only_elapsed_ns.accum(
+            clipped_snapshot
+                .execute_groups_vm_only_elapsed_ns
+                .unwrap_or(v.execute_groups_vm_only_elapsed.as_nanos()),
+        );
         self.process_txs_base.accum(v.process_txs_base);
         self.process_txs_wu.accum(v.process_txs_wu);
-        self.process_txs_elapsed_ns
-            .accum(v.process_txs_elapsed.as_nanos());
+        self.process_txs_elapsed_ns.accum(
+            clipped_snapshot
+                .process_txs_elapsed_ns
+                .unwrap_or(v.process_txs_elapsed.as_nanos()),
+        );
     }
 
-    fn accum_raw_sums(&mut self, v: &ExecuteWu, unit_cost_clippers: &mut UnitCostClippers) {
-        if let Some(execute_groups_vm_elapsed_clip_ns) = unit_cost_clippers
-            .execute
-            .execute_groups_vm
-            .clip_elapsed_ns(
-                v.execute_groups_vm_sum_gas_over_threads,
-                v.execute_groups_vm_only_elapsed.as_nanos(),
-            )
+    fn accum_raw_sums(&mut self, v: &ExecuteWu, clipped_snapshot: &ExecuteElapsedClipSnapshot) {
+        if let Some(execute_groups_vm_elapsed_clip_ns) =
+            clipped_snapshot.execute_groups_vm_only_elapsed_ns
         {
             self.execute_groups_vm_sums_accum.add((
                 execute_groups_vm_elapsed_clip_ns,
@@ -1128,11 +1202,7 @@ impl ExecuteWuAvg {
                 v.execute_groups_vm_sum_gas_over_threads,
             ));
         }
-        if let Some(process_txs_elapsed_clip_ns) = unit_cost_clippers
-            .execute
-            .process_txs
-            .clip_elapsed_ns(v.process_txs_base, v.process_txs_elapsed.as_nanos())
-        {
+        if let Some(process_txs_elapsed_clip_ns) = clipped_snapshot.process_txs_elapsed_ns {
             self.process_txs_sums_accum
                 .add((process_txs_elapsed_clip_ns, v.process_txs_base));
         }
@@ -1144,6 +1214,22 @@ impl ExecuteWuAvg {
         self.process_txs_sums_accum
             .merge(&other.process_txs_sums_accum);
     }
+}
+
+#[derive(Default)]
+struct FinalizeElapsedClipSnapshot {
+    create_queue_diff_elapsed_ns: Option<u128>,
+    apply_queue_diff_elapsed_ns: Option<u128>,
+    update_shard_accounts_elapsed_ns: Option<u128>,
+    build_accounts_blocks_elapsed_ns: Option<u128>,
+    build_accounts_elapsed_ns: Option<u128>,
+    build_in_msgs_elapsed_ns: Option<u128>,
+    build_out_msgs_elapsed_ns: Option<u128>,
+    build_accounts_and_messages_in_parallel_elased_ns: Option<u128>,
+    build_state_update_elapsed_ns: Option<u128>,
+    build_block_elapsed_ns: Option<u128>,
+    finalize_block_elapsed_ns: Option<u128>,
+    total_elapsed_ns: Option<u128>,
 }
 
 #[derive(Default)]
@@ -1212,148 +1298,224 @@ impl FinalizeWuAvg {
         serialize_min_wu: u64,
         unit_cost_clippers: &mut UnitCostClippers,
     ) {
-        self.accum_avg_result(v);
-        self.accum_raw_sums(v, state_update_min_wu, serialize_min_wu, unit_cost_clippers);
+        let clipped_snapshot =
+            Self::clip_elapsed(v, state_update_min_wu, serialize_min_wu, unit_cost_clippers);
+        self.accum_avg_result(v, &clipped_snapshot);
+        self.accum_raw_sums(v, &clipped_snapshot);
     }
 
-    fn accum_avg_result(&mut self, v: &FinalizeWu) {
+    fn clip_elapsed(
+        v: &FinalizeWu,
+        state_update_min_wu: u64,
+        serialize_min_wu: u64,
+        unit_cost_clippers: &mut UnitCostClippers,
+    ) -> FinalizeElapsedClipSnapshot {
+        FinalizeElapsedClipSnapshot {
+            create_queue_diff_elapsed_ns: unit_cost_clippers
+                .finalize
+                .create_diff
+                .clip_elapsed_ns(v.create_diff_base, v.create_queue_diff_elapsed.as_nanos()),
+            apply_queue_diff_elapsed_ns: unit_cost_clippers
+                .finalize
+                .apply_diff
+                .clip_elapsed_ns(v.apply_diff_base, v.apply_queue_diff_elapsed.as_nanos()),
+            update_shard_accounts_elapsed_ns: unit_cost_clippers
+                .finalize
+                .update_shard_accounts
+                .clip_elapsed_ns(
+                    v.update_shard_accounts_base,
+                    v.update_shard_accounts_elapsed.as_nanos(),
+                ),
+            build_accounts_blocks_elapsed_ns: unit_cost_clippers
+                .finalize
+                .build_accounts_blocks
+                .clip_elapsed_ns(
+                    v.build_accounts_blocks_base,
+                    v.build_accounts_blocks_elapsed.as_nanos(),
+                ),
+            build_accounts_elapsed_ns: unit_cost_clippers.finalize.build_accounts.clip_elapsed_ns(
+                v.build_accounts_wu() as u128,
+                v.build_accounts_elapsed.as_nanos(),
+            ),
+            build_in_msgs_elapsed_ns: unit_cost_clippers
+                .finalize
+                .build_in_msg
+                .clip_elapsed_ns(v.build_in_msg_base, v.build_in_msgs_elapsed.as_nanos()),
+            build_out_msgs_elapsed_ns: unit_cost_clippers
+                .finalize
+                .build_out_msg
+                .clip_elapsed_ns(v.build_out_msg_base, v.build_out_msgs_elapsed.as_nanos()),
+            build_accounts_and_messages_in_parallel_elased_ns: unit_cost_clippers
+                .finalize
+                .build_accounts_and_messages_in_parallel
+                .clip_elapsed_ns(
+                    v.max_accounts_in_out_msgs_wu() as u128,
+                    v.build_accounts_and_messages_in_parallel_elased.as_nanos(),
+                ),
+            build_state_update_elapsed_ns: if v.build_state_update_base > 0
+                && v.build_state_update_wu > state_update_min_wu
+            {
+                unit_cost_clippers
+                    .finalize
+                    .build_state_update
+                    .clip_elapsed_ns(
+                        v.build_state_update_base,
+                        v.build_state_update_elapsed.as_nanos(),
+                    )
+            } else {
+                None
+            },
+            build_block_elapsed_ns: if v.build_block_base > 0 && v.build_block_wu > serialize_min_wu
+            {
+                unit_cost_clippers
+                    .finalize
+                    .build_block
+                    .clip_elapsed_ns(v.build_block_base, v.build_block_elapsed.as_nanos())
+            } else {
+                None
+            },
+            finalize_block_elapsed_ns: unit_cost_clippers.finalize.finalize_block.clip_elapsed_ns(
+                v.finalize_block_wu() as u128,
+                v.finalize_block_elapsed.as_nanos(),
+            ),
+            total_elapsed_ns: unit_cost_clippers
+                .finalize
+                .total_elapsed
+                .clip_elapsed_ns(v.total_wu() as u128, v.total_elapsed.as_nanos()),
+        }
+    }
+
+    fn accum_avg_result(&mut self, v: &FinalizeWu, clipped_snapshot: &FinalizeElapsedClipSnapshot) {
         self.diff_msgs_count.accum(v.diff_msgs_count);
         self.create_diff_base.accum(v.create_diff_base);
         self.apply_diff_base.accum(v.apply_diff_base);
         self.create_queue_diff_wu.accum(v.create_queue_diff_wu);
-        self.create_queue_diff_elapsed_ns
-            .accum(v.create_queue_diff_elapsed.as_nanos());
+        self.create_queue_diff_elapsed_ns.accum(
+            clipped_snapshot
+                .create_queue_diff_elapsed_ns
+                .unwrap_or(v.create_queue_diff_elapsed.as_nanos()),
+        );
         self.apply_queue_diff_wu.accum(v.apply_queue_diff_wu);
-        self.apply_queue_diff_elapsed_ns
-            .accum(v.apply_queue_diff_elapsed.as_nanos());
+        self.apply_queue_diff_elapsed_ns.accum(
+            clipped_snapshot
+                .apply_queue_diff_elapsed_ns
+                .unwrap_or(v.apply_queue_diff_elapsed.as_nanos()),
+        );
         self.updated_accounts_count.accum(v.updated_accounts_count);
         self.in_msgs_len.accum(v.in_msgs_len);
         self.out_msgs_len.accum(v.out_msgs_len);
         self.update_shard_accounts_wu
             .accum(v.update_shard_accounts_wu);
-        self.update_shard_accounts_elapsed_ns
-            .accum(v.update_shard_accounts_elapsed.as_nanos());
+        self.update_shard_accounts_elapsed_ns.accum(
+            clipped_snapshot
+                .update_shard_accounts_elapsed_ns
+                .unwrap_or(v.update_shard_accounts_elapsed.as_nanos()),
+        );
         self.update_shard_accounts_base
             .accum(v.update_shard_accounts_base);
         self.build_accounts_blocks_wu
             .accum(v.build_accounts_blocks_wu);
-        self.build_accounts_blocks_elapsed_ns
-            .accum(v.build_accounts_blocks_elapsed.as_nanos());
+        self.build_accounts_blocks_elapsed_ns.accum(
+            clipped_snapshot
+                .build_accounts_blocks_elapsed_ns
+                .unwrap_or(v.build_accounts_blocks_elapsed.as_nanos()),
+        );
         self.build_accounts_blocks_base
             .accum(v.build_accounts_blocks_base);
-        self.build_accounts_elapsed_ns
-            .accum(v.build_accounts_elapsed.as_nanos());
+        self.build_accounts_elapsed_ns.accum(
+            clipped_snapshot
+                .build_accounts_elapsed_ns
+                .unwrap_or(v.build_accounts_elapsed.as_nanos()),
+        );
         self.build_in_msgs_wu.accum(v.build_in_msgs_wu);
-        self.build_in_msgs_elapsed_ns
-            .accum(v.build_in_msgs_elapsed.as_nanos());
+        self.build_in_msgs_elapsed_ns.accum(
+            clipped_snapshot
+                .build_in_msgs_elapsed_ns
+                .unwrap_or(v.build_in_msgs_elapsed.as_nanos()),
+        );
         self.build_in_msg_base.accum(v.build_in_msg_base);
         self.build_out_msgs_wu.accum(v.build_out_msgs_wu);
-        self.build_out_msgs_elapsed_ns
-            .accum(v.build_out_msgs_elapsed.as_nanos());
+        self.build_out_msgs_elapsed_ns.accum(
+            clipped_snapshot
+                .build_out_msgs_elapsed_ns
+                .unwrap_or(v.build_out_msgs_elapsed.as_nanos()),
+        );
         self.build_out_msg_base.accum(v.build_out_msg_base);
         self.build_accounts_and_messages_in_parallel_elased_ns
-            .accum(v.build_accounts_and_messages_in_parallel_elased.as_nanos());
+            .accum(
+                clipped_snapshot
+                    .build_accounts_and_messages_in_parallel_elased_ns
+                    .unwrap_or(v.build_accounts_and_messages_in_parallel_elased.as_nanos()),
+            );
         self.build_state_update_wu.accum(v.build_state_update_wu);
-        self.build_state_update_elapsed_ns
-            .accum(v.build_state_update_elapsed.as_nanos());
+        self.build_state_update_elapsed_ns.accum(
+            clipped_snapshot
+                .build_state_update_elapsed_ns
+                .unwrap_or(v.build_state_update_elapsed.as_nanos()),
+        );
         self.build_state_update_base
             .accum(v.build_state_update_base);
         self.build_block_wu.accum(v.build_block_wu);
-        self.build_block_elapsed_ns
-            .accum(v.build_block_elapsed.as_nanos());
+        self.build_block_elapsed_ns.accum(
+            clipped_snapshot
+                .build_block_elapsed_ns
+                .unwrap_or(v.build_block_elapsed.as_nanos()),
+        );
         self.build_block_base.accum(v.build_block_base);
-        self.finalize_block_elapsed_ns
-            .accum(v.finalize_block_elapsed.as_nanos());
-        self.total_elapsed_ns.accum(v.total_elapsed.as_nanos());
+        self.finalize_block_elapsed_ns.accum(
+            clipped_snapshot
+                .finalize_block_elapsed_ns
+                .unwrap_or(v.finalize_block_elapsed.as_nanos()),
+        );
+        self.total_elapsed_ns.accum(
+            clipped_snapshot
+                .total_elapsed_ns
+                .unwrap_or(v.total_elapsed.as_nanos()),
+        );
     }
 
-    fn accum_raw_sums(
-        &mut self,
-        v: &FinalizeWu,
-        state_update_min_wu: u64,
-        serialize_min_wu: u64,
-        unit_cost_clippers: &mut UnitCostClippers,
-    ) {
-        if let Some(create_diff_elapsed_clip_ns) = unit_cost_clippers
-            .finalize
-            .create_diff
-            .clip_elapsed_ns(v.create_diff_base, v.create_queue_diff_elapsed.as_nanos())
-        {
+    fn accum_raw_sums(&mut self, v: &FinalizeWu, clipped_snapshot: &FinalizeElapsedClipSnapshot) {
+        if let Some(create_diff_elapsed_clip_ns) = clipped_snapshot.create_queue_diff_elapsed_ns {
             self.create_diff_sums_accum
                 .add((create_diff_elapsed_clip_ns, v.create_diff_base));
         }
-        if let Some(apply_diff_elapsed_clip_ns) = unit_cost_clippers
-            .finalize
-            .apply_diff
-            .clip_elapsed_ns(v.apply_diff_base, v.apply_queue_diff_elapsed.as_nanos())
-        {
+        if let Some(apply_diff_elapsed_clip_ns) = clipped_snapshot.apply_queue_diff_elapsed_ns {
             self.apply_diff_sums_accum
                 .add((apply_diff_elapsed_clip_ns, v.apply_diff_base));
         }
-        if let Some(update_shard_accounts_elapsed_clip_ns) = unit_cost_clippers
-            .finalize
-            .update_shard_accounts
-            .clip_elapsed_ns(
-                v.update_shard_accounts_base,
-                v.update_shard_accounts_elapsed.as_nanos(),
-            )
+        if let Some(update_shard_accounts_elapsed_clip_ns) =
+            clipped_snapshot.update_shard_accounts_elapsed_ns
         {
             self.update_shard_accounts_sums_accum.add((
                 update_shard_accounts_elapsed_clip_ns,
                 v.update_shard_accounts_base,
             ));
         }
-        if let Some(build_accounts_blocks_elapsed_clip_ns) = unit_cost_clippers
-            .finalize
-            .build_accounts_blocks
-            .clip_elapsed_ns(
-                v.build_accounts_blocks_base,
-                v.build_accounts_blocks_elapsed.as_nanos(),
-            )
+        if let Some(build_accounts_blocks_elapsed_clip_ns) =
+            clipped_snapshot.build_accounts_blocks_elapsed_ns
         {
             self.build_accounts_blocks_sums_accum.add((
                 build_accounts_blocks_elapsed_clip_ns,
                 v.build_accounts_blocks_base,
             ));
         }
-        if let Some(build_in_msg_elapsed_clip_ns) = unit_cost_clippers
-            .finalize
-            .build_in_msg
-            .clip_elapsed_ns(v.build_in_msg_base, v.build_in_msgs_elapsed.as_nanos())
-        {
+        if let Some(build_in_msg_elapsed_clip_ns) = clipped_snapshot.build_in_msgs_elapsed_ns {
             self.build_in_msg_sums_accum
                 .add((build_in_msg_elapsed_clip_ns, v.build_in_msg_base));
         }
-        if let Some(build_out_msg_elapsed_clip_ns) = unit_cost_clippers
-            .finalize
-            .build_out_msg
-            .clip_elapsed_ns(v.build_out_msg_base, v.build_out_msgs_elapsed.as_nanos())
-        {
+        if let Some(build_out_msg_elapsed_clip_ns) = clipped_snapshot.build_out_msgs_elapsed_ns {
             self.build_out_msg_sums_accum
                 .add((build_out_msg_elapsed_clip_ns, v.build_out_msg_base));
         }
-        if v.build_state_update_base > 0
-            && v.build_state_update_wu > state_update_min_wu
-            && let Some(build_state_update_elapsed_clip_ns) = unit_cost_clippers
-                .finalize
-                .build_state_update
-                .clip_elapsed_ns(
-                    v.build_state_update_base,
-                    v.build_state_update_elapsed.as_nanos(),
-                )
+        if let Some(build_state_update_elapsed_clip_ns) =
+            clipped_snapshot.build_state_update_elapsed_ns
         {
             self.build_state_update_sums_accum.add((
                 build_state_update_elapsed_clip_ns,
                 v.build_state_update_base,
             ));
         }
-        if v.build_block_base > 0
-            && v.build_block_wu > serialize_min_wu
-            && let Some(build_block_elapsed_clip_ns) = unit_cost_clippers
-                .finalize
-                .build_block
-                .clip_elapsed_ns(v.build_block_base, v.build_block_elapsed.as_nanos())
-        {
+        if let Some(build_block_elapsed_clip_ns) = clipped_snapshot.build_block_elapsed_ns {
             self.build_block_sums_accum
                 .add((build_block_elapsed_clip_ns, v.build_block_base));
         }
@@ -1380,6 +1542,13 @@ impl FinalizeWuAvg {
 }
 
 #[derive(Default)]
+struct DoCollateElapsedClipSnapshot {
+    resume_collation_elapsed_ns: Option<u128>,
+    resume_collation_elapsed_per_block_ns: Option<u128>,
+    collation_total_elapsed_ns: Option<u128>,
+}
+
+#[derive(Default)]
 struct DoCollateWuAvg {
     resume_collation_wu: SafeUnsignedAvg,
     resume_collation_elapsed_ns: SafeUnsignedAvg,
@@ -1393,29 +1562,75 @@ struct DoCollateWuAvg {
 }
 
 impl DoCollateWuAvg {
-    fn accum(&mut self, v: &DoCollateWu, unit_cost_clippers: &mut UnitCostClippers) {
-        self.accum_avg_result(v);
-        self.accum_raw_sums(v, unit_cost_clippers);
+    fn accum(
+        &mut self,
+        v: &DoCollateWu,
+        collation_total_wu: u64,
+        unit_cost_clippers: &mut UnitCostClippers,
+    ) {
+        let clipped_snapshot = Self::clip_elapsed(v, collation_total_wu, unit_cost_clippers);
+        self.accum_avg_result(v, &clipped_snapshot);
+        self.accum_raw_sums(v, &clipped_snapshot);
     }
 
-    fn accum_avg_result(&mut self, v: &DoCollateWu) {
+    fn clip_elapsed(
+        v: &DoCollateWu,
+        collation_total_wu: u64,
+        unit_cost_clippers: &mut UnitCostClippers,
+    ) -> DoCollateElapsedClipSnapshot {
+        DoCollateElapsedClipSnapshot {
+            resume_collation_elapsed_ns: unit_cost_clippers
+                .do_collate
+                .resume_collation
+                .clip_elapsed_ns(
+                    v.resume_collation_base,
+                    v.resume_collation_elapsed.as_nanos(),
+                ),
+            resume_collation_elapsed_per_block_ns: unit_cost_clippers
+                .do_collate
+                .resume_collation_per_block
+                .clip_elapsed_ns(
+                    v.resume_collation_wu_per_block as u128,
+                    v.resume_collation_elapsed_per_block_ns,
+                ),
+            collation_total_elapsed_ns: unit_cost_clippers
+                .do_collate
+                .collation_total_elapsed
+                .clip_elapsed_ns(
+                    collation_total_wu as u128,
+                    v.collation_total_elapsed.as_nanos(),
+                ),
+        }
+    }
+
+    fn accum_avg_result(
+        &mut self,
+        v: &DoCollateWu,
+        clipped_snapshot: &DoCollateElapsedClipSnapshot,
+    ) {
         self.resume_collation_wu.accum(v.resume_collation_wu);
-        self.resume_collation_elapsed_ns
-            .accum(v.resume_collation_elapsed.as_nanos());
+        self.resume_collation_elapsed_ns.accum(
+            clipped_snapshot
+                .resume_collation_elapsed_ns
+                .unwrap_or(v.resume_collation_elapsed.as_nanos()),
+        );
         self.resume_collation_base.accum(v.resume_collation_base);
         self.resume_collation_wu_per_block
             .accum(v.resume_collation_wu_per_block);
-        self.resume_collation_elapsed_per_block_ns
-            .accum(v.resume_collation_elapsed_per_block_ns);
-        self.collation_total_elapsed_ns
-            .accum(v.collation_total_elapsed.as_nanos());
+        self.resume_collation_elapsed_per_block_ns.accum(
+            clipped_snapshot
+                .resume_collation_elapsed_per_block_ns
+                .unwrap_or(v.resume_collation_elapsed_per_block_ns),
+        );
+        self.collation_total_elapsed_ns.accum(
+            clipped_snapshot
+                .collation_total_elapsed_ns
+                .unwrap_or(v.collation_total_elapsed.as_nanos()),
+        );
     }
 
-    fn accum_raw_sums(&mut self, v: &DoCollateWu, unit_cost_clippers: &mut UnitCostClippers) {
-        if let Some(resume_collation_elapsed_clip_ns) = unit_cost_clippers
-            .do_collate
-            .resume_collation
-            .clip_elapsed_ns(v.resume_collation_base, v.resume_collation_elapsed.as_nanos())
+    fn accum_raw_sums(&mut self, v: &DoCollateWu, clipped_snapshot: &DoCollateElapsedClipSnapshot) {
+        if let Some(resume_collation_elapsed_clip_ns) = clipped_snapshot.resume_collation_elapsed_ns
         {
             self.resume_collation_sums_accum
                 .add((resume_collation_elapsed_clip_ns, v.resume_collation_base));
@@ -1457,26 +1672,38 @@ impl WuMetricsAvg {
         self.last_shard_accounts_count = v.wu_on_finalize.shard_accounts_count;
         let state_update_min_wu = v.wu_params.finalize.state_update_min as u64;
         let serialize_min_wu = v.wu_params.finalize.serialize_min as u64;
-        self.prepare.accum(&v.wu_on_prepare_msg_groups, unit_cost_clippers);
+        self.prepare
+            .accum(&v.wu_on_prepare_msg_groups, unit_cost_clippers);
         self.execute.accum(&v.wu_on_execute, unit_cost_clippers);
-        self.finalize
-            .accum(
-                &v.wu_on_finalize,
-                state_update_min_wu,
-                serialize_min_wu,
-                unit_cost_clippers,
-            );
-        self.do_collate.accum(&v.wu_on_do_collate, unit_cost_clippers);
+        self.finalize.accum(
+            &v.wu_on_finalize,
+            state_update_min_wu,
+            serialize_min_wu,
+            unit_cost_clippers,
+        );
+        self.do_collate.accum(
+            &v.wu_on_do_collate,
+            v.collation_total_wu(),
+            unit_cost_clippers,
+        );
     }
 
-    fn accum_avg_result(&mut self, v: &WuMetrics) {
+    fn accum_materialized_avg_result(&mut self, v: &WuMetrics) {
         self.last_wu_params = v.wu_params.clone();
         self.had_pending_messages = self.had_pending_messages && v.has_pending_messages;
         self.last_shard_accounts_count = v.wu_on_finalize.shard_accounts_count;
-        self.prepare.accum_avg_result(&v.wu_on_prepare_msg_groups);
-        self.execute.accum_avg_result(&v.wu_on_execute);
-        self.finalize.accum_avg_result(&v.wu_on_finalize);
-        self.do_collate.accum_avg_result(&v.wu_on_do_collate);
+        let prepare_clipped_snapshot = PrepareElapsedClipSnapshot::default();
+        let execute_clipped_snapshot = ExecuteElapsedClipSnapshot::default();
+        let finalize_clipped_snapshot = FinalizeElapsedClipSnapshot::default();
+        let do_collate_clipped_snapshot = DoCollateElapsedClipSnapshot::default();
+        self.prepare
+            .accum_avg_result(&v.wu_on_prepare_msg_groups, &prepare_clipped_snapshot);
+        self.execute
+            .accum_avg_result(&v.wu_on_execute, &execute_clipped_snapshot);
+        self.finalize
+            .accum_avg_result(&v.wu_on_finalize, &finalize_clipped_snapshot);
+        self.do_collate
+            .accum_avg_result(&v.wu_on_do_collate, &do_collate_clipped_snapshot);
     }
 
     fn merge_sums_accum(&mut self, other: &Self) {
@@ -1489,7 +1716,7 @@ impl WuMetricsAvg {
     fn merge_span_avg(&mut self, other: &WuMetricsAvg) -> Option<()> {
         let span_result = other.get_avg()?;
         self.merge_sums_accum(other);
-        self.accum_avg_result(&span_result);
+        self.accum_materialized_avg_result(&span_result);
         Some(())
     }
 }
@@ -1839,7 +2066,11 @@ mod tests {
     }
 
     fn test_unit_cost_clippers() -> UnitCostClippers {
-        UnitCostClippers::new(DEFAULT_PERCENTILE_WINDOW)
+        test_unit_cost_clippers_with_window(DEFAULT_PERCENTILE_WINDOW)
+    }
+
+    fn test_unit_cost_clippers_with_window(window: usize) -> UnitCostClippers {
+        UnitCostClippers::new(window)
     }
 
     fn calc_target_params(target_wu_price: f64, wu_metrics_avg: &WuMetricsAvg) -> WorkUnitsParams {
@@ -1849,6 +2080,42 @@ mod tests {
             wu_metrics_avg,
             &wu_metrics,
         )
+    }
+
+    fn clip_two_sample_avg(base1: u128, elapsed1: u128, base2: u128, elapsed2: u128) -> u128 {
+        let mut clipper =
+            crate::unit_cost_clipper::RollingUnitCostClipper::new(DEFAULT_PERCENTILE_WINDOW);
+        let first = clipper
+            .clip_elapsed_ns(base1, elapsed1)
+            .expect("clip should be available");
+        let second = clipper
+            .clip_elapsed_ns(base2, elapsed2)
+            .expect("clip should be available");
+        (first + second) / 2
+    }
+
+    fn clip_baseline_outlier_avg(
+        baseline_base: u128,
+        baseline_elapsed: u128,
+        outlier_base: u128,
+        outlier_elapsed: u128,
+    ) -> u128 {
+        let mut clipper =
+            crate::unit_cost_clipper::RollingUnitCostClipper::new(DEFAULT_PERCENTILE_WINDOW);
+        let mut sum = 0u128;
+        for _ in 0..100 {
+            sum = sum.saturating_add(
+                clipper
+                    .clip_elapsed_ns(baseline_base, baseline_elapsed)
+                    .expect("clip should be available"),
+            );
+        }
+        sum = sum.saturating_add(
+            clipper
+                .clip_elapsed_ns(outlier_base, outlier_elapsed)
+                .expect("clip should be available"),
+        );
+        sum / 101
     }
 
     fn sample_metrics(
@@ -1945,6 +2212,75 @@ mod tests {
         metrics
     }
 
+    fn metrics_with_read_ext_elapsed(elapsed_ns: u64, base: u128) -> WuMetrics {
+        let mut metrics = WuMetrics::default();
+        metrics.wu_on_prepare_msg_groups.read_ext_msgs_base = base;
+        metrics.wu_on_prepare_msg_groups.read_ext_msgs_elapsed = Duration::from_nanos(elapsed_ns);
+        metrics.wu_on_finalize.updated_accounts_count = 1;
+        metrics.wu_on_finalize.shard_accounts_count = 1;
+        metrics
+    }
+
+    fn metrics_with_derived_elapsed(
+        prepare_total_elapsed_ns: u64,
+        build_accounts_elapsed_ns: u64,
+        build_accounts_and_messages_in_parallel_elased_ns: u64,
+        finalize_block_elapsed_ns: u64,
+        finalize_total_elapsed_ns: u64,
+        resume_collation_elapsed_per_block_ns: u128,
+        collation_total_elapsed_ns: u64,
+    ) -> WuMetrics {
+        let mut metrics = sample_metrics(10, true, 11, 1000);
+        metrics.wu_on_prepare_msg_groups.total_elapsed =
+            Duration::from_nanos(prepare_total_elapsed_ns);
+        metrics.wu_on_finalize.build_accounts_elapsed =
+            Duration::from_nanos(build_accounts_elapsed_ns);
+        metrics
+            .wu_on_finalize
+            .build_accounts_and_messages_in_parallel_elased =
+            Duration::from_nanos(build_accounts_and_messages_in_parallel_elased_ns);
+        metrics.wu_on_finalize.finalize_block_elapsed =
+            Duration::from_nanos(finalize_block_elapsed_ns);
+        metrics.wu_on_finalize.total_elapsed = Duration::from_nanos(finalize_total_elapsed_ns);
+        metrics
+            .wu_on_do_collate
+            .resume_collation_elapsed_per_block_ns = resume_collation_elapsed_per_block_ns;
+        metrics.wu_on_do_collate.collation_total_elapsed =
+            Duration::from_nanos(collation_total_elapsed_ns);
+        metrics
+    }
+
+    fn metrics_with_derived_elapsed_and_zero_clip_bases(
+        prepare_total_elapsed_ns: u64,
+        build_accounts_elapsed_ns: u64,
+        build_accounts_and_messages_in_parallel_elased_ns: u64,
+        finalize_block_elapsed_ns: u64,
+        finalize_total_elapsed_ns: u64,
+        resume_collation_elapsed_per_block_ns: u128,
+        collation_total_elapsed_ns: u64,
+    ) -> WuMetrics {
+        let mut metrics = WuMetrics::default();
+        metrics.wu_on_prepare_msg_groups.total_elapsed =
+            Duration::from_nanos(prepare_total_elapsed_ns);
+        metrics.wu_on_finalize.build_accounts_elapsed =
+            Duration::from_nanos(build_accounts_elapsed_ns);
+        metrics
+            .wu_on_finalize
+            .build_accounts_and_messages_in_parallel_elased =
+            Duration::from_nanos(build_accounts_and_messages_in_parallel_elased_ns);
+        metrics.wu_on_finalize.finalize_block_elapsed =
+            Duration::from_nanos(finalize_block_elapsed_ns);
+        metrics.wu_on_finalize.total_elapsed = Duration::from_nanos(finalize_total_elapsed_ns);
+        metrics.wu_on_finalize.updated_accounts_count = 1;
+        metrics.wu_on_finalize.shard_accounts_count = 1;
+        metrics
+            .wu_on_do_collate
+            .resume_collation_elapsed_per_block_ns = resume_collation_elapsed_per_block_ns;
+        metrics.wu_on_do_collate.collation_total_elapsed =
+            Duration::from_nanos(collation_total_elapsed_ns);
+        metrics
+    }
+
     #[test]
     fn wu_metrics_avg_accumulates_fields() {
         let mut avg = WuMetricsAvg::new();
@@ -1963,11 +2299,12 @@ mod tests {
         );
         assert_eq!(
             avg.prepare.total_elapsed_ns.get_avg_checked(),
-            Some(
-                (first.wu_on_prepare_msg_groups.total_elapsed.as_nanos()
-                    + second.wu_on_prepare_msg_groups.total_elapsed.as_nanos())
-                    / 2,
-            ),
+            Some(clip_two_sample_avg(
+                first.wu_on_prepare_msg_groups.total_wu() as u128,
+                first.wu_on_prepare_msg_groups.total_elapsed.as_nanos(),
+                second.wu_on_prepare_msg_groups.total_wu() as u128,
+                second.wu_on_prepare_msg_groups.total_elapsed.as_nanos(),
+            )),
         );
         assert_eq!(
             avg.execute
@@ -1983,29 +2320,31 @@ mod tests {
             avg.finalize
                 .build_accounts_and_messages_in_parallel_elased_ns
                 .get_avg_checked(),
-            Some(
-                (first
+            Some(clip_two_sample_avg(
+                first.wu_on_finalize.max_accounts_in_out_msgs_wu() as u128,
+                first
                     .wu_on_finalize
                     .build_accounts_and_messages_in_parallel_elased
-                    .as_nanos()
-                    + second
-                        .wu_on_finalize
-                        .build_accounts_and_messages_in_parallel_elased
-                        .as_nanos())
-                    / 2,
-            ),
+                    .as_nanos(),
+                second.wu_on_finalize.max_accounts_in_out_msgs_wu() as u128,
+                second
+                    .wu_on_finalize
+                    .build_accounts_and_messages_in_parallel_elased
+                    .as_nanos(),
+            )),
         );
         assert_eq!(
             avg.do_collate
                 .resume_collation_elapsed_per_block_ns
                 .get_avg_checked(),
-            Some(
-                (first.wu_on_do_collate.resume_collation_elapsed_per_block_ns
-                    + second
-                        .wu_on_do_collate
-                        .resume_collation_elapsed_per_block_ns)
-                    / 2,
-            ),
+            Some(clip_two_sample_avg(
+                first.wu_on_do_collate.resume_collation_wu_per_block as u128,
+                first.wu_on_do_collate.resume_collation_elapsed_per_block_ns,
+                second.wu_on_do_collate.resume_collation_wu_per_block as u128,
+                second
+                    .wu_on_do_collate
+                    .resume_collation_elapsed_per_block_ns,
+            )),
         );
     }
 
@@ -2075,39 +2414,106 @@ mod tests {
             result
                 .wu_on_do_collate
                 .resume_collation_elapsed_per_block_ns,
-            (first.wu_on_do_collate.resume_collation_elapsed_per_block_ns
-                + second
+            clip_two_sample_avg(
+                first.wu_on_do_collate.resume_collation_wu_per_block as u128,
+                first.wu_on_do_collate.resume_collation_elapsed_per_block_ns,
+                second.wu_on_do_collate.resume_collation_wu_per_block as u128,
+                second
                     .wu_on_do_collate
-                    .resume_collation_elapsed_per_block_ns)
-                / 2,
+                    .resume_collation_elapsed_per_block_ns,
+            ),
         );
         assert_eq!(
             result.wu_on_finalize.total_elapsed.as_nanos(),
-            (first.wu_on_finalize.total_elapsed.as_nanos()
-                + second.wu_on_finalize.total_elapsed.as_nanos())
-                / 2,
+            clip_two_sample_avg(
+                first.wu_on_finalize.total_wu() as u128,
+                first.wu_on_finalize.total_elapsed.as_nanos(),
+                second.wu_on_finalize.total_wu() as u128,
+                second.wu_on_finalize.total_elapsed.as_nanos(),
+            ),
         );
         assert_eq!(
             result.wu_on_do_collate.collation_total_elapsed.as_nanos(),
-            (first.wu_on_do_collate.collation_total_elapsed.as_nanos()
-                + second.wu_on_do_collate.collation_total_elapsed.as_nanos())
-                / 2
+            clip_two_sample_avg(
+                first.collation_total_wu() as u128,
+                first.wu_on_do_collate.collation_total_elapsed.as_nanos(),
+                second.collation_total_wu() as u128,
+                second.wu_on_do_collate.collation_total_elapsed.as_nanos(),
+            )
         );
+    }
+
+    #[test]
+    fn wu_metrics_avg_get_avg_uses_clipped_elapsed_for_clip_enabled_metrics() {
+        let mut avg = WuMetricsAvg::new();
+        let mut unit_cost_clippers = test_unit_cost_clippers();
+        for _ in 0..100 {
+            avg.accum(
+                &metrics_with_read_ext_elapsed(10, 10),
+                &mut unit_cost_clippers,
+            );
+        }
+        avg.accum(
+            &metrics_with_read_ext_elapsed(1_000, 10),
+            &mut unit_cost_clippers,
+        );
+        let result = avg.get_avg().expect("average should exist");
+        assert_eq!(
+            result
+                .wu_on_prepare_msg_groups
+                .read_ext_msgs_elapsed
+                .as_nanos(),
+            10
+        );
+        assert_eq!(*avg.prepare.read_ext_msgs_sums_accum, (1010, 1010));
+    }
+
+    #[test]
+    fn wu_metrics_avg_get_avg_falls_back_to_raw_when_clip_unavailable() {
+        let mut avg = WuMetricsAvg::new();
+        let mut unit_cost_clippers = test_unit_cost_clippers_with_window(2);
+        avg.accum(
+            &metrics_with_read_ext_elapsed(100, 0),
+            &mut unit_cost_clippers,
+        );
+        avg.accum(
+            &metrics_with_read_ext_elapsed(200, 0),
+            &mut unit_cost_clippers,
+        );
+        let result = avg.get_avg().expect("average should exist");
+        assert_eq!(
+            result
+                .wu_on_prepare_msg_groups
+                .read_ext_msgs_elapsed
+                .as_nanos(),
+            150
+        );
+        assert_eq!(*avg.prepare.read_ext_msgs_sums_accum, (0, 0));
     }
 
     #[test]
     fn safe_metrics_avg_merges_span_result_and_sums() {
         let mut spans = BTreeMap::new();
         let mut unit_cost_clippers = test_unit_cost_clippers();
-        let mut span1 =
-            WuMetricsSpan::new(Box::new(sample_metrics(10, true, 11, 1000)), &mut unit_cost_clippers);
+        let mut span1 = WuMetricsSpan::new(
+            Box::new(sample_metrics(10, true, 11, 1000)),
+            &mut unit_cost_clippers,
+        );
         span1
-            .accum(Box::new(sample_metrics(12, true, 11, 1000)), &mut unit_cost_clippers)
+            .accum(
+                Box::new(sample_metrics(12, true, 11, 1000)),
+                &mut unit_cost_clippers,
+            )
             .expect("span accum should succeed");
-        let mut span2 =
-            WuMetricsSpan::new(Box::new(sample_metrics(20, true, 11, 1000)), &mut unit_cost_clippers);
+        let mut span2 = WuMetricsSpan::new(
+            Box::new(sample_metrics(20, true, 11, 1000)),
+            &mut unit_cost_clippers,
+        );
         span2
-            .accum(Box::new(sample_metrics(22, true, 11, 1000)), &mut unit_cost_clippers)
+            .accum(
+                Box::new(sample_metrics(22, true, 11, 1000)),
+                &mut unit_cost_clippers,
+            )
             .expect("span accum should succeed");
         spans.insert(1u32, span1);
         spans.insert(2u32, span2);
@@ -2119,6 +2525,181 @@ mod tests {
 
         assert_eq!(avg_metrics.wu_on_prepare_msg_groups.fixed_part, 17);
         assert_eq!(*avg.prepare.read_ext_msgs_sums_accum, (76, 72));
+    }
+
+    #[test]
+    fn merge_span_avg_preserves_clipped_elapsed_values() {
+        let mut span_avg = WuMetricsAvg::new();
+        let mut unit_cost_clippers = test_unit_cost_clippers();
+        for _ in 0..100 {
+            span_avg.accum(
+                &metrics_with_read_ext_elapsed(10, 10),
+                &mut unit_cost_clippers,
+            );
+        }
+        span_avg.accum(
+            &metrics_with_read_ext_elapsed(1_000, 10),
+            &mut unit_cost_clippers,
+        );
+
+        let mut merged = WuMetricsAvg::new();
+        merged
+            .merge_span_avg(&span_avg)
+            .expect("span merge should succeed");
+
+        let result = merged.get_avg().expect("average should exist");
+        assert_eq!(
+            result
+                .wu_on_prepare_msg_groups
+                .read_ext_msgs_elapsed
+                .as_nanos(),
+            10
+        );
+        assert_eq!(*merged.prepare.read_ext_msgs_sums_accum, (1010, 1010));
+    }
+
+    #[test]
+    fn wu_metrics_avg_clips_remaining_derived_elapsed_metrics() {
+        let mut avg = WuMetricsAvg::new();
+        let mut unit_cost_clippers = test_unit_cost_clippers();
+        let baseline = metrics_with_derived_elapsed(100, 110, 120, 130, 140, 150, 160);
+        let outlier =
+            metrics_with_derived_elapsed(10_000, 11_000, 12_000, 13_000, 14_000, 15_000, 16_000);
+
+        for _ in 0..100 {
+            avg.accum(&baseline, &mut unit_cost_clippers);
+        }
+        avg.accum(&outlier, &mut unit_cost_clippers);
+
+        let result = avg.get_avg().expect("average should exist");
+        let expected_prepare_total = clip_baseline_outlier_avg(
+            baseline.wu_on_prepare_msg_groups.total_wu() as u128,
+            baseline.wu_on_prepare_msg_groups.total_elapsed.as_nanos(),
+            outlier.wu_on_prepare_msg_groups.total_wu() as u128,
+            outlier.wu_on_prepare_msg_groups.total_elapsed.as_nanos(),
+        );
+        let expected_build_accounts = clip_baseline_outlier_avg(
+            baseline.wu_on_finalize.build_accounts_wu() as u128,
+            baseline.wu_on_finalize.build_accounts_elapsed.as_nanos(),
+            outlier.wu_on_finalize.build_accounts_wu() as u128,
+            outlier.wu_on_finalize.build_accounts_elapsed.as_nanos(),
+        );
+        let expected_parallel = clip_baseline_outlier_avg(
+            baseline.wu_on_finalize.max_accounts_in_out_msgs_wu() as u128,
+            baseline
+                .wu_on_finalize
+                .build_accounts_and_messages_in_parallel_elased
+                .as_nanos(),
+            outlier.wu_on_finalize.max_accounts_in_out_msgs_wu() as u128,
+            outlier
+                .wu_on_finalize
+                .build_accounts_and_messages_in_parallel_elased
+                .as_nanos(),
+        );
+        let expected_finalize_block = clip_baseline_outlier_avg(
+            baseline.wu_on_finalize.finalize_block_wu() as u128,
+            baseline.wu_on_finalize.finalize_block_elapsed.as_nanos(),
+            outlier.wu_on_finalize.finalize_block_wu() as u128,
+            outlier.wu_on_finalize.finalize_block_elapsed.as_nanos(),
+        );
+        let expected_finalize_total = clip_baseline_outlier_avg(
+            baseline.wu_on_finalize.total_wu() as u128,
+            baseline.wu_on_finalize.total_elapsed.as_nanos(),
+            outlier.wu_on_finalize.total_wu() as u128,
+            outlier.wu_on_finalize.total_elapsed.as_nanos(),
+        );
+        let expected_resume_per_block = clip_baseline_outlier_avg(
+            baseline.wu_on_do_collate.resume_collation_wu_per_block as u128,
+            baseline
+                .wu_on_do_collate
+                .resume_collation_elapsed_per_block_ns,
+            outlier.wu_on_do_collate.resume_collation_wu_per_block as u128,
+            outlier
+                .wu_on_do_collate
+                .resume_collation_elapsed_per_block_ns,
+        );
+        let expected_collation_total = clip_baseline_outlier_avg(
+            baseline.collation_total_wu() as u128,
+            baseline.wu_on_do_collate.collation_total_elapsed.as_nanos(),
+            outlier.collation_total_wu() as u128,
+            outlier.wu_on_do_collate.collation_total_elapsed.as_nanos(),
+        );
+        assert_eq!(
+            result.wu_on_prepare_msg_groups.total_elapsed.as_nanos(),
+            expected_prepare_total
+        );
+        assert_eq!(
+            result.wu_on_finalize.build_accounts_elapsed.as_nanos(),
+            expected_build_accounts
+        );
+        assert_eq!(
+            result
+                .wu_on_finalize
+                .build_accounts_and_messages_in_parallel_elased
+                .as_nanos(),
+            expected_parallel,
+        );
+        assert_eq!(
+            result.wu_on_finalize.finalize_block_elapsed.as_nanos(),
+            expected_finalize_block
+        );
+        assert_eq!(
+            result.wu_on_finalize.total_elapsed.as_nanos(),
+            expected_finalize_total
+        );
+        assert_eq!(
+            result
+                .wu_on_do_collate
+                .resume_collation_elapsed_per_block_ns,
+            expected_resume_per_block
+        );
+        assert_eq!(
+            result.wu_on_do_collate.collation_total_elapsed.as_nanos(),
+            expected_collation_total
+        );
+        let expected_total_price =
+            expected_collation_total as f64 / result.collation_total_wu() as f64;
+        assert!((result.collation_total_wu_price() - expected_total_price).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn wu_metrics_avg_derived_elapsed_falls_back_to_raw_when_clip_unavailable() {
+        let mut avg = WuMetricsAvg::new();
+        let mut unit_cost_clippers = test_unit_cost_clippers_with_window(2);
+        let first =
+            metrics_with_derived_elapsed_and_zero_clip_bases(100, 110, 120, 130, 140, 150, 160);
+        let second =
+            metrics_with_derived_elapsed_and_zero_clip_bases(300, 310, 320, 330, 340, 350, 360);
+
+        avg.accum(&first, &mut unit_cost_clippers);
+        avg.accum(&second, &mut unit_cost_clippers);
+
+        let result = avg.get_avg().expect("average should exist");
+        assert_eq!(
+            result.wu_on_prepare_msg_groups.total_elapsed.as_nanos(),
+            200
+        );
+        assert_eq!(result.wu_on_finalize.build_accounts_elapsed.as_nanos(), 210);
+        assert_eq!(
+            result
+                .wu_on_finalize
+                .build_accounts_and_messages_in_parallel_elased
+                .as_nanos(),
+            220,
+        );
+        assert_eq!(result.wu_on_finalize.finalize_block_elapsed.as_nanos(), 230);
+        assert_eq!(result.wu_on_finalize.total_elapsed.as_nanos(), 240);
+        assert_eq!(
+            result
+                .wu_on_do_collate
+                .resume_collation_elapsed_per_block_ns,
+            250
+        );
+        assert_eq!(
+            result.wu_on_do_collate.collation_total_elapsed.as_nanos(),
+            260
+        );
+        assert_eq!(result.collation_total_wu_price(), 0.0);
     }
 
     #[test]
@@ -2156,7 +2737,7 @@ mod tests {
         metrics.wu_params.prepare.read_ext_msgs = 10;
         metrics.wu_params.prepare.read_int_msgs = 123;
         let mut avg = WuMetricsAvg::new();
-        avg.accum_avg_result(&metrics);
+        avg.accum_materialized_avg_result(&metrics);
         avg.prepare
             .read_ext_msgs_sums_accum
             .add((((u16::MAX as u128) + 100) * 2, 1));
@@ -2390,6 +2971,31 @@ mod tests {
     }
 
     #[test]
+    fn target_params_from_sums_do_not_depend_on_avg_elapsed_view() {
+        let mut metrics = WuMetrics::default();
+        metrics.wu_params.prepare.read_ext_msgs = 77;
+        metrics.wu_on_finalize.updated_accounts_count = 1;
+        metrics.wu_on_finalize.shard_accounts_count = 1;
+
+        let mut avg_fast = WuMetricsAvg::new();
+        avg_fast.accum_materialized_avg_result(&metrics);
+        avg_fast.prepare.read_ext_msgs_sums_accum.add((140, 10));
+        avg_fast.prepare.read_ext_msgs_elapsed_ns.accum(10u64);
+
+        let mut avg_slow = WuMetricsAvg::new();
+        avg_slow.accum_materialized_avg_result(&metrics);
+        avg_slow.prepare.read_ext_msgs_sums_accum.add((140, 10));
+        avg_slow.prepare.read_ext_msgs_elapsed_ns.accum(10_000u64);
+
+        let target_fast = calc_target_params(2.0, &avg_fast);
+        let target_slow = calc_target_params(2.0, &avg_slow);
+        assert_eq!(
+            target_fast.prepare.read_ext_msgs,
+            target_slow.prepare.read_ext_msgs
+        );
+    }
+
+    #[test]
     fn threshold_filters_are_applied_in_aggregation() {
         let mut first = WuMetrics::default();
         first.wu_params.finalize.state_update_min = 100;
@@ -2426,6 +3032,18 @@ mod tests {
         avg.accum(&second, &mut unit_cost_clippers);
         assert_eq!(*avg.finalize.build_state_update_sums_accum, (200, 10));
         assert_eq!(*avg.finalize.build_block_sums_accum, (500, 5));
+        let avg_metrics = avg.get_avg().expect("average should exist");
+        assert_eq!(
+            avg_metrics
+                .wu_on_finalize
+                .build_state_update_elapsed
+                .as_nanos(),
+            5_100,
+        );
+        assert_eq!(
+            avg_metrics.wu_on_finalize.build_block_elapsed.as_nanos(),
+            4_250
+        );
         let target = calc_target_params(1.0, &avg);
         assert_eq!(
             target.finalize.state_update_accounts,
