@@ -29,6 +29,10 @@ impl RollingUnitCostClipper {
                 .push_and_clip(unit_cost_q, UNIT_COST_P_LOW, UNIT_COST_P_HIGH);
         dequantize_elapsed_ns(unit_cost_clip_q, base)
     }
+
+    pub fn window_is_filled(&self) -> bool {
+        self.pct.window_is_filled()
+    }
 }
 
 pub struct PrepareUnitCostClippers {
@@ -131,6 +135,40 @@ impl UnitCostClippers {
             do_collate: DoCollateUnitCostClippers::new(window),
         }
     }
+
+    pub fn missing_mandatory_windows(&self) -> Vec<&'static str> {
+        let mut missing = Vec::new();
+        if !self.prepare.add_msgs_to_groups.window_is_filled() {
+            missing.push("prepare.add_msgs_to_groups");
+        }
+        if !self.execute.execute_groups_vm.window_is_filled() {
+            missing.push("execute.execute_groups_vm");
+        }
+        if !self.execute.process_txs.window_is_filled() {
+            missing.push("execute.process_txs");
+        }
+        if !self.finalize.update_shard_accounts.window_is_filled() {
+            missing.push("finalize.update_shard_accounts");
+        }
+        if !self.finalize.build_accounts_blocks.window_is_filled() {
+            missing.push("finalize.build_accounts_blocks");
+        }
+        if !self.finalize.build_in_msg.window_is_filled() {
+            missing.push("finalize.build_in_msg");
+        }
+        if !self.finalize.build_out_msg.window_is_filled() {
+            missing.push("finalize.build_out_msg");
+        }
+        if !self.do_collate.resume_collation.window_is_filled() {
+            missing.push("do_collate.resume_collation");
+        }
+        missing
+    }
+
+    #[cfg(test)]
+    pub fn mandatory_windows_filled(&self) -> bool {
+        self.missing_mandatory_windows().is_empty()
+    }
 }
 
 fn quantize_unit_cost(unit_cost_raw: f64) -> Option<u128> {
@@ -163,7 +201,7 @@ fn dequantize_elapsed_ns(unit_cost_q: u128, base: u128) -> Option<u128> {
 
 #[cfg(test)]
 mod tests {
-    use super::RollingUnitCostClipper;
+    use super::{RollingUnitCostClipper, UnitCostClippers};
 
     #[test]
     fn clipper_returns_input_before_window_is_filled() {
@@ -189,5 +227,138 @@ mod tests {
         let mut clipper = RollingUnitCostClipper::new(100);
         assert_eq!(clipper.clip_elapsed_ns(0, 10), None);
         assert_eq!(clipper.clip_elapsed_ns(1, 0), Some(0));
+    }
+
+    #[test]
+    fn clipper_window_is_filled_after_window_samples() {
+        let mut clipper = RollingUnitCostClipper::new(100);
+        assert!(!clipper.window_is_filled());
+        for _ in 0..99 {
+            assert_eq!(clipper.clip_elapsed_ns(1, 10), Some(10));
+            assert!(!clipper.window_is_filled());
+        }
+        assert_eq!(clipper.clip_elapsed_ns(1, 10), Some(10));
+        assert!(clipper.window_is_filled());
+    }
+
+    #[test]
+    fn mandatory_windows_filled_is_false_when_mandatory_window_is_not_filled() {
+        let mut clippers = UnitCostClippers::new(100);
+        for _ in 0..100 {
+            assert_eq!(
+                clippers.prepare.add_msgs_to_groups.clip_elapsed_ns(1, 10),
+                Some(10)
+            );
+            assert_eq!(
+                clippers.execute.execute_groups_vm.clip_elapsed_ns(1, 10),
+                Some(10)
+            );
+            assert_eq!(
+                clippers.execute.process_txs.clip_elapsed_ns(1, 10),
+                Some(10)
+            );
+            assert_eq!(
+                clippers
+                    .finalize
+                    .update_shard_accounts
+                    .clip_elapsed_ns(1, 10),
+                Some(10)
+            );
+            assert_eq!(
+                clippers
+                    .finalize
+                    .build_accounts_blocks
+                    .clip_elapsed_ns(1, 10),
+                Some(10)
+            );
+            assert_eq!(
+                clippers.finalize.build_in_msg.clip_elapsed_ns(1, 10),
+                Some(10)
+            );
+            assert_eq!(
+                clippers.finalize.build_out_msg.clip_elapsed_ns(1, 10),
+                Some(10)
+            );
+        }
+        assert!(!clippers.mandatory_windows_filled());
+        assert_eq!(clippers.missing_mandatory_windows(), vec![
+            "do_collate.resume_collation"
+        ]);
+    }
+
+    #[test]
+    fn mandatory_windows_filled_is_true_when_only_excluded_windows_are_not_filled() {
+        let mut clippers = UnitCostClippers::new(100);
+        for _ in 0..100 {
+            assert_eq!(
+                clippers.prepare.add_msgs_to_groups.clip_elapsed_ns(1, 10),
+                Some(10)
+            );
+            assert_eq!(
+                clippers.execute.execute_groups_vm.clip_elapsed_ns(1, 10),
+                Some(10)
+            );
+            assert_eq!(
+                clippers.execute.process_txs.clip_elapsed_ns(1, 10),
+                Some(10)
+            );
+            assert_eq!(
+                clippers
+                    .finalize
+                    .update_shard_accounts
+                    .clip_elapsed_ns(1, 10),
+                Some(10)
+            );
+            assert_eq!(
+                clippers
+                    .finalize
+                    .build_accounts_blocks
+                    .clip_elapsed_ns(1, 10),
+                Some(10)
+            );
+            assert_eq!(
+                clippers.finalize.build_in_msg.clip_elapsed_ns(1, 10),
+                Some(10)
+            );
+            assert_eq!(
+                clippers.finalize.build_out_msg.clip_elapsed_ns(1, 10),
+                Some(10)
+            );
+            assert_eq!(
+                clippers.do_collate.resume_collation.clip_elapsed_ns(1, 10),
+                Some(10)
+            );
+        }
+        assert!(clippers.mandatory_windows_filled());
+        assert!(clippers.missing_mandatory_windows().is_empty());
+        assert!(!clippers.prepare.read_ext_msgs.window_is_filled());
+        assert!(!clippers.prepare.read_existing_int_msgs.window_is_filled());
+        assert!(!clippers.prepare.read_new_int_msgs.window_is_filled());
+        assert!(!clippers.prepare.total_elapsed.window_is_filled());
+        assert!(!clippers.finalize.create_diff.window_is_filled());
+        assert!(!clippers.finalize.apply_diff.window_is_filled());
+        assert!(!clippers.finalize.build_accounts.window_is_filled());
+        assert!(
+            !clippers
+                .finalize
+                .build_accounts_and_messages_in_parallel
+                .window_is_filled()
+        );
+        assert!(!clippers.finalize.build_state_update.window_is_filled());
+        assert!(!clippers.finalize.build_block.window_is_filled());
+        assert!(!clippers.finalize.finalize_block.window_is_filled());
+        assert!(!clippers.finalize.total_elapsed.window_is_filled());
+        assert!(
+            !clippers
+                .do_collate
+                .resume_collation_per_block
+                .window_is_filled()
+        );
+        assert!(
+            !clippers
+                .do_collate
+                .collation_total_elapsed
+                .window_is_filled()
+        );
     }
 }
