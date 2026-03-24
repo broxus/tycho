@@ -118,12 +118,14 @@ impl Inner {
             };
 
             let mut attempt = 0;
+            let mut has_dropped = false;
             let committed = loop {
                 attempt += 1;
                 match committer.commit(round_ctx.conf())? {
                     Ok(data) => break Some(data),
                     Err(HistoryConflict(round)) if rounds_drop_allowed(round) => {
                         let dropped_ok = committer.drop_upto(round.next(), round_ctx.conf());
+                        has_dropped |= true;
                         tracing::info!(
                             start_bottom,
                             start_dag_len,
@@ -178,6 +180,11 @@ impl Inner {
                         .map_err(|_closed| Cancelled())?;
                 }
                 round_ctx.meter_stats(all_stats);
+            } else if has_dropped {
+                let may_gc = committer.bottom_round().prev();
+                anchors_tx
+                    .send(MempoolOutput::CommitFinished(may_gc))
+                    .map_err(|_closed| Cancelled())?;
             }
 
             EngineCtx::meter_dag_len(committer.dag_len());

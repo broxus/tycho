@@ -389,6 +389,7 @@ impl Engine {
                     let old_dag_top_round = self.dag.top().round();
                     // do not repeat the `get()` - it can give non-reproducible result
                     let consensus_round = self.round_task.state.consensus_round.get();
+                    let top_known_anchor = self.round_task.state.top_known_anchor.get();
                     assert!(
                         old_dag_top_round <= consensus_round,
                         "consensus round {} cannot be less than old top dag round {}",
@@ -398,7 +399,9 @@ impl Engine {
                     metrics::gauge!("tycho_mempool_rounds_dag_behind_consensus")
                         .set(consensus_round.diff_f64(old_dag_top_round));
                     // if received from BcastFilter - produce point at round before it
-                    let next_round = consensus_round.max(old_dag_top_round.next());
+                    let next_round = consensus_round
+                        .max(top_known_anchor) // proof round is closed; let choose by bcasts
+                        .max(old_dag_top_round.next());
                     (old_dag_top_round, next_round)
                 };
 
