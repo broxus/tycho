@@ -164,7 +164,6 @@ fn default_collator_config() -> CollatorConfig {
         fast_sync: false,
         accounts_split_depth: 4,
         merkle_split_depth: 5,
-        merkle_chain_limit: 5,
     }
 }
 

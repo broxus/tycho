@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
@@ -10,8 +11,8 @@ use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_core::global_config::ZerostateId;
 use tycho_core::storage::{
-    BlockHandle, CachedStateUpdate, CoreStorage, MaybeExistingHandle, NewBlockMeta, StoreStateHint,
-    StoreStateStatus,
+    BlockHandle, BlockInfoForApply, CoreStorage, LoadStateHint, MaybeExistingHandle, NewBlockMeta,
+    StoreStateHint,
 };
 use tycho_network::PeerId;
 use tycho_types::boc::BocRepr;
@@ -64,17 +65,23 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
     /// Return id of last master block that was applied to node local state
     fn load_last_applied_mc_block_id(&self) -> Result<BlockId>;
     /// Return master or shard state on specified block from node local state
-    async fn load_state(&self, ref_by_mc_seqno: u32, block_id: &BlockId)
-    -> Result<ShardStateStuff>;
+    async fn load_state(
+        &self,
+        ref_by_mc_seqno: u32,
+        block_id: &BlockId,
+        hint: LoadStateHint,
+    ) -> Result<ShardStateStuff>;
     /// Store shard state root in the storage.
     /// Returns `true` when state was updated in storage.
-    async fn store_state_root(
+    async fn begin_store_next_state(
         &self,
+        prev_block_id: &BlockId,
         block_id: &BlockId,
         meta: NewBlockMeta,
-        state_root: Cell,
+        merkle_update: &MerkleUpdate,
+        state: ShardStateStuff,
         hint: StoreStateHint,
-    ) -> Result<StoreStateStatus>;
+    ) -> Result<Box<dyn InitiatedStoreState>>;
     /// Return block by its id from node local state
     async fn load_block(&self, block_id: &BlockId) -> Result<Option<BlockStuff>>;
     /// Return block by its handle from node local state
@@ -104,11 +111,16 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
     fn shard_split_depth(&self) -> u8;
 }
 
+#[async_trait]
+pub trait InitiatedStoreState: Send + 'static {
+    async fn wait_store_only(self: Box<Self>) -> Result<()>;
+    async fn wait_reload(self: Box<Self>) -> Result<ShardStateStuff>;
+}
+
 pub struct StateNodeAdapterStdImpl {
     listener: Arc<dyn StateNodeEventListener>,
     blocks: FastDashMap<ShardIdent, BTreeMap<u32, Arc<BlockStuffForSync>>>,
-    shard_blocks: FastDashMap<ShardIdent, BTreeMap<u32, ShardBlockData>>,
-    last_stored_state_seqno: Mutex<FastHashMap<ShardIdent, u32>>,
+    shard_blocks: Arc<ShardBlocksMap>,
     storage: CoreStorage,
     broadcaster: broadcast::Sender<BlockId>,
 
@@ -117,6 +129,8 @@ pub struct StateNodeAdapterStdImpl {
     delayed_state_notifier: DelayedStateNotifier,
     zerostate_id: ZerostateId,
 }
+
+type ShardBlocksMap = FastDashMap<ShardIdent, BTreeMap<BlockId, ShardBlockData>>;
 
 impl StateNodeAdapterStdImpl {
     pub fn new(
@@ -133,7 +147,6 @@ impl StateNodeAdapterStdImpl {
             storage,
             blocks: Default::default(),
             shard_blocks: Default::default(),
-            last_stored_state_seqno: Default::default(),
             broadcaster,
             sync_context_tx,
             delayed_state_notifier: DelayedStateNotifier::default(),
@@ -204,62 +217,112 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         &self,
         ref_by_mc_seqno: u32,
         block_id: &BlockId,
+        hint: LoadStateHint,
     ) -> Result<ShardStateStuff> {
         let _histogram = HistogramGuard::begin("tycho_collator_state_load_state_time");
 
         tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Load state: {}", block_id.as_short_id());
 
-        let state = self
-            .storage
+        self.storage
             .shard_state_storage()
-            .load_state_with_updates_cache(ref_by_mc_seqno, block_id, |block_id| {
+            .load_state_ext(ref_by_mc_seqno, block_id, hint, |block_id| {
                 self.shard_blocks
                     .get(&block_id.shard)
-                    .and_then(|shard_blocks| shard_blocks.get(&block_id.seqno).cloned())
-                    .map(|block| CachedStateUpdate {
-                        prev_block_id: block.prev_id,
-                        ref_by_mc_seqno: block.ref_by_mc_seqno,
-                        state_update: block.state_update,
+                    .and_then(|shard_blocks| {
+                        let block = shard_blocks.get(block_id)?;
+                        Some(BlockInfoForApply {
+                            prev_block_id: block.prev_id,
+                            partial_root_cell: block.state_update.new.clone(),
+                        })
                     })
             })
-            .await?;
-
-        Ok(state)
+            .await
     }
 
-    async fn store_state_root(
+    async fn begin_store_next_state(
         &self,
+        prev_block_id: &BlockId,
         block_id: &BlockId,
         meta: NewBlockMeta,
-        state_root: Cell,
+        merkle_update: &MerkleUpdate,
+        state: ShardStateStuff,
         hint: StoreStateHint,
-    ) -> Result<StoreStateStatus> {
-        let labels = [("workchain", block_id.shard.workchain().to_string())];
-        let _histogram = HistogramGuard::begin_with_labels(
-            "tycho_collator_state_store_state_root_time_high",
-            &labels,
-        );
+    ) -> Result<Box<dyn InitiatedStoreState>> {
+        struct HistogramOnDrop {
+            workchain: i32,
+            started_at: Instant,
+        }
+
+        impl Drop for HistogramOnDrop {
+            fn drop(&mut self) {
+                metrics::histogram!(
+                    "tycho_collator_state_store_state_root_time_high",
+                    "workchain" => self.workchain.to_string(),
+                )
+                .record(self.started_at.elapsed());
+            }
+        }
+
+        struct StoreOperation {
+            _metrics: HistogramOnDrop,
+            inner: tycho_core::storage::InitiatedStoreState,
+        }
+
+        #[async_trait]
+        impl InitiatedStoreState for StoreOperation {
+            async fn wait_store_only(self: Box<Self>) -> Result<()> {
+                self.inner.wait_store_only().await
+            }
+
+            async fn wait_reload(self: Box<Self>) -> Result<ShardStateStuff> {
+                self.inner.wait_reload().await
+            }
+        }
+
+        let metrics = HistogramOnDrop {
+            workchain: block_id.shard.workchain(),
+            started_at: Instant::now(),
+        };
 
         tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Store state root: {}", block_id.as_short_id());
 
-        let (handle, _) = self
+        let prev_handle = self
+            .storage
+            .block_handle_storage()
+            .load_handle(prev_block_id)
+            .context("no prev block handle found")?;
+
+        let (next_handle, _) = self
             .storage
             .block_handle_storage()
             .create_or_load_handle(block_id, meta);
 
-        let status = self
-            .storage
-            .shard_state_storage()
-            .store_state_root(&handle, state_root, hint)
-            .await?;
+        let get_merkle_update = Box::new({
+            let shard_blocks = self.shard_blocks.clone();
+            move |block_id: &BlockId| {
+                shard_blocks.get(&block_id.shard).and_then(|shard_blocks| {
+                    let block = shard_blocks.get(block_id)?;
+                    Some(BlockInfoForApply {
+                        prev_block_id: block.prev_id,
+                        partial_root_cell: block.state_update.new.clone(),
+                    })
+                })
+            }
+        });
 
-        if status.is_stored() {
-            self.last_stored_state_seqno
-                .lock()
-                .insert(block_id.shard, block_id.seqno);
-        }
+        let inner = self.storage.shard_state_storage().begin_store_next_state(
+            &prev_handle,
+            &next_handle,
+            merkle_update,
+            Some(state),
+            hint,
+            Some(get_merkle_update),
+        )?;
 
-        Ok(status)
+        Ok(Box::new(StoreOperation {
+            _metrics: metrics,
+            inner,
+        }))
     }
 
     async fn load_block(&self, block_id: &BlockId) -> Result<Option<BlockStuff>> {
@@ -322,15 +385,15 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
             let state_update = block.block().load_state_update()?;
             let (prev_id, prev_id_alt) = block.construct_prev_id()?;
 
-            self.shard_blocks.entry(block_id.shard).or_default().insert(
-                block_id.seqno,
-                ShardBlockData {
+            self.shard_blocks
+                .entry(block_id.shard)
+                .or_default()
+                .insert(block_id, ShardBlockData {
                     prev_id,
                     ref_by_mc_seqno,
                     state_update,
                     _prev_id_alt: prev_id_alt,
-                },
-            );
+                });
         }
 
         Ok(())
@@ -419,22 +482,35 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         // Don't wait for drop inside a tokio context.
         Reclaimer::instance().drop(to_drop);
 
-        let mut to_drop = Vec::new();
-        let last_stored = self.last_stored_state_seqno.lock();
-        for (shard, _) in &to_split {
-            let Some(&safe_seqno) = last_stored.get(shard) else {
-                continue;
-            };
+        if shard.is_masterchain() {
+            let handle_storage = self.storage.block_handle_storage();
 
-            if let Some(mut shard_blocks) = self.shard_blocks.get_mut(shard) {
-                let retained = shard_blocks.split_off(&safe_seqno);
-                to_drop.push(std::mem::replace(&mut *shard_blocks, retained));
+            let mut to_drop = Vec::new();
+            for entry in state.shards()?.latest_blocks() {
+                let top_block_id = entry?;
+                let Some(mut sb) = self.shard_blocks.get_mut(&top_block_id.shard) else {
+                    continue;
+                };
+
+                // Find the oldest block that is not yet persisted to storage.
+                // Keep it and everything after to maintain the merkle update chain.
+                let retain_from = sb
+                    .range(..top_block_id)
+                    .find(|(block_id, _)| {
+                        !matches!(
+                            handle_storage.load_handle(block_id),
+                            Some(handle) if handle.has_data()
+                        )
+                    })
+                    .map_or(top_block_id, |(block_id, _)| *block_id);
+
+                let retained = sb.split_off(&retain_from);
+                to_drop.push(std::mem::replace(&mut *sb, retained));
             }
-        }
-        drop(last_stored);
 
-        // Don't wait for drop inside a tokio context.
-        Reclaimer::instance().drop(to_drop);
+            // Don't wait for drop inside a tokio context.
+            Reclaimer::instance().drop(to_drop);
+        }
 
         Ok(())
     }
@@ -583,6 +659,7 @@ impl StateNodeAdapterStdImpl {
 #[derive(Clone)]
 struct ShardBlockData {
     prev_id: BlockId,
+    #[expect(unused)] // might be needed later
     ref_by_mc_seqno: u32,
     state_update: MerkleUpdate,
     _prev_id_alt: Option<BlockId>, // TODO: consider split/merge

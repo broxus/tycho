@@ -77,7 +77,7 @@ pub async fn prepare_test_storage() -> anyhow::Result<(CoreStorage, tempfile::Te
         .create_or_load_handle(&master_block_id, meta_data);
 
     shard_states
-        .store_state(&handle, &master_state_stuff, Default::default())
+        .store_state_ignore_cache(&handle, &master_state_stuff, Default::default())
         .await?;
 
     // first master block
@@ -153,7 +153,7 @@ pub async fn prepare_test_storage() -> anyhow::Result<(CoreStorage, tempfile::Te
                 });
 
         shard_states
-            .store_state(&handle, &shard_state_stuff, Default::default())
+            .store_state_ignore_cache(&handle, &shard_state_stuff, Default::default())
             .await?;
     }
 

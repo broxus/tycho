@@ -57,6 +57,7 @@ use tycho_types::boc::{Boc, BocRepr};
 use tycho_types::cell::HashBytes;
 use tycho_types::models::*;
 use tycho_util::compression::ZstdDecompress;
+use tycho_util::futures::AwaitBlocking;
 use tycho_util::metrics::HistogramGuard;
 use weedb::rocksdb;
 
@@ -764,6 +765,25 @@ impl BlobStorage {
             ),
         })
         .await?
+    }
+
+    pub fn blocking_get_block_data_decompressed(
+        &self,
+        handle: &BlockHandle,
+        id: &PackageEntryKey,
+    ) -> Result<Bytes> {
+        let _lock = lock_block_handle(handle, id.ty).await_blocking();
+
+        match self.blocks.get(id)? {
+            Some(compressed_data) => {
+                let mut output = Vec::new();
+                ZstdDecompress::begin(&compressed_data)?.decompress(&mut output)?;
+                Ok(Bytes::from(output))
+            }
+            None => Err(
+                BlockStorageError::PackageEntryNotFound(id.block_id.as_short_id(), id.ty).into(),
+            ),
+        }
     }
 
     pub async fn get_block_data_range(

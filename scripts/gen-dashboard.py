@@ -1033,7 +1033,15 @@ def storage() -> RowPanel:
         ),
         create_gauge_panel(
             "tycho_storage_raw_cells_cache_size",
-            "Raw cells cache size",
+            "Raw cells cache weight (resident only)",
+            UNITS.BYTES_IEC,
+        ),
+        create_gauge_panel(
+            [
+                Expr(metric="tycho_storage_raw_cells_cache_entries_mem"),
+                Expr(metric="tycho_storage_raw_cells_cache_map_mem"),
+            ],
+            "Raw cells cache actual memory",
             UNITS.BYTES_IEC,
         ),
         create_heatmap_quantile_panel(
@@ -1090,6 +1098,11 @@ def storage() -> RowPanel:
             "tycho_storage_shard_state_skipped + tycho_storage_shard_state_stored",
             "Shard states skip ratio",
         ),
+        create_heatmap_quantile_panel(
+            "tycho_storage_shard_state_accumulated_new_cells",
+            "Accumulated new cells between direct stores",
+            quantile="0.999",
+        ),
         create_heatmap_panel("tycho_gc_states_time", "Time to garbage collect state"),
         timeseries_panel(
             targets=[
@@ -1144,10 +1157,10 @@ def storage() -> RowPanel:
             "tycho_compaction_removes", "Number of deleted cells during compaction"
         ),
         create_counter_panel(
-            "tycho_storage_state_gc_count", "number of deleted states during gc"
+            "tycho_storage_state_gc_count", "Number of deleted states during gc"
         ),
         create_counter_panel(
-            "tycho_storage_state_gc_cells_count", "number of deleted cells during gc"
+            "tycho_storage_state_gc_cells_count", "Number of deleted cells during gc"
         ),
         create_heatmap_panel(
             "tycho_storage_state_gc_time_high", "time spent to gc single root"
@@ -1161,6 +1174,10 @@ def storage() -> RowPanel:
             "Time to wait gc mutex during remove",
         ),
         create_heatmap_panel(
+            "tycho_storage_cell_virtual_store_time_high",
+            "Time apply a virtual state",
+        ),
+        create_heatmap_panel(
             "tycho_storage_load_block_data_time", "Time to load block data"
         ),
         create_counter_panel(
@@ -1171,6 +1188,23 @@ def storage() -> RowPanel:
             "tycho_storage_block_cache_hit_total",
             "tycho_storage_load_block_total",
             "Block cache hit ratio",
+        ),
+        create_gauge_panel(
+            "tycho_storage_state_applier_count", "Number of alive MerkleUpdateApplier"
+        ),
+        create_gauge_panel(
+            "tycho_storage_state_applier_all_new_cell_count",
+            "Number of total new virtual cells",
+        ),
+        create_gauge_panel(
+            "tycho_storage_state_shard_cache_pivot_seqno",
+            "Pivot block seqno in shard states cache",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_storage_state_shard_cache_size",
+            "Number of items in shard states cache",
+            labels=['workchain=~"$workchain"'],
         ),
     ]
     return create_row("Storage", metrics)

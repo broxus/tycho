@@ -240,7 +240,7 @@ impl Dumper {
         {
             self.storage
                 .shard_state_storage()
-                .store_state(&block_handle, &state, StoreStateHint {
+                .store_state_ignore_cache(&block_handle, &state, StoreStateHint {
                     is_top_block: Some(true),
                     ..Default::default()
                 })
