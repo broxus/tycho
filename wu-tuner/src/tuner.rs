@@ -591,6 +591,16 @@ where
             return Ok(());
         };
 
+        let missing_mandatory_windows = history.unit_cost_clippers.missing_mandatory_windows();
+        if !missing_mandatory_windows.is_empty() {
+            tracing::trace!(
+                %shard, seqno,
+                ?missing_mandatory_windows,
+                "skip target wu params calculation because mandatory clipper windows are not ready",
+            );
+            return Ok(());
+        }
+
         // calculate target wu params if avg lag does not fit bounds
         let mut target_wu_params = None;
 
@@ -2048,12 +2058,26 @@ mod tests {
     use std::future;
     use std::future::Future;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use anyhow::Result;
 
     use super::*;
 
-    struct TestUpdater;
+    #[derive(Clone, Default)]
+    struct TestUpdater {
+        update_calls: Arc<AtomicUsize>,
+    }
+
+    impl TestUpdater {
+        fn new() -> Self {
+            Self::default()
+        }
+
+        fn update_calls(&self) -> usize {
+            self.update_calls.load(Ordering::SeqCst)
+        }
+    }
 
     impl WuParamsUpdater for TestUpdater {
         fn update_wu_params(
@@ -2061,6 +2085,7 @@ mod tests {
             _config: Arc<WuTunerConfig>,
             _target_wu_params: WorkUnitsParams,
         ) -> impl Future<Output = Result<()>> + Send {
+            self.update_calls.fetch_add(1, Ordering::SeqCst);
             future::ready(Ok(()))
         }
     }
@@ -2986,5 +3011,142 @@ mod tests {
             target.prepare.read_ext_msgs,
             sample.wu_params.prepare.read_ext_msgs
         );
+    }
+
+    fn test_tuner_config() -> Arc<WuTunerConfig> {
+        Arc::new(WuTunerConfig {
+            wu_params_ma_interval: 10,
+            tune_interval: 50,
+            lag_bounds_ms: (100, 5000),
+            adaptive_wu_price: true,
+            tune: WuTuneType::Rpc {
+                secret: Default::default(),
+                rpc: Default::default(),
+            },
+            ..Default::default()
+        })
+    }
+
+    fn fill_mandatory_windows(clippers: &mut UnitCostClippers, window: usize) {
+        for _ in 0..window {
+            assert_eq!(
+                clippers.prepare.add_msgs_to_groups.clip_elapsed_ns(1, 10),
+                Some(10)
+            );
+            assert_eq!(
+                clippers.execute.execute_groups_vm.clip_elapsed_ns(1, 10),
+                Some(10)
+            );
+            assert_eq!(
+                clippers.execute.process_txs.clip_elapsed_ns(1, 10),
+                Some(10)
+            );
+            assert_eq!(
+                clippers
+                    .finalize
+                    .update_shard_accounts
+                    .clip_elapsed_ns(1, 10),
+                Some(10)
+            );
+            assert_eq!(
+                clippers
+                    .finalize
+                    .build_accounts_blocks
+                    .clip_elapsed_ns(1, 10),
+                Some(10)
+            );
+            assert_eq!(
+                clippers.finalize.build_in_msg.clip_elapsed_ns(1, 10),
+                Some(10)
+            );
+            assert_eq!(
+                clippers.finalize.build_out_msg.clip_elapsed_ns(1, 10),
+                Some(10)
+            );
+            assert_eq!(
+                clippers.do_collate.resume_collation.clip_elapsed_ns(1, 10),
+                Some(10)
+            );
+        }
+    }
+
+    fn seed_test_history(history: &mut WuHistory, lag_ma_seqno: u32, avg_lag: i64) {
+        let mut avg = WuMetricsAvg::new();
+        let mut clippers = test_unit_cost_clippers();
+        avg.accum(&sample_metrics(10, true, 11, 1000), &mut clippers);
+        history.avg_metrics.insert(lag_ma_seqno, avg);
+        history.avg_anchors_lag.insert(lag_ma_seqno, avg_lag);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn target_flow_skips_when_mandatory_windows_are_not_ready() {
+        let updater = TestUpdater::new();
+        let config = test_tuner_config();
+        let mut tuner = WuTuner::new(config.clone(), updater.clone());
+        let shard = ShardIdent::BASECHAIN;
+        let seqno = 400;
+        let tuner_params = TunerParams::calculate(&config, seqno);
+        let history = tuner
+            .history
+            .entry(shard)
+            .or_insert_with(|| WuHistory::new(DEFAULT_PERCENTILE_WINDOW));
+        seed_test_history(history, tuner_params.wu_params_ma_seqno, 6000);
+
+        tuner
+            .try_calculate_target_wu_params_and_perform_adjustment(shard, seqno, &tuner_params)
+            .await
+            .expect("target flow should return Ok on readiness skip");
+
+        assert_eq!(tuner.wu_params_last_calculated_on_seqno, 0);
+        assert_eq!(updater.update_calls(), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn target_flow_proceeds_when_only_excluded_windows_are_not_ready() {
+        let updater = TestUpdater::new();
+        let config = test_tuner_config();
+        let mut tuner = WuTuner::new(config.clone(), updater.clone());
+        let shard = ShardIdent::BASECHAIN;
+        let seqno = 400;
+        let tuner_params = TunerParams::calculate(&config, seqno);
+        let history = tuner
+            .history
+            .entry(shard)
+            .or_insert_with(|| WuHistory::new(DEFAULT_PERCENTILE_WINDOW));
+        seed_test_history(history, tuner_params.wu_params_ma_seqno, 6000);
+        fill_mandatory_windows(&mut history.unit_cost_clippers, DEFAULT_PERCENTILE_WINDOW);
+        assert!(history.unit_cost_clippers.mandatory_windows_filled());
+        assert!(
+            !history
+                .unit_cost_clippers
+                .prepare
+                .read_ext_msgs
+                .window_is_filled()
+        );
+        assert!(
+            !history
+                .unit_cost_clippers
+                .finalize
+                .create_diff
+                .window_is_filled()
+        );
+        assert!(
+            !history
+                .unit_cost_clippers
+                .finalize
+                .apply_diff
+                .window_is_filled()
+        );
+
+        tuner
+            .try_calculate_target_wu_params_and_perform_adjustment(shard, seqno, &tuner_params)
+            .await
+            .expect("target flow should run when only excluded windows are not ready");
+
+        assert_eq!(
+            tuner.wu_params_last_calculated_on_seqno,
+            tuner_params.wu_params_ma_seqno
+        );
+        assert_eq!(updater.update_calls(), 1);
     }
 }
