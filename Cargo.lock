@@ -4000,6 +4000,7 @@ dependencies = [
  "tycho-crypto",
  "tycho-network",
  "tycho-rpc",
+ "tycho-slasher",
  "tycho-storage",
  "tycho-types",
  "tycho-util",
@@ -4048,6 +4049,7 @@ dependencies = [
  "tycho-crypto",
  "tycho-executor",
  "tycho-network",
+ "tycho-slasher-traits",
  "tycho-storage",
  "tycho-types",
  "tycho-util",
@@ -4342,6 +4344,41 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_path_to_error",
+ "tycho-util",
+]
+
+[[package]]
+name = "tycho-slasher"
+version = "0.3.6"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "dashmap",
+ "futures-util",
+ "metrics",
+ "parking_lot",
+ "scopeguard",
+ "serde",
+ "tl-proto",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tycho-block-util",
+ "tycho-core",
+ "tycho-crypto",
+ "tycho-slasher-traits",
+ "tycho-storage",
+ "tycho-types",
+ "tycho-util",
+ "weedb",
+]
+
+[[package]]
+name = "tycho-slasher-traits"
+version = "0.3.6"
+dependencies = [
+ "indexmap",
+ "tycho-types",
  "tycho-util",
 ]
 
