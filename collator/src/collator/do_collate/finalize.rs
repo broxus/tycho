@@ -883,9 +883,8 @@ impl Phase<FinalizeState> {
 
             validator_info = session_update.apply(
                 &mut consensus_info,
-                prev_state_extra.validator_info.catchain_seqno,
                 next_session_start_round,
-                session_start.is_curr_switch_after_pause,
+                &session_start,
             )?;
         }
         let validator_info = validator_info.unwrap_or(ValidatorInfo {
@@ -1481,10 +1480,11 @@ mod vset_update_start {
 
         is_consensus_info_overridden: bool,
         pub is_consensus_config_changed: bool,
-        pub is_curr_switch_after_pause: bool,
+        is_curr_switch_after_pause: bool,
         gen_chain_time_millis: u64,
 
         after_pause_round: u32,
+        catchain_seqno: u32,
     }
 
     impl KbNextSessionStart {
@@ -1501,6 +1501,10 @@ mod vset_update_start {
             let after_pause_round =
                 Self::after_pause_round(prev_processed_to_anchor, &prev_consensus_config);
 
+            let catchain_seqno = (prev_state_extra.validator_info.catchain_seqno)
+                .checked_add(1)
+                .context("catchain seqno overflow")?;
+
             Ok(Self {
                 is_consensus_info_overridden: {
                     consensus_info != &prev_state_extra.consensus_info
@@ -1512,6 +1516,7 @@ mod vset_update_start {
                 gen_chain_time_millis: collation_data.get_gen_chain_time(),
 
                 after_pause_round,
+                catchain_seqno,
 
                 prev_consensus_config,
             })
@@ -1600,19 +1605,14 @@ mod vset_update_start {
         pub fn apply(
             &self,
             consensus_info: &mut ConsensusInfo,
-            prev_catchain_seqno: u32,
             next_session_start_round: u32,
-            is_curr_switch_after_pause: bool,
+            session_start: &KbNextSessionStart,
         ) -> Result<Option<ValidatorInfo>> {
             let is_vset_same = *self.current_vset.repr_hash() == self.prev_vset_hash;
             let is_shuffle_same = self.shuffle_mc_validators == self.prev_shuffle_mc_validators;
             if is_vset_same && is_shuffle_same {
                 return Ok(None);
             }
-
-            let catchain_seqno = prev_catchain_seqno
-                .checked_add(1)
-                .context("catchain seqno overflow")?;
 
             // simultaneously update session_seqno in collation and consensus if v_(sub)_set changes;
             // genesis change (recovery or config) should not rotate validators by itself, so it
@@ -1621,7 +1621,7 @@ mod vset_update_start {
             // take prev_* attributes for mempool to calculate a subset from v_set (if used);
             // also mempool may skip a short-lived session that ended sooner than schedule
             // was applied in mempool (but subset rotations should not be that short)
-            if !is_curr_switch_after_pause {
+            if !session_start.is_curr_switch_after_pause {
                 consensus_info.prev_shuffle_mc_validators = self.prev_shuffle_mc_validators;
                 consensus_info.prev_vset_switch_round = consensus_info.vset_switch_round;
             }
@@ -1631,20 +1631,21 @@ mod vset_update_start {
 
             // calculate next validator subset and hash
             let current_vset = self.current_vset.parse::<ValidatorSet>()?;
-            let Some((_, validator_list_hash_short)) =
-                current_vset.compute_mc_subset(catchain_seqno, self.shuffle_mc_validators)
+            let Some((_, validator_list_hash_short)) = current_vset
+                .compute_mc_subset(session_start.catchain_seqno, self.shuffle_mc_validators)
             else {
                 anyhow::bail!(
                     "Error calculating subset of validators for next session \
-                         (shard_id = {}, catchain_seqno = {catchain_seqno})",
+                     (shard_id = {}, catchain_seqno = {})",
                     ShardIdent::MASTERCHAIN,
+                    session_start.catchain_seqno
                 );
             };
 
             Ok(Some(ValidatorInfo {
                 validator_list_hash_short,
                 // TODO: rename field in types
-                catchain_seqno,
+                catchain_seqno: session_start.catchain_seqno,
                 nx_cc_updated: true,
             }))
         }
@@ -1686,18 +1687,26 @@ mod vset_update_start {
             }
         }
 
+        fn random_session_start() -> KbNextSessionStart {
+            KbNextSessionStart {
+                prev_consensus_config: default_test_config().conf.consensus,
+                catchain_seqno: random(),
+                is_consensus_info_overridden: random(),
+                is_consensus_config_changed: random(),
+                is_curr_switch_after_pause: random(),
+                gen_chain_time_millis: random(),
+                after_pause_round: random(),
+            }
+        }
+
         #[test]
         fn genesis_override_overcomes_config_change() {
             let mut cons_info = random_consensus_info();
             let before = cons_info;
 
             let start = KbNextSessionStart {
-                prev_consensus_config: default_test_config().conf.consensus,
                 is_consensus_info_overridden: true,
-                is_consensus_config_changed: random(),
-                is_curr_switch_after_pause: random(),
-                gen_chain_time_millis: random(),
-                after_pause_round: random(),
+                ..random_session_start()
             };
 
             let next_session_start = start.round(&mut cons_info, random());
@@ -1711,12 +1720,10 @@ mod vset_update_start {
             let mut cons_info = random_consensus_info();
 
             let start = KbNextSessionStart {
-                prev_consensus_config: default_test_config().conf.consensus,
                 is_consensus_info_overridden: false, // no guard here: may overwrite ANY genesis
                 is_consensus_config_changed: true,
-                is_curr_switch_after_pause: random(),
                 gen_chain_time_millis: 50_000,
-                after_pause_round: random(),
+                ..random_session_start()
             };
 
             let next_session_start = start.round(&mut cons_info, 600);
@@ -1765,6 +1772,7 @@ mod vset_update_start {
                 KbNextSessionStart::after_pause_round(processed_up_to, &cons_conf);
 
             let start_1 = KbNextSessionStart {
+                catchain_seqno: 10,
                 prev_consensus_config: cons_conf.clone(),
                 is_consensus_info_overridden: false,
                 is_consensus_config_changed: false,
@@ -1778,59 +1786,45 @@ mod vset_update_start {
             assert_eq!(next_1, after_pause_round);
 
             let validator_info = stub_update
-                .apply(
-                    &mut cons_info,
-                    10,
-                    next_1,
-                    start_1.is_curr_switch_after_pause,
-                )
-                .unwrap()
-                .unwrap();
+                .apply(&mut cons_info, next_1, &start_1)
+                .expect("must be Ok")
+                .expect("must be Some");
             assert_eq!(cons_info.prev_vset_switch_round, 0);
             assert_eq!(cons_info.vset_switch_round, after_pause_round);
-            assert_eq!(validator_info.catchain_seqno, 11);
+            assert_eq!(validator_info.catchain_seqno, start_1.catchain_seqno);
 
             // Second vset change while switch is still "applied/too close": push by full history.
 
             processed_up_to += 1;
             after_pause_round = KbNextSessionStart::after_pause_round(processed_up_to, &cons_conf);
 
-            let start_2 = {
-                let mut temp = start_1;
-                temp.is_curr_switch_after_pause = cons_info.vset_switch_round > after_pause_round;
-                temp.after_pause_round = after_pause_round;
-                assert!(!temp.is_curr_switch_after_pause);
-                temp
+            let start_2 = KbNextSessionStart {
+                is_curr_switch_after_pause: cons_info.vset_switch_round > after_pause_round,
+                after_pause_round,
+                ..start_1
             };
+            assert!(!start_2.is_curr_switch_after_pause);
 
             let next_2 = start_2.round(&mut cons_info, processed_up_to);
             assert!(next_2 > processed_up_to);
             assert_eq!(next_2, (next_1 + cons_conf.max_total_rounds() + 1));
 
-            let validator_info = stub_update
-                .apply(
-                    &mut cons_info,
-                    validator_info.catchain_seqno,
-                    next_2,
-                    start_2.is_curr_switch_after_pause,
-                )
-                .unwrap()
-                .unwrap();
+            stub_update
+                .apply(&mut cons_info, next_2, &start_2)
+                .expect("must be Ok")
+                .expect("must be Some");
             assert_eq!(cons_info.prev_vset_switch_round, next_1);
             assert_eq!(cons_info.vset_switch_round, next_2);
-            assert_eq!(validator_info.catchain_seqno, 12);
 
             // Third vset change while switch is far in the future: keep the same switch round.
 
             processed_up_to += 1;
             after_pause_round = KbNextSessionStart::after_pause_round(processed_up_to, &cons_conf);
 
-            let start_3 = {
-                let mut temp = start_2;
-                temp.is_curr_switch_after_pause = cons_info.vset_switch_round > after_pause_round;
-                temp.after_pause_round = after_pause_round;
-                assert!(temp.is_curr_switch_after_pause);
-                temp
+            let start_3 = KbNextSessionStart {
+                is_curr_switch_after_pause: cons_info.vset_switch_round > after_pause_round,
+                after_pause_round,
+                ..start_2
             };
             assert!(start_3.is_curr_switch_after_pause);
 
@@ -1838,22 +1832,21 @@ mod vset_update_start {
             assert!(next_3 > processed_up_to);
             assert_eq!(next_3, next_2);
 
-            let validator_info = stub_update
-                .apply(
-                    &mut cons_info,
-                    validator_info.catchain_seqno,
-                    next_3,
-                    start_3.is_curr_switch_after_pause,
-                )
-                .unwrap()
-                .unwrap();
+            stub_update
+                .apply(&mut cons_info, next_3, &start_3)
+                .expect("must be Ok")
+                .expect("must be Some");
             assert_eq!(cons_info.prev_vset_switch_round, next_1);
             assert_eq!(cons_info.vset_switch_round, next_2);
-            assert_eq!(validator_info.catchain_seqno, 13);
         }
 
         #[test]
         fn noop_if_v_set_unchanged() {
+            let start = KbNextSessionStart {
+                is_curr_switch_after_pause: true,
+                ..random_session_start()
+            };
+
             let is_shuffle = random();
             let update = KbNextSessionUpdate {
                 prev_shuffle_mc_validators: is_shuffle,
@@ -1865,9 +1858,7 @@ mod vset_update_start {
             let mut cons_info = random_consensus_info();
             let before = cons_info;
 
-            let validator_info = update
-                .apply(&mut cons_info, random(), random(), true)
-                .unwrap();
+            let validator_info = update.apply(&mut cons_info, random(), &start).unwrap();
 
             assert!(validator_info.is_none(), "{update:?} {cons_info:?}");
             assert_eq!(cons_info, before, "{update:?} {cons_info:?}");
