@@ -574,15 +574,10 @@ impl MempoolStoreImpl for MempoolDb {
 
     fn init_storage(&self, overlay_id: &OverlayId) -> Result<()> {
         if !self.has_compatible_data(overlay_id.as_bytes())? {
-            match self.clean_points(&[u8::MAX; _])? {
-                Some((Round(first), Round(last))) => {
-                    tracing::info!("mempool DB cleaned on init, rounds: [{first}..{last}]");
-                }
-                None => {
-                    tracing::info!("mempool DB was empty on init");
-                }
-            };
+            self.remove_all_points()?;
+            tracing::info!("mempool DB cleaned on init");
             self.wait_for_compact()?;
+            tracing::info!("mempool DB compacted on init");
         }
         Ok(())
     }

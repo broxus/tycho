@@ -30,6 +30,31 @@ impl MempoolDb {
         self.ctx.root_dir().create_subdir("mempool_files")
     }
 
+    /// Doesn't try to read maybe incompatible data
+    pub(super) fn remove_all_points(&self) -> anyhow::Result<()> {
+        let _call_duration = HistogramGuard::begin("tycho_mempool_store_clean_points_time");
+        let up_to_exclusive = [u8::MAX; PointKey::MAX_TL_BYTES];
+        let zero = [0; PointKey::MAX_TL_BYTES];
+        let none = None::<[u8; PointKey::MAX_TL_BYTES]>;
+
+        let status_cf = self.db.tables().points_status.cf();
+        let info_cf = self.db.tables().points_info.cf();
+        let points_cf = self.db.tables().points.cf();
+        let rocksdb = self.db.rocksdb();
+
+        let mut batch = WriteBatch::default();
+        batch.delete_range_cf(&status_cf, &zero, &up_to_exclusive);
+        batch.delete_range_cf(&info_cf, &zero, &up_to_exclusive);
+        batch.delete_range_cf(&points_cf, &zero, &up_to_exclusive);
+        rocksdb.write(batch)?;
+
+        rocksdb.compact_range_cf(&status_cf, none, Some(up_to_exclusive));
+        rocksdb.compact_range_cf(&info_cf, none, Some(up_to_exclusive));
+        rocksdb.compact_range_cf(&points_cf, none, Some(up_to_exclusive));
+
+        Ok(())
+    }
+
     /// delete all stored data up to provided value (exclusive);
     /// returns range of logically deleted keys
     pub(super) fn clean_points(
