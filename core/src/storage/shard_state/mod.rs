@@ -291,7 +291,6 @@ impl ShardStateStorage {
                 hash_map::Entry::Vacant(entry) => {
                     let complete = Arc::new(AtomicBool::new(false));
                     let is_virtual = matches!(store_type, StoreType::Virtual);
-                    let partial_root = merkle_update.new.clone();
                     let task: PendingStoreTask = match store_type {
                         StoreType::Direct => {
                             let prev_task_fut;
@@ -305,7 +304,9 @@ impl ShardStateStorage {
                                 }
                                 None => {
                                     prev_task_fut = Some(make_prev_task_fut());
-                                    DirectStoreRoot::Next { partial_root }
+                                    DirectStoreRoot::Next {
+                                        state_update: merkle_update.clone(),
+                                    }
                                 }
                             };
 
@@ -334,7 +335,7 @@ impl ShardStateStorage {
                             let prev_task_fut = make_prev_task_fut();
                             let store_task = self.make_store_state_root_virtual_task(
                                 next_handle.clone(),
-                                partial_root,
+                                merkle_update.clone(),
                                 hint,
                                 complete.clone(),
                             );
@@ -357,7 +358,7 @@ impl ShardStateStorage {
                         prev_block_id: *prev_block_id,
                         block_id: block_id.as_short_id(),
                         is_virtual,
-                        partial_root_cell: merkle_update.new.clone(),
+                        state_update: merkle_update.clone(),
                         state: CachedState::Pending(task.clone()),
                         complete,
                     });
@@ -462,7 +463,7 @@ impl ShardStateStorage {
     fn make_store_state_root_virtual_task(
         &self,
         handle: BlockHandle,
-        partial_root: Cell,
+        state_update: MerkleUpdate,
         hint: StoreStateHint,
         complete: Arc<AtomicBool>,
     ) -> impl FnOnce(StateWithApplier) -> Result<StateWithApplier> + Send + 'static {
@@ -484,7 +485,11 @@ impl ShardStateStorage {
                 "cannot use applier for the future"
             );
 
-            let state = state.par_make_next_state(handle.id(), partial_root, &applier)?;
+            applier
+                .prepare_old_cells(state.root_cell(), &state_update)
+                .context("failed to prepare old cells for virtual state")?;
+            let state =
+                state.par_make_next_state(handle.id(), state_update.new.clone(), &applier)?;
             block_handles.set_has_virtual_shard_state(&handle);
 
             applier.add_new_virtual_cells(hint.new_cell_count());
@@ -522,12 +527,12 @@ impl ShardStateStorage {
                     tracker = ref_mc_state_handle.tracker().clone();
                     *root.repr_hash()
                 }
-                DirectStoreRoot::Next { partial_root } => {
+                DirectStoreRoot::Next { state_update } => {
                     let prev = prev
                         .as_ref()
                         .expect("prev must be specified when storing next direct state");
                     tracker = prev.applier.ref_mc_state_handle().tracker().clone();
-                    *partial_root.hash(0)
+                    state_update.new_hash
                 }
             };
 
@@ -576,7 +581,7 @@ impl ShardStateStorage {
                 }
                 // The most common case when we just use the applier to get the next state.
                 // Applier MUST be created for a block which was BEFORE the current.
-                DirectStoreRoot::Next { partial_root } => {
+                DirectStoreRoot::Next { state_update } => {
                     let prev = prev
                         .as_ref()
                         .expect("prev must be specified when storing next direct state");
@@ -592,7 +597,10 @@ impl ShardStateStorage {
                     virtual_cell_count = prev.applier.new_virtual_cells();
                     prev_ref_mc_state_handle = prev.applier.ref_mc_state_handle().clone();
                     prev.applier
-                        .make_next_state(partial_root)
+                        .prepare_old_cells(prev.state.root_cell(), &state_update)
+                        .context("failed to prepare old cells for direct state")?;
+                    prev.applier
+                        .make_next_state(state_update.new)
                         .context("failed to make next direct state")?
                 }
             };
@@ -813,7 +821,7 @@ impl ShardStateStorage {
                         // Continue searching back for the first item with "pending virtual"
                         // or "stored" state (or we will find something in storage).
                         CachedState::Pending(_) => {
-                            to_apply.push(ToApply::Loaded(item.partial_root_cell.clone()));
+                            to_apply.push(ToApply::Loaded(item.state_update.clone()));
                             pivot_block_id = item.prev_block_id;
                         }
                     }
@@ -1139,7 +1147,7 @@ fn load_state_root_hash_opt(cells_db: &CellsDb, block_id: &BlockId) -> Result<Op
 }
 
 enum ToApply {
-    Loaded(Cell),
+    Loaded(MerkleUpdate),
     Deferred(BlockHandle),
 }
 
@@ -1181,7 +1189,7 @@ where
             return Ok(get_merkle_update(block_id).map(|f| {
                 FromStorage::Virtual(VirtualBlockInfo {
                     prev_block_id: f.prev_block_id,
-                    partial_root: ToApply::Loaded(f.partial_root_cell),
+                    partial_root: ToApply::Loaded(f.state_update),
                 })
             }));
         }
@@ -1191,7 +1199,7 @@ where
         match get_merkle_update(block_id) {
             Some(f) => VirtualBlockInfo {
                 prev_block_id: f.prev_block_id,
-                partial_root: ToApply::Loaded(f.partial_root_cell),
+                partial_root: ToApply::Loaded(f.state_update),
             },
             None => {
                 if !handle.has_data() {
@@ -1226,16 +1234,20 @@ async fn apply_updates_chain(
 
     let pivot_root = rayon_run(move || {
         while let Some(item) = to_apply.pop() {
-            let partial_new_root = match item {
-                ToApply::Loaded(cell) => cell,
+            let state_update = match item {
+                ToApply::Loaded(state_update) => state_update,
                 ToApply::Deferred(handle) => {
                     let block = blocks.blocking_load_block_data(&handle)?;
-                    block.as_ref().load_state_update()?.new
+                    block.as_ref().load_state_update()?
                 }
             };
 
+            applier
+                .prepare_old_cells(&pivot_root, &state_update)
+                .context("failed to prepare old cells for chain from storage")?;
+
             pivot_root = applier
-                .make_next_state(partial_new_root)
+                .make_next_state(state_update.new.clone())
                 .context("failed to apply next state for chain from storage")?;
         }
 
@@ -1357,7 +1369,7 @@ enum DirectStoreRoot {
         ref_mc_state_handle: RefMcStateHandle,
     },
     Next {
-        partial_root: Cell,
+        state_update: MerkleUpdate,
     },
 }
 
@@ -1365,14 +1377,14 @@ struct ShardStatesCacheItem {
     prev_block_id: BlockId,
     block_id: BlockIdShort,
     is_virtual: bool,
-    partial_root_cell: Cell,
+    state_update: MerkleUpdate,
     state: CachedState,
     complete: Arc<AtomicBool>,
 }
 
 impl Drop for ShardStatesCacheItem {
     fn drop(&mut self) {
-        Reclaimer::instance().drop(std::mem::take(&mut self.partial_root_cell));
+        Reclaimer::instance().drop(std::mem::take(&mut self.state_update));
     }
 }
 
@@ -1447,6 +1459,7 @@ impl MerkleUpdateApplier {
             pivot_block_seqno: pivot_block_id.seqno,
             applier: ParMerkleUpdateApplier {
                 new_cells: Default::default(),
+                old_cells: Default::default(),
                 total_new_cells: Default::default(),
                 context: Cell::empty_context(),
                 find_cell: MerkleCellsProvider {
@@ -1481,6 +1494,27 @@ impl MerkleUpdateApplier {
         &self.0.ref_mc_state_handle
     }
 
+    fn prepare_old_cells(
+        &self,
+        old_root: &Cell,
+        state_update: &MerkleUpdate,
+    ) -> Result<(), tycho_types::error::Error> {
+        const SHARD_SPLIT_DEPTH: u8 = 5;
+
+        let split_at = if !self.shard().is_masterchain() {
+            split_shard_accounts(old_root, SHARD_SPLIT_DEPTH)
+                .map_err(|_err| tycho_types::error::Error::InvalidData)?
+                .into_keys()
+                .collect::<FastHashSet<_>>()
+        } else {
+            Default::default()
+        };
+
+        self.0
+            .applier
+            .prepare_old_cells(state_update, old_root, &split_at)
+    }
+
     fn make_next_state(&self, partial_new_root: Cell) -> Result<Cell, tycho_types::error::Error> {
         if let Some(cell) = self.find_cell.find_cell(partial_new_root.hash(0)) {
             return Ok(cell);
@@ -1512,7 +1546,11 @@ impl Drop for MerkleUpdateApplier {
 
         // Explicitly drop new cells dictionary using the reclaimer.
         // NOTE: Ensure that ref mc state handle outlives the cells map.
-        Reclaimer::instance().drop((inner.applier.new_cells, inner.ref_mc_state_handle));
+        Reclaimer::instance().drop((
+            inner.applier.new_cells,
+            inner.applier.old_cells,
+            inner.ref_mc_state_handle,
+        ));
 
         let v = ALIVE_STATE_APPLIERS.fetch_sub(1, Ordering::Relaxed) - 1;
         metrics::gauge!(Self::METRIC_ALIVE_APPLIERS).set(v);
@@ -1617,7 +1655,7 @@ pub fn split_shard_accounts(
 #[derive(Debug, Clone)]
 pub struct BlockInfoForApply {
     pub prev_block_id: BlockId,
-    pub partial_root_cell: Cell,
+    pub state_update: MerkleUpdate,
 }
 
 type FnGetBlockInfoForApply = dyn Fn(&BlockId) -> Option<BlockInfoForApply> + Send + Sync + 'static;

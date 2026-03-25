@@ -232,7 +232,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
                         let block = shard_blocks.get(block_id)?;
                         Some(BlockInfoForApply {
                             prev_block_id: block.prev_id,
-                            partial_root_cell: block.state_update.new.clone(),
+                            state_update: block.state_update.clone(),
                         })
                     })
             })
@@ -304,7 +304,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
                     let block = shard_blocks.get(block_id)?;
                     Some(BlockInfoForApply {
                         prev_block_id: block.prev_id,
-                        partial_root_cell: block.state_update.new.clone(),
+                        state_update: block.state_update.clone(),
                     })
                 })
             }
