@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
+use tycho_block_util::config::BlockchainConfigExt;
 use tycho_core::block_strider::{StateSubscriber, StateSubscriberContext};
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_crypto::ed25519;
@@ -19,7 +20,9 @@ use tycho_util::config::PartialConfig;
 use tycho_util::futures::JoinTask;
 use tycho_util::serde_helpers;
 
-pub use self::analyzer::{SessionPenaltyReport, ValidatorPenalty};
+pub use self::analyzer::{
+    SessionPenaltyReport, SessionValidatorScore, VsetPenaltyReport, VsetValidatorPenalty,
+};
 pub use self::bc::{
     BlocksBatch, ContractSubscription, EncodeBlocksBatchMessage, MessageDeliveryStatus,
     SignatureHistory, SignedMessage, SlasherContract, StubSlasherContract,
@@ -60,6 +63,11 @@ pub struct SlasherConfig {
     /// Default: `5s`
     #[serde(with = "serde_helpers::humantime")]
     pub prev_delivery_timeout: Option<Duration>,
+
+    /// Absolute threshold of bad-session weight after which validator is bad in a vset epoch.
+    ///
+    /// Default: `1000`
+    pub bad_sessions_weight_threshold: u64,
 }
 
 impl Default for SlasherConfig {
@@ -68,6 +76,7 @@ impl Default for SlasherConfig {
             message_ttl: Duration::from_secs(30),
             message_retry_interval: Duration::from_secs(1),
             prev_delivery_timeout: Some(Duration::from_secs(5)),
+            bad_sessions_weight_threshold: 1000,
         }
     }
 }
@@ -154,10 +163,15 @@ impl Slasher {
             vset_switch_round,
             catchain_seqno,
         };
+        let current_vset_hash = *state_extra
+            .config
+            .get_current_validator_set_raw()?
+            .repr_hash();
         tracing::trace!(
             target: tracing_targets::SLASHER,
             ?slasher_params,
-            ?current_session_id
+            ?current_session_id,
+            current_vset_hash = %current_vset_hash,
         );
 
         // TODO: Add metrics.
@@ -170,6 +184,8 @@ impl Slasher {
             );
             this.known_session_id.set(current_session_id);
         }
+        this.storage
+            .update_current_vset_epoch(current_session_id, current_vset_hash)?;
 
         // Handle subscription
         let subscription = match this.subscription.load_full() {
@@ -227,12 +243,17 @@ impl Slasher {
                             );
 
                             // TODO: Move into blocking.
-                            if let Some(report) = this.storage.store_blocks_batch(
+                            if !this.storage.store_blocks_batch(
                                 submitted.session_id,
                                 submitted.validator_idx,
                                 &submitted.blocks_batch,
                             )? {
-                                analyzer::clear_report_metrics(&report);
+                                tracing::warn!(
+                                    target: tracing_targets::SLASHER,
+                                    session_id = ?submitted.session_id,
+                                    current_vset_hash = %current_vset_hash,
+                                    "ignoring observed blocks batch without known epoch"
+                                );
                             }
                             tokio::task::yield_now().await;
                         }
@@ -247,7 +268,7 @@ impl Slasher {
             }
         }
 
-        self.shared.analyze_completed_sessions()?;
+        self.shared.analyze_closed_vset_epochs()?;
 
         while let Some(session_info) = self
             .validator_events_collector
@@ -320,23 +341,34 @@ struct SlasherSharedState {
 }
 
 impl SlasherSharedState {
-    fn analyze_completed_sessions(&self) -> Result<()> {
+    fn analyze_closed_vset_epochs(&self) -> Result<()> {
         let snapshot = self.storage.snapshot();
-        let Some(latest_session_id) = snapshot.load_latest_session_id()? else {
-            return Ok(());
-        };
-
-        for session_id in snapshot.load_distinct_session_ids()? {
-            if session_id >= latest_session_id
-                || snapshot.load_session_report(session_id)?.is_some()
-            {
+        for epoch in snapshot.load_closed_vset_epochs()? {
+            if snapshot.load_vset_report(epoch.start_session_id)?.is_some() {
                 continue;
             }
 
-            let batches = snapshot.load_batches_for_session(session_id)?;
-            let report = analyzer::analyze_session(session_id, &batches);
-            self.storage.store_session_report(&report)?;
-            analyzer::emit_report_metrics(&report);
+            let mut session_reports = Vec::new();
+            for meta in snapshot.load_sessions_for_epoch(epoch.start_session_id)? {
+                let report = match snapshot.load_session_report(meta.session_id)? {
+                    Some(report) => report,
+                    None => {
+                        let batches =
+                            snapshot.load_observed_batches_for_session(meta.session_id)?;
+                        let report = analyzer::analyze_session(&meta, &batches);
+                        self.storage.store_session_report(&report)?;
+                        report
+                    }
+                };
+                session_reports.push(report);
+            }
+
+            let report = analyzer::analyze_vset_epoch(
+                &epoch,
+                &session_reports,
+                self.config.bad_sessions_weight_threshold,
+            );
+            self.storage.store_vset_report(&report)?;
         }
 
         Ok(())
