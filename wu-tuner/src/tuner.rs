@@ -943,18 +943,6 @@ where
     avg.get_avg_checked().map(|v| v as i64)
 }
 
-fn safe_anchors_lag_avg_2<'a, I>(range: I) -> Option<i64>
-where
-    I: Iterator<Item = (&'a u32, &'a i64)>,
-{
-    let mut avg = SafeSignedAvg::default();
-    for (_, v) in range {
-        avg.accum(*v);
-    }
-
-    avg.get_avg_checked().map(|v| v as i64)
-}
-
 #[derive(Default)]
 struct PrepareElapsedClipSnapshot {
     read_ext_msgs_elapsed_ns: Option<u128>,
