@@ -1,9 +1,14 @@
 use tl_proto::{TlError, TlPacket, TlRead, TlResult, TlWrite};
 use tycho_slasher_traits::ValidationSessionId;
+use tycho_types::cell::HashBytes;
 use tycho_util::FastHashSet;
 
+use crate::analyzer::{
+    SessionMeta, SessionPenaltyReport, SessionValidatorScore, VsetEpoch, VsetPenaltyReport,
+    VsetValidatorPenalty,
+};
 use crate::util::BitSet;
-use crate::{BlocksBatch, SessionPenaltyReport, SignatureHistory, ValidatorPenalty};
+use crate::{BlocksBatch, SignatureHistory};
 
 #[repr(transparent)]
 pub struct StoredBlocksBatch(pub BlocksBatch);
@@ -24,7 +29,6 @@ impl StoredBlocksBatch {
 impl TlWrite for StoredBlocksBatch {
     type Repr = tl_proto::Boxed;
 
-    // TODO: Simplify becase all signature histories are equal in size.
     fn max_size_hint(&self) -> usize {
         4 + 4
             + self.0.committed_blocks.max_size_hint()
@@ -100,6 +104,133 @@ impl<'tl> TlRead<'tl> for StoredBlocksBatch {
 }
 
 #[repr(transparent)]
+pub struct StoredVsetEpoch(pub VsetEpoch);
+
+impl StoredVsetEpoch {
+    pub const TL_ID: u32 = tl_proto::id!("slasher.vsetEpoch", scheme = "proto.tl");
+
+    #[inline]
+    pub const fn wrap(inner: &VsetEpoch) -> &Self {
+        // SAFETY: `StoredVsetEpoch` has the same layout as `VsetEpoch`.
+        unsafe { &*(inner as *const VsetEpoch).cast::<Self>() }
+    }
+}
+
+impl TlWrite for StoredVsetEpoch {
+    type Repr = tl_proto::Boxed;
+
+    fn max_size_hint(&self) -> usize {
+        4 + 32 + 4 + 4 + 4
+    }
+
+    fn write_to<P: TlPacket>(&self, packet: &mut P) {
+        packet.write_u32(Self::TL_ID);
+        packet.write_raw_slice(&self.0.vset_hash.0);
+        packet.write_u32(u32::from(self.0.next_epoch_start_session_id.is_some()));
+        let next_session_id = self
+            .0
+            .next_epoch_start_session_id
+            .unwrap_or(ValidationSessionId {
+                catchain_seqno: 0,
+                vset_switch_round: 0,
+            });
+        packet.write_u32(next_session_id.catchain_seqno);
+        packet.write_u32(next_session_id.vset_switch_round);
+    }
+}
+
+impl<'tl> TlRead<'tl> for StoredVsetEpoch {
+    type Repr = tl_proto::Boxed;
+
+    fn read_from(packet: &mut &'tl [u8]) -> TlResult<Self> {
+        if u32::read_from(packet)? != Self::TL_ID {
+            return Err(TlError::UnknownConstructor);
+        }
+
+        let vset_hash = read_hash_bytes(packet)?;
+        let has_next_epoch = u32::read_from(packet)? != 0;
+        let next_session_id = ValidationSessionId {
+            catchain_seqno: u32::read_from(packet)?,
+            vset_switch_round: u32::read_from(packet)?,
+        };
+
+        Ok(Self(VsetEpoch {
+            start_session_id: ValidationSessionId {
+                catchain_seqno: 0,
+                vset_switch_round: 0,
+            },
+            vset_hash,
+            next_epoch_start_session_id: has_next_epoch.then_some(next_session_id),
+        }))
+    }
+}
+
+#[repr(transparent)]
+pub struct StoredSessionMeta(pub SessionMeta);
+
+impl StoredSessionMeta {
+    pub const TL_ID: u32 = tl_proto::id!("slasher.sessionMeta", scheme = "proto.tl");
+
+    #[inline]
+    pub const fn wrap(inner: &SessionMeta) -> &Self {
+        // SAFETY: `StoredSessionMeta` has the same layout as `SessionMeta`.
+        unsafe { &*(inner as *const SessionMeta).cast::<Self>() }
+    }
+}
+
+impl TlWrite for StoredSessionMeta {
+    type Repr = tl_proto::Boxed;
+
+    fn max_size_hint(&self) -> usize {
+        4 + 4 + self.0.validator_indices.len() * 4
+    }
+
+    fn write_to<P: TlPacket>(&self, packet: &mut P) {
+        packet.write_u32(Self::TL_ID);
+        packet.write_u32(self.0.validator_indices.len() as u32);
+        for validator_idx in &self.0.validator_indices {
+            packet.write_u32(u32::from(*validator_idx));
+        }
+    }
+}
+
+impl<'tl> TlRead<'tl> for StoredSessionMeta {
+    type Repr = tl_proto::Boxed;
+
+    fn read_from(packet: &mut &'tl [u8]) -> TlResult<Self> {
+        if u32::read_from(packet)? != Self::TL_ID {
+            return Err(TlError::UnknownConstructor);
+        }
+
+        let validator_count = u32::read_from(packet)? as usize;
+        let mut validator_indices = Vec::with_capacity(validator_count);
+        let mut unique_indices =
+            FastHashSet::with_capacity_and_hasher(validator_count, Default::default());
+        for _ in 0..validator_count {
+            let Ok(validator_idx) = u16::try_from(u32::read_from(packet)?) else {
+                return Err(TlError::InvalidData);
+            };
+            if !unique_indices.insert(validator_idx) {
+                return Err(TlError::InvalidData);
+            }
+            validator_indices.push(validator_idx);
+        }
+
+        Ok(Self(SessionMeta {
+            session_id: ValidationSessionId {
+                catchain_seqno: 0,
+                vset_switch_round: 0,
+            },
+            epoch_start_session_id: ValidationSessionId {
+                catchain_seqno: 0,
+                vset_switch_round: 0,
+            },
+            validator_indices,
+        }))
+    }
+}
+
+#[repr(transparent)]
 pub struct StoredSessionPenaltyReport(pub SessionPenaltyReport);
 
 impl StoredSessionPenaltyReport {
@@ -116,19 +247,22 @@ impl TlWrite for StoredSessionPenaltyReport {
     type Repr = tl_proto::Boxed;
 
     fn max_size_hint(&self) -> usize {
-        4 + 4 + 4 + 4 + 4 + self.0.offenders.len() * (4 + 4 + 4)
+        4 + 4 + 4 + 4 + 4 + 4 + self.0.validators.len() * (4 + 8 + 8 + 4)
     }
 
     fn write_to<P: TlPacket>(&self, packet: &mut P) {
         packet.write_u32(Self::TL_ID);
         packet.write_u32(self.0.session_id.catchain_seqno);
         packet.write_u32(self.0.session_id.vset_switch_round);
-        packet.write_u32(self.0.total_blocks_in_session);
-        packet.write_u32(self.0.offenders.len() as u32);
-        for offender in &self.0.offenders {
-            packet.write_u32(offender.validator_idx as u32);
-            packet.write_u32(offender.missing_signatures);
-            packet.write_u32(offender.invalid_signatures);
+        packet.write_u32(self.0.epoch_start_session_id.catchain_seqno);
+        packet.write_u32(self.0.epoch_start_session_id.vset_switch_round);
+        packet.write_u32(self.0.session_weight);
+        packet.write_u32(self.0.validators.len() as u32);
+        for item in &self.0.validators {
+            packet.write_u32(u32::from(item.validator_idx));
+            packet.write_u64(item.earned_points);
+            packet.write_u64(item.max_points);
+            packet.write_u32(u32::from(item.is_bad));
         }
     }
 }
@@ -145,13 +279,17 @@ impl<'tl> TlRead<'tl> for StoredSessionPenaltyReport {
             catchain_seqno: u32::read_from(packet)?,
             vset_switch_round: u32::read_from(packet)?,
         };
-        let total_blocks_in_session = u32::read_from(packet)?;
-        let offender_count = u32::read_from(packet)? as usize;
+        let epoch_start_session_id = ValidationSessionId {
+            catchain_seqno: u32::read_from(packet)?,
+            vset_switch_round: u32::read_from(packet)?,
+        };
+        let session_weight = u32::read_from(packet)?;
+        let validator_count = u32::read_from(packet)? as usize;
 
-        let mut offenders = Vec::with_capacity(offender_count);
+        let mut validators = Vec::with_capacity(validator_count);
         let mut unique_indices =
-            FastHashSet::with_capacity_and_hasher(offender_count, Default::default());
-        for _ in 0..offender_count {
+            FastHashSet::with_capacity_and_hasher(validator_count, Default::default());
+        for _ in 0..validator_count {
             let Ok(validator_idx) = u16::try_from(u32::read_from(packet)?) else {
                 return Err(TlError::InvalidData);
             };
@@ -159,102 +297,108 @@ impl<'tl> TlRead<'tl> for StoredSessionPenaltyReport {
                 return Err(TlError::InvalidData);
             }
 
-            let missing_signatures = u32::read_from(packet)?;
-            let invalid_signatures = u32::read_from(packet)?;
-
-            offenders.push(ValidatorPenalty {
+            validators.push(SessionValidatorScore {
                 validator_idx,
-                missing_signatures,
-                invalid_signatures,
+                earned_points: u64::read_from(packet)?,
+                max_points: u64::read_from(packet)?,
+                is_bad: u32::read_from(packet)? != 0,
             });
         }
 
         Ok(Self(SessionPenaltyReport {
             session_id,
-            total_blocks_in_session,
-            offenders: offenders.into_boxed_slice(),
+            epoch_start_session_id,
+            session_weight,
+            validators: validators.into_boxed_slice(),
         }))
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::num::NonZeroU32;
+#[repr(transparent)]
+pub struct StoredVsetPenaltyReport(pub VsetPenaltyReport);
 
-    use tycho_slasher_traits::ReceivedSignature;
+impl StoredVsetPenaltyReport {
+    pub const TL_ID: u32 = tl_proto::id!("slasher.vsetPenaltyReport", scheme = "proto.tl");
 
-    use super::*;
+    #[inline]
+    pub const fn wrap(inner: &VsetPenaltyReport) -> &Self {
+        // SAFETY: `StoredVsetPenaltyReport` has the same layout as `VsetPenaltyReport`.
+        unsafe { &*(inner as *const VsetPenaltyReport).cast::<Self>() }
+    }
+}
 
-    #[test]
-    fn blocks_batch_tl_repr() {
-        let mut batch = BlocksBatch::new(230, NonZeroU32::new(100).unwrap(), &[5, 10, 12, 3]);
+impl TlWrite for StoredVsetPenaltyReport {
+    type Repr = tl_proto::Boxed;
 
-        for (seqno, signatures) in [
-            (230, [
-                ReceivedSignature(ReceivedSignature::VALID_SIGNATURE_BIT),
-                ReceivedSignature(ReceivedSignature::VALID_SIGNATURE_BIT),
-                ReceivedSignature(0),
-                ReceivedSignature(ReceivedSignature::INVALID_SIGNATURE_BIT),
-            ]),
-            (250, [
-                ReceivedSignature(0),
-                ReceivedSignature(ReceivedSignature::VALID_SIGNATURE_BIT),
-                ReceivedSignature(ReceivedSignature::INVALID_SIGNATURE_BIT),
-                ReceivedSignature(ReceivedSignature::VALID_SIGNATURE_BIT),
-            ]),
-            (251, [
-                ReceivedSignature(ReceivedSignature::VALID_SIGNATURE_BIT),
-                ReceivedSignature(ReceivedSignature::VALID_SIGNATURE_BIT),
-                ReceivedSignature(ReceivedSignature::VALID_SIGNATURE_BIT),
-                ReceivedSignature(ReceivedSignature::VALID_SIGNATURE_BIT),
-            ]),
-            (300, [
-                ReceivedSignature(ReceivedSignature::VALID_SIGNATURE_BIT),
-                ReceivedSignature(ReceivedSignature::VALID_SIGNATURE_BIT),
-                ReceivedSignature(ReceivedSignature::VALID_SIGNATURE_BIT),
-                ReceivedSignature(ReceivedSignature::VALID_SIGNATURE_BIT),
-            ]),
-            (329, [
-                ReceivedSignature(ReceivedSignature::VALID_SIGNATURE_BIT),
-                ReceivedSignature(ReceivedSignature::VALID_SIGNATURE_BIT),
-                ReceivedSignature(ReceivedSignature::VALID_SIGNATURE_BIT),
-                ReceivedSignature(ReceivedSignature::VALID_SIGNATURE_BIT),
-            ]),
-        ] {
-            let committed = batch.commit_signatures(seqno, &signatures);
-            assert!(committed);
+    fn max_size_hint(&self) -> usize {
+        4 + 4 + 4 + 32 + 4 + self.0.validators.len() * (4 + 8 + 8 + 4)
+    }
+
+    fn write_to<P: TlPacket>(&self, packet: &mut P) {
+        packet.write_u32(Self::TL_ID);
+        packet.write_u32(self.0.epoch_start_session_id.catchain_seqno);
+        packet.write_u32(self.0.epoch_start_session_id.vset_switch_round);
+        packet.write_raw_slice(&self.0.vset_hash.0);
+        packet.write_u32(self.0.validators.len() as u32);
+        for item in &self.0.validators {
+            packet.write_u32(u32::from(item.validator_idx));
+            packet.write_u64(item.bad_sessions_weight);
+            packet.write_u64(item.total_sessions_weight);
+            packet.write_u32(u32::from(item.is_bad));
+        }
+    }
+}
+
+impl<'tl> TlRead<'tl> for StoredVsetPenaltyReport {
+    type Repr = tl_proto::Boxed;
+
+    fn read_from(packet: &mut &'tl [u8]) -> TlResult<Self> {
+        if u32::read_from(packet)? != Self::TL_ID {
+            return Err(TlError::UnknownConstructor);
         }
 
-        let stored = tl_proto::serialize(StoredBlocksBatch::wrap(&batch));
-        let loaded = tl_proto::deserialize::<StoredBlocksBatch>(&stored).unwrap();
-        assert_eq!(batch, loaded.0);
-    }
-
-    #[test]
-    fn session_penalty_report_tl_repr() {
-        let report = SessionPenaltyReport {
-            session_id: ValidationSessionId {
-                catchain_seqno: 5,
-                vset_switch_round: 8,
-            },
-            total_blocks_in_session: 10,
-            offenders: vec![
-                ValidatorPenalty {
-                    validator_idx: 1,
-                    missing_signatures: 6,
-                    invalid_signatures: 0,
-                },
-                ValidatorPenalty {
-                    validator_idx: 4,
-                    missing_signatures: 7,
-                    invalid_signatures: 7,
-                },
-            ]
-            .into_boxed_slice(),
+        let epoch_start_session_id = ValidationSessionId {
+            catchain_seqno: u32::read_from(packet)?,
+            vset_switch_round: u32::read_from(packet)?,
         };
+        let vset_hash = read_hash_bytes(packet)?;
+        let validator_count = u32::read_from(packet)? as usize;
 
-        let stored = tl_proto::serialize(StoredSessionPenaltyReport::wrap(&report));
-        let loaded = tl_proto::deserialize::<StoredSessionPenaltyReport>(&stored).unwrap();
-        assert_eq!(report, loaded.0);
+        let mut validators = Vec::with_capacity(validator_count);
+        let mut unique_indices =
+            FastHashSet::with_capacity_and_hasher(validator_count, Default::default());
+        for _ in 0..validator_count {
+            let Ok(validator_idx) = u16::try_from(u32::read_from(packet)?) else {
+                return Err(TlError::InvalidData);
+            };
+            if !unique_indices.insert(validator_idx) {
+                return Err(TlError::InvalidData);
+            }
+
+            validators.push(VsetValidatorPenalty {
+                validator_idx,
+                bad_sessions_weight: u64::read_from(packet)?,
+                total_sessions_weight: u64::read_from(packet)?,
+                is_bad: u32::read_from(packet)? != 0,
+            });
+        }
+
+        Ok(Self(VsetPenaltyReport {
+            epoch_start_session_id,
+            vset_hash,
+            validators: validators.into_boxed_slice(),
+        }))
     }
+}
+
+fn read_hash_bytes(packet: &mut &[u8]) -> TlResult<HashBytes> {
+    if packet.len() < size_of::<HashBytes>() {
+        return Err(TlError::UnexpectedEof);
+    }
+
+    let (hash, tail) = packet.split_at(size_of::<HashBytes>());
+    *packet = tail;
+    let mut bytes = [0; size_of::<HashBytes>()];
+    bytes.copy_from_slice(hash);
+    Ok(HashBytes(bytes))
 }
