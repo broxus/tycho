@@ -1631,8 +1631,8 @@ mod vset_update_start {
 
             // calculate next validator subset and hash
             let current_vset = self.current_vset.parse::<ValidatorSet>()?;
-            let Some((_, validator_list_hash_short)) =
-                current_vset.compute_mc_subset(catchain_seqno, self.shuffle_mc_validators)
+            let Some((_, validator_list_hash_short)) = current_vset
+                .compute_mc_subset(next_session_start_round, self.shuffle_mc_validators)
             else {
                 anyhow::bail!(
                     "Error calculating subset of validators for next session \

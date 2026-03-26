@@ -1,224 +1,188 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use tycho_slasher_traits::ValidationSessionId;
-use tycho_util::{FastHashMap, FastHashSet};
+use tycho_types::cell::HashBytes;
 
 use crate::BlocksBatch;
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct ObservedBlocksBatch {
+    pub observer_validator_idx: u16,
+    pub batch: BlocksBatch,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionMeta {
+    pub session_id: ValidationSessionId,
+    pub epoch_start_session_id: ValidationSessionId,
+    pub validator_indices: Vec<u16>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VsetEpoch {
+    pub start_session_id: ValidationSessionId,
+    pub vset_hash: HashBytes,
+    pub next_epoch_start_session_id: Option<ValidationSessionId>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionPenaltyReport {
     pub session_id: ValidationSessionId,
-    pub total_blocks_in_session: u32,
-    pub offenders: Box<[ValidatorPenalty]>,
+    pub epoch_start_session_id: ValidationSessionId,
+    pub session_weight: u32,
+    pub validators: Box<[SessionValidatorScore]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ValidatorPenalty {
+pub struct SessionValidatorScore {
     pub validator_idx: u16,
-    pub missing_signatures: u32,
-    pub invalid_signatures: u32,
+    pub earned_points: u64,
+    pub max_points: u64,
+    pub is_bad: bool,
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-struct ObservedSignature {
-    has_valid_signature: bool,
-    has_invalid_signature: bool,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VsetPenaltyReport {
+    pub epoch_start_session_id: ValidationSessionId,
+    pub vset_hash: HashBytes,
+    pub validators: Box<[VsetValidatorPenalty]>,
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-struct SignatureTotals {
-    missing_signatures: u32,
-    invalid_signatures: u32,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VsetValidatorPenalty {
+    pub validator_idx: u16,
+    pub bad_sessions_weight: u64,
+    pub total_sessions_weight: u64,
+    pub is_bad: bool,
 }
 
 pub fn analyze_session(
-    session_id: ValidationSessionId,
-    batches: &[BlocksBatch],
+    meta: &SessionMeta,
+    batches: &[ObservedBlocksBatch],
 ) -> SessionPenaltyReport {
-    let mut validators = FastHashSet::default();
-    let mut blocks = BTreeMap::<u32, FastHashMap<u16, ObservedSignature>>::new();
+    let mut committed_blocks = BTreeSet::new();
+    let mut observed_rows = BTreeSet::new();
+    // observer -> observed : points * session weight
+    let mut validator_points = BTreeMap::<(u16, u16), u64>::new();
 
-    for batch in batches {
-        for history in &batch.signatures_history {
-            validators.insert(history.validator_idx);
-        }
+    for item in batches {
+        observed_rows.insert(item.observer_validator_idx);
 
-        for offset in 0..batch.committed_blocks.len() {
-            if !batch.committed_blocks.get(offset) {
+        for offset in 0..item.batch.committed_blocks.len() {
+            if !item.batch.committed_blocks.get(offset) {
                 continue;
             }
 
-            let seqno = batch.start_seqno + offset as u32;
-            let signatures = blocks.entry(seqno).or_default();
+            committed_blocks.insert(item.batch.start_seqno + offset as u32);
 
-            // Different validators can submit overlapping matrices for the same block.
-            // We merge them by taking the union of observed bits, but a
-            // `(block, validator_idx)` pair must never end up with both `valid`
-            // and `invalid` states at once. If that happens, the input data is
-            // internally inconsistent and we fail fast instead of guessing.
-            for history in &batch.signatures_history {
-                let offset = offset * 2;
-                let has_invalid_signature = history.bits.get(offset);
-                let has_valid_signature = history.bits.get(offset + 1);
-                assert!(
-                    !(has_invalid_signature && has_valid_signature),
-                    "slasher analyzer invariant violated: validator {} has both valid and invalid bits for block {}",
-                    history.validator_idx,
-                    seqno,
-                );
+            for history in &item.batch.signatures_history {
+                let bit_offset = offset * 2;
+                let has_invalid_signature = history.bits.get(bit_offset);
+                let has_valid_signature = history.bits.get(bit_offset + 1);
 
-                let observed = signatures.entry(history.validator_idx).or_default();
-                observed.has_invalid_signature |= has_invalid_signature;
-                observed.has_valid_signature |= has_valid_signature;
-                assert!(
-                    !(observed.has_invalid_signature && observed.has_valid_signature),
-                    "slasher analyzer invariant violated: validator {} has conflicting observations for block {}",
-                    history.validator_idx,
-                    seqno,
-                );
+                if !(has_invalid_signature && has_valid_signature) {
+                    tracing::warn!(
+                        "slasher analyzer invariant violated: observer {} saw validator {} as both valid and invalid in session {:?}",
+                        item.observer_validator_idx,
+                        history.validator_idx,
+                        meta.session_id,
+                    );
+                    continue;
+                }
+
+                if has_valid_signature {
+                    *validator_points
+                        .entry((item.observer_validator_idx, history.validator_idx))
+                        .or_default() += 1;
+                }
             }
         }
     }
 
-    let total_blocks_in_session = blocks.len() as u32;
-    let threshold = total_blocks_in_session / 2;
+    let session_weight = committed_blocks.len() as u64;
 
-    let mut validators = validators.into_iter().collect::<Vec<_>>();
-    validators.sort_unstable();
+    let mut validator_indices = meta.validator_indices.clone();
+    validator_indices.sort_unstable();
+    validator_indices.dedup();
 
-    let mut totals = FastHashMap::<u16, SignatureTotals>::default();
-    for signatures in blocks.values() {
-        for &validator_idx in &validators {
-            let observed = signatures.get(&validator_idx).copied().unwrap_or_default();
-            let totals = totals.entry(validator_idx).or_default();
-            if !observed.has_valid_signature {
-                totals.missing_signatures += 1;
-            }
-            if observed.has_invalid_signature {
-                totals.invalid_signatures += 1;
-            }
-        }
-    }
-
-    let offenders = validators
+    let validators = validator_indices
         .into_iter()
-        .filter_map(|validator_idx| {
-            let totals = totals.get(&validator_idx).copied().unwrap_or_default();
-            let penalty_score = totals
-                .missing_signatures
-                .saturating_add(totals.invalid_signatures);
-            (penalty_score > threshold).then_some(ValidatorPenalty {
+        .map(|validator_idx| {
+            let max_rows =
+                observed_rows.len() as u64 - u64::from(observed_rows.contains(&validator_idx));
+            let max_points = max_rows
+                .saturating_mul(session_weight)
+                .saturating_mul(session_weight);
+
+            let earned_points = observed_rows
+                .iter()
+                .copied()
+                .filter(|observer| *observer != validator_idx)
+                .map(|observer| {
+                    validator_points
+                        .get(&(observer, validator_idx))
+                        .copied()
+                        .unwrap_or_default()
+                })
+                .sum::<u64>()
+                .saturating_mul(session_weight);
+
+            SessionValidatorScore {
                 validator_idx,
-                missing_signatures: totals.missing_signatures,
-                invalid_signatures: totals.invalid_signatures,
-            })
+                earned_points,
+                max_points,
+                is_bad: max_points > 0 && earned_points.saturating_mul(2) < max_points,
+            }
         })
         .collect::<Vec<_>>()
         .into_boxed_slice();
 
     SessionPenaltyReport {
-        session_id,
-        total_blocks_in_session,
-        offenders,
+        session_id: meta.session_id,
+        epoch_start_session_id: meta.epoch_start_session_id,
+        session_weight: session_weight as u32,
+        validators,
     }
 }
 
-pub fn emit_report_metrics(report: &SessionPenaltyReport) {
-    let labels = session_labels(report.session_id);
-    metrics::gauge!("tycho_slasher_session_blocks_total", &labels)
-        .set(report.total_blocks_in_session as f64);
-    metrics::gauge!("tycho_slasher_session_penalty_candidates_total", &labels)
-        .set(report.offenders.len() as f64);
+pub fn analyze_vset_epoch(
+    epoch: &VsetEpoch,
+    session_reports: &[SessionPenaltyReport],
+    bad_sessions_weight_threshold: u64,
+) -> VsetPenaltyReport {
+    let mut validators = BTreeMap::<u16, VsetValidatorPenalty>::new();
 
-    for offender in &report.offenders {
-        let validator_idx = format!("{}", offender.validator_idx);
-        let labels = [
-            (
-                "catchain_seqno",
-                format!("{}", report.session_id.catchain_seqno),
-            ),
-            (
-                "vset_switch_round",
-                format!("{}", report.session_id.vset_switch_round),
-            ),
-            ("validator_idx", validator_idx.clone()),
-        ];
-        metrics::gauge!("tycho_slasher_penalty_candidate", &labels).set(1);
+    for report in session_reports {
+        let session_weight = u64::from(report.session_weight);
 
-        let labels = [
-            (
-                "catchain_seqno",
-                format!("{}", report.session_id.catchain_seqno),
-            ),
-            (
-                "vset_switch_round",
-                format!("{}", report.session_id.vset_switch_round),
-            ),
-            ("validator_idx", validator_idx),
-        ];
-        metrics::gauge!(
-            "tycho_slasher_penalty_candidate_missing_signatures",
-            &labels
-        )
-        .set(offender.missing_signatures as f64);
-        metrics::gauge!(
-            "tycho_slasher_penalty_candidate_invalid_signatures",
-            &labels
-        )
-        .set(offender.invalid_signatures as f64);
+        for item in &report.validators {
+            let penalty = validators
+                .entry(item.validator_idx)
+                .or_insert(VsetValidatorPenalty {
+                    validator_idx: item.validator_idx,
+                    bad_sessions_weight: 0,
+                    total_sessions_weight: 0,
+                    is_bad: false,
+                });
+            penalty.total_sessions_weight =
+                penalty.total_sessions_weight.saturating_add(session_weight);
+            if item.is_bad {
+                penalty.bad_sessions_weight =
+                    penalty.bad_sessions_weight.saturating_add(session_weight);
+            }
+        }
     }
-}
 
-pub fn clear_report_metrics(report: &SessionPenaltyReport) {
-    let labels = session_labels(report.session_id);
-    metrics::gauge!("tycho_slasher_session_blocks_total", &labels).set(0);
-    metrics::gauge!("tycho_slasher_session_penalty_candidates_total", &labels).set(0);
-
-    for offender in &report.offenders {
-        let validator_idx = format!("{}", offender.validator_idx);
-        let labels = [
-            (
-                "catchain_seqno",
-                format!("{}", report.session_id.catchain_seqno),
-            ),
-            (
-                "vset_switch_round",
-                format!("{}", report.session_id.vset_switch_round),
-            ),
-            ("validator_idx", validator_idx.clone()),
-        ];
-        metrics::gauge!("tycho_slasher_penalty_candidate", &labels).set(0);
-
-        let labels = [
-            (
-                "catchain_seqno",
-                format!("{}", report.session_id.catchain_seqno),
-            ),
-            (
-                "vset_switch_round",
-                format!("{}", report.session_id.vset_switch_round),
-            ),
-            ("validator_idx", validator_idx),
-        ];
-        metrics::gauge!(
-            "tycho_slasher_penalty_candidate_missing_signatures",
-            &labels
-        )
-        .set(0);
-        metrics::gauge!(
-            "tycho_slasher_penalty_candidate_invalid_signatures",
-            &labels
-        )
-        .set(0);
+    for item in validators.values_mut() {
+        item.is_bad = item.bad_sessions_weight > bad_sessions_weight_threshold;
     }
-}
 
-fn session_labels(session_id: ValidationSessionId) -> [(&'static str, String); 2] {
-    [
-        ("catchain_seqno", format!("{}", session_id.catchain_seqno)),
-        (
-            "vset_switch_round",
-            format!("{}", session_id.vset_switch_round),
-        ),
-    ]
+    VsetPenaltyReport {
+        epoch_start_session_id: epoch.start_session_id,
+        vset_hash: epoch.vset_hash,
+        validators: validators
+            .into_values()
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+    }
 }
