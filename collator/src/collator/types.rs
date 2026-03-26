@@ -1395,6 +1395,7 @@ impl ExecuteMetrics {
 
 #[derive(Debug, Default)]
 pub(super) struct FinalizeMetrics {
+    /// Measures queue diff creation together with queue diff serialization
     pub create_queue_diff_timer: MetricsTimer,
 
     pub apply_queue_diff_elapsed: Duration,

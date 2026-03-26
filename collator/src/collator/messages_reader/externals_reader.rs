@@ -1139,6 +1139,7 @@ fn read_externals_into_buffers(
                     // detect target partition and add message to buffer
                     let target_partition = partition_router.get_partition(None, &ext_msg.info.dst);
                     let par_metrics = metrics_by_partitions.get_mut(target_partition);
+                    // track buffering time separately so external reading and message grouping can be priced independently
                     par_metrics.add_to_message_groups_timer.start();
                     // we use one anchors cache for all partitions
                     // and read externals into all partitions at once
@@ -1279,6 +1280,7 @@ fn read_externals_into_buffers(
             metrics_by_partitions.add_to_message_groups_total_elapsed();
         let par_0_metrics = metrics_by_partitions.get_mut(QueuePartitionIdx::ZERO);
         par_0_metrics.read_ext_messages_timer.stop();
+        // remove message-group buffering time from the raw read timer because it is tracked by a dedicated stage
         par_0_metrics.read_ext_messages_timer.total_elapsed -= add_to_msgs_groups_total_elapsed;
     }
 

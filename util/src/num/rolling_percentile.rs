@@ -11,6 +11,7 @@ pub struct RollingPercentiles<T> {
 
 impl<T: Copy + Ord> RollingPercentiles<T> {
     pub fn new(window: usize) -> Self {
+        // keep at least 100 samples so P1..P99 clipping has enough history to be meaningful
         let window = window.max(100);
         Self {
             window,
@@ -63,6 +64,7 @@ impl<T: Copy + Ord> RollingPercentiles<T> {
 
         let perc = p as f64;
         let perc = perc.clamp(0.0, 100.0);
+        // use the rounded rank instead of interpolation so the result is always an observed sample
         let pos = (perc / 100.0) * ((v.len() - 1) as f64);
         let pos = (pos.round() as usize).min(v.len() - 1);
 
@@ -84,12 +86,14 @@ impl<T: Copy + Ord> RollingPercentiles<T> {
 
     pub fn push_and_clip(&mut self, x: T, p_low: u8, p_high: u8) -> T {
         if !self.window_is_filled() {
+            // keep raw values until the window is full enough to define stable bounds
             self.push(x);
             return x;
         }
         let clipped = self
             .clip(x, p_low, p_high)
             .expect("percentiles buf should contain at least one value here");
+        // push the raw sample after clipping so the current point never clips itself
         self.push(x);
         clipped
     }

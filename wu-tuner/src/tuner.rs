@@ -26,6 +26,7 @@ pub struct WuMetricsSpan {
 impl WuMetricsSpan {
     fn new(metrics: Box<WuMetrics>, unit_cost_clippers: &mut UnitCostClippers) -> Self {
         let mut avg = WuMetricsAvg::new();
+        // materialize the first sample immediately so later MA merges can work on span-level aggregates
         avg.accum(&metrics, unit_cost_clippers);
         Self {
             avg: Box::new(avg),
@@ -39,6 +40,7 @@ impl WuMetricsSpan {
         unit_cost_clippers: &mut UnitCostClippers,
     ) -> Result<()> {
         self.avg.accum(&v, unit_cost_clippers);
+        // keep the latest raw sample because param-change detection compares against the newest input
         self.last = v;
         Ok(())
     }
@@ -73,6 +75,7 @@ impl AnchorsLagSpan {
             self.accum_last(clip_value)?;
             self.last_seqno = seqno;
         }
+        // keep only the latest anchor inside one block seqno so repeated imports do not overweight the bucket
         self.last = Some(v);
         Ok(())
     }
@@ -82,6 +85,7 @@ impl AnchorsLagSpan {
         F: FnMut(i64) -> i64,
     {
         if let Some(last) = self.last.take() {
+            // clip each finalized lag sample before it joins the seqno bucket average
             let lag_clip = clip_value(last.lag());
             match &mut self.avg {
                 AnchorsLagSpanValue::Accum(accum) => accum.accum(lag_clip),
@@ -102,6 +106,7 @@ impl AnchorsLagSpan {
                 let lag_clip = clip_value(last.lag());
                 accum.accum(lag_clip);
             }
+            // freeze the result on first read so repeated consumers do not re-add the last sample
             self.avg = AnchorsLagSpanValue::Result(accum.get_avg() as i64);
         }
 
@@ -147,6 +152,7 @@ impl WuHistory {
     }
 
     fn clear(&mut self) {
+        // preserve the configured window length across resets triggered by gaps or param changes
         let percentile_window = self.anchors_lag_pct.window();
         *self = Self::new(percentile_window);
     }
@@ -204,6 +210,7 @@ impl TunerParams {
         let wu_params_ma_interval = config.wu_params_ma_interval.max(40) as u32;
 
         let tune_interval = config.tune_interval.max(200) as u32;
+        // floor all buckets to deterministic boundaries so lag and wu MAs can be matched by seqno
         let tune_seqno = seqno / tune_interval * tune_interval;
 
         // normilized seqno for calculations
@@ -374,6 +381,7 @@ where
         );
 
         // calculate MA wu metrics both on wu MA seqno and anchors lag MA seqno
+        // use the newer boundary so wu metrics can later join the lag bucket picked for tuning
         let ma_seqno = std::cmp::max(wu_ma_seqno, lag_ma_seqno);
 
         // avoid the MA recalculation on the same bucket
@@ -491,6 +499,7 @@ where
         }
 
         // do not calculate MA until the percentile windows is filled
+        // lag clipping must be warmed up before its MA can drive wu tuning decisions
         if !history.anchors_lag_pct.window_is_filled() {
             return Ok(());
         }
@@ -579,6 +588,7 @@ where
             Bound::Included(search_from_boundary),
             Bound::Included(wu_params_ma_seqno),
         ));
+        // use the latest lag MA that does not look ahead of the target wu-params bucket
         let Some((&lag_ma_seqno, &avg_lag)) = search_range.last() else {
             return Ok(());
         };
@@ -593,6 +603,7 @@ where
 
         let missing_mandatory_windows = history.unit_cost_clippers.missing_mandatory_windows();
         if !missing_mandatory_windows.is_empty() {
+            // wait for stable percentile bounds before calculating target params
             tracing::trace!(
                 %shard, seqno,
                 ?missing_mandatory_windows,
@@ -621,6 +632,7 @@ where
         let lag_upper_bound = self.config.lag_bounds_ms.1 as i64;
 
         // it is okay when lag is negative but we do not have messages
+        // avoid adjusting wu params when anchors arrive early during idle periods
         if (avg_wu_metrics_res.wu_on_execute.groups_count > 0 || avg_lag >= 0)
             && !(lag_lower_bound..lag_upper_bound).contains(&avg_lag)
         {
@@ -701,7 +713,9 @@ where
 
             self.wu_params_last_calculated_on_seqno = wu_params_ma_seqno;
 
-            // needs to collect history more then 1/2 of tune interval to be able to perform update
+            // do not update in the current tune bucket if wu params changed
+            // in the second half of the previous bucket or later
+            // to prevent next update before 1/2 of the interval has passed
             let tune_half_seqno = tune_seqno.saturating_sub(tune_interval / 2);
 
             // update wu params in blockchain if tune interval elapsed
@@ -749,6 +763,7 @@ where
         wu_metrics_avg: &WuMetricsAvg,
         wu_metrics_avg_res: &WuMetrics,
     ) -> WorkUnitsParams {
+        // start from the latest observed params and only replace values that can be calculated safely
         let mut target_wu_params = wu_metrics_avg_res.wu_params.clone();
 
         // FINALIZE WU PARAMS
@@ -873,6 +888,7 @@ where
             &wu_metrics_avg.execute.process_txs_sums_accum,
         );
         if let Some(target_wu_param) = target_process_txs_wu_param {
+            // these three terms share one `n * log2(n)` base, so keep them locked to one calculated target value
             let target_wu_param = sat_u16_from_u64(target_wu_param);
             target_wu_params.execute.serialize_enqueue = target_wu_param;
             target_wu_params.execute.serialize_dequeue = target_wu_param;
@@ -890,6 +906,7 @@ where
 
         let target_resume_collation_wu_param = calc_target_scaled_wu_param_from_sums(
             target_wu_price,
+            // resume collation base already contains two scaled power terms, so invert it with `scale^2`
             scale * scale,
             &wu_metrics_avg.do_collate.resume_collation_sums_accum,
         )
@@ -907,11 +924,13 @@ trait SaturatingAddFloor {
 
 impl SaturatingAddFloor for f64 {
     fn saturating_add_floor(self, adj: Self) -> Self {
+        // keep wu price strictly positive so inverse price formulas never divide by zero
         (self + adj).max(0.02)
     }
 }
 
 fn sat_u16_from_u64(v: u64) -> u16 {
+    // wu params are stored as u16 values, so clamp calculated target values before assignment
     v.min(u16::MAX as u64) as u16
 }
 
@@ -922,6 +941,7 @@ where
     let mut avg = WuMetricsAvg::new();
     let mut has_merged = false;
     for (_, v) in range {
+        // each span already holds clipped stage averages and clipped raw sums, so merge at the span level
         let Some(()) = avg.merge_span_avg(&v.avg) else {
             continue;
         };
@@ -937,6 +957,7 @@ where
 {
     let mut avg = SafeSignedAvg::default();
     for (_, v) in range {
+        // finalize each span once so the last lag sample is not accumulated multiple times
         avg.accum(v.get_result(&mut clip_value));
     }
 
@@ -976,9 +997,13 @@ struct PrepareMsgGroupsWuAvg {
     add_msgs_to_groups_elapsed_ns: SafeUnsignedAvg,
     add_msgs_to_groups_base: SafeUnsignedAvg,
 
+    /// Stores `(clipped_elapsed_ns, read_ext_msgs_base)` for the target `read_ext_msgs` param calculation
     read_ext_msgs_sums_accum: SafeAccum<(u128, u128)>,
+    /// Stores `(clipped_elapsed_ns, read_existing_int_msgs_base)` for the target `read_int_msgs` param calculation
     read_existing_int_msgs_sums_accum: SafeAccum<(u128, u128)>,
+    /// Stores `(clipped_elapsed_ns, read_new_int_msgs_base)` for the target `read_new_msgs` param calculation
     read_new_int_msgs_sums_accum: SafeAccum<(u128, u128)>,
+    /// Stores `(clipped_elapsed_ns, add_msgs_to_groups_base)` for the target `add_to_msg_groups` param calculation
     add_msgs_to_groups_sums_accum: SafeAccum<(u128, u128)>,
 
     total_elapsed_ns: SafeUnsignedAvg,
@@ -986,6 +1011,7 @@ struct PrepareMsgGroupsWuAvg {
 
 impl PrepareMsgGroupsWuAvg {
     fn accum(&mut self, v: &PrepareMsgGroupsWu, unit_cost_clippers: &mut UnitCostClippers) {
+        // reuse one clipped snapshot for both displayed averages and raw sums for the target params calculation
         let clipped_snapshot = Self::clip_elapsed(v, unit_cost_clippers);
         self.accum_avg_result(v, &clipped_snapshot);
         self.accum_raw_sums(v, &clipped_snapshot);
@@ -1084,6 +1110,7 @@ impl PrepareMsgGroupsWuAvg {
         v: &PrepareMsgGroupsWu,
         clipped_snapshot: &PrepareElapsedClipSnapshot,
     ) {
+        // only clipped timings used for futher target params calculation
         if let Some(elapsed_clip_ns) = clipped_snapshot.read_ext_msgs_elapsed_ns {
             self.read_ext_msgs_sums_accum
                 .add((elapsed_clip_ns, v.read_ext_msgs_base));
@@ -1136,12 +1163,15 @@ struct ExecuteWuAvg {
     process_txs_wu: SafeUnsignedAvg,
     process_txs_elapsed_ns: SafeUnsignedAvg,
 
+    /// Stores `(clipped_elapsed_ns, accounts_over_threads, gas_over_threads)` for the target `execute` param calculation
     execute_groups_vm_sums_accum: SafeAccum<(u128, u128, u128)>,
+    /// Stores `(clipped_elapsed_ns, process_txs_base)` for the target param calculation
     process_txs_sums_accum: SafeAccum<(u128, u128)>,
 }
 
 impl ExecuteWuAvg {
     fn accum(&mut self, v: &ExecuteWu, unit_cost_clippers: &mut UnitCostClippers) {
+        // reuse one clipped snapshot for both displayed averages and raw sums for the target params calculation
         let clipped_snapshot = Self::clip_elapsed(v, unit_cost_clippers);
         self.accum_avg_result(v, &clipped_snapshot);
         self.accum_raw_sums(v, &clipped_snapshot);
@@ -1276,13 +1306,21 @@ struct FinalizeWuAvg {
 
     finalize_block_elapsed_ns: SafeUnsignedAvg,
 
+    /// Stores `(clipped_elapsed_ns, build_in_msg_base)` for the target `build_in_msg` param calculation
     build_in_msg_sums_accum: SafeAccum<(u128, u128)>,
+    /// Stores `(clipped_elapsed_ns, build_out_msg_base)` for the target `build_out_msg` param calculation
     build_out_msg_sums_accum: SafeAccum<(u128, u128)>,
+    /// Stores `(clipped_elapsed_ns, build_accounts_blocks_base)` for the target `build_transactions` param calculation
     build_accounts_blocks_sums_accum: SafeAccum<(u128, u128)>,
+    /// Stores `(clipped_elapsed_ns, update_shard_accounts_base)` for the target `build_accounts` param calculation
     update_shard_accounts_sums_accum: SafeAccum<(u128, u128)>,
+    /// Stores `(clipped_elapsed_ns, build_state_update_base)` for the target `state_update_accounts` param calculation
     build_state_update_sums_accum: SafeAccum<(u128, u128)>,
+    /// Stores `(clipped_elapsed_ns, build_block_base)` for the target serialization params calculation
     build_block_sums_accum: SafeAccum<(u128, u128)>,
+    /// Stores `(clipped_elapsed_ns, create_diff_base)` for the target `create_diff` param calculation
     create_diff_sums_accum: SafeAccum<(u128, u128)>,
+    /// Stores `(clipped_elapsed_ns, apply_diff_base)` for the target `apply_diff` param calculation
     apply_diff_sums_accum: SafeAccum<(u128, u128)>,
 
     total_elapsed_ns: SafeUnsignedAvg,
@@ -1296,6 +1334,7 @@ impl FinalizeWuAvg {
         serialize_min_wu: u64,
         unit_cost_clippers: &mut UnitCostClippers,
     ) {
+        // reuse one clipped snapshot for both displayed averages and raw sums for the target params calculation
         let clipped_snapshot =
             Self::clip_elapsed(v, state_update_min_wu, serialize_min_wu, unit_cost_clippers);
         self.accum_avg_result(v, &clipped_snapshot);
@@ -1350,6 +1389,8 @@ impl FinalizeWuAvg {
                     v.max_accounts_in_out_msgs_wu() as u128,
                     v.build_accounts_and_messages_in_parallel_elased.as_nanos(),
                 ),
+
+            // skip min-dominated samples so as not to distort the target params calculation
             build_state_update_elapsed_ns: if v.build_state_update_base > 0
                 && v.build_state_update_wu > state_update_min_wu
             {
@@ -1372,6 +1413,7 @@ impl FinalizeWuAvg {
             } else {
                 None
             },
+
             finalize_block_elapsed_ns: unit_cost_clippers.finalize.finalize_block.clip_elapsed_ns(
                 v.finalize_block_wu() as u128,
                 v.finalize_block_elapsed.as_nanos(),
@@ -1551,6 +1593,7 @@ struct DoCollateWuAvg {
     resume_collation_wu: SafeUnsignedAvg,
     resume_collation_elapsed_ns: SafeUnsignedAvg,
     resume_collation_base: SafeUnsignedAvg,
+    /// Stores `(clipped_elapsed_ns, resume_collation_base)` for the target param calculation
     resume_collation_sums_accum: SafeAccum<(u128, u128)>,
 
     resume_collation_wu_per_block: SafeUnsignedAvg,
@@ -1566,6 +1609,7 @@ impl DoCollateWuAvg {
         collation_total_wu: u64,
         unit_cost_clippers: &mut UnitCostClippers,
     ) {
+        // reuse one clipped snapshot for both displayed averages and raw sums for the target params calculation
         let clipped_snapshot = Self::clip_elapsed(v, collation_total_wu, unit_cost_clippers);
         self.accum_avg_result(v, &clipped_snapshot);
         self.accum_raw_sums(v, &clipped_snapshot);
@@ -1670,6 +1714,7 @@ impl WuMetricsAvg {
         self.last_shard_accounts_count = v.wu_on_finalize.shard_accounts_count;
         let state_update_min_wu = v.wu_params.finalize.state_update_min as u64;
         let serialize_min_wu = v.wu_params.finalize.serialize_min as u64;
+        // reuse the latest min params while other parts are accumulated through clipped sums
         self.prepare
             .accum(&v.wu_on_prepare_msg_groups, unit_cost_clippers);
         self.execute.accum(&v.wu_on_execute, unit_cost_clippers);
@@ -1690,6 +1735,7 @@ impl WuMetricsAvg {
         self.last_wu_params = v.wu_params.clone();
         self.had_pending_messages = self.had_pending_messages && v.has_pending_messages;
         self.last_shard_accounts_count = v.wu_on_finalize.shard_accounts_count;
+        // replay the already materialized span average without re-clipping it during MA merges
         let prepare_clipped_snapshot = PrepareElapsedClipSnapshot::default();
         let execute_clipped_snapshot = ExecuteElapsedClipSnapshot::default();
         let finalize_clipped_snapshot = FinalizeElapsedClipSnapshot::default();
@@ -1712,6 +1758,7 @@ impl WuMetricsAvg {
     }
 
     fn merge_span_avg(&mut self, other: &WuMetricsAvg) -> Option<()> {
+        // combine both span representations: raw clipped sums and the materialized averages
         let span_result = other.get_avg()?;
         self.merge_sums_accum(other);
         self.accum_materialized_avg_result(&span_result);
