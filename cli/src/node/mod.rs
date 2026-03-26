@@ -72,9 +72,11 @@ impl Node {
         is_single_node: bool,
     ) -> Result<Self> {
         let base = NodeBase::builder(&node_config.base, &global_config)
-            .init_network(public_addr, &keys.as_secret())?
-            .init_storage()
-            .await?;
+            .init_network(public_addr, &keys.as_secret())?;
+
+        base.check_any_bootstrap_peer_is_alive().await;
+
+        let base = base.init_storage().await?;
 
         let rpc_mempool_adapter = if is_single_node {
             RpcMempoolAdapter {
