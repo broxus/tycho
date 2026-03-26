@@ -19,6 +19,7 @@ impl RollingUnitCostClipper {
         if base == 0 {
             return None;
         }
+        // compare samples by unit cost instead of raw elapsed time so different bases stay comparable
         let unit_cost_raw = elapsed_ns as f64 / base as f64;
         if !unit_cost_raw.is_finite() || unit_cost_raw < 0.0 {
             return None;
@@ -172,6 +173,7 @@ impl UnitCostClippers {
 }
 
 fn quantize_unit_cost(unit_cost_raw: f64) -> Option<u128> {
+    // store unit cost as a scaled integer so percentile clipping stays deterministic
     let scaled = unit_cost_raw * UNIT_COST_SCALE as f64;
     if scaled < 0.0 {
         return None;
@@ -186,6 +188,7 @@ fn quantize_unit_cost(unit_cost_raw: f64) -> Option<u128> {
 }
 
 fn dequantize_elapsed_ns(unit_cost_q: u128, base: u128) -> Option<u128> {
+    // convert the clipped unit cost back into elapsed time for downstream averages and target params calculation
     let elapsed_ns = (unit_cost_q as f64 * base as f64) / UNIT_COST_SCALE as f64;
     if elapsed_ns < 0.0 {
         return None;

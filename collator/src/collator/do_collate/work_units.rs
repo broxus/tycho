@@ -24,21 +24,25 @@ pub struct PrepareMsgGroupsWu {
     pub read_ext_msgs_count: u64,
     pub read_ext_msgs_wu: u64,
     pub read_ext_msgs_elapsed: Duration,
+    /// Count-based base used to calculate target `read_ext_msgs` param
     pub read_ext_msgs_base: u128,
 
     pub read_existing_int_msgs_count: u64,
     pub read_existing_int_msgs_wu: u64,
     pub read_existing_int_msgs_elapsed: Duration,
+    /// Count-based base used to calculate target `read_int_msgs` param
     pub read_existing_int_msgs_base: u128,
 
     pub read_new_int_msgs_count: u64,
     pub read_new_int_msgs_wu: u64,
     pub read_new_int_msgs_elapsed: Duration,
+    /// Count-based base used to calculate `read_new_msgs` param
     pub read_new_int_msgs_base: u128,
 
     pub add_to_msgs_groups_ops_count: u64,
     pub add_msgs_to_groups_wu: u64,
     pub add_msgs_to_groups_elapsed: Duration,
+    /// Count-based base used to calculate `add_to_msg_groups` param
     pub add_msgs_to_groups_base: u128,
 }
 
@@ -184,12 +188,15 @@ pub struct ExecuteWu {
 
     pub groups_count: u64,
 
+    /// Stores the accounts term normalized by the actual threads count for the target `execute` param calculation
     pub execute_groups_vm_sum_accounts_over_threads: u128,
+    /// Stores the gas term normalized by the actual threads count for the target `execute` param calculation
     pub execute_groups_vm_sum_gas_over_threads: u128,
 
     pub execute_groups_vm_only_wu: u64,
     pub execute_groups_vm_only_elapsed: Duration,
 
+    /// Shared `n * log2(n)` base used to calculate target params
     pub process_txs_base: u128,
     pub process_txs_wu: u64,
     pub process_txs_elapsed: Duration,
@@ -210,7 +217,10 @@ impl ExecuteWu {
         } = wu_params_execute;
 
         self.groups_count += 1;
+        // we cannot use more thread then groups count
         let threads_count = calc_threads_count(max_threads_count as u64, group_accounts_count);
+
+        // keep normalized accounts and gas sums for the target param calculation
         self.execute_groups_vm_sum_accounts_over_threads = self
             .execute_groups_vm_sum_accounts_over_threads
             .saturating_add(
@@ -262,6 +272,8 @@ impl ExecuteWu {
         let out_msgs_len_log = self.out_msgs_len_log();
         self.inserted_new_msgs_count = inserted_new_msgs_count;
         let inserted_new_msgs_count_log = self.inserted_new_msgs_count_log();
+
+        // use `n * log2(n)` complexity to eval because queue serialization cost grows with collection size
         self.process_txs_base = (in_msgs_len as u128)
             .saturating_mul(in_msgs_len_log as u128)
             .saturating_add((out_msgs_len as u128).saturating_mul(out_msgs_len_log as u128))
@@ -335,6 +347,7 @@ impl ExecuteWu {
         if sum_execute_groups_vm_sum_gas_over_threads == 0 {
             return None;
         }
+        // subtract the prepare term first and then calculate the remaining gas-dependent part for `execute` param
         let target_wu_param = (execute_delimiter as f64)
             * (((sum_execute_groups_vm_elapsed_clip_ns as f64 / target_wu_price)
                 * EXECUTE_OVER_THREADS_SCALE as f64)
@@ -363,7 +376,9 @@ impl ExecuteWu {
 #[derive(Default, Clone)]
 pub struct FinalizeWu {
     pub diff_msgs_count: u64,
+    /// Actullay, `diff_msgs_count` is used as the base
     pub create_diff_base: u128,
+    /// Actullay, `diff_msgs_count` is used as the base
     pub apply_diff_base: u128,
 
     pub create_queue_diff_wu: u64,
@@ -379,30 +394,36 @@ pub struct FinalizeWu {
 
     pub update_shard_accounts_wu: u64,
     pub update_shard_accounts_elapsed: Duration,
+    /// Proportional base used to calculate target `build_accounts` param
     pub update_shard_accounts_base: u128,
 
     pub build_accounts_blocks_wu: u64,
     pub build_accounts_blocks_elapsed: Duration,
+    /// Proportional base used to calculate target `build_transactions` param
     pub build_accounts_blocks_base: u128,
 
     pub build_accounts_elapsed: Duration,
 
     pub build_in_msgs_wu: u64,
     pub build_in_msgs_elapsed: Duration,
+    /// Proportional base used to calculate target `build_in_msg` param
     pub build_in_msg_base: u128,
 
     pub build_out_msgs_wu: u64,
     pub build_out_msgs_elapsed: Duration,
+    /// Proportional base used to calculate target `build_out_msg` param
     pub build_out_msg_base: u128,
 
     pub build_accounts_and_messages_in_parallel_elased: Duration,
 
     pub build_state_update_wu: u64,
     pub build_state_update_elapsed: Duration,
+    /// Proportional base used to calculate target `state_update_accounts` param
     pub build_state_update_base: u128,
 
     pub build_block_wu: u64,
     pub build_block_elapsed: Duration,
+    /// Proportional base used to calculate target serialize params
     pub build_block_base: u128,
 
     pub finalize_block_elapsed: Duration,
@@ -619,6 +640,8 @@ impl FinalizeWu {
     ) -> u64 {
         //  * build maps of transactions by accounts in parallel in (txs_count)*log(txs_count/threads_count)/(threads_count)
         //  * then build AugDict of accounts blocks in (updated_accounts_count)*log(updated_accounts_count)
+
+        // the transaction-map term benefits from threads while the final accounts-block dict build does not
         let in_msgs_len_div_threads_count_log =
             self.in_msgs_len_div_threads_count_log(threads_count);
         self.in_msgs_len
@@ -775,6 +798,7 @@ impl FinalizeWu {
         //  * serialize each account block in (updated_accounts_count)
         //  * serialize in msgs and out msgs in (in_msgs_len + out_msgs_len)
         //  * use min value if calculated is less
+        // share one base across account and message serialization while keeping separate params
         self.build_block_base = self
             .updated_accounts_count
             .saturating_add(self.in_msgs_len)
@@ -827,8 +851,8 @@ impl FinalizeWu {
     }
 
     pub fn total_wu(&self) -> u64 {
-        // take max from finalize block and apply diff
-        // and sum with create diff
+        // take max from finalize block and apply diff and sum with create diff
+        // create diff is sequential while apply diff overlaps with finalize block work, so consider only the slower branch
         self.finalize_block_wu()
             .max(self.apply_queue_diff_wu)
             .saturating_add(self.create_queue_diff_wu)
@@ -850,9 +874,12 @@ pub struct DoCollateWu {
 
     pub resume_collation_wu: u64,
     pub resume_collation_elapsed: Duration,
+    /// Proportional base used to calculate target `diff_tail_len` param
     pub resume_collation_base: u128,
 
+    /// Resume collation wu spread over shard blocks between two master blocks
     pub resume_collation_wu_per_block: u64,
+    /// Resume collation elapsed spread over shard blocks between two master blocks
     pub resume_collation_elapsed_per_block_ns: u128,
 
     pub collation_total_elapsed: Duration,
@@ -900,6 +927,9 @@ impl DoCollateWu {
             store_state_wu_param as u64,
         );
 
+        // we eval the time spent on saving state updated state to storage,
+        // we consider that we actually wait of only one last state store finished,
+        // so we spread wu over shard blocks count between masters
         let blocks_count_between_masters = mc_data.get_blocks_count_between_masters(current_shard);
         self.resume_collation_wu_per_block = self
             .resume_collation_wu
@@ -927,6 +957,7 @@ impl DoCollateWu {
     }
 
     pub fn normalized_updated_accounts_count(&self) -> u64 {
+        // floor small diffs so exponent-based resume wu calculation does not collapse on small updates
         if self.updated_accounts_count == 0 {
             0
         } else {
@@ -935,6 +966,7 @@ impl DoCollateWu {
     }
 
     pub fn pow_updated_accounts_count(&self, state_pow_coeff: u16, scale: u128) -> u128 {
+        // exponentiate the normalized count instead of the raw count so small updates can still be considered
         let normilized_updated_accounts_count = self.normalized_updated_accounts_count();
         let (numerator, denominator) = unpack_from_u16(state_pow_coeff);
         compute_scaled_pow(
@@ -960,6 +992,7 @@ impl DoCollateWu {
             shard_accounts_count_log,
             pow_shard_accounts_count,
         );
+        // the base already carries two scaled power terms, so convert it back by dividing by `scale^2`
         self.resume_collation_wu = self
             .resume_collation_base
             .saturating_mul(store_state_wu_param as u128)
@@ -974,6 +1007,7 @@ impl DoCollateWu {
         shard_accounts_count_log: u64,
         pow_shard_accounts_count: u128,
     ) -> u128 {
+        // resume cost grows with updated accounts and is amplified by both update size and total state size exponents
         (self.updated_accounts_count as u128)
             .saturating_mul(pow_updated_accounts_count)
             .saturating_mul(shard_accounts_count_log as u128)
@@ -989,6 +1023,7 @@ impl DoCollateWu {
     }
 
     pub fn total_elapsed_ns(&self) -> u128 {
+        // report full price as pure collation wu plus one shard block share of resume wu
         self.collation_total_elapsed
             .as_nanos()
             .saturating_add(self.resume_collation_elapsed_per_block_ns)
@@ -1001,6 +1036,7 @@ pub fn calc_threads_count(max_threads_count: u64, updated_accounts_count: u64) -
 
 pub struct WuEvent {
     pub shard: ShardIdent,
+    /// Block seqno bucket that should receive this event
     pub seqno: BlockSeqno,
     pub data: WuEventData,
 }
@@ -1011,7 +1047,9 @@ pub enum WuEventData {
 
 #[derive(Debug, Default, Clone)]
 pub struct MempoolAnchorLag {
+    /// Wall-clock time when the collator requested the next anchor from mempool
     pub requested_at: u64,
+    /// Wall-clock time when the imported anchor was produced on the leader
     pub chain_time: u64,
 }
 
@@ -1028,6 +1066,7 @@ pub struct WuMetrics {
     pub wu_on_execute: ExecuteWu,
     pub wu_on_finalize: FinalizeWu,
     pub wu_on_do_collate: DoCollateWu,
+    /// Reports whether we still have pending work when the sample is captured
     pub has_pending_messages: bool,
 }
 
@@ -1245,6 +1284,7 @@ pub fn calc_target_scaled_wu_param_from_sums(
     if sum_base == 0 {
         return None;
     }
+    // invert `elapsed = price * param * base / scale` using clipped elapsed sums and accumulated bases
     let target_param =
         (sum_elapsed_clip_ns as f64 / target_wu_price) * scale as f64 / sum_base as f64;
     trunc_sat_u64_from_f64(target_param)
@@ -1261,12 +1301,14 @@ pub fn pack_into_u16(a: u16, b: u16) -> u16 {
 /// Numbers should be in range 0..=99
 pub fn unpack_from_u16(packed: u16) -> (u16, u16) {
     if packed > 99 * 100 + 99 {
+        // fall back to a neutral coefficient when stored data is outside the supported packed range
         return (1, 1);
     }
     let a = packed / 100;
 
     let mut b = packed % 100;
     if b == 0 {
+        // downstream formulas require a non-zero denominator, so treat zero as one
         b = 1;
     }
 
@@ -1286,6 +1328,7 @@ pub fn compute_scaled_pow(
         let mut low = BigUint::ZERO;
         let mut high = &y + &one;
 
+        // use integer binary search on the root so the fixed-point power stays deterministic
         while &low + &one < high {
             let mid: BigUint = (&low + &high) >> 1;
             let power = mid.pow(denominator);
@@ -1299,6 +1342,7 @@ pub fn compute_scaled_pow(
         low
     }
 
+    // move `scale^denominator` under the root so the integer root recovers a fixed-point `x^(num/den)`
     let x_pow = BigUint::from(x).pow(pow_coeff_numerator);
     let scale_pow = BigUint::from(scale).pow(pow_coeff_denominator);
     let y = x_pow * scale_pow;
