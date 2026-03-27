@@ -61,12 +61,12 @@ pub fn analyze_session(
     batches: &[ObservedBlocksBatch],
 ) -> SessionPenaltyReport {
     let mut committed_blocks = BTreeSet::new();
-    let mut observed_rows = BTreeSet::new();
+    let mut observed_validators = BTreeSet::new();
     // observer -> observed : points * session weight
     let mut validator_points = BTreeMap::<(u16, u16), u64>::new();
 
     for item in batches {
-        observed_rows.insert(item.observer_validator_idx);
+        observed_validators.insert(item.observer_validator_idx);
 
         for offset in 0..item.batch.committed_blocks.len() {
             if !item.batch.committed_blocks.get(offset) {
@@ -80,7 +80,7 @@ pub fn analyze_session(
                 let has_invalid_signature = history.bits.get(bit_offset);
                 let has_valid_signature = history.bits.get(bit_offset + 1);
 
-                if !(has_invalid_signature && has_valid_signature) {
+                if has_invalid_signature && has_valid_signature {
                     tracing::warn!(
                         "slasher analyzer invariant violated: observer {} saw validator {} as both valid and invalid in session {:?}",
                         item.observer_validator_idx,
@@ -102,19 +102,18 @@ pub fn analyze_session(
     let session_weight = committed_blocks.len() as u64;
 
     let mut validator_indices = meta.validator_indices.clone();
-    validator_indices.sort_unstable();
+    validator_indices.sort();
     validator_indices.dedup();
 
     let validators = validator_indices
         .into_iter()
         .map(|validator_idx| {
-            let max_rows =
-                observed_rows.len() as u64 - u64::from(observed_rows.contains(&validator_idx));
-            let max_points = max_rows
-                .saturating_mul(session_weight)
-                .saturating_mul(session_weight);
+            let max_rows = observed_validators.len() as u64
+                - u64::from(observed_validators.contains(&validator_idx));
+            let max_session_points = max_rows.saturating_mul(session_weight);
+            //.saturating_mul(session_weight);
 
-            let earned_points = observed_rows
+            let earned_points = observed_validators
                 .iter()
                 .copied()
                 .filter(|observer| *observer != validator_idx)
@@ -130,8 +129,9 @@ pub fn analyze_session(
             SessionValidatorScore {
                 validator_idx,
                 earned_points,
-                max_points,
-                is_bad: max_points > 0 && earned_points.saturating_mul(2) < max_points,
+                max_points: max_session_points,
+                is_bad: max_session_points > 0
+                    && earned_points.saturating_mul(2) < max_session_points,
             }
         })
         .collect::<Vec<_>>()
