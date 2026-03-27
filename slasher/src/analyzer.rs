@@ -80,7 +80,7 @@ pub fn analyze_session(
                 let has_invalid_signature = history.bits.get(bit_offset);
                 let has_valid_signature = history.bits.get(bit_offset + 1);
 
-                if !(has_invalid_signature && has_valid_signature) {
+                if has_invalid_signature && has_valid_signature {
                     tracing::warn!(
                         "slasher analyzer invariant violated: observer {} saw validator {} as both valid and invalid in session {:?}",
                         item.observer_validator_idx,
