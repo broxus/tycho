@@ -1,4 +1,5 @@
 use std::num::NonZeroU64;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
@@ -882,6 +883,29 @@ impl proto::ControlServer for ControlServer {
         })
     }
 
+    async fn mempool_ban(
+        self,
+        _: tarpc::context::Context,
+        req: mempool::BanRequest,
+    ) -> ServerResult<String> {
+        let mempool = (self.inner.mempool_service.as_ref()).ok_or_else(|| {
+            ServerError::new("control server was created without mempool service")
+        })?;
+        mempool.manual_ban(req).await.map_err(Into::into)
+    }
+
+    async fn mempool_unban(
+        self,
+        _: tarpc::context::Context,
+        peer_id: HashBytes,
+    ) -> ServerResult<()> {
+        let mempool = (self.inner.mempool_service.as_ref()).ok_or_else(|| {
+            ServerError::new("control server was created without mempool service")
+        })?;
+        mempool.manual_unban(peer_id).await?;
+        Ok(())
+    }
+
     async fn mempool_list_events(
         self,
         _: tarpc::context::Context,
@@ -891,6 +915,18 @@ impl proto::ControlServer for ControlServer {
             ServerError::new("control server was created without mempool service")
         })?;
         Ok(mempool.list_events(req).await?)
+    }
+
+    async fn mempool_delete_events(
+        self,
+        _: tarpc::context::Context,
+        millis: Range<u64>,
+    ) -> ServerResult<()> {
+        let mempool = (self.inner.mempool_service.as_ref()).ok_or_else(|| {
+            ServerError::new("control server was created without mempool service")
+        })?;
+        mempool.delete_events(millis).await?;
+        Ok(())
     }
 }
 

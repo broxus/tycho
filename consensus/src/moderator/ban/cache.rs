@@ -166,6 +166,24 @@ impl BanCache {
     }
 
     /// does not affect accumulated penalties in events cache
+    /// * returns `Some(is_first)` if stored a new value that ends later than previous
+    ///   * `true` in case a ban is new and should be applied at network level
+    ///   * `false` in case a ban at network level already exists
+    /// * returns `None` in case a longer ban exists and this call is a no-op
+    pub fn manual_ban(&mut self, peer_id: &PeerId, q_ban: CurrentBan) -> Option<bool> {
+        let result = self.current_bans.upsert(peer_id, q_ban);
+        if result.is_some() {
+            self.updates_tx
+                .send(UpdaterQueueItem::Banned {
+                    peer_id: *peer_id,
+                    q_ban,
+                })
+                .expect("channel manual ban");
+        }
+        result
+    }
+
+    /// does not affect accumulated penalties in events cache
     /// * returns `false` in case a longer ban was set concurrently
     #[must_use]
     pub fn unban(&mut self, peer_id: &PeerId, expected_until: UnixTime) -> bool {

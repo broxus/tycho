@@ -1,10 +1,11 @@
 use std::collections::hash_map;
+use std::ops::Range;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use futures_util::StreamExt;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::time::delay_queue::Expired;
 use tokio_util::time::{DelayQueue, delay_queue};
 use tycho_network::PeerId;
@@ -79,6 +80,58 @@ impl BanCore {
             .send(UpdaterQueueItem::Event(event))
             .context("channel new mempool event")
     }
+
+    pub fn manual_ban(
+        &self,
+        peer_id: &PeerId,
+        until: UnixTime,
+        callback: oneshot::Sender<Result<()>>,
+    ) -> Result<()> {
+        let mut state = self.0.state.lock().unwrap();
+        let key = state.kf.new_key();
+        if !state.manual_ban(peer_id, CurrentBan { until, key }) {
+            anyhow::bail!("already banned for a longer period")
+        }
+
+        let item = JournalItem::Banned(BanItem {
+            until,
+            peer_id: *peer_id,
+            origin: BanOrigin::Manual,
+        });
+        (self.0.delayed_db_tasks_tx)
+            .send(DelayedDbTask::Items {
+                items: vec![JournalItemFull { key, item }],
+                user_callback: Some(callback),
+            })
+            .expect("send to db writer at the end");
+        Ok(())
+    }
+
+    pub fn manual_unban(
+        &self,
+        peer_id: &PeerId,
+        callback: oneshot::Sender<Result<()>>,
+    ) -> Result<()> {
+        (self.0.updates_tx)
+            .send(UpdaterQueueItem::ManualUnban {
+                peer_id: *peer_id,
+                callback,
+            })
+            .context("unban task stopped")
+    }
+
+    pub fn delete(
+        &self,
+        range: Range<UnixTime>,
+        user_callback: oneshot::Sender<Result<()>>,
+    ) -> Result<()> {
+        (self.0.delayed_db_tasks_tx)
+            .send(DelayedDbTask::Delete {
+                range,
+                user_callback,
+            })
+            .context("delete events task stopped")
+    }
 }
 
 #[derive(Default)]
@@ -107,6 +160,9 @@ impl UnbanScheduler {
                         UpdaterQueueItem::Banned{peer_id, q_ban} => {
                             self.on_banned(&inner, &peer_id, q_ban);
                         },
+                        UpdaterQueueItem::ManualUnban{peer_id, callback} => {
+                            self.on_manual_unban(&inner, &peer_id, callback)?;
+                        }
                     }
                 },
                 Some(expired) = self.auto_unbans.next() => {
@@ -182,6 +238,53 @@ impl UnbanScheduler {
                 empty.insert((dq_key, q_ban));
             }
         };
+    }
+
+    fn on_manual_unban(
+        &mut self,
+        inner: &BanCoreInner,
+        peer_id: &PeerId,
+        user_callback: oneshot::Sender<Result<()>>,
+    ) -> TaskResult<()> {
+        let mut state = inner.state.lock().unwrap();
+
+        let Some((dq_key, q_ban)) = self.last_bans.remove(peer_id) else {
+            user_callback.send(Err(anyhow!("peer is not banned"))).ok();
+            return Ok(());
+        };
+
+        self.auto_unbans.remove(&dq_key); // panics if the key is not present
+
+        if !state.unban(peer_id, q_ban.until) {
+            user_callback.send(Err(anyhow!("no ban to remove"))).ok();
+            return Ok(());
+        }
+
+        let item_full = JournalItemFull {
+            key: state.kf.new_key(),
+            item: JournalItem::Unbanned(UnbanItem {
+                peer_id: *peer_id,
+                origin: UnbanOrigin::Manual,
+            }),
+        };
+
+        let items = DelayedDbTask::Items {
+            items: vec![item_full],
+            user_callback: Some(user_callback),
+        };
+
+        match inner.delayed_db_tasks_tx.send(items) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::SendError(DelayedDbTask::Items {
+                user_callback: Some(user_callback),
+                ..
+            })) => {
+                (user_callback.send(Err(anyhow!("db writer task is dead")))).ok();
+                tracing::error!("failed to channel to delayed db writer");
+                Err(Cancelled())
+            }
+            Err(mpsc::error::SendError(_)) => unreachable!(),
+        }
     }
 
     fn on_auto_unban(&mut self, inner: &BanCoreInner, expired: Expired<PeerId>) -> TaskResult<()> {

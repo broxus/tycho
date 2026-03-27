@@ -14,6 +14,10 @@ mod journal;
 mod storage;
 
 enum DelayedDbTask {
+    Delete {
+        range: std::ops::Range<crate::models::UnixTime>,
+        user_callback: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
+    },
     Items {
         items: Vec<journal::item::JournalItemFull>,
         user_callback: Option<tokio::sync::oneshot::Sender<anyhow::Result<()>>>,

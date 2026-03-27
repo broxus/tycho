@@ -104,6 +104,7 @@ pub struct BanItem {
 
 #[derive(Debug, Clone, Copy)]
 pub enum BanOrigin {
+    Manual,
     Parent { key: RecordKey, tag: EventTag },
 }
 
@@ -114,12 +115,14 @@ pub struct UnbanItem {
 
 #[derive(Debug, Clone, Copy)]
 pub enum UnbanOrigin {
+    Manual,
     Parent(RecordKey),
 }
 
 impl Display for BanOrigin {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Manual => f.write_str("manual"),
             Self::Parent { key, tag } => write!(
                 f,
                 "parent {tag:?} key {} # {}",
@@ -133,6 +136,7 @@ impl Display for BanOrigin {
 impl Display for UnbanOrigin {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Manual => f.write_str("manual"),
             Self::Parent(key) => {
                 write!(f, "parent key {} # {}", key.created.millis(), key.seq_no())
             }

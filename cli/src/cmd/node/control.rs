@@ -950,13 +950,19 @@ impl CmdDhtFindNode {
 #[derive(Subcommand)]
 #[clap(subcommand_required = true, arg_required_else_help = true)]
 pub enum CmdMempool {
+    Ban(CmdMempoolBan),
+    Unban(CmdMempoolUnban),
     ListEvents(CmdMempoolListEvents),
+    DeleteEvents(CmdMempoolDeleteEvents),
 }
 
 impl CmdMempool {
     fn run(self, args: BaseArgs) -> Result<()> {
         match self {
+            Self::Ban(cmd) => cmd.run(args),
+            Self::Unban(cmd) => cmd.run(args),
             Self::ListEvents(cmd) => cmd.run(args),
+            Self::DeleteEvents(cmd) => cmd.run(args),
         }
     }
 }
@@ -976,6 +982,41 @@ pub struct CmdMempoolBan {
     /// Ban duration, must be more than 1 minute and less than 4 years
     #[clap(short, long, value_parser = humantime::parse_duration)]
     duration: Duration,
+}
+
+impl CmdMempoolBan {
+    fn run(self, args: BaseArgs) -> Result<()> {
+        self.args.rt(args, move |client| async move {
+            let pretty = std::io::stdin().is_terminal();
+            let output = client
+                .mempool_ban(&self.peer_id, self.duration, pretty)
+                .await?;
+            println!("{output}");
+            Ok(())
+        })
+    }
+}
+
+/// Unban peer manually.
+/// After the node accepts the request, Ctrl-C, disconnect, or client timeout does not cancel it.
+/// Re-check ban state before retrying after interruption or timeout.
+#[derive(Parser)]
+pub struct CmdMempoolUnban {
+    #[clap(flatten)]
+    args: ControlArgs,
+
+    /// which peer to unban
+    #[clap(short, long)]
+    peer_id: HashBytes,
+}
+
+impl CmdMempoolUnban {
+    fn run(self, args: BaseArgs) -> Result<()> {
+        self.args.rt(args, move |client| async move {
+            client.mempool_unban(&self.peer_id).await?;
+            print_json(Empty {})
+        })
+    }
 }
 
 /// List persisted mempool moderator journal records of all types.
@@ -1057,6 +1098,33 @@ impl CmdMempoolListEvents {
             } else {
                 print_json(res)
             }
+        })
+    }
+}
+
+/// Delete persisted mempool journal entries and trigger compaction.
+/// Current live moderator state is left as-is; persisted edits affect bans after restart.
+/// After the node accepts the request, Ctrl-C, disconnect, or client timeout does not cancel it.
+/// Re-check persisted journal state before retrying after interruption or timeout.
+#[derive(Parser)]
+pub struct CmdMempoolDeleteEvents {
+    #[clap(flatten)]
+    args: ControlArgs,
+
+    /// range start (inclusive) in UTC millis of event creation timestamp
+    #[clap(short, long)]
+    since: u64,
+
+    /// range end (exclusive) in UTC millis of event creation timestamp
+    #[clap(short, long)]
+    until: u64,
+}
+
+impl CmdMempoolDeleteEvents {
+    fn run(self, args: BaseArgs) -> Result<()> {
+        self.args.rt(args, move |client| async move {
+            client.mempool_delete_events(self.since, self.until).await?;
+            print_json(Empty {})
         })
     }
 }
