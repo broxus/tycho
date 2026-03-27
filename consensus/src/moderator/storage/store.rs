@@ -9,6 +9,7 @@ use tycho_util::FastHashSet;
 use weedb::rocksdb::{Direction, IteratorMode, WriteBatch};
 
 use crate::models::{PointKey, UnixTime};
+use crate::moderator::storage::db::ModeratorDb;
 use crate::moderator::{
     JournalPoint, JournalPointData, RecordBatch, RecordFull, RecordKey, RecordKind, RecordValue,
     RecordValueShort,
@@ -16,11 +17,24 @@ use crate::moderator::{
 use crate::storage::{DB_CLEAN_ERRORS, MempoolDb};
 
 #[derive(Clone)]
-pub struct JournalStore(Arc<MempoolDb>);
+pub struct JournalStore(Arc<JournalStoreInner>);
+
+struct JournalStoreInner {
+    this: ModeratorDb,
+    main: Arc<MempoolDb>,
+}
 
 impl JournalStore {
-    pub fn new(mempool_db: Arc<MempoolDb>) -> Self {
-        Self(mempool_db)
+    pub fn new(mempool_db: Arc<MempoolDb>) -> Result<Self> {
+        let moderator_db = ModeratorDb::open(mempool_db.storage_context().clone())?;
+        Ok(Self(Arc::new(JournalStoreInner {
+            this: moderator_db,
+            main: mempool_db,
+        })))
+    }
+
+    pub async fn init(&self) -> Result<()> {
+        self.0.this.apply_migrations().await
     }
 
     pub fn load_restore(
@@ -53,7 +67,7 @@ impl JournalStore {
         min_key[..UnixTime::MAX_TL_BYTES]
             .copy_from_slice(&special_since.min(all_since).millis().to_be_bytes());
 
-        (self.0.db.journal)
+        (self.0.this.db.journal)
             .iterator(IteratorMode::From(&min_key, Direction::Forward))
             .filter_map_ok(move |(k, v)| filter_parse(&k, &v, all_since).transpose())
             .flatten()
@@ -65,7 +79,7 @@ impl JournalStore {
         } else {
             IteratorMode::End
         };
-        (self.0.db.journal)
+        (self.0.this.db.journal)
             .iterator(mode)
             .skip(count as usize * page as usize)
             .take(count as usize)
@@ -82,7 +96,7 @@ impl JournalStore {
         let mut key_buf = [0; _];
         key.fill(&mut key_buf);
 
-        let Some(slice) = self.0.db.journal_points.get_owned(&key_buf[..])? else {
+        let Some(slice) = self.0.this.db.journal_points.get_owned(&key_buf[..])? else {
             return Ok(None);
         };
         let data_offset = match JournalPoint::read_from(&mut &slice[..])?.data {
@@ -96,15 +110,7 @@ impl JournalStore {
 
     pub fn delete(&self, millis: std::ops::Range<UnixTime>) -> Result<()> {
         let range_string = || format!("{}..{}", millis.start, millis.end);
-        match self.0.wait_for_compact() {
-            Ok(()) => {}
-            Err(e) => {
-                metrics::gauge!(DB_CLEAN_ERRORS, "kind" => "compact").increment(1);
-                tracing::error!("compact in mempool journal {} failed: {e}", range_string());
-                return Err(e);
-            }
-        }
-        match self.0.clean_events(millis.clone()) {
+        match self.0.this.clean_events(millis.clone()) {
             Ok(()) => {}
             Err(e) => {
                 metrics::gauge!(DB_CLEAN_ERRORS, "kind" => "journal").increment(1);
@@ -115,7 +121,7 @@ impl JournalStore {
                 return Err(e);
             }
         }
-        match self.0.wait_for_compact() {
+        match self.0.this.wait_for_compact() {
             Ok(()) => {}
             Err(e) => {
                 metrics::gauge!(DB_CLEAN_ERRORS, "kind" => "compact").increment(1);
@@ -147,7 +153,7 @@ impl JournalStore {
                 }),
         );
 
-        let j_points_cf = self.0.db.journal_points.cf();
+        let j_points_cf = self.0.this.db.journal_points.cf();
         let mut j_point_buf = Vec::with_capacity(journal_point_max_bytes);
 
         // full points are most likely not yet stored in DB, but keys are most likely still stored;
@@ -156,8 +162,8 @@ impl JournalStore {
         let mut point_key_buf = [0; PointKey::MAX_TL_BYTES];
         {
             assert!(batch.keys.is_sorted(), "batch point keys must be sorted");
-            let mut target_iter = self.0.db.journal_points.raw_iterator();
-            let mut source_iter = self.0.db.points.raw_iterator();
+            let mut target_iter = self.0.this.db.journal_points.raw_iterator();
+            let mut source_iter = self.0.main.points_raw_iter();
             'keys: for (key, ref_count) in &batch.keys {
                 key.fill(&mut point_key_buf);
 
@@ -208,7 +214,7 @@ impl JournalStore {
         }
 
         // fill records and indices
-        let journal_cf = self.0.db.journal.cf();
+        let journal_cf = self.0.this.db.journal.cf();
         let mut record_bytes = Vec::with_capacity(batch.max_record_bytes);
         for (record_key, record_value) in &mut batch.records {
             for point_ref in &mut record_value.point_refs {
@@ -226,7 +232,7 @@ impl JournalStore {
             );
         }
 
-        let db = self.0.db.rocksdb();
+        let db = self.0.this.db.rocksdb();
         db.write(write).context("write record batch")?;
         Ok(())
     }

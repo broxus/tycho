@@ -243,7 +243,6 @@ impl Mempool {
                 bootstrap_peers = global_config.bootstrap_peers.len(),
                 "initialized network"
             );
-
             moderator.wait_init().await?;
 
             EngineNetworkArgs {

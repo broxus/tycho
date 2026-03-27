@@ -183,7 +183,6 @@ fn make_network(
                                 "engine example",
                             )
                             .expect("moderator");
-
                             moderator.wait_init().await.expect("moderator init");
 
                             EngineNetworkArgs {

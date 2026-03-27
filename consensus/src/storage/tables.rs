@@ -17,8 +17,6 @@ weedb::tables! {
         pub points: Points,
         pub points_info: PointsInfo,
         pub points_status: PointsStatus,
-        pub journal: Journal,
-        pub journal_points: JournalPoints,
     }
 }
 
@@ -83,51 +81,4 @@ fn points_status_merge(
     new_status_queue: &MergeOperands,
 ) -> Option<Vec<u8>> {
     crate::models::point_status::merge_bytes(key, stored.into_iter().chain(new_status_queue))
-}
-
-/// Stores mempool moderation-related events
-/// - Key: [`crate::moderator::RecordKey`]
-/// - Value: [`crate::moderator::RecordValue`]
-pub struct Journal;
-
-impl ColumnFamily for Journal {
-    const NAME: &'static str = "journal";
-}
-
-impl ColumnFamilyOptions<TableContext> for Journal {
-    fn options(opts: &mut Options, ctx: &mut TableContext) {
-        optimize_for_point_lookup(opts, ctx);
-        opts.set_disable_auto_compactions(true);
-    }
-}
-
-/// Mempool points linked to events are stored across versions
-/// - Key: [`crate::models::PointKey`]
-/// - Value: [`crate::moderator::JournalPoint`]
-pub struct JournalPoints;
-
-impl ColumnFamily for JournalPoints {
-    const NAME: &'static str = "journal_points";
-}
-
-impl ColumnFamilyOptions<TableContext> for JournalPoints {
-    fn options(opts: &mut Options, ctx: &mut TableContext) {
-        optimize_for_point_lookup(opts, ctx);
-        opts.set_disable_auto_compactions(true);
-
-        opts.set_enable_blob_files(true);
-        opts.set_enable_blob_gc(false);
-        opts.set_min_blob_size(DEFAULT_MIN_BLOB_SIZE);
-        opts.set_blob_compression_type(DBCompressionType::None);
-
-        opts.set_merge_operator_associative("journal_points_merge", journal_points_merge);
-    }
-}
-
-fn journal_points_merge(
-    key: &[u8],
-    stored: Option<&[u8]>,
-    new_status_queue: &MergeOperands,
-) -> Option<Vec<u8>> {
-    crate::moderator::JournalPoint::merge_bytes(key, stored.into_iter().chain(new_status_queue))
 }

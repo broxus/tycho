@@ -16,8 +16,10 @@ use crate::models::{
 use crate::moderator::journal::batch::batch;
 use crate::moderator::journal::item::{JournalItem, JournalItemFull};
 use crate::moderator::journal::record_key::RecordKeyFactory;
-use crate::moderator::{JournalEvent, JournalPoint, JournalPointRef, RecordFull, RecordValue};
-use crate::storage::{JournalStore, MempoolDb, MempoolStore};
+use crate::moderator::{
+    JournalEvent, JournalPoint, JournalPointRef, JournalStore, RecordFull, RecordValue,
+};
+use crate::storage::{MempoolDb, MempoolStore};
 use crate::test_utils::{default_test_config, test_logger};
 
 const DIFF: UnixTime = UnixTime::from_millis(60 * 1000);
@@ -28,7 +30,8 @@ async fn point_not_corrupt_across_batches() -> Result<()> {
 
     let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
     let db = MempoolDb::open(ctx)?;
-    let store = JournalStore::new(db.clone());
+    let store = JournalStore::new(db.clone())?;
+    store.init().await?;
 
     let point = gen_point();
     let main_store = MempoolStore::new(db);
@@ -65,7 +68,8 @@ async fn test() -> Result<()> {
 
     let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
     let db = MempoolDb::open(ctx)?;
-    let store = JournalStore::new(db.clone());
+    let store = JournalStore::new(db.clone())?;
+    store.init().await?;
 
     let points: [_; 5] = std::array::from_fn(|_| gen_point());
 

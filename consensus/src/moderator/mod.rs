@@ -5,11 +5,13 @@ pub use journal::event::*;
 pub use journal::point_ref_count::*;
 pub use journal::record::*;
 pub use journal::record_key::RecordKey;
+pub use storage::store::*;
 
 mod ban;
 mod config;
 mod impl_;
 mod journal;
+mod storage;
 
 enum DelayedDbTask {
     Delete {

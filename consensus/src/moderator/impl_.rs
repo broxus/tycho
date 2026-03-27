@@ -22,10 +22,10 @@ use crate::moderator::journal::batch::batch;
 use crate::moderator::journal::item::{JournalItem, JournalItemFull};
 use crate::moderator::journal::record_key::RecordKeyFactory;
 use crate::moderator::{
-    BanConfigDuration, DelayedDbTask, JournalConfig, JournalEvent, JournalPoint, ModeratorConfig,
-    RecordFull,
+    BanConfigDuration, DelayedDbTask, JournalConfig, JournalEvent, JournalPoint, JournalStore,
+    ModeratorConfig, RecordFull,
 };
-use crate::storage::{JournalStore, MempoolDb};
+use crate::storage::MempoolDb;
 
 /// Must outlive [`crate::engine::lifecycle::EngineSession`] just like opened DB
 #[derive(Clone)]
@@ -45,7 +45,7 @@ impl Moderator {
     ) -> Result<Self> {
         config.validate()?;
 
-        let journal_store = JournalStore::new(mempool_db);
+        let journal_store = JournalStore::new(mempool_db)?;
 
         // unbounded because we don't know the capacity, anyway the queue won't be long
         let (delayed_db_tasks_tx, delayed_db_tasks_rx) = mpsc::unbounded_channel();
@@ -91,15 +91,17 @@ impl Moderator {
             },
             is_init: is_init.clone(),
             init_task: {
+                let journal_store_2 = journal_store.clone();
                 let f = move || {
-                    let short_events = journal_store.load_restore(special_since, all_since);
+                    let short_events = journal_store_2.load_restore(special_since, all_since);
                     (ban_core.restore(started, short_events))
                         .map_err(|e| format!("restore: {e}"))?;
                     (init_tx.send(())).map_err(|()| "cannot notify mempool init".to_string())?;
                     is_init.store(true, atomic::Ordering::Relaxed);
                     Ok(())
                 };
-                let task = async {
+                let task = async move {
+                    journal_store.init().await.map_err(|e| e.to_string())?;
                     (db_spawn(f).await)
                         .unwrap_or_else(|Cancelled()| Err("restore aborted".to_string()))
                 };
@@ -112,7 +114,7 @@ impl Moderator {
         Ok(Self(inner_clone))
     }
 
-    /// guards [`Self::set_peer_schedule`]
+    /// applies migrations and guards [`Self::set_peer_schedule`]
     pub async fn wait_init(&self) -> Result<()> {
         tracing::info!("wait Moderator init");
         self.0.wait_init().await.0.map_err(anyhow::Error::msg)?;
@@ -128,7 +130,6 @@ impl Moderator {
         self.0.report(data);
     }
 
-    /// Init or update delayed db writer with mempool config
     pub(crate) fn apply_mempool_config(&self, conf: &MempoolConfig) {
         self.0.apply_mempool_config(conf);
     }
@@ -309,7 +310,7 @@ impl ModeratorTrait for ModeratorInner {
     }
 
     fn list_events(&self, count: u16, page: u32, asc: bool) -> Result<Vec<RecordFull>> {
-        // no need to check init
+        self.check_init()?;
         self.journal_store.load_records(count, page, asc)
     }
 
@@ -332,6 +333,7 @@ impl ModeratorTrait for ModeratorInner {
     }
 
     fn get_event_point(&self, key: &PointKey) -> Result<Bytes> {
+        self.check_init()?;
         self.journal_store
             .get_point(key)?
             .ok_or_else(|| anyhow::anyhow!("point not found"))
