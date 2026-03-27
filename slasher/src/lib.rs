@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
+use tycho_block_util::config::BlockchainConfigExt;
 use tycho_core::block_strider::{StateSubscriber, StateSubscriberContext};
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_crypto::ed25519;
@@ -19,6 +20,9 @@ use tycho_util::config::PartialConfig;
 use tycho_util::futures::JoinTask;
 use tycho_util::serde_helpers;
 
+pub use self::analyzer::{
+    SessionPenaltyReport, SessionValidatorScore, VsetPenaltyReport, VsetValidatorPenalty,
+};
 pub use self::bc::{
     BlocksBatch, ContractSubscription, EncodeBlocksBatchMessage, MessageDeliveryStatus,
     SignatureHistory, SignedMessage, SlasherContract, StubSlasherContract,
@@ -27,6 +31,7 @@ use self::collector::{ValidatorEventsCollector, ValidatorSessionInfo};
 use self::storage::SlasherStorage;
 use self::util::AtomicValidationSessionId;
 
+mod analyzer;
 pub mod collector {
     pub use self::validator_events::*;
 
@@ -35,11 +40,12 @@ pub mod collector {
 }
 
 mod bc;
-#[expect(unused)]
 mod storage;
+mod tracing_targets;
 mod util;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialConfig)]
+#[serde(default)]
 pub struct SlasherConfig {
     /// TTL of messages to the slasher contract.
     ///
@@ -57,6 +63,11 @@ pub struct SlasherConfig {
     /// Default: `5s`
     #[serde(with = "serde_helpers::humantime")]
     pub prev_delivery_timeout: Option<Duration>,
+
+    /// Absolute threshold of bad-session weight after which validator is bad in a vset epoch.
+    ///
+    /// Default: `100`
+    pub bad_sessions_weight_threshold: u64,
 }
 
 impl Default for SlasherConfig {
@@ -65,6 +76,7 @@ impl Default for SlasherConfig {
             message_ttl: Duration::from_secs(30),
             message_retry_interval: Duration::from_secs(1),
             prev_delivery_timeout: Some(Duration::from_secs(5)),
+            bad_sessions_weight_threshold: 100,
         }
     }
 }
@@ -98,8 +110,8 @@ impl Slasher {
                 blockchain_rpc_client,
                 storage,
                 known_session_id: AtomicValidationSessionId::new(ValidationSessionId {
-                    seqno: 0,
-                    short_hash: 0,
+                    vset_switch_round: 0,
+                    catchain_seqno: 0,
                 }),
                 signature_context: ArcSwap::new(Arc::new(SignatureContext {
                     global_id: 0,
@@ -144,36 +156,53 @@ impl Slasher {
             .set_default_batch_size(slasher_params.blocks_batch_size);
         let slasher_address = StdAddr::new_masterchain(slasher_params.address);
 
-        let session_id_from_block = ValidationSessionId {
-            seqno: state_extra.validator_info.catchain_seqno,
-            short_hash: state_extra.validator_info.validator_list_hash_short,
+        let catchain_seqno = state_extra.validator_info.catchain_seqno;
+        let vset_switch_round = state_extra.consensus_info.vset_switch_round;
+
+        let current_session_id = ValidationSessionId {
+            vset_switch_round,
+            catchain_seqno,
         };
-        tracing::trace!(?slasher_params, ?session_id_from_block);
+        let current_vset_hash = *state_extra
+            .config
+            .get_current_validator_set_raw()?
+            .repr_hash();
+        tracing::trace!(
+            target: tracing_targets::SLASHER,
+            ?slasher_params,
+            ?current_session_id,
+            current_vset_hash = %current_vset_hash,
+        );
 
-        // Clear old sessions if needed
         // TODO: Add metrics.
-        if session_id_from_block != this.known_session_id.load() {
-            let span = tracing::Span::current();
-            let storage = this.storage.clone();
-            tokio::task::spawn_blocking(move || {
-                let _span = span.enter();
-                storage.remove_outdated_batches(session_id_from_block)
-            })
-            .await??;
-
-            this.known_session_id.set(session_id_from_block);
+        if current_session_id != this.known_session_id.load() {
+            tracing::info!(
+                target: tracing_targets::SLASHER,
+                old_session_id = ?this.known_session_id.load(),
+                ?current_session_id,
+                "slasher observed validation session change",
+            );
+            this.known_session_id.set(current_session_id);
         }
+        this.storage
+            .update_current_vset_epoch(current_session_id, current_vset_hash)?;
 
         // Handle subscription
         let subscription = match this.subscription.load_full() {
             Some(s) if s.address() == &slasher_address => s,
             _ => {
-                tracing::info!(%slasher_address, "slasher address changed");
+                tracing::info!(
+                    target: tracing_targets::SLASHER,
+                    %slasher_address,
+                    "slasher address changed"
+                );
                 let s = Arc::new(ContractSubscription::new(&slasher_address));
                 this.subscription.store(Some(s.clone()));
                 s
             }
         };
+
+        subscription.cleanup_expired_messages(cx.block.load_info()?.gen_utime);
 
         let extra = cx.block.load_extra()?.account_blocks.load()?;
         if let Some((_, account_block)) = extra.get(slasher_address.address)? {
@@ -183,39 +212,80 @@ impl Slasher {
                 let tx = tx.load()?;
 
                 tracing::debug!(
+                    target: tracing_targets::SLASHER,
                     %tx_hash,
                     msg_hash = ?tx.in_msg.as_ref().map(|msg| msg.repr_hash()),
                     "found slasher transaction",
                 );
 
-                subscription.handle_account_transaction(tx_hash, &tx)?;
+                let matched_own_message = subscription.handle_account_transaction(tx_hash, &tx)?;
 
                 match self.shared.contract.decode_event(&tx) {
                     Ok(Some(event)) => match event {
                         bc::SlasherContractEvent::SubmitBlocksBatch(submitted) => {
+                            let batch = &submitted.blocks_batch;
+                            tracing::info!(
+                                target: tracing_targets::SLASHER,
+                                %tx_hash,
+                                session_id = ?submitted.session_id,
+                                validator_idx = submitted.validator_idx,
+                                batch_start_seqno = batch.start_seqno(),
+                                batch_seqno_after = batch.seqno_after(),
+                                batch_slots = batch.committed_blocks.len(),
+                                committed_blocks = batch.committed_block_count(),
+                                validators = batch.validator_count(),
+                                "{}",
+                                if matched_own_message {
+                                    "own blocks batch committed by slasher"
+                                } else {
+                                    "received blocks batch from validator"
+                                }
+                            );
+
                             // TODO: Move into blocking.
-                            this.storage.store_blocks_batch(
-                                session_id_from_block,
+                            if !this.storage.store_blocks_batch(
+                                submitted.session_id,
                                 submitted.validator_idx,
                                 &submitted.blocks_batch,
-                            )?;
+                            )? {
+                                tracing::warn!(
+                                    target: tracing_targets::SLASHER,
+                                    session_id = ?submitted.session_id,
+                                    current_vset_hash = %current_vset_hash,
+                                    "ignoring observed blocks batch without known epoch"
+                                );
+                            }
                             tokio::task::yield_now().await;
                         }
                     },
                     Ok(None) => {}
-                    Err(e) => tracing::warn!(%tx_hash, "failed to parse slasher event: {e:?}"),
+                    Err(e) => tracing::warn!(
+                        target: tracing_targets::SLASHER,
+                        %tx_hash,
+                        "failed to parse slasher event: {e:?}"
+                    ),
                 }
             }
         }
+
+        self.shared.analyze_closed_vset_epochs()?;
 
         while let Some(session_info) = self
             .validator_events_collector
             .pop_session_to_init(mc_seqno)
         {
             let session_id = session_info.session_id;
-            tracing::info!(?session_id, "found session to init");
+            tracing::info!(
+                target: tracing_targets::SLASHER,
+                ?session_id,
+                "found session to init"
+            );
             if !session_info.can_participate(&this.node_keys.public_key) {
-                tracing::info!(?session_id, "skipping session");
+                tracing::info!(
+                    target: tracing_targets::SLASHER,
+                    ?session_id,
+                    "skipping session"
+                );
                 continue;
             }
 
@@ -225,7 +295,11 @@ impl Slasher {
                 slasher_params.blocks_batch_size,
                 tx,
             ) {
-                tracing::warn!(?session_id, "session removed before init");
+                tracing::warn!(
+                    target: tracing_targets::SLASHER,
+                    ?session_id,
+                    "session removed before init"
+                );
                 continue;
             }
 
@@ -267,14 +341,111 @@ struct SlasherSharedState {
 }
 
 impl SlasherSharedState {
+    fn analyze_closed_vset_epochs(&self) -> Result<()> {
+        let snapshot = self.storage.snapshot();
+        let closed_vset_epoches = snapshot.load_closed_vset_epochs()?;
+        if closed_vset_epoches.is_empty() {
+            tracing::warn!(
+                target: tracing_targets::SLASHER,
+                "closes vset epoches not found"
+            );
+            return Ok(());
+        }
+
+        for epoch in closed_vset_epoches {
+            if snapshot.load_vset_report(epoch.start_session_id)?.is_some() {
+                continue;
+            }
+
+            tracing::info!(
+                target: tracing_targets::SLASHER,
+                vset_hash = ?epoch.vset_hash,
+                start_id = ?epoch.start_session_id,
+                "analyzing closed vset epoch"
+            );
+
+            let mut session_reports = Vec::new();
+            for meta in snapshot.load_sessions_for_epoch(epoch.start_session_id)? {
+                let report = match snapshot.load_session_report(meta.session_id)? {
+                    Some(report) => report,
+                    None => {
+                        let batches =
+                            snapshot.load_observed_batches_for_session(meta.session_id)?;
+                        let report = analyzer::analyze_session(&meta, &batches);
+                        self.storage.store_session_report(&report)?;
+                        report
+                    }
+                };
+                self.log_session_report(&report);
+                session_reports.push(report);
+            }
+
+            let report = analyzer::analyze_vset_epoch(
+                &epoch,
+                &session_reports,
+                self.config.bad_sessions_weight_threshold,
+            );
+            self.storage.store_vset_report(&report)?;
+            self.log_vset_report(&report);
+        }
+
+        Ok(())
+    }
+
+    fn log_session_report(&self, report: &SessionPenaltyReport) {
+        for item in &report.validators {
+            tracing::info!(
+                target: tracing_targets::SLASHER,
+                session_id = ?report.session_id,
+                epoch_start_session_id = ?report.epoch_start_session_id,
+                validator_idx = item.validator_idx,
+                earned_points = item.earned_points,
+                max_points = item.max_points,
+                session_weight = report.session_weight,
+                is_bad = item.is_bad,
+                "scored validator in validation session",
+            );
+        }
+    }
+
+    fn log_vset_report(&self, report: &VsetPenaltyReport) {
+        let bad_validator_indices = report
+            .validators
+            .iter()
+            .filter(|item| item.is_bad)
+            .map(|item| item.validator_idx)
+            .collect::<Vec<_>>();
+
+        tracing::info!(
+            target: tracing_targets::SLASHER,
+            epoch_start_session_id = ?report.epoch_start_session_id,
+            vset_hash = %report.vset_hash,
+            bad_validator_indices = ?bad_validator_indices,
+            "finished scoring closed vset epoch",
+        );
+
+        for item in &report.validators {
+            tracing::info!(
+                target: tracing_targets::SLASHER,
+                epoch_start_session_id = ?report.epoch_start_session_id,
+                vset_hash = %report.vset_hash,
+                validator_idx = item.validator_idx,
+                bad_sessions_weight = item.bad_sessions_weight,
+                total_sessions_weight = item.total_sessions_weight,
+                is_bad = item.is_bad,
+                "computed final validator verdict in vset epoch",
+            );
+        }
+    }
+
     #[instrument(skip_all, fields(session_id = ?info.session_id))]
     async fn send_batches_to_contract(
         self: Arc<Self>,
         info: ValidatorSessionInfo,
         mut rx: collector::BlocksBatchRx,
     ) {
-        tracing::info!("started");
-        scopeguard::defer!(tracing::info!("finished"));
+        tracing::info!(target: tracing_targets::SLASHER, "started");
+        scopeguard::defer!(tracing::info!(target: tracing_targets::SLASHER, "finished"));
 
         let mut send_task = None;
 
@@ -283,7 +454,10 @@ impl SlasherSharedState {
                 && let Some(timeout) = self.config.prev_delivery_timeout
                 && tokio::time::timeout(timeout, send_task).await.is_err()
             {
-                tracing::warn!("timeout on waiting for the previous batch to be delivered");
+                tracing::warn!(
+                    target: tracing_targets::SLASHER,
+                    "timeout on waiting for the previous batch to be delivered"
+                );
             }
 
             send_task = Some(JoinTask::new(self.clone().deliver_batch_message(
@@ -302,7 +476,7 @@ impl SlasherSharedState {
     ) {
         loop {
             let Some(subscription) = self.subscription.load_full() else {
-                tracing::warn!("no slasher contract subscription");
+                tracing::warn!(target: tracing_targets::SLASHER, "no slasher contract subscription");
                 break;
             };
 
@@ -319,7 +493,10 @@ impl SlasherSharedState {
             let signed = match self.contract.encode_blocks_batch_message(&params) {
                 Ok(signed) => signed,
                 Err(e) => {
-                    tracing::error!("failed to encode batch message: {e:?}");
+                    tracing::error!(
+                        target: tracing_targets::SLASHER,
+                        "failed to encode batch message: {e:?}"
+                    );
                     return;
                 }
             };
@@ -329,13 +506,17 @@ impl SlasherSharedState {
             match subscription.track_message(&msg_hash, signed.expire_at) {
                 Ok(res) => {
                     tracing::info!(
+                        target: tracing_targets::SLASHER,
                         %msg_hash,
                         address = %params.address,
                         session_id = ?params.session_id,
                         validator_idx = params.validator_idx,
-                        batch_seqno = batch.start_seqno,
-                        block_count = batch.committed_blocks.len(),
-                        "sending blocks batch"
+                        batch_start_seqno = batch.start_seqno(),
+                        batch_seqno_after = batch.seqno_after(),
+                        batch_slots = batch.committed_blocks.len(),
+                        committed_blocks = batch.committed_block_count(),
+                        validators = batch.validator_count(),
+                        "sending own blocks batch to slasher"
                     );
                     self.blockchain_rpc_client
                         .broadcast_external_message(&boc)
@@ -344,17 +525,34 @@ impl SlasherSharedState {
 
                     match res.await {
                         Ok(MessageDeliveryStatus::Sent { tx_hash }) => {
-                            tracing::info!(%tx_hash, "batch message delivered");
+                            tracing::info!(
+                                target: tracing_targets::SLASHER,
+                                %tx_hash,
+                                session_id = ?params.session_id,
+                                validator_idx = params.validator_idx,
+                                batch_start_seqno = batch.start_seqno(),
+                                batch_seqno_after = batch.seqno_after(),
+                                batch_slots = batch.committed_blocks.len(),
+                                committed_blocks = batch.committed_block_count(),
+                                validators = batch.validator_count(),
+                                "own blocks batch delivered"
+                            );
                             return;
                         }
                         Ok(MessageDeliveryStatus::Expired) => {
                             // TODO: Execute transaction locally to guess the reason.
-                            tracing::warn!("batch message expired");
+                            tracing::warn!(
+                                target: tracing_targets::SLASHER,
+                                "batch message expired"
+                            );
                         }
                         Err(_) => return,
                     }
                 }
-                Err(e) => tracing::warn!("failed to track message: {e:?}"),
+                Err(e) => tracing::warn!(
+                    target: tracing_targets::SLASHER,
+                    "failed to track message: {e:?}"
+                ),
             }
 
             tokio::time::sleep(self.config.message_retry_interval).await;

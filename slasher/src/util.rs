@@ -26,21 +26,21 @@ impl AtomicValidationSessionId {
     const fn pack_id(value: ValidationSessionId) -> u64 {
         const _: () = const {
             let id = ValidationSessionId {
-                seqno: 0,
-                short_hash: 0,
+                catchain_seqno: 0,
+                vset_switch_round: 0,
             };
-            assert!(std::mem::size_of_val(&id.seqno) == 4);
-            assert!(std::mem::size_of_val(&id.short_hash) == 4);
+            assert!(std::mem::size_of_val(&id.catchain_seqno) == 4);
+            assert!(std::mem::size_of_val(&id.vset_switch_round) == 4);
         };
 
-        ((value.seqno as u64) << 32) | (value.short_hash as u64)
+        ((value.catchain_seqno as u64) << 32) | (value.vset_switch_round as u64)
     }
 
     #[inline]
     const fn unpack_id(value: u64) -> ValidationSessionId {
         ValidationSessionId {
-            seqno: (value >> 32) as u32,
-            short_hash: value as u32,
+            catchain_seqno: (value >> 32) as u32,
+            vset_switch_round: value as u32,
         }
     }
 }
@@ -118,6 +118,24 @@ impl BitSet {
 
     pub fn is_zero(&self) -> bool {
         self.as_slice().iter().all(|item| *item == 0)
+    }
+
+    pub fn get(&self, bit: usize) -> bool {
+        assert!(
+            bit < self.length,
+            "get at index {bit} exceeds bitset size {}",
+            self.length
+        );
+
+        let Some(data) = self.data else {
+            return false;
+        };
+
+        let block = bit / Self::BLOCK_BITS;
+        let rem = bit % Self::BLOCK_BITS;
+
+        // SAFETY: `bit` is whithin the range.
+        unsafe { (*data.as_ptr().add(block) & (1 << rem)) != 0 }
     }
 
     pub fn set(&mut self, bit: usize, enabled: bool) {
