@@ -5,7 +5,6 @@ mod intercom;
 #[cfg(feature = "mock-feedback")]
 pub mod mock_feedback;
 mod models;
-#[allow(dead_code)]
 mod moderator;
 mod storage;
 #[cfg(any(feature = "test", test))]
@@ -24,5 +23,6 @@ pub mod prelude {
         AnchorData, AnchorStageRole, MempoolOutput, MempoolPeerStats, MempoolStatsMergeError,
         PointInfo,
     };
+    pub use crate::moderator::{Moderator, ModeratorConfig};
     pub use crate::storage::{MempoolAdapterStore, MempoolDb};
 }

@@ -1,4 +1,5 @@
 pub use config::*;
+pub use impl_::*;
 pub use journal::batch::RecordBatch;
 pub use journal::event::*;
 pub use journal::point_ref_count::*;
