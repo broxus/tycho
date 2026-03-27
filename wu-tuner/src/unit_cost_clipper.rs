@@ -204,7 +204,24 @@ fn dequantize_elapsed_ns(unit_cost_q: u128, base: u128) -> Option<u128> {
 
 #[cfg(test)]
 mod tests {
-    use super::{RollingUnitCostClipper, UnitCostClippers};
+    use super::{
+        dequantize_elapsed_ns, quantize_unit_cost, RollingUnitCostClipper, UnitCostClippers,
+    };
+
+    fn warm_window_with_samples(
+        clipper: &mut RollingUnitCostClipper,
+        samples: &[(u128, u128)],
+        repeats: usize,
+    ) {
+        for _ in 0..repeats {
+            for (base, elapsed_ns) in samples {
+                assert_eq!(
+                    clipper.clip_elapsed_ns(*base, *elapsed_ns),
+                    Some(*elapsed_ns)
+                );
+            }
+        }
+    }
 
     #[test]
     fn clipper_returns_input_before_window_is_filled() {
@@ -242,6 +259,57 @@ mod tests {
         }
         assert_eq!(clipper.clip_elapsed_ns(1, 10), Some(10));
         assert!(clipper.window_is_filled());
+    }
+
+    #[test]
+    fn clipper_clips_high_and_low_outliers_by_unit_cost_across_bases() {
+        let warmup_samples = [(2_u128, 6_u128), (5_u128, 15_u128), (11_u128, 33_u128)];
+
+        let mut high_outlier_clipper = RollingUnitCostClipper::new(100);
+        warm_window_with_samples(&mut high_outlier_clipper, &warmup_samples, 34);
+        assert!(high_outlier_clipper.window_is_filled());
+        assert_eq!(high_outlier_clipper.clip_elapsed_ns(7, 700), Some(21));
+
+        let mut low_outlier_clipper = RollingUnitCostClipper::new(100);
+        warm_window_with_samples(&mut low_outlier_clipper, &warmup_samples, 34);
+        assert!(low_outlier_clipper.window_is_filled());
+        assert_eq!(low_outlier_clipper.clip_elapsed_ns(7, 1), Some(21));
+    }
+
+    #[test]
+    fn clipper_truncates_fractional_elapsed_after_clipping() {
+        let mut clipper = RollingUnitCostClipper::new(100);
+        warm_window_with_samples(&mut clipper, &[(2_u128, 3_u128)], 100);
+        assert!(clipper.window_is_filled());
+        assert_eq!(clipper.clip_elapsed_ns(3, 300), Some(4));
+    }
+
+    #[test]
+    fn dequantize_elapsed_ns_truncates_fractional_elapsed() {
+        assert_eq!(dequantize_elapsed_ns(1_500_000_000, 3), Some(4));
+    }
+
+    #[test]
+    fn quantize_unit_cost_truncates_non_integer_scaled_value() {
+        assert_eq!(quantize_unit_cost(1.0 / 3.0), Some(333_333_333));
+    }
+
+    #[test]
+    fn quantize_and_dequantize_reverse_calculation_has_bounded_error() {
+        let unit_cost_raw = 1.0 / 3.0;
+        let base = 9_u128;
+        let quantized = quantize_unit_cost(unit_cost_raw).unwrap();
+        let actual = dequantize_elapsed_ns(quantized, base).unwrap();
+        let exact = unit_cost_raw * base as f64;
+
+        assert!(actual as f64 <= exact);
+        assert!((exact - actual as f64) < 1.0 + (base as f64 / 1_000_000_000.0));
+    }
+
+    #[test]
+    fn quantize_and_dequantize_saturate_to_u128_max() {
+        assert_eq!(quantize_unit_cost(u128::MAX as f64), Some(u128::MAX));
+        assert_eq!(dequantize_elapsed_ns(u128::MAX, u128::MAX), Some(u128::MAX));
     }
 
     #[test]

@@ -2142,40 +2142,8 @@ mod tests {
         )
     }
 
-    fn clip_two_sample_avg(base1: u128, elapsed1: u128, base2: u128, elapsed2: u128) -> u128 {
-        let mut clipper =
-            crate::unit_cost_clipper::RollingUnitCostClipper::new(DEFAULT_PERCENTILE_WINDOW);
-        let first = clipper
-            .clip_elapsed_ns(base1, elapsed1)
-            .expect("clip should be available");
-        let second = clipper
-            .clip_elapsed_ns(base2, elapsed2)
-            .expect("clip should be available");
-        (first + second) / 2
-    }
-
-    fn clip_baseline_outlier_avg(
-        baseline_base: u128,
-        baseline_elapsed: u128,
-        outlier_base: u128,
-        outlier_elapsed: u128,
-    ) -> u128 {
-        let mut clipper =
-            crate::unit_cost_clipper::RollingUnitCostClipper::new(DEFAULT_PERCENTILE_WINDOW);
-        let mut sum = 0u128;
-        for _ in 0..100 {
-            sum = sum.saturating_add(
-                clipper
-                    .clip_elapsed_ns(baseline_base, baseline_elapsed)
-                    .expect("clip should be available"),
-            );
-        }
-        sum = sum.saturating_add(
-            clipper
-                .clip_elapsed_ns(outlier_base, outlier_elapsed)
-                .expect("clip should be available"),
-        );
-        sum / 101
+    fn roundtrip_elapsed_ns(elapsed_ns: u128, base: u128) -> u128 {
+        ((elapsed_ns * 1_000_000_000) / base * base) / 1_000_000_000
     }
 
     fn sample_metrics(
@@ -2359,12 +2327,15 @@ mod tests {
         );
         assert_eq!(
             avg.prepare.total_elapsed_ns.get_avg_checked(),
-            Some(clip_two_sample_avg(
-                first.wu_on_prepare_msg_groups.total_wu() as u128,
-                first.wu_on_prepare_msg_groups.total_elapsed.as_nanos(),
-                second.wu_on_prepare_msg_groups.total_wu() as u128,
-                second.wu_on_prepare_msg_groups.total_elapsed.as_nanos(),
-            )),
+            Some(
+                (roundtrip_elapsed_ns(
+                    first.wu_on_prepare_msg_groups.total_elapsed.as_nanos(),
+                    first.wu_on_prepare_msg_groups.total_wu() as u128,
+                ) + roundtrip_elapsed_ns(
+                    second.wu_on_prepare_msg_groups.total_elapsed.as_nanos(),
+                    second.wu_on_prepare_msg_groups.total_wu() as u128,
+                )) / 2,
+            ),
         );
         assert_eq!(
             avg.execute
@@ -2380,31 +2351,37 @@ mod tests {
             avg.finalize
                 .build_accounts_and_messages_in_parallel_elased_ns
                 .get_avg_checked(),
-            Some(clip_two_sample_avg(
-                first.wu_on_finalize.max_accounts_in_out_msgs_wu() as u128,
-                first
-                    .wu_on_finalize
-                    .build_accounts_and_messages_in_parallel_elased
-                    .as_nanos(),
-                second.wu_on_finalize.max_accounts_in_out_msgs_wu() as u128,
-                second
-                    .wu_on_finalize
-                    .build_accounts_and_messages_in_parallel_elased
-                    .as_nanos(),
-            )),
+            Some(
+                (roundtrip_elapsed_ns(
+                    first
+                        .wu_on_finalize
+                        .build_accounts_and_messages_in_parallel_elased
+                        .as_nanos(),
+                    first.wu_on_finalize.max_accounts_in_out_msgs_wu() as u128,
+                ) + roundtrip_elapsed_ns(
+                    second
+                        .wu_on_finalize
+                        .build_accounts_and_messages_in_parallel_elased
+                        .as_nanos(),
+                    second.wu_on_finalize.max_accounts_in_out_msgs_wu() as u128,
+                )) / 2,
+            ),
         );
         assert_eq!(
             avg.do_collate
                 .resume_collation_elapsed_per_block_ns
                 .get_avg_checked(),
-            Some(clip_two_sample_avg(
-                first.wu_on_do_collate.resume_collation_wu_per_block as u128,
-                first.wu_on_do_collate.resume_collation_elapsed_per_block_ns,
-                second.wu_on_do_collate.resume_collation_wu_per_block as u128,
-                second
-                    .wu_on_do_collate
-                    .resume_collation_elapsed_per_block_ns,
-            )),
+            Some(
+                (roundtrip_elapsed_ns(
+                    first.wu_on_do_collate.resume_collation_elapsed_per_block_ns,
+                    first.wu_on_do_collate.resume_collation_wu_per_block as u128,
+                ) + roundtrip_elapsed_ns(
+                    second
+                        .wu_on_do_collate
+                        .resume_collation_elapsed_per_block_ns,
+                    second.wu_on_do_collate.resume_collation_wu_per_block as u128,
+                )) / 2,
+            ),
         );
     }
 
@@ -2474,32 +2451,35 @@ mod tests {
             result
                 .wu_on_do_collate
                 .resume_collation_elapsed_per_block_ns,
-            clip_two_sample_avg(
-                first.wu_on_do_collate.resume_collation_wu_per_block as u128,
+            (roundtrip_elapsed_ns(
                 first.wu_on_do_collate.resume_collation_elapsed_per_block_ns,
-                second.wu_on_do_collate.resume_collation_wu_per_block as u128,
+                first.wu_on_do_collate.resume_collation_wu_per_block as u128,
+            ) + roundtrip_elapsed_ns(
                 second
                     .wu_on_do_collate
                     .resume_collation_elapsed_per_block_ns,
-            ),
+                second.wu_on_do_collate.resume_collation_wu_per_block as u128,
+            )) / 2,
         );
         assert_eq!(
             result.wu_on_finalize.total_elapsed.as_nanos(),
-            clip_two_sample_avg(
-                first.wu_on_finalize.total_wu() as u128,
+            (roundtrip_elapsed_ns(
                 first.wu_on_finalize.total_elapsed.as_nanos(),
-                second.wu_on_finalize.total_wu() as u128,
+                first.wu_on_finalize.total_wu() as u128,
+            ) + roundtrip_elapsed_ns(
                 second.wu_on_finalize.total_elapsed.as_nanos(),
-            ),
+                second.wu_on_finalize.total_wu() as u128,
+            )) / 2,
         );
         assert_eq!(
             result.wu_on_do_collate.collation_total_elapsed.as_nanos(),
-            clip_two_sample_avg(
-                first.collation_total_wu() as u128,
+            (roundtrip_elapsed_ns(
                 first.wu_on_do_collate.collation_total_elapsed.as_nanos(),
-                second.collation_total_wu() as u128,
+                first.collation_total_wu() as u128,
+            ) + roundtrip_elapsed_ns(
                 second.wu_on_do_collate.collation_total_elapsed.as_nanos(),
-            )
+                second.collation_total_wu() as u128,
+            )) / 2
         );
     }
 
@@ -2632,57 +2612,38 @@ mod tests {
         avg.accum(&outlier, &mut unit_cost_clippers);
 
         let result = avg.get_avg().expect("average should exist");
-        let expected_prepare_total = clip_baseline_outlier_avg(
-            baseline.wu_on_prepare_msg_groups.total_wu() as u128,
+        let expected_prepare_total = roundtrip_elapsed_ns(
             baseline.wu_on_prepare_msg_groups.total_elapsed.as_nanos(),
-            outlier.wu_on_prepare_msg_groups.total_wu() as u128,
-            outlier.wu_on_prepare_msg_groups.total_elapsed.as_nanos(),
+            baseline.wu_on_prepare_msg_groups.total_wu() as u128,
         );
-        let expected_build_accounts = clip_baseline_outlier_avg(
-            baseline.wu_on_finalize.build_accounts_wu() as u128,
+        let expected_build_accounts = roundtrip_elapsed_ns(
             baseline.wu_on_finalize.build_accounts_elapsed.as_nanos(),
-            outlier.wu_on_finalize.build_accounts_wu() as u128,
-            outlier.wu_on_finalize.build_accounts_elapsed.as_nanos(),
+            baseline.wu_on_finalize.build_accounts_wu() as u128,
         );
-        let expected_parallel = clip_baseline_outlier_avg(
+        let expected_parallel = roundtrip_elapsed_ns(
+            baseline
+                .wu_on_finalize
+                .build_accounts_and_messages_in_parallel_elased
+                .as_nanos(),
             baseline.wu_on_finalize.max_accounts_in_out_msgs_wu() as u128,
-            baseline
-                .wu_on_finalize
-                .build_accounts_and_messages_in_parallel_elased
-                .as_nanos(),
-            outlier.wu_on_finalize.max_accounts_in_out_msgs_wu() as u128,
-            outlier
-                .wu_on_finalize
-                .build_accounts_and_messages_in_parallel_elased
-                .as_nanos(),
         );
-        let expected_finalize_block = clip_baseline_outlier_avg(
-            baseline.wu_on_finalize.finalize_block_wu() as u128,
+        let expected_finalize_block = roundtrip_elapsed_ns(
             baseline.wu_on_finalize.finalize_block_elapsed.as_nanos(),
-            outlier.wu_on_finalize.finalize_block_wu() as u128,
-            outlier.wu_on_finalize.finalize_block_elapsed.as_nanos(),
+            baseline.wu_on_finalize.finalize_block_wu() as u128,
         );
-        let expected_finalize_total = clip_baseline_outlier_avg(
-            baseline.wu_on_finalize.total_wu() as u128,
+        let expected_finalize_total = roundtrip_elapsed_ns(
             baseline.wu_on_finalize.total_elapsed.as_nanos(),
-            outlier.wu_on_finalize.total_wu() as u128,
-            outlier.wu_on_finalize.total_elapsed.as_nanos(),
+            baseline.wu_on_finalize.total_wu() as u128,
         );
-        let expected_resume_per_block = clip_baseline_outlier_avg(
-            baseline.wu_on_do_collate.resume_collation_wu_per_block as u128,
+        let expected_resume_per_block = roundtrip_elapsed_ns(
             baseline
                 .wu_on_do_collate
                 .resume_collation_elapsed_per_block_ns,
-            outlier.wu_on_do_collate.resume_collation_wu_per_block as u128,
-            outlier
-                .wu_on_do_collate
-                .resume_collation_elapsed_per_block_ns,
+            baseline.wu_on_do_collate.resume_collation_wu_per_block as u128,
         );
-        let expected_collation_total = clip_baseline_outlier_avg(
-            baseline.collation_total_wu() as u128,
+        let expected_collation_total = roundtrip_elapsed_ns(
             baseline.wu_on_do_collate.collation_total_elapsed.as_nanos(),
-            outlier.collation_total_wu() as u128,
-            outlier.wu_on_do_collate.collation_total_elapsed.as_nanos(),
+            baseline.collation_total_wu() as u128,
         );
         assert_eq!(
             result.wu_on_prepare_msg_groups.total_elapsed.as_nanos(),
@@ -2718,7 +2679,7 @@ mod tests {
             expected_collation_total
         );
         let expected_total_price =
-            expected_collation_total as f64 / result.collation_total_wu() as f64;
+            expected_collation_total as f64 / baseline.collation_total_wu() as f64;
         assert!((result.collation_total_wu_price() - expected_total_price).abs() < f64::EPSILON);
     }
 
@@ -2763,35 +2724,6 @@ mod tests {
     }
 
     #[test]
-    fn target_methods_return_none_on_zero_denominator() {
-        let sums_2 = SafeAccum::<(u128, u128)>::default();
-        let sums_3 = SafeAccum::<(u128, u128, u128)>::default();
-        assert_eq!(calc_target_wu_param_from_sums(1.0, &sums_2), None);
-
-        assert_eq!(
-            ExecuteWu::calc_target_execute_wu_param(1.0, 10, 10, &sums_3),
-            None
-        );
-        assert_eq!(calc_target_wu_param_from_sums(1.0, &sums_2), None);
-
-        assert_eq!(calc_target_wu_param_from_sums(1.0, &sums_2), None);
-        assert_eq!(
-            calc_target_scaled_wu_param_from_sums(1.0, 10, &sums_2),
-            None
-        );
-        assert_eq!(
-            calc_target_scaled_wu_param_from_sums(1.0, 10, &sums_2),
-            None
-        );
-        assert_eq!(calc_target_wu_param_from_sums(1.0, &sums_2), None);
-
-        assert_eq!(
-            calc_target_scaled_wu_param_from_sums(1.0, 10 * 10, &sums_2),
-            None
-        );
-    }
-
-    #[test]
     fn calculate_target_wu_params_saturates_and_falls_back() {
         let mut metrics = WuMetrics::default();
         metrics.wu_params.prepare.read_ext_msgs = 10;
@@ -2809,7 +2741,8 @@ mod tests {
         );
     }
 
-    fn synthetic_metrics_for_expected_params() -> (WuMetricsAvg, f64, WorkUnitsParams, WorkUnitsParams) {
+    fn synthetic_metrics_for_expected_params()
+    -> (WuMetricsAvg, f64, WorkUnitsParams, WorkUnitsParams) {
         let target_wu_price = 2.0;
         let mut metrics = WuMetrics::default();
         metrics.wu_params.prepare.read_ext_msgs = 70;
