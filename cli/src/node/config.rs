@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use tycho_collator::internal_queue::queue::QueueConfig;
 use tycho_collator::types::CollatorConfig;
 use tycho_collator::validator::ValidatorStdImplConfig;
-use tycho_consensus::prelude::MempoolNodeConfig;
+use tycho_consensus::prelude::{MempoolNodeConfig, ModeratorConfig};
 use tycho_control::ControlServerConfig;
 use tycho_core::node::NodeBaseConfig;
 use tycho_crypto::ed25519;
@@ -159,7 +159,7 @@ pub struct NodeConfig {
     #[partial]
     pub collator: CollatorConfig,
 
-    pub mempool: MempoolNodeConfig,
+    pub mempool: FullMempoolConfig,
 
     pub internal_queue: QueueConfig,
 
@@ -246,4 +246,13 @@ impl NodeConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MemoryProfilingConfig {
     pub profiling_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct FullMempoolConfig {
+    #[serde(flatten)]
+    pub node: MempoolNodeConfig,
+    #[serde(flatten)]
+    pub moderator: ModeratorConfig,
 }
