@@ -66,6 +66,7 @@ impl SlasherStorage {
                     next_epoch_start_session_id: None,
                 })
             }
+            // Cold start. Save first vset epoch
             None => self.store_vset_epoch(&VsetEpoch {
                 start_session_id: current_session_id,
                 vset_hash: current_vset_hash,
