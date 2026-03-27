@@ -49,6 +49,7 @@ impl Engine {
         fix_history: FixHistoryFlag,
     ) -> Engine {
         let conf = &merged_conf.conf;
+        net.moderator.apply_mempool_config(conf);
         let genesis = merged_conf.genesis();
 
         Point::parse(genesis.serialized().to_vec())
@@ -89,7 +90,8 @@ impl Engine {
             &net.peer_schedule,
             &round_ctx,
         );
-        let committer_run = CommitterTask::new(committer, &bind.top_known_anchor, conf);
+        let committer_run =
+            CommitterTask::new(committer, &net.moderator, &bind.top_known_anchor, conf);
 
         let init_task = engine_ctx.task().spawn_blocking({
             let store = store.clone();

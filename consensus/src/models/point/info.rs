@@ -1,13 +1,14 @@
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
+use serde::Serialize;
 use tl_proto::{TlRead, TlWrite};
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
 use crate::models::{
     AnchorLink, AnchorStageRole, ChainedAnchorProof, Digest, EvidenceSigError, IndirectLink,
-    PointData, PointId, PointKey, Round, Signature, StructureIssue, UnixTime,
+    PointData, PointId, PointKey, Round, Signature, StructureIssue, Through, UnixTime,
 };
 
 #[derive(Clone, TlRead, TlWrite)]
@@ -15,7 +16,17 @@ use crate::models::{
 #[tl(boxed, id = "consensus.pointInfo", scheme = "proto.tl")]
 pub struct PointInfo(Arc<PointInfoInner>);
 
-#[derive(TlWrite, TlRead)]
+// The only such case doesn't deserve `rc` feature on `serde` crate to be enabled
+impl Serialize for &PointInfo {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.0.serialize(serializer)
+    }
+}
+
+#[derive(TlRead, TlWrite, Serialize)]
 #[cfg_attr(test, derive(PartialEq))]
 struct PointInfoInner {
     id: PointId,
@@ -166,10 +177,16 @@ impl PointInfo {
 
     pub fn chained_proof_to_through(&self) -> Option<(PointId, PointId)> {
         self.chained_anchor_proof().map(|link| {
-            let through = (self.0.data.through_id(&link.path, self.round()))
+            let through = self
+                .through_id(&link.path)
                 .expect("Coding error: usage of ill-formed point");
             (link.to, through)
         })
+    }
+
+    /// Well-formed point may return `None` if attribute belongs to another point
+    pub fn through_id(&self, through: &Through) -> Option<PointId> {
+        self.0.data.through_id(through, self.round())
     }
 
     /// the final destination of an anchor link

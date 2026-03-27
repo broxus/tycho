@@ -20,6 +20,7 @@ use tycho_collator::types::CollatorConfig;
 use tycho_collator::validator::{
     ValidatorNetworkContext, ValidatorStdImpl, ValidatorStdImplConfig,
 };
+use tycho_consensus::prelude::{MempoolDb, Moderator};
 use tycho_control::{ControlEndpoint, ControlServer, ControlServerConfig, ControlServerVersion};
 use tycho_core::block_strider::{
     BlockProvider, BlockProviderExt, ColdBootType, MetricsSubscriber, OptionalBlockStuff,
@@ -36,6 +37,7 @@ use tycho_util::futures::JoinTask;
 use tycho_wu_tuner::service::WuTunerServiceBuilder;
 
 pub use self::config::{ElectionsConfig, NodeConfig, SimpleElectionsConfig};
+use crate::cmd::node::MempoolServer;
 #[cfg(feature = "jemalloc")]
 use crate::util::alloc::JemallocMemoryProfiler;
 
@@ -47,6 +49,7 @@ pub struct Node {
 
     queue_state_factory: QueueStateImplFactory,
     rpc_mempool_adapter: RpcMempoolAdapter,
+    moderator: Option<Moderator>,
     rpc_config: Option<RpcConfig>,
     control_config: ControlServerConfig,
     control_socket: PathBuf,
@@ -76,24 +79,37 @@ impl Node {
             .init_storage()
             .await?;
 
-        let rpc_mempool_adapter = if is_single_node {
-            RpcMempoolAdapter {
+        let (rpc_mempool_adapter, moderator) = if is_single_node {
+            let adapter = RpcMempoolAdapter {
                 inner: Arc::new(MempoolAdapterSingleNodeImpl::new(
-                    &node_config.mempool,
+                    &node_config.mempool.node,
                     *base.network().peer_id(),
                 )?),
-            }
+            };
+            (adapter, None)
         } else {
-            RpcMempoolAdapter {
+            let mempool_db = MempoolDb::open(base.storage_context().clone())
+                .context("failed to create mempool db")?;
+
+            let moderator = Moderator::new(
+                base.network(),
+                mempool_db.clone(),
+                node_config.mempool.moderator,
+                crate::version_string(),
+            )?;
+
+            let adapter = RpcMempoolAdapter {
                 inner: Arc::new(MempoolAdapterStdImpl::new(
                     base.keypair().clone(),
                     base.network(),
                     base.peer_resolver(),
                     base.overlay_service(),
-                    base.storage_context(),
-                    &node_config.mempool,
+                    mempool_db,
+                    moderator.clone(),
+                    &node_config.mempool.node,
                 )?),
-            }
+            };
+            (adapter, Some(moderator))
         };
 
         let base = base
@@ -108,6 +124,7 @@ impl Node {
             overwrite_cold_boot_type: None,
             queue_state_factory,
             rpc_mempool_adapter,
+            moderator,
             rpc_config: node_config.rpc,
             control_config: node_config.control,
             control_socket,
@@ -272,6 +289,10 @@ impl Node {
             if let Some(profiler) = JemallocMemoryProfiler::connect() {
                 builder = builder.with_memory_profiler(Arc::new(profiler));
             }
+
+            if let Some(moderator) = self.moderator {
+                builder = builder.with_mempool_service(Arc::new(MempoolServer::new(moderator)));
+            };
 
             builder
                 .build(ControlServerVersion {

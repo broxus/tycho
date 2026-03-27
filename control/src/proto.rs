@@ -10,6 +10,7 @@ use tycho_types::prelude::*;
 use tycho_util::{FastHashSet, serde_helpers};
 
 use crate::error::ServerResult;
+use crate::mempool;
 
 #[tarpc::service]
 pub trait ControlServer {
@@ -83,6 +84,34 @@ pub trait ControlServer {
     async fn sign_elections_payload(
         req: ElectionsPayloadRequest,
     ) -> ServerResult<ElectionsPayloadResponse>;
+
+    /// Dumps the current in-memory moderator ban state.
+    async fn mempool_dump_bans() -> ServerResult<Vec<mempool::DumpBansItem>>;
+
+    /// Dumps the in-memory moderator event/toleration cache, not persisted journal rows.
+    async fn mempool_dump_events(req: mempool::DumpEventsRequest) -> ServerResult<String>;
+
+    /// Queues a manual ban and waits for persisted completion while the client stays connected.
+    /// After the node accepts the request, it cannot be cancelled (by timeout, disconnect, etc.).
+    async fn mempool_ban(req: mempool::BanRequest) -> ServerResult<String>;
+
+    /// Queues a manual unban and waits for persisted completion while the client stays connected.
+    /// Live visibility can lag because the peer must resolve again after unban.
+    /// After the node accepts the request, it cannot be cancelled (by timeout, disconnect, etc.).
+    async fn mempool_unban(peer_id: HashBytes) -> ServerResult<()>;
+
+    /// Lists persisted moderator journal records of all types.
+    /// Point key with `stored=true` can be used to retrieve full point with a separate call.
+    async fn mempool_list_events(
+        req: mempool::ListEventsRequest,
+    ) -> ServerResult<Vec<mempool::MempoolEventDisplay>>;
+
+    /// Deletes persisted moderator journal data only; does not mutate in-mem moderator state.
+    /// After the node accepts the request, it cannot be cancelled (by timeout, disconnect, etc.).
+    async fn mempool_delete_events(millis: std::ops::Range<u64>) -> ServerResult<()>;
+
+    /// Loads a point linked from a stored moderator journal record (if its key has `stored` flag)
+    async fn mempool_get_event_point(key: mempool::PointKey) -> ServerResult<Bytes>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

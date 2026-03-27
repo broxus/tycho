@@ -4,10 +4,12 @@ use tycho_storage::StorageContext;
 use tycho_storage::kv::NamedTables;
 use tycho_util::metrics::HistogramGuard;
 use weedb::WeeDb;
-use weedb::rocksdb::{IteratorMode, ReadOptions, WaitForCompactOptions, WriteBatch};
+use weedb::rocksdb::{DBRawIterator, IteratorMode, ReadOptions, WaitForCompactOptions, WriteBatch};
 
 use crate::models::{PointKey, Round};
 use crate::storage::tables::MempoolTables;
+
+pub const DB_CLEAN_ERRORS: &str = "tycho_mempool_db_clean_error_count";
 
 pub struct MempoolDb {
     #[allow(unused, reason = "context must have at least the lifetime of the DB")]
@@ -25,9 +27,17 @@ impl MempoolDb {
         Ok(Arc::new(Self { db, ctx }))
     }
 
+    pub fn storage_context(&self) -> &StorageContext {
+        &self.ctx
+    }
+
     #[cfg(any(test, feature = "test"))]
     pub fn file_storage(&self) -> anyhow::Result<tycho_storage::fs::Dir> {
         self.ctx.root_dir().create_subdir("mempool_files")
+    }
+
+    pub(crate) fn points_raw_iter(&self) -> DBRawIterator<'_> {
+        self.db.points.raw_iterator()
     }
 
     /// delete all stored data up to provided value (exclusive);

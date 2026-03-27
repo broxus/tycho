@@ -5,14 +5,13 @@ mod state_update_queue;
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use futures_util::FutureExt;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tracing::Instrument;
 use tycho_consensus::prelude::*;
 use tycho_crypto::ed25519::KeyPair;
 use tycho_network::{Network, OverlayService, PeerResolver};
-use tycho_storage::StorageContext;
 
 use crate::mempool::StateUpdateContext;
 use crate::mempool::impls::common::cache::Cache;
@@ -38,12 +37,10 @@ impl MempoolAdapterStdImpl {
         network: &Network,
         peer_resolver: &PeerResolver,
         overlay_service: &OverlayService,
-        storage_context: &StorageContext,
+        mempool_db: Arc<MempoolDb>,
+        moderator: Moderator,
         mempool_node_config: &MempoolNodeConfig,
     ) -> Result<Self> {
-        let mempool_db =
-            MempoolDb::open(storage_context.clone()).context("failed to create mempool db")?;
-
         Ok(Self {
             cache: Default::default(),
             net_args: EngineNetworkArgs {
@@ -51,6 +48,7 @@ impl MempoolAdapterStdImpl {
                 network: network.clone(),
                 peer_resolver: peer_resolver.clone(),
                 overlay_service: overlay_service.clone(),
+                moderator,
             },
             keeper: Mutex::new(StdSessionKeeper::new(mempool_node_config)),
             mempool_db,
@@ -70,6 +68,8 @@ impl MempoolAdapterStdImpl {
         let has_session_after_update = keeper.has_session_after_update(&self.cache, new_cx);
 
         if !has_session_after_update.instrument(span.clone()).await? {
+            (self.net_args.moderator.wait_init().instrument(span.clone())).await?;
+
             let _guard = span.enter();
             let merged_config = keeper.config_builder.build()?;
             keeper.engine_session = Some(self.start(&merged_config, new_cx)?);

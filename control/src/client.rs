@@ -1,5 +1,6 @@
 use std::io::Write;
 use std::path::Path;
+use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::StreamExt;
@@ -14,6 +15,7 @@ use tycho_util::compression::ZstdDecompressStream;
 use tycho_util::futures::JoinTask;
 
 use crate::error::{ClientError, ClientResult};
+use crate::mempool;
 use crate::proto::*;
 
 pub struct ControlClient {
@@ -305,6 +307,86 @@ impl ControlClient {
             .await?
             .map_err(Into::into)
             .map(|res| res.nodes)
+    }
+
+    pub async fn mempool_dump_bans(&self) -> ClientResult<Vec<mempool::DumpBansItem>> {
+        self.inner
+            .mempool_dump_bans(current_context())
+            .await?
+            .map_err(Into::into)
+    }
+
+    pub async fn mempool_dump_events(
+        &self,
+        peer_id: Option<&HashBytes>,
+        pretty: bool,
+    ) -> ClientResult<String> {
+        self.inner
+            .mempool_dump_events(current_context(), mempool::DumpEventsRequest {
+                peer_id: peer_id.copied(),
+                pretty,
+            })
+            .await?
+            .map_err(Into::into)
+    }
+
+    pub async fn mempool_ban(
+        &self,
+        peer_id: &HashBytes,
+        duration: Duration,
+        pretty: bool,
+    ) -> ClientResult<String> {
+        self.inner
+            .mempool_ban(current_context(), mempool::BanRequest {
+                peer_id: *peer_id,
+                duration,
+                pretty,
+            })
+            .await?
+            .map_err(Into::into)
+    }
+
+    pub async fn mempool_unban(&self, peer_id: &HashBytes) -> ClientResult<()> {
+        self.inner
+            .mempool_unban(current_context(), *peer_id)
+            .await?
+            .map_err(Into::into)
+    }
+
+    pub async fn mempool_list_events(
+        &self,
+        count: u16,
+        page: u32,
+        asc: bool,
+        with_ids: bool,
+    ) -> ClientResult<Vec<mempool::MempoolEventDisplay>> {
+        self.inner
+            .mempool_list_events(current_context(), mempool::ListEventsRequest {
+                count,
+                page,
+                asc,
+                with_ids,
+            })
+            .await?
+            .map_err(Into::into)
+    }
+
+    pub async fn mempool_delete_events(&self, since: u64, until: u64) -> ClientResult<()> {
+        self.inner
+            .mempool_delete_events(current_context(), since..until)
+            .await?
+            .map_err(Into::into)
+    }
+
+    pub async fn mempool_get_event_point(
+        &self,
+        round: u32,
+        digest: HashBytes,
+    ) -> ClientResult<Bytes> {
+        self.inner
+            .mempool_get_event_point(current_context(), mempool::PointKey(round, digest))
+            .await?
+            .map_err(Into::into)
     }
 }
 

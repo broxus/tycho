@@ -5,7 +5,7 @@ mod intercom;
 #[cfg(feature = "mock-feedback")]
 pub mod mock_feedback;
 mod models;
-// TODO: Move into submodules, e.g. merge with `MempoolAdapterStore`.
+mod moderator;
 mod storage;
 #[cfg(any(feature = "test", test))]
 pub mod test_utils;
@@ -21,7 +21,8 @@ pub mod prelude {
     pub use crate::intercom::InitPeers;
     pub use crate::models::{
         AnchorData, AnchorStageRole, MempoolOutput, MempoolPeerStats, MempoolStatsMergeError,
-        PointInfo,
+        Point, PointInfo,
     };
+    pub use crate::moderator::{Moderator, ModeratorConfig, RecordKey};
     pub use crate::storage::{MempoolAdapterStore, MempoolDb};
 }

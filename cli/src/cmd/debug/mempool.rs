@@ -10,15 +10,18 @@ use tokio::sync::{mpsc, oneshot};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_consensus::prelude::{
     EngineBinding, EngineNetworkArgs, EngineSession, InitPeers, InputBuffer, MempoolConfigBuilder,
-    MempoolDb, MempoolMergedConfig,
+    MempoolDb, MempoolMergedConfig, Moderator,
 };
 use tycho_consensus::test_utils::{AnchorConsumer, LastAnchorFile, test_logger};
+use tycho_control::{ControlEndpoint, ControlServer, ControlServerConfig, ControlServerVersion};
 use tycho_core::block_strider::{FileZerostateProvider, ZerostateProvider};
+use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_core::global_config::{GlobalConfig, ZerostateId};
 use tycho_core::node::NodeKeys;
+use tycho_core::overlay_client::PublicOverlayClient;
 use tycho_core::storage::CoreStorage;
 use tycho_crypto::ed25519;
-use tycho_network::PeerId;
+use tycho_network::{OverlayId, PeerId, PublicOverlay, service_message_fn};
 use tycho_storage::StorageContext;
 use tycho_types::boc::Boc;
 use tycho_types::cell::HashBytes;
@@ -28,7 +31,9 @@ use tycho_util::cli::metrics::init_metrics;
 use tycho_util::cli::{resolve_public_ip, signal};
 use tycho_util::futures::JoinTask;
 
+use crate::cmd::node::MempoolServer;
 use crate::node::NodeConfig;
+use crate::util::alloc::JemallocMemoryProfiler;
 
 /// run a node
 #[derive(Parser)]
@@ -43,6 +48,10 @@ pub struct CmdRun {
 
     #[clap(flatten)]
     key_variant: KeyVariant,
+
+    /// Path to the `control.sock` file
+    #[clap(long)]
+    control_socket: PathBuf,
 
     /// path to the logger config
     #[clap(long)]
@@ -112,12 +121,9 @@ impl CmdRun {
         let node_config =
             NodeConfig::from_file(&self.config).context("failed to load node config")?;
 
-        node_config.threads.init_global_rayon_pool()?;
-
         node_config
             .threads
-            .build_tokio_runtime()?
-            .block_on(self.run_impl(node_config))
+            .init_all_and_run(self.run_impl(node_config))
     }
 
     async fn run_impl(self, node_config: NodeConfig) -> Result<()> {
@@ -174,6 +180,9 @@ struct Mempool {
     mempool_db: Arc<MempoolDb>,
     input_buffer: InputBuffer,
     merged_conf: MempoolMergedConfig,
+
+    // a guard to abort the server future on drop
+    _control_endpoint: JoinTask<()>,
 }
 
 impl Mempool {
@@ -183,6 +192,20 @@ impl Mempool {
 
         let init_peers =
             InitPeers::new((global_config.bootstrap_peers.iter().map(|info| info.id)).collect());
+
+        let core_storage = {
+            let ctx = StorageContext::new(node_config.storage.clone())
+                .await
+                .context("failed to create storage context")?;
+            let mut core_storage = node_config.core_storage.clone();
+            if std::mem::replace(&mut core_storage.blob_db.pre_create_cas_tree, false) {
+                tracing::warn!("Cas_tree will not be created, blob_db config ignored");
+            }
+            CoreStorage::open(ctx, core_storage)
+                .await
+                .context("failed to create storage")?
+        };
+        let mempool_db = MempoolDb::open(core_storage.context().clone())?;
 
         let net_args = {
             let keys = NodeKeys::try_from(&cmd.key_variant)?;
@@ -206,6 +229,12 @@ impl Mempool {
 
             let key_pair = Arc::new(ed25519::KeyPair::from(&keys.as_secret()));
             let local_id: PeerId = key_pair.public_key.into();
+            let moderator = Moderator::new(
+                &network,
+                mempool_db.clone(),
+                node_config.mempool.moderator,
+                crate::version_string(),
+            )?;
 
             tracing::info!(
                 %local_id,
@@ -214,30 +243,18 @@ impl Mempool {
                 bootstrap_peers = global_config.bootstrap_peers.len(),
                 "initialized network"
             );
+            moderator.wait_init().await?;
 
             EngineNetworkArgs {
                 key_pair,
                 network,
                 peer_resolver,
                 overlay_service,
+                moderator,
             }
         };
 
         // Setup storage
-
-        let core_storage = {
-            let ctx = StorageContext::new(node_config.storage.clone())
-                .await
-                .context("failed to create storage context")?;
-            let mut core_storage = node_config.core_storage.clone();
-            if std::mem::replace(&mut core_storage.blob_db.pre_create_cas_tree, false) {
-                tracing::warn!("Cas_tree will not be created, blob_db config ignored");
-            }
-            CoreStorage::open(ctx, core_storage)
-                .await
-                .context("failed to create storage")?
-        };
-        let mempool_db = MempoolDb::open(core_storage.context().clone())?;
 
         let mut last_anchor_file = LastAnchorFile::reopen_in(&mempool_db.file_storage()?)?;
         let last_anchor_opt = last_anchor_file.read_opt()?;
@@ -260,7 +277,11 @@ impl Mempool {
         )
         .await?;
 
-        let mut config_builder = MempoolConfigBuilder::new(&node_config.mempool);
+        let control_server = control_server(&net_args, core_storage).await?;
+        let _control_endpoint =
+            spawn_control_server(control_server, node_config.control, cmd.control_socket).await?;
+
+        let mut config_builder = MempoolConfigBuilder::new(&node_config.mempool.node);
 
         config_builder.set_genesis(match &global_config.mempool {
             Some(global_config) => global_config.genesis_info,
@@ -289,6 +310,8 @@ impl Mempool {
             mempool_db,
             input_buffer,
             merged_conf,
+
+            _control_endpoint,
         })
     }
 
@@ -405,4 +428,57 @@ where
     });
 
     rx
+}
+
+async fn control_server(
+    net_args: &EngineNetworkArgs,
+    core_storage: CoreStorage,
+) -> Result<ControlServer> {
+    let overlay_stub = PublicOverlay::builder(OverlayId([0; _]))
+        .build(service_message_fn(|_| futures_util::future::ready(())));
+
+    let overlay_client_stub =
+        PublicOverlayClient::new(net_args.network.clone(), overlay_stub, Default::default());
+
+    let blockchain_rpc_client_stub = BlockchainRpcClient::builder()
+        .with_public_overlay_client(overlay_client_stub)
+        .build();
+
+    let mut builder = ControlServer::builder()
+        .with_network(&net_args.network)
+        .with_storage(core_storage)
+        .with_blockchain_rpc_client(blockchain_rpc_client_stub)
+        .with_mempool_service(Arc::new(MempoolServer::new(net_args.moderator.clone())));
+
+    #[cfg(feature = "jemalloc")]
+    if let Some(profiler) = JemallocMemoryProfiler::connect() {
+        builder = builder.with_memory_profiler(Arc::new(profiler));
+    }
+
+    builder
+        .build(ControlServerVersion {
+            version: crate::TYCHO_VERSION.to_owned(),
+            build: crate::TYCHO_BUILD.to_owned(),
+        })
+        .await
+}
+
+async fn spawn_control_server(
+    control_server: ControlServer,
+    control_config: ControlServerConfig,
+    control_socket: PathBuf,
+) -> Result<JoinTask<()>> {
+    let endpoint = ControlEndpoint::bind(&control_config, control_server.clone(), control_socket)
+        .await
+        .context("failed to setup control server endpoint")?;
+
+    tracing::info!(socket_path = %endpoint.socket_path().display(), "control server started");
+
+    Ok(JoinTask::new(async move {
+        scopeguard::defer! {
+            tracing::info!("control server stopped");
+        }
+
+        endpoint.serve().await;
+    }))
 }

@@ -36,6 +36,14 @@ This document contains the help content for the `tycho` command-line program.
 * [`tycho node overlay peers`↴](#tycho-node-overlay-peers)
 * [`tycho node dht`↴](#tycho-node-dht)
 * [`tycho node dht find-node`↴](#tycho-node-dht-find-node)
+* [`tycho node mempool`↴](#tycho-node-mempool)
+* [`tycho node mempool dump-bans`↴](#tycho-node-mempool-dump-bans)
+* [`tycho node mempool dump-events`↴](#tycho-node-mempool-dump-events)
+* [`tycho node mempool ban`↴](#tycho-node-mempool-ban)
+* [`tycho node mempool unban`↴](#tycho-node-mempool-unban)
+* [`tycho node mempool list-events`↴](#tycho-node-mempool-list-events)
+* [`tycho node mempool delete-events`↴](#tycho-node-mempool-delete-events)
+* [`tycho node mempool get-event-point`↴](#tycho-node-mempool-get-event-point)
 * [`tycho tool`↴](#tycho-tool)
 * [`tycho tool gen-dht`↴](#tycho-tool-gen-dht)
 * [`tycho tool gen-key`↴](#tycho-tool-gen-key)
@@ -188,6 +196,7 @@ Manage the node
 * `mem-profiler` — Manage memory profiler
 * `overlay` — Overlay runtime tools
 * `dht` — DHT runtime tools
+* `mempool` — Mempool journal and ban tools
 
 
 
@@ -591,6 +600,127 @@ Find at most `k` nodes that can contain the specified `key`
 * `--control-socket <CONTROL_SOCKET>` — Path to the control socket. Default: `$TYCHO_HOME/control.sock`
 * `-k <K>` — Maximum number of nodes to return
 * `--peer-id <PEER_ID>` — Target `PeerId`
+
+
+
+## `tycho node mempool`
+
+Mempool journal and ban tools
+
+**Usage:** `tycho node mempool <COMMAND>`
+
+###### **Subcommands:**
+
+* `dump-bans` — List all banned peers
+* `dump-events` — Dump in-memory mempool moderator event counters. This is ban cache event/toleration state, not persisted journal history
+* `ban` — Ban peer manually. After the node accepts the request, Ctrl-C, disconnect, or client timeout does not cancel it. Re-check ban state before retrying after interruption or timeout
+* `unban` — Unban peer manually. After the node accepts the request, Ctrl-C, disconnect, or client timeout does not cancel it. Re-check ban state before retrying after interruption or timeout
+* `list-events` — List persisted mempool moderator journal records of all types
+* `delete-events` — Delete persisted mempool journal entries and trigger compaction. Current live moderator state is left as-is; persisted edits affect bans after restart. After the node accepts the request, Ctrl-C, disconnect, or client timeout does not cancel it. Re-check persisted journal state before retrying after interruption or timeout
+* `get-event-point` — Get point linked with a persisted moderator journal record. Use `list-events --point-keys` first; only point keys marked `stored=true` are available
+
+
+
+## `tycho node mempool dump-bans`
+
+List all banned peers
+
+**Usage:** `tycho node mempool dump-bans [OPTIONS]`
+
+###### **Options:**
+
+* `--control-socket <CONTROL_SOCKET>` — Path to the control socket. Default: `$TYCHO_HOME/control.sock`
+* `-t`, `--table` — print as a table
+
+
+
+## `tycho node mempool dump-events`
+
+Dump in-memory mempool moderator event counters. This is ban cache event/toleration state, not persisted journal history
+
+**Usage:** `tycho node mempool dump-events [OPTIONS]`
+
+###### **Options:**
+
+* `--control-socket <CONTROL_SOCKET>` — Path to the control socket. Default: `$TYCHO_HOME/control.sock`
+* `-p`, `--peer-id <PEER_ID>` — single peer to filter
+
+
+
+## `tycho node mempool ban`
+
+Ban peer manually. After the node accepts the request, Ctrl-C, disconnect, or client timeout does not cancel it. Re-check ban state before retrying after interruption or timeout
+
+**Usage:** `tycho node mempool ban [OPTIONS] --peer-id <PEER_ID> --duration <DURATION>`
+
+###### **Options:**
+
+* `--control-socket <CONTROL_SOCKET>` — Path to the control socket. Default: `$TYCHO_HOME/control.sock`
+* `-p`, `--peer-id <PEER_ID>` — which peer to ban
+* `-d`, `--duration <DURATION>` — Ban duration, must be more than 1 minute and less than 4 years
+
+
+
+## `tycho node mempool unban`
+
+Unban peer manually. After the node accepts the request, Ctrl-C, disconnect, or client timeout does not cancel it. Re-check ban state before retrying after interruption or timeout
+
+**Usage:** `tycho node mempool unban [OPTIONS] --peer-id <PEER_ID>`
+
+###### **Options:**
+
+* `--control-socket <CONTROL_SOCKET>` — Path to the control socket. Default: `$TYCHO_HOME/control.sock`
+* `-p`, `--peer-id <PEER_ID>` — which peer to unban
+
+
+
+## `tycho node mempool list-events`
+
+List persisted mempool moderator journal records of all types
+
+**Usage:** `tycho node mempool list-events [OPTIONS]`
+
+###### **Options:**
+
+* `--control-socket <CONTROL_SOCKET>` — Path to the control socket. Default: `$TYCHO_HOME/control.sock`
+* `-c`, `--count <COUNT>` — amount of items per page
+
+  Default value: `10`
+* `-p`, `--page <PAGE>` — page to display, starts with 0
+
+  Default value: `0`
+* `-a`, `--asc` — apply historical order, starting with oldest (by default order is reversed)
+* `--point-keys` — Display point keys linked to the journal record. Use point keys with `stored=true` to fetch full points with `get-event-point`
+* `-t`, `--table` — print as a table
+
+
+
+## `tycho node mempool delete-events`
+
+Delete persisted mempool journal entries and trigger compaction. Current live moderator state is left as-is; persisted edits affect bans after restart. After the node accepts the request, Ctrl-C, disconnect, or client timeout does not cancel it. Re-check persisted journal state before retrying after interruption or timeout
+
+**Usage:** `tycho node mempool delete-events [OPTIONS] --since <SINCE> --until <UNTIL>`
+
+###### **Options:**
+
+* `--control-socket <CONTROL_SOCKET>` — Path to the control socket. Default: `$TYCHO_HOME/control.sock`
+* `-s`, `--since <SINCE>` — range start (inclusive) in UTC millis of event creation timestamp
+* `-u`, `--until <UNTIL>` — range end (exclusive) in UTC millis of event creation timestamp
+
+
+
+## `tycho node mempool get-event-point`
+
+Get point linked with a persisted moderator journal record. Use `list-events --point-keys` first; only point keys marked `stored=true` are available
+
+**Usage:** `tycho node mempool get-event-point [OPTIONS] --round <ROUND> --digest <DIGEST>`
+
+###### **Options:**
+
+* `--control-socket <CONTROL_SOCKET>` — Path to the control socket. Default: `$TYCHO_HOME/control.sock`
+* `-r`, `--round <ROUND>` — point round
+* `-d`, `--digest <DIGEST>` — point digest
+* `-b`, `--base64` — Print raw bytes as base64 instead of parsing (bypass old incompatible format parsing)
 
 
 
