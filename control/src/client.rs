@@ -14,6 +14,7 @@ use tycho_util::compression::ZstdDecompressStream;
 use tycho_util::futures::JoinTask;
 
 use crate::error::{ClientError, ClientResult};
+use crate::mempool;
 use crate::proto::*;
 
 pub struct ControlClient {
@@ -305,6 +306,24 @@ impl ControlClient {
             .await?
             .map_err(Into::into)
             .map(|res| res.nodes)
+    }
+
+    pub async fn mempool_list_events(
+        &self,
+        count: u16,
+        page: u32,
+        asc: bool,
+        with_ids: bool,
+    ) -> ClientResult<Vec<mempool::MempoolEventDisplay>> {
+        self.inner
+            .mempool_list_events(current_context(), mempool::ListEventsRequest {
+                count,
+                page,
+                asc,
+                with_ids,
+            })
+            .await?
+            .map_err(Into::into)
     }
 }
 

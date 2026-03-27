@@ -36,6 +36,8 @@ This document contains the help content for the `tycho` command-line program.
 * [`tycho node overlay peers`↴](#tycho-node-overlay-peers)
 * [`tycho node dht`↴](#tycho-node-dht)
 * [`tycho node dht find-node`↴](#tycho-node-dht-find-node)
+* [`tycho node mempool`↴](#tycho-node-mempool)
+* [`tycho node mempool list-events`↴](#tycho-node-mempool-list-events)
 * [`tycho tool`↴](#tycho-tool)
 * [`tycho tool gen-dht`↴](#tycho-tool-gen-dht)
 * [`tycho tool gen-key`↴](#tycho-tool-gen-key)
@@ -188,6 +190,7 @@ Manage the node
 * `mem-profiler` — Manage memory profiler
 * `overlay` — Overlay runtime tools
 * `dht` — DHT runtime tools
+* `mempool` — Mempool journal and ban tools
 
 
 
@@ -591,6 +594,39 @@ Find at most `k` nodes that can contain the specified `key`
 * `--control-socket <CONTROL_SOCKET>` — Path to the control socket. Default: `$TYCHO_HOME/control.sock`
 * `-k <K>` — Maximum number of nodes to return
 * `--peer-id <PEER_ID>` — Target `PeerId`
+
+
+
+## `tycho node mempool`
+
+Mempool journal and ban tools
+
+**Usage:** `tycho node mempool <COMMAND>`
+
+###### **Subcommands:**
+
+* `list-events` — List persisted mempool moderator journal records of all types
+
+
+
+## `tycho node mempool list-events`
+
+List persisted mempool moderator journal records of all types
+
+**Usage:** `tycho node mempool list-events [OPTIONS]`
+
+###### **Options:**
+
+* `--control-socket <CONTROL_SOCKET>` — Path to the control socket. Default: `$TYCHO_HOME/control.sock`
+* `-c`, `--count <COUNT>` — amount of items per page
+
+  Default value: `10`
+* `-p`, `--page <PAGE>` — page to display, starts with 0
+
+  Default value: `0`
+* `-a`, `--asc` — apply historical order, starting with oldest (by default order is reversed)
+* `--point-keys` — Display point keys linked to the journal record. Use point keys with `stored=true` to fetch full points with `get-event-point`
+* `-t`, `--table` — print as a table
 
 
 

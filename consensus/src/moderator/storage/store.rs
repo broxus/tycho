@@ -11,7 +11,8 @@ use weedb::rocksdb::{Direction, IteratorMode, WriteBatch};
 use crate::models::{PointKey, UnixTime};
 use crate::moderator::storage::db::ModeratorDb;
 use crate::moderator::{
-    JournalPoint, JournalPointData, RecordBatch, RecordKey, RecordKind, RecordValueShort,
+    JournalPoint, JournalPointData, RecordBatch, RecordFull, RecordKey, RecordKind, RecordValue,
+    RecordValueShort,
 };
 use crate::storage::{MempoolDb, meter_db_clean_error};
 
@@ -70,6 +71,25 @@ impl JournalStore {
             .iterator(IteratorMode::From(&min_key, Direction::Forward))
             .filter_map_ok(move |(k, v)| filter_parse(&k, &v, all_since).transpose())
             .flatten()
+    }
+
+    pub fn load_records(&self, count: u16, page: u32, asc: bool) -> Result<Vec<RecordFull>> {
+        let mode = if asc {
+            IteratorMode::Start
+        } else {
+            IteratorMode::End
+        };
+        (self.0.this.db.journal)
+            .iterator(mode)
+            .skip(count as usize * page as usize)
+            .take(count as usize)
+            .map_ok(|(k, v)| {
+                let key = RecordKey::read_from(&mut &k[..])?;
+                let value = RecordValue::read_from(&mut &v[..])?;
+                Ok(RecordFull { key, value })
+            })
+            .flatten()
+            .try_collect()
     }
 
     pub fn delete(&self, millis: std::ops::Range<UnixTime>) -> Result<()> {
