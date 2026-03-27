@@ -1,5 +1,6 @@
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, atomic};
 
 use anyhow::{Context, Result};
 use futures_util::FutureExt;
@@ -18,6 +19,7 @@ use crate::moderator::journal::item::{JournalItem, JournalItemFull};
 use crate::moderator::journal::record_key::RecordKeyFactory;
 use crate::moderator::{
     DelayedDbTask, JournalConfig, JournalEvent, JournalPoint, JournalStore, ModeratorConfig,
+    RecordFull,
 };
 use crate::storage::MempoolDb;
 
@@ -64,10 +66,12 @@ impl Moderator {
 
         let ban_core = BanCore::new(config.bans, record_key_factory, delayed_db_tasks_tx);
 
+        let is_init = Arc::new(AtomicBool::new(false));
         let (init_tx, init_rx) = oneshot::channel();
 
         let inner = Arc::new(ModeratorInner {
             ban_core: ban_core.clone(),
+            journal_store: journal_store.clone(),
             mempool_conf_tx,
             _delayed_db_writer: {
                 let f = ModeratorInner::delayed_db_runner(
@@ -79,6 +83,7 @@ impl Moderator {
                 );
                 JoinTask::new(async { f.await.expect("delayed db runner failed") })
             },
+            is_init: is_init.clone(),
             init_task: {
                 let journal_store_2 = journal_store.clone();
                 let f = move || {
@@ -86,6 +91,7 @@ impl Moderator {
                     (ban_core.restore(started, short_events))
                         .map_err(|e| format!("restore: {e}"))?;
                     (init_tx.send(())).map_err(|()| "cannot notify mempool init".to_string())?;
+                    is_init.store(true, atomic::Ordering::Relaxed);
                     Ok(())
                 };
                 let task = async move {
@@ -121,6 +127,10 @@ impl Moderator {
     pub(crate) fn apply_mempool_config(&self, conf: &MempoolConfig) {
         self.0.apply_mempool_config(conf);
     }
+
+    pub fn list_events(&self, count: u16, page: u32, asc: bool) -> Result<Vec<RecordFull>> {
+        self.0.list_events(count, page, asc)
+    }
 }
 
 trait ModeratorTrait: Send + Sync {
@@ -128,6 +138,7 @@ trait ModeratorTrait: Send + Sync {
     fn set_peer_schedule(&self, peer_schedule: &PeerSchedule);
     fn report(&self, event: JournalEvent);
     fn apply_mempool_config(&self, conf: &MempoolConfig);
+    fn list_events(&self, count: u16, page: u32, asc: bool) -> Result<Vec<RecordFull>>;
 }
 
 #[cfg(any(test, feature = "test"))]
@@ -138,12 +149,17 @@ impl ModeratorTrait for () {
     fn set_peer_schedule(&self, _: &PeerSchedule) {}
     fn report(&self, _: JournalEvent) {}
     fn apply_mempool_config(&self, _: &MempoolConfig) {}
+    fn list_events(&self, _: u16, _: u32, _: bool) -> Result<Vec<RecordFull>> {
+        Ok(Vec::new())
+    }
 }
 
 struct ModeratorInner {
     /// because gets created and init once at a node start and may outlive engine session
     init_task: Shared<BoxFuture<'static, std::result::Result<(), String>>>,
+    is_init: Arc<AtomicBool>,
     ban_core: BanCore,
+    journal_store: JournalStore,
     mempool_conf_tx: mpsc::UnboundedSender<MempoolConfig>,
     _delayed_db_writer: JoinTask<()>, // moderator outlives mempool session(s)
 }
@@ -164,9 +180,22 @@ impl ModeratorTrait for ModeratorInner {
     fn apply_mempool_config(&self, conf: &MempoolConfig) {
         self.mempool_conf_tx.send(conf.clone()).ok();
     }
+
+    fn list_events(&self, count: u16, page: u32, asc: bool) -> Result<Vec<RecordFull>> {
+        self.check_init()?;
+        self.journal_store.load_records(count, page, asc)
+    }
 }
 
 impl ModeratorInner {
+    fn check_init(&self) -> Result<()> {
+        if self.is_init.load(atomic::Ordering::Relaxed) {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("moderator is not init yet"))
+        }
+    }
+
     async fn delayed_db_runner(
         journal_store: JournalStore,
         journal_config: JournalConfig,

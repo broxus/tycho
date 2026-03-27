@@ -10,6 +10,7 @@ use tycho_types::prelude::*;
 use tycho_util::{FastHashSet, serde_helpers};
 
 use crate::error::ServerResult;
+use crate::mempool;
 
 #[tarpc::service]
 pub trait ControlServer {
@@ -83,6 +84,12 @@ pub trait ControlServer {
     async fn sign_elections_payload(
         req: ElectionsPayloadRequest,
     ) -> ServerResult<ElectionsPayloadResponse>;
+
+    /// Lists persisted moderator journal records of all types.
+    /// Point key with `stored=true` can be used to retrieve full point with a separate call.
+    async fn mempool_list_events(
+        req: mempool::ListEventsRequest,
+    ) -> ServerResult<Vec<mempool::MempoolEventDisplay>>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
