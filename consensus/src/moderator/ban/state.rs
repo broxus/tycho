@@ -69,6 +69,20 @@ impl BanCoreState {
         Some(q_ban)
     }
 
+    /// returns `false` in case a ban to remove does not exist
+    pub fn manual_ban(&mut self, peer_id: &PeerId, q_ban: CurrentBan) -> bool {
+        let Some(is_applied) = self.cache.manual_ban(peer_id, q_ban) else {
+            return false;
+        };
+        if is_applied {
+            meter_banned(peer_id, true);
+            if let Some(peer_schedule) = self.peer_schedule.as_ref().and_then(|ps| ps.upgrade()) {
+                peer_schedule.set_banned(&[*peer_id]);
+            }
+        }
+        true
+    }
+
     /// returns `false` in case a ban to remove neither exist nor matches expected
     #[must_use]
     pub fn unban(&mut self, peer_id: &PeerId, expected_until: UnixTime) -> bool {
