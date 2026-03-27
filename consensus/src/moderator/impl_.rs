@@ -265,7 +265,13 @@ fn meter_event(item: &JournalItem) {
     let JournalItem::Event(event) = item else {
         return;
     };
-    let kind = format!("{:?}", event.tag());
+    let kind = match event {
+        JournalEvent::BadRequest(_, query, _) => format!("{query:?} request tl err"),
+        JournalEvent::BadResponse(_, query, _) => format!("{query:?} response tl err"),
+        JournalEvent::QueryLimitReached(_, query) => format!("{query:?} rate limit"),
+        JournalEvent::PointIntegrityError(_, query, err) => format!("{query:?} {err:?}"),
+        other => format!("{:?}", other.tag()),
+    };
     let labels = [("kind", kind), ("peer_id", format!("{}", event.peer_id()))];
     metrics::counter!("tycho_mempool_moderator_event", &labels).increment(1);
 }
