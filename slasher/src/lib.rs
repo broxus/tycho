@@ -66,7 +66,7 @@ pub struct SlasherConfig {
 
     /// Absolute threshold of bad-session weight after which validator is bad in a vset epoch.
     ///
-    /// Default: `1000`
+    /// Default: `100`
     pub bad_sessions_weight_threshold: u64,
 }
 
@@ -76,7 +76,7 @@ impl Default for SlasherConfig {
             message_ttl: Duration::from_secs(30),
             message_retry_interval: Duration::from_secs(1),
             prev_delivery_timeout: Some(Duration::from_secs(5)),
-            bad_sessions_weight_threshold: 1000,
+            bad_sessions_weight_threshold: 100,
         }
     }
 }
@@ -167,6 +167,7 @@ impl Slasher {
             .config
             .get_current_validator_set_raw()?
             .repr_hash();
+
         tracing::trace!(
             target: tracing_targets::SLASHER,
             ?slasher_params,
@@ -343,10 +344,26 @@ struct SlasherSharedState {
 impl SlasherSharedState {
     fn analyze_closed_vset_epochs(&self) -> Result<()> {
         let snapshot = self.storage.snapshot();
-        for epoch in snapshot.load_closed_vset_epochs()? {
+        let closed_vset_epoches = snapshot.load_closed_vset_epochs()?;
+        if closed_vset_epoches.is_empty() {
+            tracing::warn!(
+                target: tracing_targets::SLASHER,
+                "closes vset epoches not found"
+            );
+            return Ok(());
+        }
+
+        for epoch in closed_vset_epoches {
             if snapshot.load_vset_report(epoch.start_session_id)?.is_some() {
                 continue;
             }
+
+            tracing::info!(
+                target: tracing_targets::SLASHER,
+                vset_hash = ?epoch.vset_hash,
+                start_id = ?epoch.start_session_id,
+                "analyzing closed vset epoch"
+            );
 
             let mut session_reports = Vec::new();
             for meta in snapshot.load_sessions_for_epoch(epoch.start_session_id)? {
@@ -360,6 +377,7 @@ impl SlasherSharedState {
                         report
                     }
                 };
+                Self::log_session_report(&report);
                 session_reports.push(report);
             }
 
@@ -369,9 +387,56 @@ impl SlasherSharedState {
                 self.config.bad_sessions_weight_threshold,
             );
             self.storage.store_vset_report(&report)?;
+            Self::log_vset_report(&report);
         }
 
         Ok(())
+    }
+
+    fn log_session_report(report: &SessionPenaltyReport) {
+        for item in &report.validators {
+            tracing::info!(
+                target: tracing_targets::SLASHER,
+                session_id = ?report.session_id,
+                epoch_start_session_id = ?report.epoch_start_session_id,
+                validator_idx = item.validator_idx,
+                earned_points = item.earned_points,
+                max_points = item.max_points,
+                session_weight = report.session_weight,
+                is_bad = item.is_bad,
+                "scored validator in validation session",
+            );
+        }
+    }
+
+    fn log_vset_report(report: &VsetPenaltyReport) {
+        let bad_validator_indices = report
+            .validators
+            .iter()
+            .filter(|item| item.is_bad)
+            .map(|item| item.validator_idx)
+            .collect::<Vec<_>>();
+
+        tracing::info!(
+            target: tracing_targets::SLASHER,
+            epoch_start_session_id = ?report.epoch_start_session_id,
+            vset_hash = %report.vset_hash,
+            bad_validator_indices = ?bad_validator_indices,
+            "finished scoring closed vset epoch",
+        );
+
+        for item in &report.validators {
+            tracing::info!(
+                target: tracing_targets::SLASHER,
+                epoch_start_session_id = ?report.epoch_start_session_id,
+                vset_hash = %report.vset_hash,
+                validator_idx = item.validator_idx,
+                bad_sessions_weight = item.bad_sessions_weight,
+                total_sessions_weight = item.total_sessions_weight,
+                is_bad = item.is_bad,
+                "computed final validator verdict in vset epoch",
+            );
+        }
     }
 
     #[instrument(skip_all, fields(session_id = ?info.session_id))]
