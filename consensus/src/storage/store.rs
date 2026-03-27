@@ -13,7 +13,7 @@ use weedb::rocksdb::{DBRawIterator, IteratorMode, ReadOptions, WriteBatch};
 use crate::effects::AltFormat;
 use crate::models::point_status::*;
 use crate::models::{Digest, Point, PointId, PointInfo, PointKey, PointRestore, Round};
-use crate::storage::MempoolDb;
+use crate::storage::{MempoolDb, meter_db_clean_points_time};
 
 #[derive(Clone)]
 pub struct MempoolStore(Arc<dyn MempoolStoreImpl>);
@@ -574,6 +574,7 @@ impl MempoolStoreImpl for MempoolDb {
 
     fn init_storage(&self, overlay_id: &OverlayId) -> Result<()> {
         if !self.has_compatible_data(overlay_id.as_bytes())? {
+            let _call_duration = meter_db_clean_points_time();
             self.remove_all_points()?;
             tracing::info!("mempool DB cleaned on init");
             self.wait_for_compact()?;

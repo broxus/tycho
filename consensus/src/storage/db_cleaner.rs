@@ -6,7 +6,7 @@ use crate::effects::{Cancelled, Ctx, RoundCtx, Task};
 use crate::engine::round_watch::{Commit, Consensus, RoundWatcher, TopKnownAnchor};
 use crate::engine::{ConsensusConfigExt, MempoolConfig, NodeConfig};
 use crate::models::{PointKey, Round};
-use crate::storage::MempoolDb;
+use crate::storage::{MempoolDb, meter_db_clean_error, meter_db_clean_points_time};
 
 pub struct DbCleaner {
     mempool_db: Arc<MempoolDb>,
@@ -89,9 +89,7 @@ impl DbCleaner {
                     let task = round_ctx.task().spawn_blocking(move || {
                         let mut up_to_exclusive = [0; _];
                         PointKey::fill_prefix(new_least_to_keep, &mut up_to_exclusive);
-
-                        const DB_CLEAN_ERRORS: &str = "tycho_mempool_db_clean_error_count";
-
+                        let _call_duration = meter_db_clean_points_time();
                         match db.clean_points(&up_to_exclusive) {
                             Ok(Some((Round(first), Round(last)))) => {
                                 const CLEANED: &str = "tycho_mempool_rounds_db_cleaned";
@@ -109,7 +107,7 @@ impl DbCleaner {
                                 );
                             }
                             Err(e) => {
-                                metrics::gauge!(DB_CLEAN_ERRORS, "kind" => "points").increment(1);
+                                meter_db_clean_error("points");
                                 tracing::error!(
                                     "delete range of mempool data before round {} failed: {e}",
                                     new_least_to_keep.0
@@ -119,7 +117,7 @@ impl DbCleaner {
                         match db.wait_for_compact() {
                             Ok(()) => {}
                             Err(e) => {
-                                metrics::gauge!(DB_CLEAN_ERRORS, "kind" => "compact").increment(1);
+                                meter_db_clean_error("compact_points");
                                 tracing::error!("wait compaction of mempool DB failed: {e}");
                             }
                         };

@@ -5,7 +5,8 @@ mod intercom;
 #[cfg(feature = "mock-feedback")]
 pub mod mock_feedback;
 mod models;
-// TODO: Move into submodules, e.g. merge with `MempoolAdapterStore`.
+#[allow(dead_code)]
+mod moderator;
 mod storage;
 #[cfg(any(feature = "test", test))]
 pub mod test_utils;

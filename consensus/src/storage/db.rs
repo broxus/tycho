@@ -2,11 +2,11 @@ use std::sync::Arc;
 
 use tycho_storage::StorageContext;
 use tycho_storage::kv::NamedTables;
-use tycho_util::metrics::HistogramGuard;
 use weedb::WeeDb;
-use weedb::rocksdb::{IteratorMode, ReadOptions, WaitForCompactOptions, WriteBatch};
+use weedb::rocksdb::{DBRawIterator, IteratorMode, ReadOptions, WaitForCompactOptions, WriteBatch};
 
 use crate::models::{PointKey, Round};
+use crate::storage::meter_db_wait_for_compact_time;
 use crate::storage::tables::MempoolTables;
 
 pub struct MempoolDb {
@@ -25,14 +25,21 @@ impl MempoolDb {
         Ok(Arc::new(Self { db, ctx }))
     }
 
+    pub fn storage_context(&self) -> &StorageContext {
+        &self.ctx
+    }
+
     #[cfg(any(test, feature = "test"))]
     pub fn file_storage(&self) -> anyhow::Result<tycho_storage::fs::Dir> {
         self.ctx.root_dir().create_subdir("mempool_files")
     }
 
+    pub(crate) fn points_raw_iter(&self) -> DBRawIterator<'_> {
+        self.db.points.raw_iterator()
+    }
+
     /// Doesn't try to read maybe incompatible data
     pub(super) fn remove_all_points(&self) -> anyhow::Result<()> {
-        let _call_duration = HistogramGuard::begin("tycho_mempool_store_clean_points_time");
         let up_to_exclusive = [u8::MAX; PointKey::MAX_TL_BYTES];
         let zero = [0; PointKey::MAX_TL_BYTES];
         let none = None::<[u8; PointKey::MAX_TL_BYTES]>;
@@ -61,7 +68,6 @@ impl MempoolDb {
         &self,
         up_to_exclusive: &[u8; PointKey::MAX_TL_BYTES],
     ) -> anyhow::Result<Option<(Round, Round)>> {
-        let _call_duration = HistogramGuard::begin("tycho_mempool_store_clean_points_time");
         let zero = [0; PointKey::MAX_TL_BYTES];
         let none = None::<[u8; PointKey::MAX_TL_BYTES]>;
 
@@ -123,7 +129,7 @@ impl MempoolDb {
 
     /// Use when no reads/writes are possible, and this should finish prior other ops
     pub(super) fn wait_for_compact(&self) -> anyhow::Result<()> {
-        let _call_duration = HistogramGuard::begin("tycho_mempool_db_wait_for_compact_time");
+        let _call_duration = meter_db_wait_for_compact_time();
         let mut opt = WaitForCompactOptions::default();
         opt.set_flush(true);
         self.db.rocksdb().wait_for_compact(&opt)?;

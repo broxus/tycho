@@ -2960,6 +2960,25 @@ def mempool_stats() -> RowPanel:
 
 def mempool_misc() -> RowPanel:
     metrics = [
+        create_gauge_panel(
+            "tycho_mempool_moderator_banned",
+            "Banned",
+            unit_format=UNITS.YES_NO,
+            labels=['peer_id=~"$peer_id"'],
+            legend_format="{{peer_id}} <- {{instance}}",
+        ),
+        create_counter_panel(
+            expr_sum_increase(
+                f"tycho_mempool_moderator_event",
+                label_selectors=['peer_id=~"$peer_id"'],
+                range_selector="$__interval",
+                by_labels=["instance", "kind", "peer_id"],
+            ),
+            "Moderator event",
+            labels_selectors=['peer_id=~"$peer_id"'],
+            legend_format="{{instance}} {{kind}} {{peer_id}}",
+            by_labels=["instance", "kind", "peer_id"],
+        ),
         create_counter_panel(
             expr_sum_increase(
                 "tycho_mempool_query_limited_responder",
@@ -3232,8 +3251,12 @@ def mempool_storage() -> RowPanel:
             "Clean points task",
         ),
         create_heatmap_panel(
+            "tycho_mempool_store_clean_events_time",
+            "Clean events task",
+        ),
+        create_heatmap_panel(
             "tycho_mempool_db_wait_for_compact_time",
-            "Wait for compact",
+            "Wait for compact in clean tasks",
         ),
         create_gauge_panel(
             "tycho_mempool_db_clean_error_count",
