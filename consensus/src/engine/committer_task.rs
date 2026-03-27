@@ -17,22 +17,29 @@ use crate::models::{
     AnchorData, MempoolOutput, MempoolPeerStats, MempoolStatsMergeError, MempoolStatsOutput,
     PointInfo, Round,
 };
+use crate::moderator::Moderator;
 
 pub struct CommitterTask {
-    inner: Inner,
+    state: State,
     pub interval: Interval,
-    top_known_anchor: RoundWatch<TopKnownAnchor>,
 }
 
-enum Inner {
+enum State {
     Uninit,
-    Ready(Box<Committer>),
-    Running(Task<Result<Box<Committer>, EngineError>>),
+    Ready(Box<Inner>),
+    Running(Task<Result<Box<Inner>, EngineError>>),
+}
+
+struct Inner {
+    committer: Committer,
+    moderator: Moderator,
+    top_known_anchor: RoundWatch<TopKnownAnchor>,
 }
 
 impl CommitterTask {
     pub fn new(
         committer: Committer,
+        moderator: &Moderator,
         top_known_anchor: &RoundWatch<TopKnownAnchor>,
         conf: &MempoolConfig,
     ) -> Self {
@@ -42,18 +49,21 @@ impl CommitterTask {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         Self {
-            inner: Inner::Ready(Box::new(committer)),
+            state: State::Ready(Box::new(Inner {
+                committer,
+                moderator: moderator.clone(),
+                top_known_anchor: top_known_anchor.clone(),
+            })),
             interval,
-            top_known_anchor: top_known_anchor.clone(),
         }
     }
 
     pub async fn ready_mut(&mut self) -> EngineResult<Option<&mut Committer>> {
-        if let Some(committer) = self.inner.take_ready().await? {
-            self.inner = Inner::Ready(committer);
+        if let Some(inner) = self.state.take_ready().await? {
+            self.state = State::Ready(inner);
         };
-        Ok(match &mut self.inner {
-            Inner::Ready(committer) => Some(committer),
+        Ok(match &mut self.state {
+            State::Ready(inner) => Some(&mut inner.committer),
             _ => None,
         })
     }
@@ -63,22 +73,21 @@ impl CommitterTask {
         anchors_tx: &mpsc::UnboundedSender<MempoolOutput>,
         round_ctx: &RoundCtx,
     ) -> EngineResult<()> {
-        let Some(committer) = self.inner.take_ready().await? else {
+        let Some(inner) = self.state.take_ready().await? else {
             return Ok(());
         };
-        let tka = self.top_known_anchor.get();
         let anchors_tx = anchors_tx.clone();
-        self.inner = Inner::running(committer, tka, anchors_tx, round_ctx);
+        self.state = State::running(inner, anchors_tx, round_ctx);
         Ok(())
     }
 }
 
-impl Inner {
-    async fn take_ready(&mut self) -> EngineResult<Option<Box<Committer>>> {
-        Ok(match mem::replace(self, Inner::Uninit) {
-            Inner::Uninit => panic!("must be taken only once"),
-            Inner::Ready(committer) => Some(committer),
-            Inner::Running(task) => {
+impl State {
+    async fn take_ready(&mut self) -> EngineResult<Option<Box<Inner>>> {
+        Ok(match mem::replace(self, State::Uninit) {
+            State::Uninit => panic!("must be taken only once"),
+            State::Ready(inner) => Some(inner),
+            State::Running(task) => {
                 if task.is_finished() {
                     Some(task.await??)
                 } else {
@@ -90,8 +99,7 @@ impl Inner {
     }
 
     fn running(
-        mut committer: Box<Committer>,
-        top_known_anchor: Round,
+        mut inner: Box<Inner>,
         anchors_tx: mpsc::UnboundedSender<MempoolOutput>,
         round_ctx: &RoundCtx,
     ) -> Self {
@@ -102,9 +110,9 @@ impl Inner {
             let _guard = HistogramGuard::begin("tycho_mempool_engine_commit_time");
             let _span = round_ctx.span().enter();
 
-            let top_round = committer.top_round();
-            let start_bottom = committer.bottom_round().0;
-            let start_dag_len = committer.dag_len();
+            let top_round = inner.committer.top_round();
+            let start_bottom = inner.committer.bottom_round().0;
+            let start_dag_len = inner.committer.dag_len();
 
             let rounds_drop_allowed = |conflict_at: Round| {
                 // reset and replay offsets both include additional rounds just to be dropped
@@ -112,7 +120,7 @@ impl Inner {
                     > round_ctx.conf().consensus.reset_rounds() - DAG_ROUNDS_TO_DROP;
                 let min_dag_len =
                     (top_round - conflict_at.0).0 > round_ctx.conf().consensus.min_front_rounds();
-                let replay_since = top_known_anchor
+                let replay_since = inner.top_known_anchor.get()
                     - (round_ctx.conf().consensus.replay_anchor_rounds() - DAG_ROUNDS_TO_DROP);
                 to_reset || (min_dag_len && conflict_at < replay_since)
             };
@@ -120,15 +128,15 @@ impl Inner {
             let mut attempt = 0;
             let committed = loop {
                 attempt += 1;
-                match committer.commit(round_ctx.conf())? {
+                match inner.committer.commit(round_ctx.conf())? {
                     Ok(data) => break Some(data),
                     Err(HistoryConflict(round)) if rounds_drop_allowed(round) => {
-                        let dropped_ok = committer.drop_upto(round.next(), round_ctx.conf());
+                        let dropped_ok = inner.committer.drop_upto(round.next(), round_ctx.conf());
                         tracing::info!(
                             start_bottom,
                             start_dag_len,
-                            current_bottom = ?committer.bottom_round(),
-                            current_dag_len = committer.dag_len(),
+                            current_bottom = inner.committer.bottom_round().0,
+                            current_dag_len = inner.committer.dag_len(),
                             attempt,
                             "comitter rounds were dropped as impossible to sync"
                         );
@@ -139,7 +147,7 @@ impl Inner {
                                 "infinite loop on dropping dag rounds: attempt {attempt}, \
                                  start dag len {start_dag_len}, start bottom {start_bottom} \
                                  resulting {:?}",
-                                committer.alt()
+                                inner.committer.alt()
                             )
                         };
                     }
@@ -148,8 +156,8 @@ impl Inner {
                             err = %history_conflict,
                             start_bottom,
                             start_dag_len,
-                            current_bottom = ?committer.bottom_round(),
-                            current_dag_len = committer.dag_len(),
+                            current_bottom = inner.committer.bottom_round().0,
+                            current_dag_len = inner.committer.dag_len(),
                             attempt,
                             "will try to fix local history"
                         );
@@ -171,8 +179,12 @@ impl Inner {
                 // stats should be reported for each round separately - to be grouped by consumer
                 let mut all_stats = Vec::with_capacity(anchor_rounds.len());
                 for anchor_round in anchor_rounds {
-                    let stats = committer.remove_committed(anchor_round, round_ctx.conf())?;
+                    let (stats, events) =
+                        (inner.committer).remove_committed(anchor_round, round_ctx.conf())?;
                     all_stats.push(stats);
+                    for event in events {
+                        inner.moderator.report(event);
+                    }
                     anchors_tx
                         .send(MempoolOutput::CommitFinished(anchor_round))
                         .map_err(|_closed| Cancelled())?;
@@ -180,9 +192,9 @@ impl Inner {
                 round_ctx.meter_stats(all_stats);
             }
 
-            EngineCtx::meter_dag_len(committer.dag_len());
+            EngineCtx::meter_dag_len(inner.committer.dag_len());
 
-            Ok(committer)
+            Ok(inner)
         };
 
         Self::Running(task_ctx.spawn_blocking(task))
@@ -267,7 +279,7 @@ impl RoundCtx {
         }
 
         for (peer_id, stats) in &reduced {
-            let labels = [("peer_id", format!("{:.4}", peer_id))];
+            let labels = [("peer_id", format!("{}", peer_id))];
             metrics::counter!("tycho_mempool_stats_filled_rounds", &labels)
                 .increment(u64::from(stats.filled_rounds()));
             if let Some(counters) = stats.counters() {
