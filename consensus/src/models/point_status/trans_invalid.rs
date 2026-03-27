@@ -20,6 +20,9 @@ pub struct PointStatusTransInvalid {
     pub anchor_flags: AnchorFlags,
     pub committed: Option<CommitHistoryPart>,
     pub root_cause: IndirectLink,
+
+    // not a stored flag, just a mark was it written or not
+    pub is_restored: bool,
 }
 
 impl PointStatus for PointStatusTransInvalid {
@@ -58,6 +61,8 @@ impl PointStatusStore for PointStatusTransInvalid {
             anchor_flags: AnchorFlags::from_bits_retain(stored[2]),
             committed: CommitHistoryPart::read(&stored[CommitHistoryPart::RANGE])?,
             root_cause: IndirectLink::read_from(&mut &stored[Self::ROOT_CAUSE_RANGE])?,
+
+            is_restored: true,
         })
     }
 
@@ -124,6 +129,7 @@ impl super::PointStatusStoreRandom for PointStatusTransInvalid {
             anchor_flags: AnchorFlags::from_bits_truncate(rand::random()),
             committed: CommitHistoryPart::random_opt(),
             root_cause: IndirectLink::random(),
+            is_restored: true, // will be restored as `true`
         }
     }
 }
