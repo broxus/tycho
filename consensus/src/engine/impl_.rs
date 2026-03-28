@@ -69,7 +69,6 @@ impl Engine {
         let db_cleaner = DbCleaner::new(
             bind.mempool_db.clone(),
             bind.top_known_anchor.receiver(),
-            bind.commit_finished.receiver(),
             consensus_round.receiver(),
         );
 
@@ -493,7 +492,7 @@ fn collator_feedback(
                 "enter pause by collator feedback",
             );
             *is_paused = true;
-            anchors_tx.send(MempoolOutput::Paused).ok();
+            anchors_tx.send(MempoolOutput::Paused(true)).ok();
         }
 
         let timeout =
@@ -533,7 +532,7 @@ fn collator_feedback(
             "exit from pause by collator feedback",
         );
         *is_paused = false;
-        anchors_tx.send(MempoolOutput::Running).ok();
+        anchors_tx.send(MempoolOutput::Paused(false)).ok();
         Ok(pause_at)
     } else {
         Ok(pause_at)

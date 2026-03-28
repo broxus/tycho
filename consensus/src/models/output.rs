@@ -16,10 +16,8 @@ pub struct AnchorData {
 
 pub enum MempoolOutput {
     NextAnchor(Box<AnchorData>),
-    // must be sent after NextAnchor to make data available for GC
-    CommitFinished(Round),
-    Running,
-    Paused,
+    /// just an info message: `true` when set on pause
+    Paused(bool),
 }
 
 pub struct MempoolStatsOutput {

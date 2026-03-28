@@ -173,9 +173,6 @@ impl Inner {
                 for anchor_round in anchor_rounds {
                     let stats = committer.remove_committed(anchor_round, round_ctx.conf())?;
                     all_stats.push(stats);
-                    anchors_tx
-                        .send(MempoolOutput::CommitFinished(anchor_round))
-                        .map_err(|_closed| Cancelled())?;
                 }
                 round_ctx.meter_stats(all_stats);
             }
@@ -191,6 +188,7 @@ impl Inner {
 
 impl RoundCtx {
     fn commit_metrics(&self, anchor: &PointInfo) {
+        metrics::gauge!("tycho_mempool_commit_round").set(anchor.round().0);
         metrics::counter!("tycho_mempool_commit_anchors").increment(1);
         metrics::gauge!("tycho_mempool_commit_latency_rounds").set(self.depth(anchor.round()));
     }

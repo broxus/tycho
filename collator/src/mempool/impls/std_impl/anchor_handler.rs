@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use futures_util::never::Never;
 use tokio::sync::mpsc;
-use tycho_consensus::prelude::{Commit, MempoolAdapterStore, MempoolDb, MempoolOutput, RoundWatch};
+use tycho_consensus::prelude::{MempoolAdapterStore, MempoolDb, MempoolOutput};
 use tycho_types::models::ConsensusConfig;
 
 use crate::mempool::impls::common::cache::Cache;
@@ -13,7 +13,6 @@ use crate::tracing_targets;
 
 pub struct StdAnchorHandler {
     anchor_rx: mpsc::UnboundedReceiver<MempoolOutput>,
-    commit_finished: RoundWatch<Commit>,
     cache: Arc<Cache>,
     deduplicate_rounds: u16,
 }
@@ -21,13 +20,11 @@ pub struct StdAnchorHandler {
 impl StdAnchorHandler {
     pub fn new(
         anchor_rx: mpsc::UnboundedReceiver<MempoolOutput>,
-        commit_finished: RoundWatch<Commit>,
         cache: &Arc<Cache>,
         config: &ConsensusConfig,
     ) -> Self {
         Self {
             anchor_rx,
-            commit_finished,
             cache: cache.clone(),
             deduplicate_rounds: config.deduplicate_rounds,
         }
@@ -55,11 +52,10 @@ impl StdAnchorHandler {
         output: MempoolOutput,
     ) -> Result<Box<Shuttle>> {
         match output {
+            MempoolOutput::Paused(is_paused) => self.cache.set_paused(is_paused),
             MempoolOutput::NextAnchor(adata) => {
                 if adata.needs_empty_cache {
                     shuttle.parser = Parser::new(self.deduplicate_rounds);
-                    // every anchor is repeatable, i.e. enough tail is preserved
-                    self.commit_finished.set_max_raw(adata.anchor.round().0);
                     tracing::info!(
                         target: tracing_targets::MEMPOOL_ADAPTER,
                         is_executable = adata.is_executable,
@@ -72,12 +68,6 @@ impl StdAnchorHandler {
                 }
                 return dirty.clean().await;
             }
-            MempoolOutput::CommitFinished(round) => {
-                // history payloads are read from DB and marked committed, so ready to be removed
-                self.commit_finished.set_max(round);
-            }
-            MempoolOutput::Running => self.cache.set_paused(false),
-            MempoolOutput::Paused => self.cache.set_paused(true),
         };
         Ok(shuttle)
     }
