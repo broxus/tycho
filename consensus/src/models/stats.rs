@@ -1,4 +1,5 @@
-use std::ops::RangeInclusive;
+use std::fmt::{Debug, Formatter};
+use std::ops::{Add, AddAssign, RangeInclusive};
 
 #[derive(Debug, thiserror::Error)]
 pub enum MempoolStatsMergeError {
@@ -53,8 +54,8 @@ impl MempoolPeerStats {
     }
 
     // unfortunately this is not filled at the same time with the other stats
-    pub fn add_references_skipped(&mut self, value: u32) {
-        self.cumulative.references_skipped += value;
+    pub fn add_references_skipped(&mut self, value: usize) {
+        self.cumulative.references_skipped += u16::try_from(value).unwrap_or(u16::MAX);
     }
 
     pub fn merge_with(&mut self, other: &Self) -> Result<(), MempoolStatsMergeError> {
@@ -79,15 +80,16 @@ impl MempoolPeerStats {
 #[derive(Debug, Default)]
 pub struct MempoolPeerCounters {
     pub last_round: u32,
-    pub was_leader: u32,
-    pub was_not_leader: u32,
-    pub skipped_rounds: u32,
-    pub valid_points: u32,
-    pub equivocated: u32,
-    pub trans_invalid_points: u32,
-    pub invalid_points: u32,
-    pub ill_formed_points: u32,
-    pub references_skipped: u32,
+    pub was_leader: CounterU16,
+    pub was_not_leader: CounterU16,
+    pub skipped_rounds: CounterU16,
+    pub valid_points: CounterU16,
+    pub points_proved: CounterU16,
+    pub equivocated: CounterU16,
+    pub trans_invalid_points: CounterU16,
+    pub invalid_points: CounterU16,
+    pub ill_formed_points: CounterU16,
+    pub references_skipped: CounterU16,
 }
 
 impl MempoolPeerCounters {
@@ -104,3 +106,38 @@ impl MempoolPeerCounters {
         self.references_skipped += other.references_skipped;
     }
 }
+
+#[derive(Default, Clone, Copy)]
+pub struct CounterU16(u16);
+
+impl CounterU16 {
+    pub fn inner(self) -> u16 {
+        self.0
+    }
+}
+
+impl Debug for CounterU16 {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+macro_rules! impl_add {
+    ($ty:ty, $($rhs:ty => $cast:ident),+ $(,)?) => {$(
+        impl Add<$rhs> for $ty {
+            type Output = Self;
+            #[inline]
+            fn add(self, rhs: $rhs) -> Self {
+                Self(self.0.saturating_add(rhs.$cast()))
+            }
+        }
+        impl AddAssign<$rhs> for $ty {
+            #[inline]
+            fn add_assign(&mut self, rhs: $rhs) {
+                self.0 = self.0.saturating_add(rhs.$cast())
+            }
+        }
+    )+};
+}
+
+impl_add! { CounterU16, CounterU16 => inner, bool => into, u16 => into, }

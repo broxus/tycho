@@ -273,7 +273,7 @@ impl RoundCtx {
             ($prefix:literal, $stats:expr, $labels:expr, [ $($field:ident),* $(,)? ]) => {
                 $(
                     metrics::counter!(concat!($prefix, stringify!($field)), $labels)
-                        .increment(u64::from($stats.$field));
+                        .increment(u64::from($stats.$field.inner()));
                 )*
             };
         }
