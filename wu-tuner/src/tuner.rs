@@ -687,6 +687,8 @@ where
 
             tracing::debug!(
                 %shard, seqno,
+                tune_seqno, tune_interval,
+                wu_params_last_updated_on_seqno = self.wu_params_last_updated_on_seqno,
                 has_pending_messages = avg_wu_metrics_res.has_pending_messages,
                 avg_lag, lag_bounds = ?self.config.lag_bounds_ms,
                 current_wu_price = actual_wu_price,
