@@ -351,11 +351,15 @@ where
             // report updated wu params to metrics
             report_wu_params(&metrics.wu_params, &metrics.wu_params);
 
-            self.wu_params_last_updated_on_seqno = seqno;
+            // we update wu params by shard blocks data, so we remember ashard block seqno of the last update
+            // for futher check for the minimal interval before the next update
+            if !shard.is_masterchain() {
+                self.wu_params_last_updated_on_seqno = seqno;
+            }
         }
 
-        // on start set wu params last updated on current seqno
-        if self.wu_params_last_updated_on_seqno == 0 {
+        // on start set wu params last updated on current shard block seqno
+        if self.wu_params_last_updated_on_seqno == 0 && !shard.is_masterchain() {
             self.wu_params_last_updated_on_seqno = seqno;
         }
 
