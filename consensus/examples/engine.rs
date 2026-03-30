@@ -129,7 +129,7 @@ fn make_network(
 
     for (((secret_key, key_pair), bind_address), peer_id) in keys
         .into_iter()
-        .zip(bind_addresses.into_iter())
+        .zip(bind_addresses)
         .zip(peer_info.iter().map(|p| p.id))
     {
         let init_peers = InitPeers::new(all_peers.clone());

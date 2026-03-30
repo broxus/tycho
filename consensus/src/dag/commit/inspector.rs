@@ -9,8 +9,8 @@ use tycho_util::FastHashMap;
 use crate::dag::DagRound;
 use crate::effects::{AltFormat, TaskResult};
 use crate::models::{
-    DagPoint, Digest, IllFormedPoint, InvalidPoint, MempoolPeerCounters, MempoolPeerStats, PointId,
-    PointInfo, Round, TransInvalidPoint,
+    CounterU16, DagPoint, Digest, IllFormedPoint, InvalidPoint, MempoolPeerCounters,
+    MempoolPeerStats, PointId, PointInfo, Round, TransInvalidPoint,
 };
 use crate::moderator::JournalEvent;
 
@@ -113,7 +113,7 @@ impl RoundInspector {
                 ..Default::default()
             };
 
-            let mut authored_versions: u32 = 0;
+            let mut authored_versions = CounterU16::default();
             let mut has_valid = false;
 
             for version in authored {
@@ -146,12 +146,12 @@ impl RoundInspector {
                     DagPoint::NotFound(_) => {}
                 }
             }
-            author_counters.valid_points += has_valid as u32;
-            if authored_versions == 0 {
+            author_counters.valid_points += has_valid;
+            if authored_versions.inner() == 0 {
                 author_counters.skipped_rounds += 1;
             } else {
-                author_counters.equivocated += authored_versions - 1;
-                if author_counters.equivocated > 0 {
+                author_counters.equivocated += authored_versions.inner() - 1;
+                if author_counters.equivocated.inner() > 0 {
                     let forks = authored.iter().filter_map(|version| match version {
                         DagPoint::NotFound(_) => None,
                         found => Some(*found.digest()),
@@ -223,7 +223,7 @@ impl RoundInspector {
                     continue;
                 };
                 // signer created points at both rounds, but skipped somme points it signed
-                signer_stats.add_references_skipped(signer_prev_round.signed_proofs.len() as u32);
+                signer_stats.add_references_skipped(signer_prev_round.signed_proofs.len());
                 self.not_referenced.push(NotReferenced {
                     signer,
                     blamed: signer_prev_round
