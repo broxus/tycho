@@ -608,7 +608,7 @@ where
         let missing_mandatory_windows = history.unit_cost_clippers.missing_mandatory_windows();
         if !missing_mandatory_windows.is_empty() {
             // wait for stable percentile bounds before calculating target params
-            tracing::trace!(
+            tracing::debug!(
                 %shard, seqno,
                 ?missing_mandatory_windows,
                 "skip target wu params calculation because mandatory clipper windows are not ready",
@@ -628,9 +628,14 @@ where
             .last_key_value()
             .map(|(_, v)| v.target_wu_price);
 
-        // initial target and adaptive wu price from last adjustment or actual
-        let mut target_wu_price = last_adjustment_wu_price.unwrap_or(actual_wu_price);
-        let mut adaptive_wu_price = target_wu_price;
+        // initial target wu price from config, or last adjustment, or actual
+        let mut target_wu_price = if !self.config.adaptive_wu_price {
+            self.config.target_wu_price as f64 / 100.0
+        } else {
+            last_adjustment_wu_price.unwrap_or(actual_wu_price)
+        };
+        // initial adaptive wu price from actual
+        let mut adaptive_wu_price = actual_wu_price;
 
         let lag_lower_bound = self.config.lag_bounds_ms.0 as i64;
         let lag_upper_bound = self.config.lag_bounds_ms.1 as i64;
@@ -677,9 +682,6 @@ where
             // use adaptive wu price if required
             if self.config.adaptive_wu_price {
                 target_wu_price = adaptive_wu_price;
-            } else {
-                // otherwise get target wu price from config
-                target_wu_price = self.config.target_wu_price as f64 / 100.0;
             }
 
             // calculate target wu params
