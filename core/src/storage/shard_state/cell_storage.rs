@@ -1603,36 +1603,27 @@ impl RawCellsCache {
         db: &CellsDb,
         key: &HashBytes,
     ) -> Result<Option<RawCellsCacheItem>, rocksdb::Error> {
-        use quick_cache::sync::GuardResult;
-
-        match self.inner.get_value_or_guard(key, None) {
-            GuardResult::Value(value) => Ok(Some(value)),
-            GuardResult::Guard(g) => {
-                let value = {
-                    #[cfg(feature = "cells-metrics")]
-                    let _timer = scopeguard::guard(Instant::now(), |started_at| {
-                        self.rocksdb_access_histogram.record(started_at.elapsed());
-                    });
-
-                    db.cells.get(key.as_slice())?
-                };
-
-                Ok(if let Some(value) = value {
-                    let (_, data) = refcount::decode_value_with_rc(value.as_ref());
-                    data.map(|value| {
-                        let value = RawCellsCacheItem::from_header_and_slice(
-                            AtomicI64::new(Self::RC_NAN),
-                            value,
-                        );
-                        _ = g.insert(value.clone());
-                        value
-                    })
-                } else {
-                    None
-                })
-            }
-            GuardResult::Timeout => unreachable!(),
+        // Read-only check of quick_cache (no insertion on miss)
+        if let Some(value) = self.inner.get(key) {
+            return Ok(Some(value));
         }
+
+        // Fallback to RocksDB
+        let value = {
+            #[cfg(feature = "cells-metrics")]
+            let _timer = scopeguard::guard(Instant::now(), |started_at| {
+                self.rocksdb_access_histogram.record(started_at.elapsed());
+            });
+
+            db.cells.get(key.as_slice())?
+        };
+
+        Ok(value.and_then(|value| {
+            let (_, data) = refcount::decode_value_with_rc(value.as_ref());
+            data.map(|data| {
+                RawCellsCacheItem::from_header_and_slice(AtomicI64::new(Self::RC_NAN), data)
+            })
+        }))
     }
 
     fn get_rc_for_insert(
