@@ -4,6 +4,8 @@ use std::time::Duration;
 use itertools::Itertools;
 use tokio::sync::mpsc;
 use tokio::time::Interval;
+use tycho_network::PeerId;
+use tycho_util::FastHashMap;
 use tycho_util::metrics::HistogramGuard;
 
 use crate::dag::{Committer, HistoryConflict};
@@ -14,8 +16,7 @@ use crate::engine::{
     ConsensusConfigExt, DAG_ROUNDS_TO_DROP, EngineResult, MempoolConfig, NodeConfig,
 };
 use crate::models::{
-    AnchorData, MempoolOutput, MempoolPeerStats, MempoolStatsMergeError, MempoolStatsOutput,
-    PointInfo, Round,
+    AnchorData, MempoolOutput, MempoolPeerStats, MempoolStatsMergeError, PointInfo, Round,
 };
 use crate::moderator::Moderator;
 
@@ -168,27 +169,25 @@ impl State {
 
             if let Some(committed) = committed {
                 round_ctx.log_committed(&committed);
-                let anchor_rounds =
-                    (committed.iter().map(|a| a.anchor.round())).collect::<Vec<_>>();
-                for data in committed {
-                    round_ctx.commit_metrics(&data.anchor);
-                    anchors_tx
-                        .send(MempoolOutput::NextAnchor(Box::new(data)))
-                        .map_err(|_closed| Cancelled())?;
-                }
                 // stats should be reported for each round separately - to be grouped by consumer
-                let mut all_stats = Vec::with_capacity(anchor_rounds.len());
-                for anchor_round in anchor_rounds {
-                    let (stats, events) =
+                let mut all_stats = Vec::with_capacity(committed.len());
+
+                for adata in committed {
+                    let anchor_round = adata.anchor.round();
+
+                    let (stat_map, events) =
                         (inner.committer).remove_committed(anchor_round, round_ctx.conf())?;
-                    all_stats.push(stats);
+                    all_stats.push(stat_map);
+
+                    round_ctx.commit_metrics(&adata.anchor);
+                    anchors_tx
+                        .send(MempoolOutput::NextAnchor(Box::new(adata)))
+                        .map_err(|_closed| Cancelled())?;
                     for event in events {
                         inner.moderator.report(event);
                     }
-                    anchors_tx
-                        .send(MempoolOutput::CommitFinished(anchor_round))
-                        .map_err(|_closed| Cancelled())?;
                 }
+
                 round_ctx.meter_stats(all_stats);
             }
 
@@ -248,18 +247,15 @@ impl RoundCtx {
         metrics::counter!("tycho_mempool_stats_merge_errors", "kind" => kind).increment(1);
     }
 
-    fn meter_stats(&self, all_stats: Vec<MempoolStatsOutput>) {
-        let reduced = all_stats
-            .into_iter()
-            .map(|stats| stats.data)
-            .reduce(|mut acc, other_map| {
-                for (peer_id, stats) in other_map {
-                    acc.entry(peer_id)
-                        .and_modify(|occupied| self.merge_stats(occupied, &stats))
-                        .or_insert(stats);
-                }
-                acc
-            });
+    fn meter_stats(&self, all_stats: Vec<FastHashMap<PeerId, MempoolPeerStats>>) {
+        let reduced = all_stats.into_iter().reduce(|mut acc, other_map| {
+            for (peer_id, stats) in other_map {
+                acc.entry(peer_id)
+                    .and_modify(|occupied| self.merge_stats(occupied, &stats))
+                    .or_insert(stats);
+            }
+            acc
+        });
 
         let Some(reduced) = reduced else {
             return;

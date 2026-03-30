@@ -55,11 +55,11 @@ impl StdAnchorHandler {
         output: MempoolOutput,
     ) -> Result<Box<Shuttle>> {
         match output {
+            MempoolOutput::Paused(is_paused) => self.cache.set_paused(is_paused),
             MempoolOutput::NextAnchor(adata) => {
+                let anchor_round = adata.anchor.round();
                 if adata.needs_empty_cache {
                     shuttle.parser = Parser::new(self.deduplicate_rounds);
-                    // every anchor is repeatable, i.e. enough tail is preserved
-                    self.commit_finished.set_max_raw(adata.anchor.round().0);
                     tracing::info!(
                         target: tracing_targets::MEMPOOL_ADAPTER,
                         is_executable = adata.is_executable,
@@ -70,14 +70,11 @@ impl StdAnchorHandler {
                 if let Some(anchor) = output {
                     self.cache.push(Arc::new(anchor))?;
                 }
-                return dirty.clean().await;
-            }
-            MempoolOutput::CommitFinished(round) => {
+                let shuttle = dirty.clean().await;
                 // history payloads are read from DB and marked committed, so ready to be removed
-                self.commit_finished.set_max(round);
+                self.commit_finished.set_max(anchor_round);
+                return shuttle;
             }
-            MempoolOutput::Running => self.cache.set_paused(false),
-            MempoolOutput::Paused => self.cache.set_paused(true),
         };
         Ok(shuttle)
     }
