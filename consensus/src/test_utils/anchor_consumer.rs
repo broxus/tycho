@@ -61,31 +61,28 @@ impl AnchorConsumer {
     }
 
     fn drain_anchor(&mut self, file: &mut LastAnchorFile, commit_result: MempoolOutput) {
-        let round = match commit_result {
-            MempoolOutput::Running | MempoolOutput::Paused => return,
+        let adata = match commit_result {
+            MempoolOutput::Paused(_) => return,
             MempoolOutput::NextAnchor(adata) => {
                 let round = adata.anchor.round().0;
                 if adata.needs_empty_cache {
                     tracing::warn!("gap in anchor chain, first to commit: {round}");
                 }
-                tracing::info!("committed anchor {round}");
-                metrics::gauge!("tycho_mempool_last_anchor_round").set(round);
-                tycho_util::mem::Reclaimer::instance().drop(adata);
-                Round(round)
-            }
-            MempoolOutput::CommitFinished(round) => {
-                // while MempoolAdapter sets commit_round at this event,
-                // here in simulation we check that every NextAnchor is followed by CommitFinished
+                let prev_committed = self.commit_finished.get().0;
                 assert!(
-                    self.commit_finished.get() >= round,
-                    "anchor was not received"
+                    prev_committed <= round || !adata.is_executable,
+                    "anchor out of order: {round:?} after {prev_committed:?}",
                 );
-                return;
+                self.commit_finished.set_max_raw(round);
+                adata
             }
         };
-        self.commit_finished.set_max(round);
-        self.top_known_anchor.set_max(round);
-        file.update(round.0).expect("update last anchor file");
+        let round = adata.anchor.round().0;
+        tracing::info!("committed anchor {round}");
+        metrics::gauge!("tycho_mempool_last_anchor_round").set(round);
+
+        tycho_util::mem::Reclaimer::instance().drop(adata);
+        file.update(round).expect("update last anchor file");
     }
 
     fn check_anchor(
@@ -94,29 +91,24 @@ impl AnchorConsumer {
         peer_id: PeerId,
         commit_result: MempoolOutput,
     ) {
-        let (anchor, history) = match commit_result {
-            MempoolOutput::Running | MempoolOutput::Paused => {
-                return;
-            }
+        let adata = match commit_result {
+            MempoolOutput::Paused(_) => return,
             MempoolOutput::NextAnchor(adata) => {
                 let round = adata.anchor.round().0;
                 if adata.needs_empty_cache {
                     tracing::warn!("gap in anchor chain, first to commit: {round}");
                 }
-                (adata.anchor, adata.history)
-            }
-            MempoolOutput::CommitFinished(round) => {
-                // while MempoolAdapter sets commit_round at this event,
-                // here in simulation we check that every NextAnchor is followed by CommitFinished
+                let prev_committed = self.commit_finished.get().0;
                 assert!(
-                    self.commit_finished.get() >= round,
-                    "anchor was not received"
+                    prev_committed <= round || !adata.is_executable,
+                    "anchor out of order: {round} after {prev_committed}"
                 );
-                return;
+                self.commit_finished.set_max_raw(round);
+                adata
             }
         };
 
-        let anchor_id = *anchor.id();
+        let anchor_id = *adata.anchor.id();
         metrics::gauge!("tycho_mempool_last_anchor_round").set(anchor_id.round.0);
 
         // get last previous anchor round and check if we don't have previous
@@ -163,13 +155,13 @@ impl AnchorConsumer {
             Some(stored_history) => {
                 assert_eq!(
                     stored_history.len(),
-                    history.len(),
+                    adata.history.len(),
                     "Commited points size differs for {} at round: {}",
                     peer_id.alt(),
                     anchor_id.round.0,
                 );
 
-                for (left, right) in stored_history.iter().zip(history.iter()) {
+                for (left, right) in stored_history.iter().zip(&adata.history) {
                     assert_eq!(
                         &left.digest,
                         right.digest(),
@@ -179,12 +171,12 @@ impl AnchorConsumer {
                 }
             }
             None => {
-                let point_refs = history.iter().map(|x| *x.id()).collect::<Vec<_>>();
+                let point_refs = adata.history.iter().map(|x| *x.id()).collect::<Vec<_>>();
                 self.history.insert(anchor_id.round, point_refs);
             }
         }
 
-        tycho_util::mem::Reclaimer::instance().drop((anchor, history));
+        tycho_util::mem::Reclaimer::instance().drop(adata);
 
         let mut common_anchors = vec![];
         let mut common_history = vec![];
@@ -232,7 +224,6 @@ impl AnchorConsumer {
         tracing::debug!("Anchor hashmap len: {}", self.anchors.len());
         tracing::trace!("History hashmap len: {}", self.history.len());
 
-        self.commit_finished.set_max(anchor_id.round);
         if let Some(top_common_anchor) = common_anchors.last() {
             self.top_known_anchor.set_max_raw(*top_common_anchor);
             tracing::info!(
