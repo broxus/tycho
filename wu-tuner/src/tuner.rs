@@ -183,43 +183,47 @@ struct TunerParams {
     pub lag_ma_interval: u32,
     pub lag_ma_range: u32,
 
-    pub wu_params_ma_interval: u32,
+    pub wu_params_calc_interval: u32,
 
     pub tune_interval: u32,
+
     pub tune_seqno: u32,
 
     pub wu_span_seqno: u32,
     pub wu_ma_seqno: u32,
     pub lag_span_seqno: u32,
     pub lag_ma_seqno: u32,
-    pub wu_params_ma_seqno: u32,
+
+    pub wu_params_calc_seqno: u32,
 }
 
 impl TunerParams {
     fn calculate(config: &WuTunerConfig, seqno: BlockSeqno) -> Self {
-        let wu_span = config.wu_span.max(10) as u32;
-        let wu_ma_interval = config.wu_ma_interval.max(2) as u32;
-        let wu_ma_interval = wu_ma_interval.saturating_mul(wu_span);
-        let wu_ma_range = config.wu_ma_range.max(100) as u32;
+        let wu_span = config.wu_span as u32;
+        let wu_ma_spans = config.wu_ma_spans as u32;
+        let wu_ma_interval = wu_ma_spans.saturating_mul(wu_span);
+        let wu_ma_range = config.wu_ma_range as u32;
 
-        let lag_span = config.lag_span.max(10) as u32;
-        let lag_ma_interval = config.lag_ma_interval.max(2) as u32;
-        let lag_ma_interval = lag_ma_interval.saturating_mul(lag_span);
-        let lag_ma_range = config.lag_ma_range.max(100) as u32;
+        let lag_span = config.lag_span as u32;
+        let lag_ma_spans = config.lag_ma_spans as u32;
+        let lag_ma_interval = lag_ma_spans.saturating_mul(lag_span);
+        let lag_ma_range = config.lag_ma_range as u32;
 
-        let wu_params_ma_interval = config.wu_params_ma_interval.max(40) as u32;
+        let wu_params_calc_interval = config.wu_params_calc_interval as u32;
 
-        let tune_interval = config.tune_interval.max(200) as u32;
+        let tune_interval = config.tune_interval as u32;
+
         // floor all buckets to deterministic boundaries so lag and wu MAs can be matched by seqno
         let tune_seqno = seqno / tune_interval * tune_interval;
 
         // normilized seqno for calculations
-        // e.g. seqno = 254
+        // e.g. seqno = 254, wu_span = 10, wu_ma_spans = 2, lag_span = 5, lag_ma_spans = 2, wu_params_ma_interval = 40
         let wu_span_seqno = seqno / wu_span * wu_span; // 250
         let wu_ma_seqno = seqno / wu_ma_interval * wu_ma_interval; // 240
         let lag_span_seqno = seqno / lag_span * lag_span; // 250
-        let lag_ma_seqno = seqno / lag_ma_interval * lag_ma_interval; // 240
-        let wu_params_ma_seqno = seqno / wu_params_ma_interval * wu_params_ma_interval; // 240
+        let lag_ma_seqno = seqno / lag_ma_interval * lag_ma_interval; // 250
+
+        let wu_params_calc_seqno = seqno / wu_params_calc_interval * wu_params_calc_interval; // 240
 
         Self {
             wu_span,
@@ -228,14 +232,14 @@ impl TunerParams {
             lag_span,
             lag_ma_interval,
             lag_ma_range,
-            wu_params_ma_interval,
+            wu_params_calc_interval,
             tune_interval,
             tune_seqno,
             wu_span_seqno,
             wu_ma_seqno,
             lag_span_seqno,
             lag_ma_seqno,
-            wu_params_ma_seqno,
+            wu_params_calc_seqno,
         }
     }
 }
@@ -274,6 +278,25 @@ where
     pub fn update_config(&mut self, config: Arc<WuTunerConfig>) {
         self.config = config;
         self.history.clear();
+    }
+
+    pub fn pause_on_invalid_config(&mut self) {
+        self.report_zero_metrics();
+        self.history.clear();
+        self.wu_once_reported.clear();
+        self.lag_once_reported = false;
+        self.adjustments.clear();
+    }
+
+    fn report_zero_metrics(&self) {
+        let shards: Vec<_> = self.history.keys().cloned().collect();
+        for shard in shards {
+            WuMetrics::default().report_metrics(&shard);
+            report_anchor_lag_to_metrics(&shard, 0);
+        }
+
+        report_zero_wu_price();
+        report_wu_params(&WorkUnitsParams::default(), &WorkUnitsParams::default());
     }
 
     pub async fn handle_wu_event(&mut self, event: WuEvent) -> Result<()> {
@@ -502,12 +525,6 @@ where
             return Ok(());
         }
 
-        // do not calculate MA until the percentile windows is filled
-        // lag clipping must be warmed up before its MA can drive wu tuning decisions
-        if !history.anchors_lag_pct.window_is_filled() {
-            return Ok(());
-        }
-
         // e.g. seqno = 244 -> avg_range = [140..240)
         let avg_from_boundary = lag_ma_seqno.saturating_sub(lag_ma_range);
         let avg_range = history.anchors_lag.range_mut((
@@ -531,6 +548,12 @@ where
             "avg anchor lag calculated on [{0}..{1})",
             avg_from_boundary, lag_ma_seqno,
         );
+
+        // do not process MA until the percentile windows is filled
+        // lag clipping must be warmed up before its MA can drive wu tuning decisions
+        if !history.anchors_lag_pct.window_is_filled() {
+            return Ok(());
+        }
 
         // store avg lag
         history.avg_anchors_lag.insert(lag_ma_seqno, avg_lag);
@@ -570,7 +593,7 @@ where
         let &TunerParams {
             tune_interval,
             tune_seqno,
-            wu_params_ma_seqno,
+            wu_params_calc_seqno,
             ..
         } = tuner_params;
 
@@ -581,16 +604,17 @@ where
 
         // calculate MA target wu params
         // avoid the MA recalculation on the same bucket
-        if wu_params_ma_seqno == 0 || self.wu_params_last_calculated_on_seqno == wu_params_ma_seqno
+        if wu_params_calc_seqno == 0
+            || self.wu_params_last_calculated_on_seqno == wu_params_calc_seqno
         {
             return Ok(());
         }
 
         // take last recorder avg lag not ahead of target params calculation seqno
-        let search_from_boundary = wu_params_ma_seqno.saturating_sub(tune_interval);
+        let search_from_boundary = wu_params_calc_seqno.saturating_sub(tune_interval);
         let search_range = history.avg_anchors_lag.range((
             Bound::Included(search_from_boundary),
-            Bound::Included(wu_params_ma_seqno),
+            Bound::Included(wu_params_calc_seqno),
         ));
         // use the latest lag MA that does not look ahead of the target wu-params bucket
         let Some((&lag_ma_seqno, &avg_lag)) = search_range.last() else {
@@ -719,7 +743,7 @@ where
             // report target wu params to metrics
             report_wu_params(&avg_wu_metrics_res.wu_params, &target_wu_params);
 
-            self.wu_params_last_calculated_on_seqno = wu_params_ma_seqno;
+            self.wu_params_last_calculated_on_seqno = wu_params_calc_seqno;
 
             // do not update in the current tune bucket if wu params changed
             // in the second half of the previous bucket or later
@@ -1978,10 +2002,13 @@ fn report_wu_price(
     metrics::gauge!("tycho_wu_tuner_actual_wu_price").set(actual_wu_price);
     metrics::gauge!("tycho_wu_tuner_adaptive_wu_price").set(adaptive_wu_price);
     metrics::gauge!("tycho_wu_tuner_target_wu_price").set(target_wu_price);
-
-    if let Some(last) = last_adjustment_wu_price {
-        metrics::gauge!("tycho_wu_tuner_last_adjustment_wu_price").set(last);
+    if let Some(last_adjustment_wu_price) = last_adjustment_wu_price {
+        metrics::gauge!("tycho_wu_tuner_last_adjustment_wu_price").set(last_adjustment_wu_price);
     }
+}
+
+fn report_zero_wu_price() {
+    report_wu_price(0.0, Some(0.0), 0.0, 0.0);
 }
 
 fn report_wu_params(curr_wu_params: &WorkUnitsParams, target_wu_params: &WorkUnitsParams) {
@@ -3082,7 +3109,7 @@ mod tests {
 
     fn test_tuner_config() -> Arc<WuTunerConfig> {
         Arc::new(WuTunerConfig {
-            wu_params_ma_interval: 10,
+            wu_params_calc_interval: 10,
             tune_interval: 50,
             lag_bounds_ms: (100, 5000),
             adaptive_wu_price: true,
@@ -3157,7 +3184,7 @@ mod tests {
             .history
             .entry(shard)
             .or_insert_with(|| WuHistory::new(DEFAULT_PERCENTILE_WINDOW));
-        seed_test_history(history, tuner_params.wu_params_ma_seqno, 6000);
+        seed_test_history(history, tuner_params.wu_params_calc_seqno, 6000);
 
         tuner
             .try_calculate_target_wu_params_and_perform_adjustment(shard, seqno, &tuner_params)
@@ -3180,7 +3207,7 @@ mod tests {
             .history
             .entry(shard)
             .or_insert_with(|| WuHistory::new(DEFAULT_PERCENTILE_WINDOW));
-        seed_test_history(history, tuner_params.wu_params_ma_seqno, 6000);
+        seed_test_history(history, tuner_params.wu_params_calc_seqno, 6000);
         fill_mandatory_windows(&mut history.unit_cost_clippers, DEFAULT_PERCENTILE_WINDOW);
         assert!(history.unit_cost_clippers.mandatory_windows_filled());
         assert!(
@@ -3212,7 +3239,7 @@ mod tests {
 
         assert_eq!(
             tuner.wu_params_last_calculated_on_seqno,
-            tuner_params.wu_params_ma_seqno
+            tuner_params.wu_params_calc_seqno
         );
         assert_eq!(updater.update_calls(), 1);
     }
