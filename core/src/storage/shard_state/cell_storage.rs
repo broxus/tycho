@@ -1590,8 +1590,6 @@ impl RawCellsCache {
         }
     }
 
-    // NOTE: Does not populate cache on miss (read-only via `inner.get()`).
-    //
     // Previously used `get_value_or_guard` which inserts into cache on miss.
     // This caused two problems:
     // 1. Memory leak: `get_value_or_guard` allocates a Placeholder in LinkedSlab
@@ -1603,7 +1601,6 @@ impl RawCellsCache {
         db: &CellsDb,
         key: &HashBytes,
     ) -> Result<Option<RawCellsCacheItem>, rocksdb::Error> {
-        // Read-only check of quick_cache (no insertion on miss)
         if let Some(value) = self.inner.get(key) {
             return Ok(Some(value));
         }
@@ -1621,7 +1618,10 @@ impl RawCellsCache {
         Ok(value.and_then(|value| {
             let (_, data) = refcount::decode_value_with_rc(value.as_ref());
             data.map(|data| {
-                RawCellsCacheItem::from_header_and_slice(AtomicI64::new(Self::RC_NAN), data)
+                let item =
+                    RawCellsCacheItem::from_header_and_slice(AtomicI64::new(Self::RC_NAN), data);
+                self.inner.insert(*key, item.clone());
+                item
             })
         }))
     }
