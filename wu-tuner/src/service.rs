@@ -1,10 +1,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
 use crate::WuEvent;
-use crate::config::WuTunerConfig;
+use crate::config::{WuTunerConfig, WuTunerConfigState};
 use crate::tuner::WuTuner;
 use crate::updater::WuParamsUpdater;
 
@@ -29,13 +30,13 @@ where
         }
     }
 
-    pub fn with_config_path(path: PathBuf) -> Self {
-        let config = WuTunerConfig::from_file(&path).unwrap_or_default();
-        Self {
+    pub fn with_config_path(path: PathBuf) -> Result<Self> {
+        let config = WuTunerConfig::from_file_or_default_on_missing(&path)?;
+        Ok(Self {
             config: Arc::new(config),
             config_path: Some(path),
             updater: None,
-        }
+        })
     }
 
     pub fn with_updater(mut self, updater: U) -> Self {
@@ -44,7 +45,8 @@ where
     }
 
     pub fn build(self) -> WuTunerService<U> {
-        let (config_sender, mut config_receiver) = tokio::sync::watch::channel(self.config.clone());
+        let (config_sender, mut config_receiver) =
+            tokio::sync::watch::channel(WuTunerConfigState::Valid(self.config.clone()));
         let _ = *config_receiver.borrow_and_update();
 
         let (event_sender, event_receiver) = tokio::sync::mpsc::channel(1000);
@@ -64,8 +66,8 @@ pub struct WuTunerService<U>
 where
     U: WuParamsUpdater,
 {
-    config_receiver: tokio::sync::watch::Receiver<Arc<WuTunerConfig>>,
-    config_sender: tokio::sync::watch::Sender<Arc<WuTunerConfig>>,
+    config_receiver: tokio::sync::watch::Receiver<WuTunerConfigState>,
+    config_sender: tokio::sync::watch::Sender<WuTunerConfigState>,
     event_receiver: tokio::sync::mpsc::Receiver<WuEvent>,
     event_sender: tokio::sync::mpsc::Sender<WuEvent>,
     tuner: WuTuner<U>,
@@ -95,10 +97,14 @@ where
                 tracing::info!("WuTuner service started");
                 let mut service = self;
                 let _config_sender = service.config_sender.clone();
+                let mut paused = false;
                 loop {
                     tokio::select! {
                         event = service.event_receiver.recv() => match event {
                             Some(event) => {
+                                if paused {
+                                    continue;
+                                }
                                 if let Err(err) = service.tuner.handle_wu_event(event).await {
                                     tracing::error!(?err, "Error handling wu event");
                                     break;
@@ -111,9 +117,23 @@ where
                         },
                         config_changed = service.config_receiver.changed() => match config_changed {
                             Ok(_) => {
-                                let config = service.config_receiver.borrow_and_update();
-                                service.tuner.update_config(config.clone());
-                                tracing::info!(?config, "WuTuner config updated");
+                                let config_state = service.config_receiver.borrow_and_update().clone();
+                                match config_state {
+                                    WuTunerConfigState::Valid(config) => {
+                                        service.tuner.update_config(config.clone());
+                                        if paused {
+                                            paused = false;
+                                            tracing::info!(?config, "WuTuner config valid, resumed processing");
+                                        } else {
+                                            tracing::info!(?config, "WuTuner config updated");
+                                        }
+                                    }
+                                    WuTunerConfigState::Invalid(error) => {
+                                        service.tuner.pause_on_invalid_config();
+                                        paused = true;
+                                        tracing::warn!(error, "WuTuner config invalid, paused processing");
+                                    }
+                                }
                             },
                             Err(err) => {
                                 tracing::warn!(%err, "Error receive WuTuner config update");

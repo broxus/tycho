@@ -201,7 +201,7 @@ impl Node {
             .await?;
 
         // start work units tuner
-        let wu_tuner = WuTunerServiceBuilder::with_config_path(self.wu_tuner_config_path.clone())
+        let wu_tuner = WuTunerServiceBuilder::with_config_path(self.wu_tuner_config_path.clone())?
             .with_updater(crate::util::rpc_wu_updater::update_wu_params)
             .build()
             .start();
