@@ -216,6 +216,10 @@ impl ExecuteWu {
             ..
         } = wu_params_execute;
 
+        // TEST: pow gas to reduce target wu param calculation error
+        let scale = 10;
+        let group_gas = compute_scaled_pow(group_gas, 9, 10, scale);
+
         self.groups_count += 1;
         // we cannot use more thread then groups count
         let threads_count = calc_threads_count(max_threads_count as u64, group_accounts_count);
@@ -241,7 +245,8 @@ impl ExecuteWu {
             .saturating_add(
                 group_gas
                     .saturating_mul(execute as u128)
-                    .saturating_div(execute_delimiter as u128),
+                    .saturating_div(execute_delimiter as u128)
+                    .saturating_div(scale),
             )
             .saturating_div(threads_count as u128);
 
@@ -347,12 +352,14 @@ impl ExecuteWu {
         if sum_execute_groups_vm_sum_gas_over_threads == 0 {
             return None;
         }
+        let scale = 10;
         // subtract the prepare term first and then calculate the remaining gas-dependent part for `execute` param
         let target_wu_param = (execute_delimiter as f64)
             * (((sum_execute_groups_vm_elapsed_clip_ns as f64 / target_wu_price)
                 * EXECUTE_OVER_THREADS_SCALE as f64)
                 - (prepare_wu_param as f64)
                     * sum_execute_groups_vm_sum_accounts_over_threads as f64)
+            * scale as f64
             / sum_execute_groups_vm_sum_gas_over_threads as f64;
         trunc_sat_u64_from_f64(target_wu_param)
     }
