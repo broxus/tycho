@@ -89,6 +89,8 @@ pub struct CollatorContext {
 
     /// For graceful collation cancellation
     pub cancel_collation: Arc<Notify>,
+    /// Notified when collator completes current command
+    pub command_complete: Arc<Notify>,
     pub zerostate_id: ZerostateId,
 }
 
@@ -278,6 +280,10 @@ impl CollatorHandle {
                     panic!("Collator command ({command_descr}) failed: {err:?}");
                 }
 
+                // Notify that the current command has completed.
+                // Used by the manager to await collation cancellation.
+                worker.command_complete.notify_one();
+
                 tracing::trace!(
                     target: tracing_targets::COLLATOR,
                     "Collator command ({command_descr}) executed",
@@ -333,6 +339,7 @@ impl CollatorFactory for CollatorStdImplFactory {
             cx.mc_data,
             cx.mempool_config_override,
             cx.cancel_collation,
+            cx.command_complete,
             self.wu_tuner_event_sender.clone(),
         )
         .await
@@ -413,6 +420,8 @@ pub struct CollatorStdImpl {
 
     /// For graceful collation cancellation
     cancel_collation: Arc<Notify>,
+    /// Notified when collator completes current command
+    command_complete: Arc<Notify>,
 
     /// Events sender for Work Units tuner service
     wu_tuner_event_sender: Option<tokio::sync::mpsc::Sender<work_units::WuEvent>>,
@@ -434,6 +443,7 @@ impl CollatorStdImpl {
         mc_data: Arc<McData>,
         mempool_config_override: Option<MempoolGlobalConfig>,
         cancel_collation: Arc<Notify>,
+        command_complete: Arc<Notify>,
         wu_tuner_event_sender: Option<tokio::sync::mpsc::Sender<work_units::WuEvent>>,
     ) -> Result<CollatorHandle> {
         const BLOCK_CELL_COUNT_BASELINE: usize = 100_000;
@@ -474,6 +484,7 @@ impl CollatorStdImpl {
             shard_blocks_count_from_last_anchor: 0,
             mempool_config_override,
             cancel_collation,
+            command_complete,
             wu_tuner_event_sender,
             zerostate_id,
         };
@@ -798,6 +809,9 @@ impl CollatorStdImpl {
             anchors_info,
             mut anchors_count_above_last_imported_in_current_shard,
         } = match import_res {
+            Err(CollatorError::Cancelled(CollationCancelReason::ExternalCancel)) => {
+                return Ok(NextCollationFlowStep::Cancel);
+            }
             Err(CollatorError::Cancelled(reason)) => {
                 self.listener
                     .on_cancelled(
@@ -1895,13 +1909,6 @@ impl CollatorStdImpl {
                             "collation was cancelled by manager on wait_state_and_do_collate",
                         );
                         metrics::counter!("tycho_collator_anchor_import_cancelled_count", &labels).increment(1);
-                        self.listener
-                            .on_cancelled(
-                                working_state.mc_data.block_id,
-                                working_state.next_block_id_short,
-                                CollationCancelReason::ExternalCancel,
-                            )
-                            .await?;
                         self.delayed_working_state.delay(working_state);
                         return Ok(());
                     }
@@ -2069,13 +2076,6 @@ impl CollatorStdImpl {
                     "collation was cancelled by manager on try_collate_next_master_block",
                 );
                 metrics::counter!("tycho_collator_anchor_import_cancelled_count", &labels).increment(1);
-                self.listener
-                    .on_cancelled(
-                        working_state.mc_data.block_id,
-                        working_state.next_block_id_short,
-                        CollationCancelReason::ExternalCancel,
-                    )
-                    .await?;
                 self.delayed_working_state.delay(working_state);
                 return Ok(());
             }
@@ -2342,13 +2342,6 @@ impl CollatorStdImpl {
                                 "collation was cancelled by manager on try_collate_next_shard_block",
                             );
                             metrics::counter!("tycho_collator_anchor_import_cancelled_count", &labels).increment(1);
-                            self.listener
-                                .on_cancelled(
-                                    working_state.mc_data.block_id,
-                                    working_state.next_block_id_short,
-                                    CollationCancelReason::ExternalCancel,
-                                )
-                                .await?;
                             self.delayed_working_state.delay(working_state);
                             return Ok(());
                         }
