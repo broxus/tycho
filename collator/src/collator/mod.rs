@@ -8,8 +8,7 @@ use async_trait::async_trait;
 use error::CollatorError;
 use futures_util::future::Future;
 use messages_reader::{MessagesReader, MessagesReaderContext};
-use tokio::sync::{Notify, oneshot};
-use tokio_util::sync::CancellationToken;
+use tokio::sync::{Notify, mpsc, oneshot};
 use tracing::Instrument;
 use tycho_block_util::block::calc_next_block_id_short;
 use tycho_block_util::state::{ShardStateStuff, choose_genesis_info};
@@ -29,15 +28,12 @@ use crate::internal_queue::types::message::EnqueuedMessage;
 use crate::mempool::{GetAnchorResult, MempoolAdapter, MempoolAnchorId};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::StateNodeAdapter;
+use crate::tracing_targets;
 use crate::types::processed_upto::ProcessedUptoInfoExtension;
 use crate::types::{
     BlockCollationResult, CollationSessionId, CollationSessionInfo, CollatorConfig, DebugDisplay,
     DisplayBlockIdsIntoIter, McData, TopBlockDescription,
 };
-use crate::utils::async_queued_dispatcher::{
-    AsyncQueuedDispatcher, STANDARD_QUEUED_DISPATCHER_BUFFER_SIZE,
-};
-use crate::{method_to_queued_async_closure, tracing_targets};
 
 mod anchors_cache;
 mod debug_info;
@@ -75,6 +71,8 @@ pub(crate) use messages_reader::tests::{TestInternalMessage, TestMessageFactory}
 use crate::collator::anchors_cache::AnchorsCacheTransaction;
 // FACTORY
 
+const COLLATOR_COMMAND_QUEUE_BUFFER_SIZE: usize = 100;
+
 pub struct CollatorContext {
     pub mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
     pub mpool_adapter: Arc<dyn MempoolAdapter>,
@@ -89,6 +87,8 @@ pub struct CollatorContext {
 
     /// For graceful collation cancellation
     pub cancel_collation: Arc<Notify>,
+    /// Notified when collator completes current command
+    pub command_complete: Arc<Notify>,
     pub zerostate_id: ZerostateId,
 }
 
@@ -165,13 +165,163 @@ pub trait Collator: Send + Sync + 'static {
     ) -> Result<()>;
 }
 
+enum CollatorCommand {
+    Init {
+        prev_blocks_ids: Vec<BlockId>,
+        mc_data: Arc<McData>,
+        working_state_tx: oneshot::Sender<Result<Box<WorkingState>>>,
+    },
+    ResumeCollation {
+        mc_data: Arc<McData>,
+        reset: bool,
+        collation_session: Arc<CollationSessionInfo>,
+        prev_blocks_ids: Vec<BlockId>,
+    },
+    TryCollate {
+        force_one_anchor_import: bool,
+    },
+    DoCollate {
+        top_shard_blocks_info: Vec<TopBlockDescription>,
+        next_chain_time: u64,
+    },
+    Stop,
+}
+
+impl CollatorCommand {
+    fn descr(&self) -> &'static str {
+        match self {
+            Self::Init { .. } => "init_collator",
+            Self::ResumeCollation { .. } => "resume_collation",
+            Self::TryCollate { .. } => "try_collate",
+            Self::DoCollate { .. } => "do_collate",
+            Self::Stop => "stop_collator",
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct CollatorHandle {
+    commands_tx: mpsc::Sender<CollatorCommand>,
+}
+
+impl CollatorHandle {
+    fn new(queue_buffer_size: usize) -> (Self, mpsc::Receiver<CollatorCommand>) {
+        let (commands_tx, commands_rx) = mpsc::channel::<CollatorCommand>(queue_buffer_size);
+        (Self { commands_tx }, commands_rx)
+    }
+
+    fn run(mut worker: CollatorStdImpl, mut commands_rx: mpsc::Receiver<CollatorCommand>) {
+        tokio::spawn(async move {
+            loop {
+                let Some(command) = commands_rx.recv().await else {
+                    tracing::info!(
+                        target: tracing_targets::COLLATOR,
+                        "Collator command channel closed",
+                    );
+                    break;
+                };
+
+                let command_descr = command.descr();
+                tracing::trace!(
+                    target: tracing_targets::COLLATOR,
+                    "Collator command ({command_descr}) received",
+                );
+                let should_stop = matches!(&command, CollatorCommand::Stop);
+
+                let command_result = match command {
+                    CollatorCommand::Init {
+                        prev_blocks_ids,
+                        mc_data,
+                        working_state_tx,
+                    } => {
+                        worker
+                            .init_collator_wrapper(prev_blocks_ids, mc_data, working_state_tx)
+                            .await
+                    }
+                    CollatorCommand::ResumeCollation {
+                        mc_data,
+                        reset,
+                        collation_session,
+                        prev_blocks_ids,
+                    } => {
+                        worker
+                            .resume_collation_wrapper(
+                                mc_data,
+                                reset,
+                                collation_session,
+                                prev_blocks_ids,
+                            )
+                            .await
+                    }
+                    CollatorCommand::TryCollate {
+                        force_one_anchor_import,
+                    } => {
+                        worker
+                            .wait_state_and_try_collate_wrapper(force_one_anchor_import)
+                            .await
+                    }
+                    CollatorCommand::DoCollate {
+                        top_shard_blocks_info,
+                        next_chain_time,
+                    } => {
+                        worker
+                            .wait_state_and_do_collate_wrapper(
+                                top_shard_blocks_info,
+                                next_chain_time,
+                            )
+                            .await
+                    }
+                    CollatorCommand::Stop => worker.stop_collator().await,
+                };
+
+                if let Err(err) = command_result {
+                    panic!("Collator command ({command_descr}) failed: {err:?}");
+                }
+
+                // Notify that the current command has completed.
+                // Used by the manager to await collation cancellation.
+                worker.command_complete.notify_one();
+
+                tracing::trace!(
+                    target: tracing_targets::COLLATOR,
+                    "Collator command ({command_descr}) executed",
+                );
+
+                if should_stop {
+                    break;
+                }
+            }
+
+            tracing::info!(
+                target: tracing_targets::COLLATOR,
+                "Collator command loop stopped",
+            );
+        });
+    }
+
+    async fn enqueue_command(&self, command: CollatorCommand) -> Result<()> {
+        let command_descr = command.descr();
+        self.commands_tx
+            .send(command)
+            .await
+            .map_err(|err| anyhow::anyhow!("collator commands receiver dropped {err:?}"))?;
+
+        tracing::trace!(
+            target: tracing_targets::COLLATOR,
+            "Collator command ({command_descr}) enqueued",
+        );
+
+        Ok(())
+    }
+}
+
 pub struct CollatorStdImplFactory {
     pub wu_tuner_event_sender: Option<tokio::sync::mpsc::Sender<work_units::WuEvent>>,
 }
 
 #[async_trait]
 impl CollatorFactory for CollatorStdImplFactory {
-    type Collator = AsyncQueuedDispatcher<CollatorStdImpl>;
+    type Collator = CollatorHandle;
 
     async fn start(&self, cx: CollatorContext) -> Result<Self::Collator> {
         CollatorStdImpl::start(
@@ -187,6 +337,7 @@ impl CollatorFactory for CollatorStdImplFactory {
             cx.mc_data,
             cx.mempool_config_override,
             cx.cancel_collation,
+            cx.command_complete,
             self.wu_tuner_event_sender.clone(),
         )
         .await
@@ -194,11 +345,9 @@ impl CollatorFactory for CollatorStdImplFactory {
 }
 
 #[async_trait]
-impl Collator for AsyncQueuedDispatcher<CollatorStdImpl> {
+impl Collator for CollatorHandle {
     async fn enqueue_stop(&self) -> Result<()> {
-        let cancel_token = self.cancel_token().clone();
-        self.enqueue_task(method_to_queued_async_closure!(stop_collator, cancel_token))
-            .await
+        self.enqueue_command(CollatorCommand::Stop).await
     }
 
     /// Enqueue update `McData` if newer, reset `PrevData` if required and run next collation attempt
@@ -209,20 +358,19 @@ impl Collator for AsyncQueuedDispatcher<CollatorStdImpl> {
         collation_session: Arc<CollationSessionInfo>,
         prev_blocks_ids: Vec<BlockId>,
     ) -> Result<()> {
-        self.enqueue_task(method_to_queued_async_closure!(
-            resume_collation_wrapper,
+        self.enqueue_command(CollatorCommand::ResumeCollation {
             mc_data,
             reset,
             collation_session,
-            prev_blocks_ids
-        ))
+            prev_blocks_ids,
+        })
         .await
     }
 
     async fn enqueue_try_collate(&self) -> Result<()> {
-        self.enqueue_task(method_to_queued_async_closure!(
-            wait_state_and_try_collate_wrapper,
-        ))
+        self.enqueue_command(CollatorCommand::TryCollate {
+            force_one_anchor_import: false,
+        })
         .await
     }
 
@@ -231,11 +379,10 @@ impl Collator for AsyncQueuedDispatcher<CollatorStdImpl> {
         top_shard_blocks_info: Vec<TopBlockDescription>,
         next_chain_time: u64,
     ) -> Result<()> {
-        self.enqueue_task(method_to_queued_async_closure!(
-            wait_state_and_do_collate_wrapper,
+        self.enqueue_command(CollatorCommand::DoCollate {
             top_shard_blocks_info,
-            next_chain_time
-        ))
+            next_chain_time,
+        })
         .await
     }
 }
@@ -271,6 +418,8 @@ pub struct CollatorStdImpl {
 
     /// For graceful collation cancellation
     cancel_collation: Arc<Notify>,
+    /// Notified when collator completes current command
+    command_complete: Arc<Notify>,
 
     /// Events sender for Work Units tuner service
     wu_tuner_event_sender: Option<tokio::sync::mpsc::Sender<work_units::WuEvent>>,
@@ -292,8 +441,9 @@ impl CollatorStdImpl {
         mc_data: Arc<McData>,
         mempool_config_override: Option<MempoolGlobalConfig>,
         cancel_collation: Arc<Notify>,
+        command_complete: Arc<Notify>,
         wu_tuner_event_sender: Option<tokio::sync::mpsc::Sender<work_units::WuEvent>>,
-    ) -> Result<AsyncQueuedDispatcher<Self>> {
+    ) -> Result<CollatorHandle> {
         const BLOCK_CELL_COUNT_BASELINE: usize = 100_000;
 
         let next_block_info = calc_next_block_id_short(&prev_blocks_ids);
@@ -331,6 +481,7 @@ impl CollatorStdImpl {
             shard_blocks_count_from_last_anchor: 0,
             mempool_config_override,
             cancel_collation,
+            command_complete,
             wu_tuner_event_sender,
             zerostate_id,
         };
@@ -346,40 +497,38 @@ impl CollatorStdImpl {
             }
         });
 
-        // create dispatcher for own async tasks queue
-        let dispatcher =
-            AsyncQueuedDispatcher::create(processor, STANDARD_QUEUED_DISPATCHER_BUFFER_SIZE);
+        // start collator command loop (commands are executed sequentially)
+        let (collator, commands_rx) = CollatorHandle::new(COLLATOR_COMMAND_QUEUE_BUFFER_SIZE);
+        CollatorHandle::run(processor, commands_rx);
         tracing::trace!(target: tracing_targets::COLLATOR,
-            "(next_block_id={}): collator tasks queue dispatcher started", next_block_info,
+            "(next_block_id={}): collator command loop started", next_block_info,
         );
 
-        // equeue first initialization task
+        // enqueue first initialization command
         // sending to the receiver here cannot return Error because it is guaranteed not closed or dropped
-        dispatcher
-            .enqueue_task(method_to_queued_async_closure!(
-                init_collator_wrapper,
+        collator
+            .enqueue_command(CollatorCommand::Init {
                 prev_blocks_ids,
                 mc_data,
-                working_state_tx
-            ))
+                working_state_tx,
+            })
             .await
-            .context("task receiver had to be not closed or dropped here")?;
+            .context("collator commands receiver had to be not closed or dropped here")?;
         tracing::info!(target: tracing_targets::COLLATOR,
-            "(next_block_id={}): collator initialization task enqueued", next_block_info,
+            "(next_block_id={}): collator initialization command enqueued", next_block_info,
         );
 
         tracing::info!(target: tracing_targets::COLLATOR,
             "(next_block_id={}): collator started", next_block_info,
         );
 
-        Ok(dispatcher)
+        Ok(collator)
     }
 
-    async fn stop_collator(&mut self, dispatcher_cancel_token: CancellationToken) -> Result<()> {
+    async fn stop_collator(&mut self) -> Result<()> {
         self.listener
             .on_collator_stopped(self.collation_session.id())
             .await?;
-        dispatcher_cancel_token.cancel();
         Ok(())
     }
 
@@ -654,6 +803,9 @@ impl CollatorStdImpl {
             anchors_info,
             mut anchors_count_above_last_imported_in_current_shard,
         } = match import_res {
+            Err(CollatorError::Cancelled(CollationCancelReason::ExternalCancel)) => {
+                return Ok(NextCollationFlowStep::Cancel);
+            }
             Err(CollatorError::Cancelled(reason)) => {
                 self.listener
                     .on_cancelled(
@@ -1504,8 +1656,11 @@ impl CollatorStdImpl {
         Ok(has_pending_internals)
     }
 
-    async fn wait_state_and_try_collate_wrapper(&mut self) -> Result<()> {
-        self.wait_state_and_try_collate(false)
+    async fn wait_state_and_try_collate_wrapper(
+        &mut self,
+        force_one_anchor_import: bool,
+    ) -> Result<()> {
+        self.wait_state_and_try_collate(force_one_anchor_import)
             .await
             .with_context(|| format!("next_block_id: {}", self.next_block_info))
     }
@@ -1577,13 +1732,6 @@ impl CollatorStdImpl {
                             "collation was cancelled by manager on wait_state_and_do_collate",
                         );
                         metrics::counter!("tycho_collator_anchor_import_cancelled_count", &labels).increment(1);
-                        self.listener
-                            .on_cancelled(
-                                working_state.mc_data.block_id,
-                                working_state.next_block_id_short,
-                                CollationCancelReason::ExternalCancel,
-                            )
-                            .await?;
                         self.delayed_working_state.delay(working_state);
                         return Ok(());
                     }
@@ -1751,13 +1899,6 @@ impl CollatorStdImpl {
                     "collation was cancelled by manager on try_collate_next_master_block",
                 );
                 metrics::counter!("tycho_collator_anchor_import_cancelled_count", &labels).increment(1);
-                self.listener
-                    .on_cancelled(
-                        working_state.mc_data.block_id,
-                        working_state.next_block_id_short,
-                        CollationCancelReason::ExternalCancel,
-                    )
-                    .await?;
                 self.delayed_working_state.delay(working_state);
                 return Ok(());
             }
@@ -2024,13 +2165,6 @@ impl CollatorStdImpl {
                                 "collation was cancelled by manager on try_collate_next_shard_block",
                             );
                             metrics::counter!("tycho_collator_anchor_import_cancelled_count", &labels).increment(1);
-                            self.listener
-                                .on_cancelled(
-                                    working_state.mc_data.block_id,
-                                    working_state.next_block_id_short,
-                                    CollationCancelReason::ExternalCancel,
-                                )
-                                .await?;
                             self.delayed_working_state.delay(working_state);
                             return Ok(());
                         }

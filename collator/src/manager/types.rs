@@ -30,7 +30,6 @@ pub(super) enum CollatorState {
     Active,
     Waiting,
     Cancelled,
-    CancelPending,
 }
 
 pub(super) struct ActiveCollator<C> {
@@ -39,6 +38,8 @@ pub(super) struct ActiveCollator<C> {
 
     /// For graceful collation cancellation
     pub cancel_collation: Arc<Notify>,
+    /// Notified when collator completes current command
+    pub command_complete: Arc<Notify>,
 }
 
 #[derive(Default)]
