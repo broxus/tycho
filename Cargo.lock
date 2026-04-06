@@ -3992,7 +3992,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tycho-block-util"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4012,14 +4012,14 @@ dependencies = [
 
 [[package]]
 name = "tycho-build-info"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "tycho-cli"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4069,7 +4069,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-collator"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "ahash",
  "anyhow",
@@ -4117,7 +4117,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-consensus"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "ahash",
  "anyhow",
@@ -4160,7 +4160,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-control"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4184,7 +4184,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-core"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "ahash",
  "anyhow",
@@ -4252,9 +4252,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-executor"
-version = "0.3.4"
+version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9c58da2418c1014625503816b48207c970d4d81b35e276407456746f14f1ff3e"
+checksum = "30fc06f88c65ab0eb4725bd5082080cee3aa84c32923340c34389b15585657fe"
 dependencies = [
  "ahash",
  "anyhow",
@@ -4266,7 +4266,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-gen-protos"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "anyhow",
  "prost-build",
@@ -4274,7 +4274,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-network"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "ahash",
  "anyhow",
@@ -4318,7 +4318,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-rpc"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "ahash",
  "anyhow",
@@ -4357,7 +4357,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-rpc-subscriptions"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "alloc-metrics",
  "bytesize",
@@ -4377,7 +4377,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-simulator"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4390,7 +4390,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-storage"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4412,7 +4412,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-storage-traits"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "bytes",
  "smallvec",
@@ -4421,8 +4421,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-types"
-version = "0.3.3"
-source = "git+https://github.com/broxus/tycho-types.git?rev=054d1d648520cef2d7d10a2b639d4f0bef7bfaf0#054d1d648520cef2d7d10a2b639d4f0bef7bfaf0"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85ebf3e9cb2b0e515adc25e4b30f46bd70cbd4d67edfaca7e3440c0ab7405086"
 dependencies = [
  "ahash",
  "anyhow",
@@ -4455,7 +4456,8 @@ dependencies = [
 [[package]]
 name = "tycho-types-abi-proc"
 version = "0.3.0"
-source = "git+https://github.com/broxus/tycho-types.git?rev=054d1d648520cef2d7d10a2b639d4f0bef7bfaf0#054d1d648520cef2d7d10a2b639d4f0bef7bfaf0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c813c08a03554252747f9e5e88485d9af4c30077394a1c3bb6d774ddca56b07"
 dependencies = [
  "anyhow",
  "proc-macro2",
@@ -4466,7 +4468,8 @@ dependencies = [
 [[package]]
 name = "tycho-types-proc"
 version = "0.3.0"
-source = "git+https://github.com/broxus/tycho-types.git?rev=054d1d648520cef2d7d10a2b639d4f0bef7bfaf0#054d1d648520cef2d7d10a2b639d4f0bef7bfaf0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ad05cf4ab89631f8c11d85c3aa80f781502440f75361d251f866e0d76ae9d31"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4475,7 +4478,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-util"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "ahash",
  "anyhow",
@@ -4517,7 +4520,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-util-proc"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4526,9 +4529,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-vm"
-version = "0.3.4"
+version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c91e7065262c5a6b7b2d144381c6a8a138d6f398a20591d49cc1347e8986e31"
+checksum = "1ed3cfdbb32ea373f1b450ef6b6ef69d737aa78f62b717d7dc4cb67ce59674e2"
 dependencies = [
  "ahash",
  "anyhow",
@@ -4560,7 +4563,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-wu-tuner"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "anyhow",
  "metrics",
