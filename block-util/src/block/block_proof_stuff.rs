@@ -388,15 +388,16 @@ impl BlockProofStuff {
         validator_set: &ValidatorSet,
         shuffle_validators: bool,
     ) -> Result<ValidatorSubsetInfo> {
-        let cc_seqno = self
+        let Some(vset_switch_round) = self
             .inner
             .proof
             .signatures
             .as_ref()
-            .map(|s| s.validator_info.catchain_seqno)
-            .unwrap_or_default();
-
-        ValidatorSubsetInfo::compute_standard(validator_set, cc_seqno, shuffle_validators)
+            .map(|s| s.consensus_info.vset_switch_round)
+        else {
+            anyhow::bail!("no `consensus_info` to compute subset from");
+        };
+        ValidatorSubsetInfo::compute_standard(validator_set, vset_switch_round, shuffle_validators)
     }
 }
 
@@ -527,11 +528,11 @@ pub struct ValidatorSubsetInfo {
 impl ValidatorSubsetInfo {
     pub fn compute_standard(
         validator_set: &ValidatorSet,
-        cc_seqno: u32,
+        vset_switch_round: u32,
         shuffle_validators: bool,
     ) -> Result<Self> {
         let Some((validators, short_hash)) =
-            validator_set.compute_mc_subset_indexed(cc_seqno, shuffle_validators)
+            validator_set.compute_mc_subset_indexed(vset_switch_round, shuffle_validators)
         else {
             anyhow::bail!("failed to compute a validator subset");
         };
