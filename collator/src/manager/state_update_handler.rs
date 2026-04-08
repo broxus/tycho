@@ -205,11 +205,11 @@ where
             }
             hash_map::Entry::Vacant(entry) => {
                 let (subset, hash_short) = full_validators_set
-                    .compute_mc_subset_indexed(catchain_seqno, collation_config.shuffle_mc_validators)
+                    .compute_mc_subset_indexed(vset_switch_round, collation_config.shuffle_mc_validators)
                     .ok_or_else(|| anyhow!(
                         "Error calculating subset of validators for catchain session (shard_id = {}, seqno = {})",
                         ShardIdent::MASTERCHAIN,
-                        catchain_seqno,
+                        vset_switch_round,
                     ))?;
 
                 let subset: FastHashMap<_, _> = subset
@@ -243,7 +243,6 @@ where
                     tracing::debug!(
                         target: tracing_targets::COLLATION_MANAGER,
                         public_key = %self.keypair.public_key,
-                        current_session_seqno,
                         hash_short,
                         "Current node was not authorized to collate shard {}. Use TRACE to see subset",
                         shard_id,
