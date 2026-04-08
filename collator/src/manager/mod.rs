@@ -2416,11 +2416,11 @@ where
             }
             hash_map::Entry::Vacant(entry) => {
                 let (subset, hash_short) = full_validators_set
-                    .compute_mc_subset_indexed(catchain_seqno, collation_config.shuffle_mc_validators)
+                    .compute_mc_subset_indexed(vset_switch_round, collation_config.shuffle_mc_validators)
                     .ok_or_else(|| anyhow!(
                         "Error calculating subset of validators for catchain session (shard_id = {}, seqno = {})",
                         ShardIdent::MASTERCHAIN,
-                        catchain_seqno,
+                        vset_switch_round,
                     ))?;
 
                 let subset: FastHashMap<_, _> = subset
