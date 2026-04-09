@@ -16,7 +16,7 @@ use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_core::block_strider::{
     BlockSubscriber, BlockSubscriberContext, StateSubscriber, StateSubscriberContext,
 };
-use tycho_core::blockchain_rpc::BlockchainRpcClient;
+use tycho_core::blockchain_rpc::{BlockchainRpcClient, ExternalMessageValidator};
 use tycho_core::global_config::ZerostateId;
 use tycho_core::storage::{CoreStorage, KeyBlocksDirection};
 use tycho_executor::{Executor, ExecutorInspector, ExecutorParams, ParsedConfig, TxError};
@@ -422,7 +422,9 @@ impl RpcState {
         })
         .await
     }
+}
 
+impl RpcState {
     pub fn get_unpacked_blockchain_config(&self) -> Arc<LatestBlockchainConfig> {
         self.inner.blockchain_config.load_full()
     }
@@ -661,6 +663,15 @@ impl RpcState {
 
         let handle = handles.load_handle(block_id)?;
         blocks.load_block_data_decompressed(&handle).await.ok()
+    }
+}
+
+#[async_trait::async_trait]
+impl ExternalMessageValidator for RpcState {
+    async fn validate(&self, msg_cell: Cell) -> Result<()> {
+        self.check_external_message(msg_cell)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
     }
 }
 

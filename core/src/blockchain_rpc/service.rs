@@ -1,18 +1,20 @@
 use std::num::NonZeroU32;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::Context;
 use bytes::{Buf, Bytes};
 #[cfg(feature = "s3")]
 use bytesize::ByteSize;
 use serde::{Deserialize, Serialize};
-use tycho_block_util::message::validate_external_message;
+use tycho_block_util::message::parse_external_message;
 use tycho_network::{Response, Service, ServiceRequest, try_handle_prefix};
 use tycho_types::models::BlockId;
 use tycho_util::futures::BoxFutureOrNoop;
 use tycho_util::metrics::HistogramGuard;
 
-use crate::blockchain_rpc::broadcast_listener::{BroadcastListener, NoopBroadcastListener};
+use crate::blockchain_rpc::broadcast_listener::{
+    BroadcastListener, ExternalMessageValidator, NoopBroadcastListener,
+};
 use crate::blockchain_rpc::providers::{IntoRpcDataProvider, RpcDataProvider};
 use crate::blockchain_rpc::{BAD_REQUEST_ERROR_CODE, INTERNAL_ERROR_CODE, NOT_FOUND_ERROR_CODE};
 use crate::proto::blockchain::*;
@@ -87,6 +89,8 @@ pub struct BlockchainRpcServiceBuilder<MandatoryFields> {
     mandatory_fields: MandatoryFields,
 }
 
+pub type ExternalMessageValidatorHandle = Arc<OnceLock<Arc<dyn ExternalMessageValidator>>>;
+
 impl<B> BlockchainRpcServiceBuilder<(B, CoreStorage, Arc<dyn RpcDataProvider>)>
 where
     B: BroadcastListener,
@@ -100,6 +104,7 @@ where
                 rpc_data_provider,
                 config: self.config,
                 broadcast_listener,
+                external_message_validator: Default::default(),
             }),
         }
     }
@@ -119,6 +124,7 @@ where
                 rpc_data_provider,
                 config: self.config,
                 broadcast_listener,
+                external_message_validator: Default::default(),
             }),
         }
     }
@@ -198,6 +204,12 @@ impl<B> Clone for BlockchainRpcService<B> {
         Self {
             inner: self.inner.clone(),
         }
+    }
+}
+
+impl<B> BlockchainRpcService<B> {
+    pub fn external_message_validator_handle(&self) -> ExternalMessageValidatorHandle {
+        Arc::clone(&self.inner.external_message_validator)
     }
 }
 
@@ -399,8 +411,18 @@ impl<B: BroadcastListener> Service<ServiceRequest> for BlockchainRpcService<B> {
                 metrics::counter!("tycho_rpc_broadcast_external_message_rx_bytes_total")
                     .increment(req.body.len() as u64);
                 BoxFutureOrNoop::future(async move {
-                    if let Err(e) = validate_external_message(&req.body).await {
-                        tracing::debug!("invalid external message: {e:?}");
+                    let msg_cell = match parse_external_message(&req.body).await {
+                        Ok(cell) => cell,
+                        Err(e) => {
+                            tracing::debug!("invalid external message: {e:?}");
+                            return;
+                        }
+                    };
+
+                    if let Some(validator) = inner.external_message_validator.get()
+                        && let Err(e) = validator.validate(msg_cell).await
+                    {
+                        tracing::debug!("external message rejected by validator: {e:?}");
                         return;
                     }
 
@@ -423,6 +445,7 @@ struct Inner<B> {
     config: BlockchainRpcServiceConfig,
     broadcast_listener: B,
     rpc_data_provider: Arc<dyn RpcDataProvider>,
+    external_message_validator: ExternalMessageValidatorHandle,
 }
 
 impl<B> Inner<B> {
