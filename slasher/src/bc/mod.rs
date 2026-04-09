@@ -12,6 +12,7 @@ use tycho_types::models::{
 use tycho_util::FastDashMap;
 
 pub use self::stub_contract::StubSlasherContract;
+use crate::tracing_targets;
 use crate::util::BitSet;
 
 mod stub_contract;
@@ -87,9 +88,13 @@ impl ContractSubscription {
         }
     }
 
-    pub fn handle_account_transaction(&self, tx_hash: &HashBytes, tx: &Transaction) -> Result<()> {
+    pub fn handle_account_transaction(
+        &self,
+        tx_hash: &HashBytes,
+        tx: &Transaction,
+    ) -> Result<bool> {
         let Some(in_msg) = &tx.in_msg else {
-            return Ok(());
+            return Ok(false);
         };
         let msg_hash = in_msg.repr_hash();
 
@@ -98,19 +103,31 @@ impl ContractSubscription {
                 .tx
                 .send(MessageDeliveryStatus::Sent { tx_hash: *tx_hash })
                 .ok();
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     }
 
     pub fn cleanup_expired_messages(&self, now_sec: u32) {
-        let mut dropped = 0usize;
-        self.pending_messages.retain(|_, msg| {
-            let retain = msg.expire_at >= now_sec;
-            dropped += !retain as usize;
-            retain
-        });
+        let expired = self
+            .pending_messages
+            .iter()
+            .filter_map(|entry| (entry.expire_at < now_sec).then_some(*entry.key()))
+            .collect::<Vec<_>>();
+
+        let dropped = expired.len();
+        for msg_hash in expired {
+            if let Some((_, pending)) = self.pending_messages.remove(&msg_hash) {
+                pending.tx.send(MessageDeliveryStatus::Expired).ok();
+            }
+        }
+
         if dropped > 0 {
-            tracing::warn!(dropped, "dropped pending messages");
+            tracing::warn!(
+                target: tracing_targets::SLASHER,
+                dropped,
+                "dropped pending messages"
+            );
         }
     }
 }
@@ -132,9 +149,9 @@ pub enum SlasherContractEvent {
     SubmitBlocksBatch(SubmitBlocksBatch),
 }
 
-// TODO: Propagate session id?
 #[derive(Debug, PartialEq, Eq)]
 pub struct SubmitBlocksBatch {
+    pub session_id: ValidationSessionId,
     pub validator_idx: u16,
     pub blocks_batch: BlocksBatch,
 }
@@ -174,6 +191,16 @@ impl BlocksBatch {
     pub fn seqno_after(&self) -> u32 {
         self.start_seqno
             .saturating_add(self.committed_blocks.len() as u32)
+    }
+
+    pub fn committed_block_count(&self) -> usize {
+        (0..self.committed_blocks.len())
+            .filter(|offset| self.committed_blocks.get(*offset))
+            .count()
+    }
+
+    pub fn validator_count(&self) -> usize {
+        self.signatures_history.len()
     }
 
     pub fn contains_seqno(&self, seqno: u32) -> bool {

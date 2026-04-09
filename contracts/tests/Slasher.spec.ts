@@ -132,11 +132,16 @@ describe("Slasher", () => {
 
     const nowMs = now * 1000 + 500;
     const expireAt = ~~(nowMs / 1000) + 60;
+    const catchainSeqno = 0;
+    const vsetSwitchRound = 0;
+    const validatorIdx = 0;
 
     const bodyToSign = beginCell()
       .storeUint(nowMs, 64)
       .storeUint(expireAt, 32)
-      .storeUint(0, 16)
+      .storeUint(catchainSeqno, 32)
+      .storeUint(vsetSwitchRound, 32)
+      .storeUint(validatorIdx, 16)
       .storeRef(SAMPLE_BLOCKS_BATCH)
       .endCell();
     const signature = sign(bodyToSign.hash(), keypair.secretKey);

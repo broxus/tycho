@@ -211,6 +211,10 @@ impl ZerostateConfig {
                 fundamental_addresses.set(minter_address, ())?;
             }
 
+            if let Some(slasher_params) = self.params.get::<ConfigParam666>()? {
+                fundamental_addresses.set(slasher_params.address, ())?;
+            }
+
             self.params.set::<ConfigParam31>(&fundamental_addresses)?;
         }
 
@@ -500,9 +504,9 @@ impl Default for ZerostateConfig {
             global_id: 0,
             config_public_key: *zero_public_key(),
             minter_public_key: None,
-            config_balance: Tokens::new(500_000_000_000), // 500
+            config_balance: Tokens::new(500_000_000_000),
             config_code: None,
-            elector_balance: Tokens::new(500_000_000_000), // 500
+            elector_balance: Tokens::new(500_000_000_000),
             elector_code: None,
             accounts: Default::default(),
             validators: Default::default(),
@@ -808,7 +812,6 @@ fn make_default_params() -> Result<BlockchainConfigParams> {
 
     // Param 31
     params.set_fundamental_addresses(&[HashBytes([0x00; 32]), HashBytes([0x33; 32])])?;
-
     // Param 43
     params.set_size_limits(&SizeLimitsConfig {
         max_msg_bits: 1 << 21,
