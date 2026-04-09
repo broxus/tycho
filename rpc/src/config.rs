@@ -40,6 +40,11 @@ pub struct RpcConfig {
     /// Configuration of getter requests.
     pub run_get_method: RunGetMethodConfig,
 
+    /// Whether to validate external messages before broadcasting.
+    ///
+    /// Default: `false`.
+    pub validate_external_messages: bool,
+
     /// Subscriptions limits and buffering.
     pub subscriptions: SubscriptionsConfig,
 
@@ -145,6 +150,7 @@ impl Default for RpcConfig {
             allow_huge_requests: false,
             max_parallel_block_downloads: 10,
             run_get_method: RunGetMethodConfig::default(),
+            validate_external_messages: false,
             subscriptions: SubscriptionsConfig::default(),
             storage: RpcStorageConfig::Full {
                 gc: Some(Default::default()),

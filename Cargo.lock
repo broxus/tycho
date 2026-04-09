@@ -4345,6 +4345,7 @@ dependencies = [
  "tracing",
  "tycho-block-util",
  "tycho-core",
+ "tycho-executor",
  "tycho-network",
  "tycho-rpc-subscriptions",
  "tycho-storage",

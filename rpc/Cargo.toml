@@ -40,6 +40,7 @@ weedb = { workspace = true }
 # local deps
 tycho-block-util = { workspace = true }
 tycho-core = { workspace = true }
+tycho-executor = { workspace = true }
 tycho-storage = { workspace = true }
 tycho-util = { workspace = true }
 tycho-rpc-subscriptions = { workspace = true }
