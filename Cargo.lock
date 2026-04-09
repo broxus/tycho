@@ -4382,6 +4382,7 @@ dependencies = [
  "ahash",
  "anyhow",
  "arc-swap",
+ "async-trait",
  "axum",
  "axum-client-ip",
  "base64 0.22.1",
