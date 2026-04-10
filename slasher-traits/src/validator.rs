@@ -6,6 +6,8 @@ use indexmap::IndexMap;
 use tycho_types::models::{BlockId, IndexedValidatorDescription};
 use tycho_util::FastHasherState;
 
+use crate::PeerIdInner;
+
 // TODO: Decide how to be with this collator-defined type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ValidationSessionId {
@@ -61,12 +63,9 @@ impl ValidatorEvents {
         self.listener
             .on_session_started(session_id, first_mc_seqno, own_validator_idx, validators);
 
-        let mut remap = IndexMap::<u16, u16, FastHasherState>::with_capacity_and_hasher(
-            validators.len(),
-            Default::default(),
-        );
+        let mut remap = IndexMap::with_capacity_and_hasher(validators.len(), Default::default());
         for (i, validator) in validators.iter().enumerate() {
-            remap.insert(validator.validator_idx, i as u16);
+            remap.insert(validator.desc.public_key.0, i as u16);
         }
 
         ValidatorSessionScope {
@@ -81,7 +80,7 @@ impl ValidatorEvents {
 pub struct ValidatorSessionScope {
     recorder: Arc<dyn ValidatorEventsListener>,
     session_id: ValidationSessionId,
-    remap_ids: Arc<IndexMap<u16, u16, FastHasherState>>,
+    remap_ids: Arc<IndexMap<PeerIdInner, u16, FastHasherState>>,
     is_sealed: AtomicBool,
 }
 
@@ -120,7 +119,7 @@ impl Drop for ValidatorSessionScope {
 pub struct BlockValidationScope {
     recorder: Arc<dyn ValidatorEventsListener>,
     session_id: ValidationSessionId,
-    remap_ids: Arc<IndexMap<u16, u16, FastHasherState>>,
+    remap_ids: Arc<IndexMap<PeerIdInner, u16, FastHasherState>>,
     block_id: BlockId,
     signature_slots: Box<[AtomicU8]>,
     is_sealed: AtomicBool,
@@ -135,14 +134,14 @@ impl BlockValidationScope {
         &self.block_id
     }
 
-    pub fn receive_signature(&self, validator_idx: u16, is_valid: bool) -> bool {
+    pub fn receive_signature(&self, peer_id: &PeerIdInner, is_valid: bool) -> bool {
         let mask = if is_valid {
             ReceivedSignature::VALID_SIGNATURE_BIT
         } else {
             ReceivedSignature::INVALID_SIGNATURE_BIT
         };
 
-        let Some(slot_id) = self.remap_ids.get(&validator_idx) else {
+        let Some(slot_id) = self.remap_ids.get(peer_id) else {
             return false;
         };
 

@@ -255,7 +255,7 @@ impl ValidatorSession {
         );
 
         // Notify listeners about the own signature
-        events_scope.receive_signature(self.inner.own_validator_idx, true);
+        events_scope.receive_signature(self.inner.peer_id.as_bytes(), true);
 
         let mut total_weight = self.inner.own_weight;
 
@@ -421,7 +421,6 @@ impl ValidatorSession {
                     };
 
                     let validator_info = validators.get(peer_id).expect("peer info out of sync");
-                    let validator_idx = validator_info.validator_idx;
 
                     if !validator_info.public_key.verify_raw(&data, &signature) {
                         tracing::warn!(
@@ -439,14 +438,14 @@ impl ValidatorSession {
                         metrics::counter!(METRIC_INVALID_SIGNATURES_CACHED_TOTAL).increment(1);
 
                         if let Some(scope) = events_scope.upgrade() {
-                            scope.receive_signature(validator_idx, false);
+                            scope.receive_signature(peer_id.as_bytes(), false);
                         }
 
                         break 'stored Default::default();
                     }
 
                     if let Some(scope) = events_scope.upgrade() {
-                        scope.receive_signature(validator_idx, true);
+                        scope.receive_signature(peer_id.as_bytes(), true);
                     }
 
                     total_weight += validator_info.weight;
@@ -699,7 +698,7 @@ impl SessionState {
             metrics::counter!(METRIC_INVALID_SIGNATURES_IN_TOTAL).increment(1);
 
             if let Some(scope) = block.events_scope.upgrade() {
-                scope.receive_signature(validator_info.validator_idx, false);
+                scope.receive_signature(peer_id.as_bytes(), false);
             }
 
             return Err(ValidationError::InvalidSignature);
@@ -740,7 +739,7 @@ impl SessionState {
             && !was_sealed
             && let Some(scope) = block.events_scope.upgrade()
         {
-            scope.receive_signature(validator_info.validator_idx, true);
+            scope.receive_signature(peer_id.as_bytes(), true);
         }
 
         Ok(())

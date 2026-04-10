@@ -4,3 +4,5 @@ pub use self::validator::{
 };
 
 mod validator;
+
+pub type PeerIdInner = [u8; 32];
