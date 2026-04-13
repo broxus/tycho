@@ -23,7 +23,8 @@ pub struct PeerScheduleStateful {
 }
 
 impl PeerScheduleStateful {
-    /// local peer id is always kept as not resolved, so always excluded from result
+    /// local peer id is always kept as not resolved, so always excluded from result;
+    /// a check disregard state: [`super::stateless::PeerScheduleStateless::is_in_active_v_subset`]
     pub fn broadcast_receivers(&self) -> &FastHashSet<PeerId> {
         &self.broadcast_receivers
     }

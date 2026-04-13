@@ -5,7 +5,8 @@ use tycho_network::PeerId;
 
 use crate::dag::DagHead;
 use crate::effects::{AltFormat, Cancelled, Ctx, RoundCtx, SpawnLimit};
-use crate::engine::NodeConfig;
+use crate::engine::{ConsensusConfigExt, NodeConfig};
+use crate::intercom::PeerSchedule;
 use crate::intercom::core::query::response::DownloadResponse;
 use crate::models::PointId;
 use crate::models::point_status::StatusFlags;
@@ -21,12 +22,22 @@ impl Uploader {
         peer_id: &PeerId,
         point_id: PointId,
         store: &MempoolStore,
+        peer_schedule: &PeerSchedule,
         head: &DagHead,
         round_ctx: &RoundCtx,
     ) -> DownloadResponse<Bytes> {
         let (flags_opt, result) = if point_id.round > head.current().round() {
             // we surely return points that we used as an (in)direct  dependency,
             // so we have the opportunity not to search for points that we're unlikely to have
+            (None, DownloadResponse::TryLater)
+        } else if point_id.round
+            < (head.current().round() - round_ctx.conf().consensus.max_total_rounds())
+                .max(round_ctx.conf().genesis_round)
+        {
+            // crossed GC boundary, may not serve it even if it exists, take care of local DB
+            (None, DownloadResponse::DefinedNone)
+        } else if !peer_schedule.atomic().is_in_active_v_subset(peer_id) {
+            // peer is in overlay, just not yet supposed to receive broadcasts
             (None, DownloadResponse::TryLater)
         } else {
             let task_opt = LIMIT.try_spawn_blocking(round_ctx.task(), {

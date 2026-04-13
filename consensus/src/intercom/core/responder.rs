@@ -296,8 +296,17 @@ impl ResponderInner {
                 head,
                 round_ctx,
             )),
-            QueryRequest::Download(point_id) => response
-                .download(Uploader::find(peer_id, point_id, &state.store, head, round_ctx).await),
+            QueryRequest::Download(point_id) => response.download(
+                Uploader::find(
+                    peer_id,
+                    point_id,
+                    &state.store,
+                    &state.peer_schedule,
+                    head,
+                    round_ctx,
+                )
+                .await,
+            ),
         })
     }
 }

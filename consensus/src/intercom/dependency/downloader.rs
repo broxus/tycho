@@ -155,7 +155,7 @@ struct DownloadTask {
     parse_slot: BoxFuture<'static, QueryFutureOutput<ParseResult>>,
 
     interval: Interval,
-    attempt: u8,
+    attempt: u32,
 }
 
 struct QueryFutureOutput<T> {
@@ -251,7 +251,7 @@ impl DownloadTask {
         );
 
         for _ in 0..amount {
-            let Some(peer_id) = self.undone_peers.take_to_flight() else {
+            let Some(peer_id) = self.undone_peers.take_to_flight(self.attempt) else {
                 break;
             };
             let query = self.query.clone();
@@ -461,7 +461,7 @@ impl DownloadCtx {
 }
 
 fn current_peers(
-    attempt: u8,
+    attempt: u32,
     already_downloading: usize,
     peer_count: &PeerCount,
     conf: &MempoolConfig,
@@ -506,7 +506,7 @@ mod tests {
 
         let actual: [usize; N] = std::array::from_fn(|attempt| {
             current_peers(
-                attempt as u8,
+                attempt as u32,
                 already_downloading,
                 &peer_count,
                 &merged_conf.conf,

@@ -20,6 +20,7 @@ pub struct PeerScheduleStateless {
     peer_vecs: [Arc<Vec<PeerId>>; 4],
     peer_sets: [Arc<FastHashSet<PeerId>>; 4],
 
+    banned: FastHashSet<PeerId>,
     pub(super) epoch_starts: EpochStarts,
 
     empty_slot_map: Arc<FastHashMap<PeerId, usize>>,
@@ -35,6 +36,7 @@ impl PeerScheduleStateless {
             peer_vecs: Default::default(),
             peer_sets: Default::default(),
 
+            banned: Default::default(),
             epoch_starts: EpochStarts::default(),
 
             empty_slot_map: Default::default(),
@@ -96,6 +98,21 @@ impl PeerScheduleStateless {
         result
     }
 
+    /// a check for [`super::stateful::PeerScheduleStateful::broadcast_receivers`]
+    /// (disregarding resolve state as it may be stale)
+    pub fn is_in_active_v_subset(&self, peer_id: &PeerId) -> bool {
+        for i in [2, 1, 3, 0] {
+            if self.peer_sets[i].contains(peer_id) {
+                return !self.is_banned(peer_id);
+            }
+        }
+        false
+    }
+
+    pub(super) fn is_banned(&self, peer_id: &PeerId) -> bool {
+        self.banned.contains(peer_id)
+    }
+
     /// local peer id is always kept as not resolved
     pub fn peers_for_array<const N: usize>(
         &self,
@@ -121,6 +138,16 @@ impl PeerScheduleStateless {
         self.peer_vecs[3] = Arc::new(working_subset.iter().map(|(p, _)| *p).collect());
         self.epoch_starts.next = Some(next_epoch_start);
         self.meter();
+    }
+
+    pub(super) fn insert_banned(&mut self, peers: &[PeerId]) {
+        self.banned.extend(peers);
+    }
+
+    pub(super) fn remove_banned(&mut self, peers: &[PeerId]) {
+        for peer in peers {
+            self.banned.remove(peer);
+        }
     }
 
     /// on epoch change
