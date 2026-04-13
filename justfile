@@ -94,6 +94,10 @@ update_rpc_proto:
 update_cli_reference:
     CI=true cargo run --bin tycho -- util markdown-help > docs/cli-reference.md
 
+# Runs fuzzing for external message validation. Example: just fuzz_ext_msg -- -max_total_time=60
+fuzz_ext_msg *flags:
+    cd block-util/fuzz && cargo +nightly fuzz run fuzz_ext_msg {{ flags }}
+
 # === Integration tests stuff ===
 
 # Runs all tests including ignored. Will take a lot of time to run.
