@@ -178,6 +178,7 @@ impl PeerSchedule {
         if !peers.is_empty() {
             let mut guard = self.write();
             guard.set_banned(peers, self.downgrade());
+            self.update_atomic(|stateless| stateless.insert_banned(peers));
         }
     }
 
@@ -185,6 +186,7 @@ impl PeerSchedule {
         if !peers.is_empty() {
             let mut guard = self.write();
             guard.remove_bans(peers, self.downgrade());
+            self.update_atomic(|stateless| stateless.remove_banned(peers));
         }
     }
 
@@ -400,7 +402,9 @@ mod tests {
         let mut updates = peer_schedule.read().updates();
 
         peer_schedule.set_banned(&[remote_peer]);
+        assert!(peer_schedule.atomic().is_banned(&remote_peer));
         peer_schedule.remove_bans(&[remote_peer]);
+        assert!(!peer_schedule.atomic().is_banned(&remote_peer));
 
         let mut seen = Vec::new();
         loop {

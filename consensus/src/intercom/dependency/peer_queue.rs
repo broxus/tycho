@@ -11,6 +11,7 @@ pub struct PeerStatus {
     pub state: OrderedPeerState,
     /// has uncompleted request just now
     pub is_in_flight: bool,
+    last_attempt: Option<u32>,
     pub failed_queries: usize,
     /// `false` for peers that depend on current point, i.e. included it directly;
     /// those have more priority than independent ones which may not have the point
@@ -43,13 +44,16 @@ impl PeerStatus {
         Self {
             state: OrderedPeerState(state),
             is_in_flight: false,
+            last_attempt: None,
             failed_queries: 0,
             is_independent: true, // `false` comes from channel to start immediate download
             rand: rand::rng().next_u32(),
         }
     }
-    fn is_ready_to_query(&self) -> bool {
-        self.state.0 == PeerState::Resolved && !self.is_in_flight
+    fn is_ready_to_query(&self, attempt: u32) -> bool {
+        self.state.0 == PeerState::Resolved
+            && !self.is_in_flight
+            && self.last_attempt.is_none_or(|a| a < attempt)
     }
 }
 
@@ -61,10 +65,11 @@ impl PeerQueue {
         Self(mapped.collect())
     }
 
-    pub fn take_to_flight(&mut self) -> Option<PeerId> {
+    pub fn take_to_flight(&mut self, attempt: u32) -> Option<PeerId> {
         let (&peer_id, &Reverse(mut status)) = self.0.max()?;
-        if status.is_ready_to_query() {
+        if status.is_ready_to_query(attempt) {
             status.is_in_flight = true;
+            status.last_attempt = Some(attempt);
             self.0.upsert(peer_id, Reverse(status), PartialEq::ne).ok();
             Some(peer_id)
         } else {
