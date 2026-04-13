@@ -8,7 +8,7 @@ use futures_util::TryFutureExt;
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
-use tycho_block_util::block::{ValidatorSubsetInfo, calc_next_block_id_short};
+use tycho_block_util::block::{TopBlocks, ValidatorSubsetInfo, calc_next_block_id_short};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_core::global_config::MempoolGlobalConfig;
@@ -1660,25 +1660,35 @@ where
         }
 
         // if `fast_sync` is enabled then we will skip already applied queue diffs
-        let queue_diffs_applied_to_top_blocks = if self.config.fast_sync {
+        let queue_diffs_applied_to_top_blocks = if self.config.fast_sync
+            && let Some(applied_to_mc_block_id) =
+                self.get_queue_diffs_applied_to_mc_block_id(last_collated_mc_block_id)?
+        {
             // BACKWARD COMPATIBILITY: `last_committed_mc_block_id` will not exist in queue storage
             // in previous version. We will receive None and will use all required diffs to restore the queue
-            if let Some(applied_to_mc_block_id) =
-                self.get_queue_diffs_applied_to_mc_block_id(last_collated_mc_block_id)?
-            {
-                // collect top blocks queue diffs already applied to
-                Self::get_top_blocks_seqno(
-                    &applied_to_mc_block_id,
-                    &self.blocks_cache,
-                    self.state_node_adapter.clone(),
-                )
-                .await_blocking()?
-            } else {
-                FastHashMap::default()
-            }
+
+            // NOTE: when the node started to sync from a persistent state with a bunch of archives after it,
+            //      the `last_collated_mc_block_id` will be None, and `applied_to_mc_block_id` will be equal
+            //      to the top block of the persistent state - init block. But the persistent state can be already
+            //      removed because of the long history after it when collator starts to sync by recent blocks.
+            //      So we will not able to read top blocks ids and will fallback the full sync.
+
+            // collect top blocks queue diffs already applied to
+            Self::get_top_blocks_seqno(
+                &applied_to_mc_block_id,
+                &self.blocks_cache,
+                self.state_node_adapter.clone(),
+            )
+            .await_blocking()?
         } else {
-            FastHashMap::default()
+            None
         };
+        if queue_diffs_applied_to_top_blocks.is_some() {
+            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                ?queue_diffs_applied_to_top_blocks,
+                "will use fast sync to restore queue",
+            );
+        }
 
         // restore queue state and return latest applied master state
         let queue_restore_res = Self::restore_queue(
@@ -1688,7 +1698,7 @@ where
             applied_range.0,
             min_processed_to_by_shards,
             before_tail_block_ids,
-            queue_diffs_applied_to_top_blocks,
+            queue_diffs_applied_to_top_blocks.unwrap_or_default(),
         )
         .await_blocking()?;
 
@@ -1848,7 +1858,7 @@ where
         &self,
         last_collated_mc_block_id: Option<BlockId>,
     ) -> Result<Option<BlockId>> {
-        let last_queue_comitted_on = self.mq_adapter.get_last_commited_mc_block_id()?;
+        let last_queue_comitted_on = self.mq_adapter.get_last_committed_mc_block_id()?;
         let last_collated_or_synced_to =
             self.get_top_mc_block_id_for_next_collation(last_collated_mc_block_id);
 
@@ -1873,11 +1883,18 @@ where
     /// Or last received and "synced to" if it is ahead of last correct collated.
     /// Last collated may be incorrect but we don not know this until we receive block from bc.
     /// We use this to detect the lag from last received to check if we need to run next sync.
+    #[tracing::instrument(skip_all)]
     fn get_top_mc_block_id_for_next_collation(
         &self,
         last_collated_mc_block_id: Option<BlockId>,
     ) -> Option<BlockId> {
         let last_synced_to_mc_block_id = self.get_last_synced_to_mc_block_id();
+
+        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+            ?last_synced_to_mc_block_id,
+            ?last_collated_mc_block_id,
+        );
+
         match (last_synced_to_mc_block_id, last_collated_mc_block_id) {
             (Some(last_synced_to), Some(last_collated)) => {
                 if last_synced_to.seqno > last_collated.seqno {
@@ -3464,47 +3481,78 @@ where
         Ok(())
     }
 
-    /// Collect top blocks seqno from all shards by master block id.
-    /// Master block seqno included
+    /// Collect top blocks seqno from all shards by master block id. Master block seqno included.
+    /// Returns None when unable to read related top shard blocks info.
     async fn get_top_blocks_seqno(
         mc_block_id: &BlockId,
         blocks_cache: &BlocksCache,
         state_node_adapter: Arc<dyn StateNodeAdapter>,
-    ) -> Result<FastHashMap<ShardIdent, BlockSeqno>> {
+    ) -> Result<Option<FastHashMap<ShardIdent, BlockSeqno>>> {
         let mut result = FastHashMap::default();
 
         result.insert(mc_block_id.shard, mc_block_id.seqno);
 
-        let top_shard_blocks = blocks_cache.get_top_shard_blocks(mc_block_id.as_short_id());
+        // try get top shard blocks from cache first
+        if let Some(top_shard_blocks) = blocks_cache.get_top_shard_blocks(mc_block_id.as_short_id())
+        {
+            result.extend(top_shard_blocks);
+            return Ok(Some(result));
+        }
 
-        match top_shard_blocks {
-            None => {
-                let state = match state_node_adapter
-                    .load_state(mc_block_id.seqno, mc_block_id, Default::default())
-                    .await
-                {
-                    Err(err) => match err.downcast_ref::<StateNotFound>() {
-                        Some(_) => {
-                            tracing::warn!(target: tracing_targets::COLLATION_MANAGER,
-                                %mc_block_id,
-                                "master state not found in get_top_blocks_seqno",
-                            );
-                            return Ok(FastHashMap::default());
-                        }
-                        _ => Err(err),
-                    },
-                    state => state,
-                }?;
-                for item in state.shards()?.iter() {
-                    let (shard_id, shard_descr) = item?;
-                    result.insert(shard_id, shard_descr.get_block_id(shard_id).seqno);
+        // then try read from state
+        match state_node_adapter
+            .load_state(mc_block_id.seqno, mc_block_id, Default::default())
+            .await
+        {
+            Err(err) => match err.downcast_ref::<StateNotFound>() {
+                Some(_) => {
+                    tracing::warn!(target: tracing_targets::COLLATION_MANAGER,
+                        %mc_block_id,
+                        "master state not found in get_top_blocks_seqno",
+                    );
                 }
-            }
-            Some(top_shard_blocks) => {
-                result.extend(top_shard_blocks);
+                _ => {
+                    tracing::warn!(target: tracing_targets::COLLATION_MANAGER,
+                        ?err,
+                        "error loading master state in get_top_blocks_seqno",
+                    );
+                }
+            },
+            Ok(state) => {
+                for item in state.shards()?.latest_blocks() {
+                    let top_sb = item?;
+                    result.insert(top_sb.shard, top_sb.seqno);
+                }
+                return Ok(Some(result));
             }
         }
-        Ok(result)
+
+        // finally try read from block data
+        match state_node_adapter.load_block(mc_block_id).await {
+            Err(err) => {
+                tracing::warn!(target: tracing_targets::COLLATION_MANAGER,
+                    %mc_block_id,
+                    ?err,
+                    "error loading master block in get_top_blocks_seqno",
+                );
+            }
+            Ok(None) => {
+                tracing::warn!(target: tracing_targets::COLLATION_MANAGER,
+                    %mc_block_id,
+                    "master block was not found in get_top_blocks_seqno",
+                );
+            }
+            Ok(Some(mc_block_stuff)) => {
+                let top_blocks = TopBlocks::from_mc_block(&mc_block_stuff)?;
+                for top_sb in top_blocks.shard_heights().iter() {
+                    result.insert(top_sb.shard, top_sb.seqno);
+                }
+                return Ok(Some(result));
+            }
+        }
+
+        // unable to load related shard blocks info, return None
+        Ok(None)
     }
 }
 

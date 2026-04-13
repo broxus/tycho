@@ -2425,7 +2425,7 @@ async fn test_queue_restore_on_sync() {
         first_applied_mc_block_key.seqno,
         min_processed_to_by_shards,
         before_tail_block_ids,
-        queue_diffs_applied_to_top_blocks,
+        queue_diffs_applied_to_top_blocks.unwrap_or_default(),
     )
     .await
     .unwrap();
@@ -2837,7 +2837,7 @@ async fn test_queue_restore_on_sync() {
         first_applied_mc_block_key.seqno,
         min_processed_to_by_shards,
         before_tail_block_ids,
-        queue_diffs_applied_to_top_blocks,
+        queue_diffs_applied_to_top_blocks.unwrap_or_default(),
     )
     .await
     .unwrap();
@@ -3140,7 +3140,7 @@ async fn test_queue_restore_on_sync() {
     tracing::trace!("before_tail_block_ids: {:?}", before_tail_block_ids);
     let queue_diffs_applied_to_mc_block_id = test_adapter
         .mq_adapter
-        .get_last_commited_mc_block_id()
+        .get_last_committed_mc_block_id()
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -3165,7 +3165,7 @@ async fn test_queue_restore_on_sync() {
         first_applied_mc_block_key.seqno,
         min_processed_to_by_shards,
         before_tail_block_ids,
-        queue_diffs_applied_to_top_blocks,
+        queue_diffs_applied_to_top_blocks.unwrap_or_default(),
     )
     .await
     .unwrap();
@@ -3480,7 +3480,7 @@ async fn test_queue_restore_on_sync() {
     tracing::trace!("before_tail_block_ids: {:?}", before_tail_block_ids);
     let queue_diffs_applied_to_mc_block_id = test_adapter
         .mq_adapter
-        .get_last_commited_mc_block_id()
+        .get_last_committed_mc_block_id()
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -3505,7 +3505,7 @@ async fn test_queue_restore_on_sync() {
         first_applied_mc_block_key.seqno,
         min_processed_to_by_shards,
         before_tail_block_ids,
-        queue_diffs_applied_to_top_blocks,
+        queue_diffs_applied_to_top_blocks.unwrap_or_default(),
     )
     .await
     .unwrap();

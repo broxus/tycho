@@ -89,7 +89,7 @@ where
 
     /// Get mc block id on which the queue was committed.
     /// Returns None if queue was not committed
-    fn get_last_commited_mc_block_id(&self) -> Result<Option<BlockId>>;
+    fn get_last_committed_mc_block_id(&self) -> Result<Option<BlockId>>;
 
     /// Get diffs tail len.
     /// `from` - start key for the tail. Diff with `max_message` == `from` will be excluded from the tail
@@ -324,14 +324,14 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
     }
 
     #[instrument(skip_all)]
-    fn get_last_commited_mc_block_id(&self) -> Result<Option<BlockId>> {
+    fn get_last_committed_mc_block_id(&self) -> Result<Option<BlockId>> {
         let start_time = std::time::Instant::now();
         let block_id = self.queue.get_last_committed_mc_block_id()?;
         let elapsed = start_time.elapsed();
         tracing::info!(target: tracing_targets::MQ_ADAPTER,
             elapsed = %humantime::format_duration(elapsed),
             block_id = ?DebugDisplayOpt(block_id),
-            "get_last_commited_mc_block_id completed"
+            "get_last_committed_mc_block_id completed"
         );
         Ok(block_id)
     }
