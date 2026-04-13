@@ -34,18 +34,24 @@ struct ByRoundItem {
 
 #[derive(Clone)]
 struct ByAuthor {
-    item: ByAuthorItem,
+    first: Cached,
+    fork: Option<Cached>,
+}
+
+#[derive(Clone)]
+struct Cached {
+    item: CachedItem,
     duplicates: u16,
 }
 /// store only `Digest` when point is too far from engine round
 #[derive(Clone)]
-enum ByAuthorItem {
+enum CachedItem {
     Ok(Point),
     OkPruned(Digest),
     IllFormed(Point, IllFormedReason),
     IllFormedPruned(Digest, IllFormedReason),
 }
-impl ByAuthorItem {
+impl CachedItem {
     fn digest(&self) -> &Digest {
         match self {
             Self::Ok(point) | Self::IllFormed(point, _) => point.info().digest(),
@@ -73,16 +79,16 @@ impl ByAuthorItem {
         round_ctx: &RoundCtx,
     ) {
         match self {
-            ByAuthorItem::Ok(point) => {
+            CachedItem::Ok(point) => {
                 dag_round.add_broadcast(point, downloader, store, round_ctx);
             }
-            ByAuthorItem::OkPruned(digest) => {
+            CachedItem::OkPruned(digest) => {
                 dag_round.add_pruned_broadcast(author, digest, downloader, store, round_ctx);
             }
-            ByAuthorItem::IllFormed(point, reason) => {
+            CachedItem::IllFormed(point, reason) => {
                 dag_round.add_ill_formed_broadcast(point, reason, store, round_ctx);
             }
-            ByAuthorItem::IllFormedPruned(_digest, _) => {
+            CachedItem::IllFormedPruned(_digest, _) => {
                 // do nothing, was stored only to determine round because signature is valid
             }
         }
@@ -138,21 +144,21 @@ impl BroadcastFilter {
         let checked = if let Some(issue) = maybe_issue {
             let reason = IllFormedReason::EvidenceSigError(issue);
             Ok(if id.round > prune_after {
-                ByAuthorItem::IllFormedPruned(id.digest, reason)
+                CachedItem::IllFormedPruned(id.digest, reason)
             } else {
-                ByAuthorItem::IllFormed(point.clone(), reason)
+                CachedItem::IllFormed(point.clone(), reason)
             })
         } else {
             match Verifier::verify(point.info(), peer_schedule, round_ctx.conf()) {
                 Ok(()) => Ok(if id.round > prune_after {
-                    ByAuthorItem::OkPruned(id.digest)
+                    CachedItem::OkPruned(id.digest)
                 } else {
-                    ByAuthorItem::Ok(point.clone())
+                    CachedItem::Ok(point.clone())
                 }),
                 Err(VerifyError::IllFormed(reason)) => Ok(if id.round > prune_after {
-                    ByAuthorItem::IllFormedPruned(id.digest, reason)
+                    CachedItem::IllFormedPruned(id.digest, reason)
                 } else {
-                    ByAuthorItem::IllFormed(point.clone(), reason)
+                    CachedItem::IllFormed(point.clone(), reason)
                 }),
                 Err(VerifyError::Fail(reason)) => Err(reason),
             }
@@ -200,7 +206,7 @@ impl BroadcastFilter {
     fn cache(
         &self,
         id: &PointId,
-        checked: &Result<ByAuthorItem, UninitVset>,
+        checked: &Result<CachedItem, UninitVset>,
         store: &MempoolStore,
         peer_schedule: &PeerSchedule,
         downloader: &Downloader,
@@ -262,16 +268,31 @@ impl BroadcastFilter {
         // if some signatures are invalid (it's another reason for a local ban)
         (by_author.entry(id.author))
             .and_modify(|existing| {
-                let old_digest = *existing.item.digest();
-                if old_digest == id.digest {
-                    existing.duplicates = existing.duplicates.saturating_add(1);
+                if *existing.first.item.digest() == id.digest {
+                    let first = &mut existing.first;
+                    first.duplicates = first.duplicates.saturating_add(1);
                     // allow some duplicates in case of network error or sender restart
                     // sender could have not received our response, thus retried
-                    if existing.duplicates > 3 {
-                        cached_info.duplicates = Some(existing.duplicates);
+                    if first.duplicates > 3 {
+                        cached_info.duplicates = Some(first.duplicates);
                     }
                 } else {
-                    cached_info.equivocation = Some(old_digest);
+                    match &mut existing.fork {
+                        Some(fork) if *fork.item.digest() == id.digest => {
+                            fork.duplicates = fork.duplicates.saturating_add(1);
+                            if fork.duplicates > 3 {
+                                cached_info.duplicates = Some(fork.duplicates);
+                            }
+                        }
+                        None => {
+                            existing.fork = Some(Cached {
+                                item: verified.clone(),
+                                duplicates: 0,
+                            });
+                        }
+                        Some(_) => {}
+                    }
+                    cached_info.equivocation = Some(*existing.first.item.digest());
                 };
             })
             .or_insert_with(|| {
@@ -280,8 +301,11 @@ impl BroadcastFilter {
                     .wrapping_add(1) as usize // won't exceed u8, just don't panic holding lock
                     == peer_count.reliable_minority();
                 ByAuthor {
-                    item: verified.clone(),
-                    duplicates: 0,
+                    first: Cached {
+                        item: verified.clone(),
+                        duplicates: 0,
+                    },
+                    fork: None,
                 }
             });
 
@@ -403,8 +427,13 @@ impl BroadcastFilter {
                 let mut incr = ByRoundIncrement::default();
                 for entry in map_by_author.iter() {
                     let (author, by_author) = entry.pair();
-                    incr.count(&by_author.item);
-                    (by_author.item).add_to_dag(author, dag_round, downloader, store, round_ctx);
+                    incr.count(&by_author.first.item);
+                    (by_author.first.item)
+                        .add_to_dag(author, dag_round, downloader, store, round_ctx);
+                    if let Some(fork) = &by_author.fork {
+                        incr.count(&fork.item);
+                        (fork.item).add_to_dag(author, dag_round, downloader, store, round_ctx);
+                    }
                 }
                 flushed.add(round, incr);
             } else {
@@ -437,7 +466,7 @@ struct ByRoundIncrement {
     digests: u8,
 }
 impl ByRoundIncrement {
-    fn count(&mut self, item: &ByAuthorItem) {
+    fn count(&mut self, item: &CachedItem) {
         if item.is_pruned() {
             self.digests = self.digests.saturating_add(1);
         } else {
