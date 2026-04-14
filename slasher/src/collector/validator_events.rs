@@ -45,6 +45,8 @@ struct SessionState {
     /// Maps each subset item with its original vset index.
     validator_indices: Box<[u16]>,
     current_batch: BlocksBatch,
+    /// Imported anchors can arrive one batch window before block callbacks rotate the session.
+    next_batch: BlocksBatch,
     first_seqno: u32,
     next_expected_seqno: u32,
     complete_batches: Option<mpsc::UnboundedSender<BlocksBatch>>,
@@ -127,11 +129,8 @@ impl ValidatorEventsCollector {
         // TODO: Split or grow the previous batch to not discard events.
         if session.batch_size != batch_size {
             session.batch_size = batch_size;
-            session.current_batch = BlocksBatch::new(
-                session.align_seqno(session.next_expected_seqno),
-                batch_size,
-                &session.validator_indices,
-            );
+            let next_expected_seqno = session.next_expected_seqno;
+            session.reset_batches(next_expected_seqno);
         }
 
         session.complete_batches = Some(complete_batches);
@@ -167,6 +166,8 @@ impl ValidatorEventsListener for ValidatorEventsCollector {
 
         let batch_size = NonZeroU32::new(self.default_batch_size.load(Ordering::Acquire)).unwrap();
         let current_batch = BlocksBatch::new(first_mc_seqno, batch_size, &validator_indices);
+        let next_batch =
+            BlocksBatch::new(current_batch.seqno_after(), batch_size, &validator_indices);
 
         let validators = Arc::<[IndexedValidatorDescription]>::from(validators);
 
@@ -175,6 +176,7 @@ impl ValidatorEventsListener for ValidatorEventsCollector {
                 batch_size,
                 validator_indices,
                 current_batch,
+                next_batch,
                 first_seqno: first_mc_seqno,
                 next_expected_seqno: first_mc_seqno,
                 // Will be initialized later via `init_session`.
@@ -226,7 +228,7 @@ impl ValidatorEventsListener for ValidatorEventsCollector {
             tracing::warn!("session not found, ignoring on_anchor_import event");
             return;
         };
-        (session.current_batch).push_anchor_stats(block_id.seqno, anchor_id, &anchor_stats);
+        session.push_anchor_stats(block_id.seqno, anchor_id, &anchor_stats);
     }
 
     #[instrument(skip_all, fields(session_id = ?session_id))]
@@ -284,11 +286,33 @@ impl ValidatorSessionInfo {
 // === Session state impl ===
 
 impl SessionState {
+    fn push_anchor_stats(
+        &mut self,
+        seqno: u32,
+        anchor_id: u32,
+        anchor_stats: &AnchorStats,
+    ) -> bool {
+        if self.current_batch.contains_seqno(seqno) {
+            (self.current_batch).push_anchor_stats(anchor_id, anchor_stats)
+        } else if self.next_batch.contains_seqno(seqno) {
+            (self.next_batch).push_anchor_stats(anchor_id, anchor_stats)
+        } else {
+            tracing::warn!(
+                anchor_id,
+                seqno,
+                current_batch_seqnos = ?self.current_batch.seqno_range(),
+                next_batch_seqnos = ?self.next_batch.seqno_range(),
+                "anchor import outside block batches"
+            );
+            false
+        }
+    }
+
     fn handle_block(&mut self, seqno: u32, signatures: Option<&[ReceivedSignature]>) -> bool {
-        let to_commit = match self.try_advance_current_batch(seqno) {
+        let batches = match self.try_advance_current_batch(seqno) {
             AdvanceBlockStatus::TooOld => return false,
-            AdvanceBlockStatus::Unchanged => None,
-            AdvanceBlockStatus::Replaced(batch) => Some(batch),
+            AdvanceBlockStatus::Unchanged => [None, None],
+            AdvanceBlockStatus::Rotated { first, second } => [Some(first), second],
         };
 
         let event_type = match signatures {
@@ -299,10 +323,10 @@ impl SessionState {
             None => "skipped",
         };
 
-        if let Some(batch) = to_commit
-            && let Err(e) = self.commit_batch(batch)
-        {
-            tracing::error!(event_type, "failed to commit blocks batch: {e:?}");
+        for (batch, ith) in batches.into_iter().flatten().zip(["1st", "2nd"]) {
+            if let Err(e) = self.commit_batch(batch) {
+                tracing::error!(event_type, "{ith} blocks batch failed to commit: {e:?}");
+            }
         }
         true
     }
@@ -314,14 +338,19 @@ impl SessionState {
             return AdvanceBlockStatus::Unchanged;
         }
 
-        let start_seqno = self.align_seqno(seqno);
-        let prev_batch = std::mem::replace(
-            &mut self.current_batch,
-            BlocksBatch::new(start_seqno, self.batch_size, &self.validator_indices),
-        );
         self.next_expected_seqno = seqno + 1;
 
-        AdvanceBlockStatus::Replaced(prev_batch)
+        if self.next_batch.contains_seqno(seqno) {
+            let next = self.make_batch(self.next_batch.seqno_after());
+            let current = std::mem::replace(&mut self.next_batch, next);
+
+            AdvanceBlockStatus::Rotated {
+                first: std::mem::replace(&mut self.current_batch, current),
+                second: None,
+            }
+        } else {
+            self.reset_batches(seqno)
+        }
     }
 
     fn commit_batch(&self, batch: BlocksBatch) -> Result<()> {
@@ -329,7 +358,8 @@ impl SessionState {
     }
 
     fn commit_final_batch(self) -> Result<()> {
-        Self::commit_batch_impl(&self.complete_batches, self.current_batch)
+        Self::commit_batch_impl(&self.complete_batches, self.current_batch)?;
+        Self::commit_batch_impl(&self.complete_batches, self.next_batch)
     }
 
     fn commit_batch_impl(
@@ -351,6 +381,20 @@ impl SessionState {
         Ok(())
     }
 
+    fn reset_batches(&mut self, seqno: u32) -> AdvanceBlockStatus {
+        let current = self.make_batch(self.align_seqno(seqno));
+        let next = self.make_batch(current.seqno_after());
+
+        AdvanceBlockStatus::Rotated {
+            first: std::mem::replace(&mut self.current_batch, current),
+            second: Some(std::mem::replace(&mut self.next_batch, next)),
+        }
+    }
+
+    fn make_batch(&self, start_seqno: u32) -> BlocksBatch {
+        BlocksBatch::new(start_seqno, self.batch_size, &self.validator_indices)
+    }
+
     fn align_seqno(&self, seqno: u32) -> u32 {
         assert!(seqno >= self.first_seqno);
 
@@ -366,5 +410,213 @@ impl SessionState {
 enum AdvanceBlockStatus {
     TooOld,
     Unchanged,
-    Replaced(BlocksBatch),
+    Rotated {
+        first: BlocksBatch,
+        second: Option<BlocksBatch>,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use tycho_slasher_traits::AnchorPeerStats;
+    use tycho_types::models::{ShardIdent, ValidatorDescription};
+
+    use super::*;
+
+    const FIRST_SEQNO: u32 = 100;
+    const BATCH_SIZE: u32 = 3;
+
+    #[test]
+    fn next_window_anchor_import_survives_rotation() {
+        let (collector, mut rx, session_id) = make_collector();
+
+        collector.on_anchor_import(
+            session_id,
+            &master_short(FIRST_SEQNO + BATCH_SIZE),
+            10,
+            stats(&[51, 52, 53]),
+        );
+        assert!(drain_batches(&mut rx).is_empty());
+
+        collector.on_block_skipped(session_id, &master(FIRST_SEQNO + BATCH_SIZE));
+        assert!(drain_batches(&mut rx).is_empty());
+
+        collector.on_session_finished(session_id);
+        let batches = drain_batches(&mut rx);
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].start_seqno, FIRST_SEQNO + BATCH_SIZE);
+        assert_eq!(batches[0].anchor_range, Some(10..=10));
+        assert_eq!(points(&batches[0]), vec![(0, 51), (1, 52), (2, 53)]);
+    }
+
+    #[test]
+    fn final_flush_commits_current_and_next_anchor_batches() {
+        let (collector, mut rx, session_id) = make_collector();
+
+        collector.on_anchor_import(
+            session_id,
+            &master_short(FIRST_SEQNO),
+            10,
+            stats(&[51, 52, 53]),
+        );
+        collector.on_anchor_import(
+            session_id,
+            &master_short(FIRST_SEQNO + BATCH_SIZE),
+            11,
+            stats(&[61, 62, 63]),
+        );
+
+        collector.on_session_finished(session_id);
+        let batches = drain_batches(&mut rx);
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].start_seqno, FIRST_SEQNO);
+        assert_eq!(batches[0].anchor_range, Some(10..=10));
+        assert_eq!(points(&batches[0]), vec![(0, 51), (1, 52), (2, 53)]);
+        assert_eq!(batches[1].start_seqno, FIRST_SEQNO + BATCH_SIZE);
+        assert_eq!(batches[1].anchor_range, Some(11..=11));
+        assert_eq!(points(&batches[1]), vec![(0, 61), (1, 62), (2, 63)]);
+    }
+
+    #[test]
+    fn far_jump_flushes_old_next_batch_before_reset() {
+        let (collector, mut rx, session_id) = make_collector();
+
+        collector.on_anchor_import(
+            session_id,
+            &master_short(FIRST_SEQNO + BATCH_SIZE),
+            10,
+            stats(&[51, 52, 53]),
+        );
+
+        collector.on_block_skipped(session_id, &master(FIRST_SEQNO + 3 * BATCH_SIZE));
+        let batches = drain_batches(&mut rx);
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].start_seqno, FIRST_SEQNO + BATCH_SIZE);
+        assert_eq!(batches[0].anchor_range, Some(10..=10));
+        assert_eq!(points(&batches[0]), vec![(0, 51), (1, 52), (2, 53)]);
+    }
+
+    #[test]
+    fn duplicate_anchor_import_is_not_counted_twice() {
+        let (collector, mut rx, session_id) = make_collector();
+
+        collector.on_anchor_import(
+            session_id,
+            &master_short(FIRST_SEQNO),
+            10,
+            stats(&[51, 52, 53]),
+        );
+        collector.on_anchor_import(
+            session_id,
+            &master_short(FIRST_SEQNO),
+            10,
+            stats(&[61, 62, 63]),
+        );
+
+        collector.on_session_finished(session_id);
+        let batches = drain_batches(&mut rx);
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].anchor_range, Some(10..=10));
+        assert_eq!(points(&batches[0]), vec![(0, 51), (1, 52), (2, 53)]);
+    }
+
+    #[test]
+    fn anchor_import_outside_live_windows_is_rejected() {
+        let (collector, mut rx, session_id) = make_collector();
+
+        collector.on_anchor_import(
+            session_id,
+            &master_short(FIRST_SEQNO + 2 * BATCH_SIZE),
+            10,
+            stats(&[51, 52, 53]),
+        );
+
+        collector.on_session_finished(session_id);
+
+        assert!(drain_batches(&mut rx).is_empty());
+    }
+
+    fn master(seqno: u32) -> BlockId {
+        BlockId {
+            shard: ShardIdent::MASTERCHAIN,
+            seqno,
+            root_hash: HashBytes::ZERO,
+            file_hash: HashBytes::ZERO,
+        }
+    }
+
+    fn master_short(seqno: u32) -> BlockIdShort {
+        BlockIdShort {
+            shard: ShardIdent::MASTERCHAIN,
+            seqno,
+        }
+    }
+
+    fn stats(points: &[u16]) -> AnchorStats {
+        AnchorStats(Arc::from(
+            points
+                .iter()
+                .copied()
+                .map(|points_proven| AnchorPeerStats { points_proven })
+                .collect::<Vec<_>>(),
+        ))
+    }
+
+    fn drain_batches(rx: &mut BlocksBatchRx) -> Vec<BlocksBatch> {
+        let mut result = Vec::new();
+        while let Ok(batch) = rx.try_recv() {
+            result.push(batch);
+        }
+        result
+    }
+
+    fn points(batch: &BlocksBatch) -> Vec<(u16, u16)> {
+        (batch.observed)
+            .iter()
+            .map(|item| (item.validator_idx, item.points_proven))
+            .collect()
+    }
+
+    fn make_collector() -> (ValidatorEventsCollector, BlocksBatchRx, ValidationSessionId) {
+        let collector = ValidatorEventsCollector::new(NonZeroU32::new(BATCH_SIZE).unwrap());
+        let session_id = ValidationSessionId {
+            catchain_seqno: 1,
+            vset_switch_round: 2,
+        };
+        let validators = make_validators();
+
+        collector.on_session_started(session_id, FIRST_SEQNO, 0, &HashBytes::ZERO, &validators);
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        assert!(collector.init_session(session_id, NonZeroU32::new(BATCH_SIZE).unwrap(), tx,));
+
+        (collector, rx, session_id)
+    }
+
+    fn make_validators() -> Vec<IndexedValidatorDescription> {
+        [2, 0, 1]
+            .into_iter()
+            .scan(0, |prev_total_weight, validator_idx| {
+                let desc = ValidatorDescription {
+                    public_key: HashBytes([validator_idx as u8 + 1; 32]),
+                    weight: 1,
+                    adnl_addr: None,
+                    mc_seqno_since: FIRST_SEQNO,
+                    prev_total_weight: *prev_total_weight,
+                };
+                *prev_total_weight += desc.weight;
+
+                Some(IndexedValidatorDescription {
+                    desc,
+                    validator_idx,
+                })
+            })
+            .collect()
+    }
 }
