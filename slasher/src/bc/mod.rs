@@ -1,5 +1,5 @@
 use std::num::NonZeroU32;
-use std::ops::RangeInclusive;
+use std::ops::{Range, RangeInclusive};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -201,6 +201,14 @@ impl BlocksBatch {
             .saturating_add(self.committed_blocks.len() as u32)
     }
 
+    pub fn seqno_range(&self) -> Range<u32> {
+        self.start_seqno..self.seqno_after()
+    }
+
+    pub fn contains_seqno(&self, seqno: u32) -> bool {
+        self.seqno_range().contains(&seqno)
+    }
+
     pub fn committed_block_count(&self) -> usize {
         (0..self.committed_blocks.len())
             .filter(|offset| self.committed_blocks.get(*offset))
@@ -211,13 +219,8 @@ impl BlocksBatch {
         self.observed.len()
     }
 
-    pub fn contains_seqno(&self, seqno: u32) -> bool {
-        (self.start_seqno..self.seqno_after()).contains(&seqno)
-    }
-
-    pub fn push_anchor_stats(&mut self, seqno: u32, anchor_stats: &AnchorStats) -> bool {
-        if !self.contains_seqno(seqno)
-            || anchor_stats.round_range.is_empty()
+    pub fn push_anchor_stats(&mut self, anchor_stats: &AnchorStats) -> bool {
+        if anchor_stats.round_range.is_empty()
             || anchor_stats.filled_rounds == 0
             || anchor_stats.data.len() != self.observed.len()
         {
