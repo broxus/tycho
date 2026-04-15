@@ -7,8 +7,10 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 use tracing::instrument;
 use tycho_crypto::ed25519;
-use tycho_slasher_traits::{ReceivedSignature, ValidationSessionId, ValidatorEventsListener};
-use tycho_types::models::{BlockId, IndexedValidatorDescription};
+use tycho_slasher_traits::{
+    AnchorStats, ReceivedSignature, ValidationSessionId, ValidatorEventsListener,
+};
+use tycho_types::models::{BlockId, BlockIdShort, IndexedValidatorDescription};
 use tycho_types::prelude::*;
 use tycho_util::{DashMapEntry, FastDashMap};
 
@@ -201,6 +203,29 @@ impl ValidatorEventsListener for ValidatorEventsCollector {
             tracing::warn!("failed to commit blocks batch on finish: {e:?}");
         }
         metrics::gauge!(METRIC_ACTIVE_SESSIONS).set(self.sessions.len() as f64);
+    }
+
+    #[instrument(skip_all, fields(session_id = ?session_id))]
+    fn on_anchor_import(
+        &self,
+        session_id: ValidationSessionId,
+        block_id: &BlockIdShort,
+        anchor_stats: AnchorStats,
+    ) {
+        if !block_id.is_masterchain() {
+            // Ignore for non-masterchain blocks (just in case).
+            return;
+        }
+
+        tracing::debug!(
+            %block_id,
+            "on_anchor_import"
+        );
+        let Some(mut session) = self.sessions.get_mut(&session_id) else {
+            tracing::warn!("session not found, ignoring on_anchor_import event");
+            return;
+        };
+        (session.current_batch).push_anchor_stats(block_id.seqno, &anchor_stats);
     }
 
     #[instrument(skip_all, fields(session_id = ?session_id))]
