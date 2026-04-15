@@ -96,7 +96,7 @@ update_cli_reference:
 
 # Runs fuzzing for external message validation. Example: just fuzz_ext_msg -- -max_total_time=60
 fuzz_ext_msg *flags:
-    cd block-util/fuzz && cargo +nightly fuzz run fuzz_ext_msg {{ flags }}
+    cargo +nightly fuzz run ext_msg --fuzz-dir block-util/fuzz {{ flags }}
 
 # === Integration tests stuff ===
 
