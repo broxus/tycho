@@ -460,6 +460,7 @@ pub(crate) fn make_empty_anchor(
         author: PeerId(Default::default()),
         chain_time,
         externals: vec![],
+        stats: None,
     })
 }
 
@@ -484,6 +485,7 @@ pub(crate) fn make_stub_anchor(id: MempoolAnchorId, prev_id: MempoolAnchorId) ->
         author: PeerId(Default::default()),
         chain_time,
         externals,
+        stats: None,
     }
 }
 
@@ -547,6 +549,7 @@ pub(crate) fn make_anchor_from_file(
         author: PeerId(Default::default()),
         chain_time,
         externals,
+        stats: None,
     }))
 }
 

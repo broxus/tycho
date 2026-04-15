@@ -6,6 +6,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
 use tycho_network::PeerId;
+use tycho_slasher_traits::AnchorStats;
 use tycho_types::models::*;
 use tycho_types::prelude::*;
 
@@ -125,6 +126,7 @@ pub struct MempoolAnchor {
     pub author: PeerId,
     pub chain_time: u64,
     pub externals: Vec<Arc<ExternalMessage>>,
+    pub stats: Option<AnchorStats>,
 }
 
 impl MempoolAnchor {

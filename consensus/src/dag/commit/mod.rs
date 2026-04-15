@@ -329,6 +329,7 @@ impl Committer {
             history: committed,
             is_executable,
             needs_empty_cache,
+            stats: None, // may be set later
         })
     }
 }
