@@ -13,6 +13,7 @@ use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_core::global_config::ZerostateId;
 use tycho_core::storage::{BlockHandle, LoadStateHint, NewBlockMeta, StoreStateHint};
 use tycho_crypto::ed25519::{KeyPair, SecretKey};
+use tycho_slasher_traits::NoopValidatorEventsRecorder;
 use tycho_types::boc::Boc;
 use tycho_types::cell::{Cell, CellBuilder, CellFamily, HashBytes, Lazy};
 use tycho_types::merkle::MerkleUpdate;
@@ -1912,6 +1913,7 @@ async fn test_should_not_sync_without_applied_range_after_known_sync() {
         },
         validator: Arc::new(NoopValidator),
         cancel_validation_runner: Default::default(),
+        stats_recorder: Arc::new(NoopValidatorEventsRecorder),
         active_collation_sessions: Default::default(),
         active_collators: Default::default(),
         blocks_cache: BlocksCache::new(&Default::default()),
@@ -3847,6 +3849,7 @@ async fn test_cache_gc_on_skipped_sync() {
         CollatorStdImplFactory {
             wu_tuner_event_sender: None,
         },
+        Arc::new(NoopValidatorEventsRecorder),
         None,
     );
     Arc::get_mut(&mut manager)

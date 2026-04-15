@@ -72,6 +72,7 @@ pub(super) mod tests;
 
 #[cfg(test)]
 pub(crate) use messages_reader::tests::{TestInternalMessage, TestMessageFactory};
+use tycho_slasher_traits::ValidatorEventsListener;
 
 // FACTORY
 
@@ -82,6 +83,7 @@ pub struct CollatorContext {
     pub config: Arc<CollatorConfig>,
     pub collation_session: Arc<CollationSessionInfo>,
     pub zerostate_id: ZerostateId,
+    pub stats_recorder: Arc<dyn ValidatorEventsListener>,
     pub shard_id: ShardIdent,
     pub prev_blocks_ids: Vec<BlockId>,
 
@@ -165,6 +167,7 @@ pub struct CollatorStdImpl {
     collation_session: Arc<CollationSessionInfo>,
     zerostate_id: ZerostateId,
 
+    stats_recorder: Arc<dyn ValidatorEventsListener>,
     mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
     mpool_adapter: Arc<dyn MempoolAdapter>,
     state_node_adapter: Arc<dyn StateNodeAdapter>,
@@ -263,6 +266,7 @@ impl CollatorStdImpl {
             config,
             collation_session,
             zerostate_id,
+            stats_recorder,
             shard_id,
             prev_blocks_ids,
             mempool_config_override,
@@ -285,6 +289,7 @@ impl CollatorStdImpl {
             config,
             collation_session,
             zerostate_id,
+            stats_recorder,
             mq_adapter,
             mpool_adapter,
             state_node_adapter,
@@ -1564,6 +1569,21 @@ impl CollatorStdImpl {
                             )
                             .record(elapsed_from_prev_anchor);
 
+                            if let Some(stats) = &next_anchor.stats {
+                                let (catchain_seqno, vset_switch_round) =
+                                    self.collation_session.get_validation_session_id();
+
+                                self.stats_recorder.on_anchor_import(
+                                    tycho_slasher_traits::ValidationSessionId {
+                                        catchain_seqno,
+                                        vset_switch_round,
+                                    },
+                                    &self.next_block_info,
+                                    next_anchor.id,
+                                    stats.clone(),
+                                );
+                            }
+
                             working_state.wu_used_from_last_anchor = 0;
 
                             // time between anchors
@@ -1769,6 +1789,21 @@ impl CollatorStdImpl {
                         has_externals = has_our_externals,
                         "imported next anchor, will notify collation manager",
                     );
+
+                    if let Some(stats) = &next_anchor.stats {
+                        let (catchain_seqno, vset_switch_round) =
+                            self.collation_session.get_validation_session_id();
+
+                        self.stats_recorder.on_anchor_import(
+                            tycho_slasher_traits::ValidationSessionId {
+                                catchain_seqno,
+                                vset_switch_round,
+                            },
+                            &self.next_block_info,
+                            next_anchor.id,
+                            stats.clone(),
+                        );
+                    }
 
                     // this may start master block collation or cause next anchor import
                     let res = CollatorResult::skipped(

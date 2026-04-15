@@ -1,10 +1,11 @@
 use std::num::NonZeroU32;
+use std::ops::RangeInclusive;
 use std::time::Duration;
 
 use anyhow::Result;
 use tokio::sync::oneshot;
 use tycho_crypto::ed25519;
-use tycho_slasher_traits::{ReceivedSignature, ValidationSessionId};
+use tycho_slasher_traits::{AnchorStats, ReceivedSignature, ValidationSessionId};
 use tycho_types::cell::{HashBytes, Lazy};
 use tycho_types::models::{
     BlockchainConfigParams, OwnedMessage, SignatureContext, StdAddr, Transaction,
@@ -157,29 +158,36 @@ pub struct SubmitBlocksBatch {
 #[derive(Debug, PartialEq, Eq)]
 pub struct BlocksBatch {
     pub start_seqno: u32,
+    pub anchor_range: Option<RangeInclusive<u32>>,
     pub committed_blocks: BitSet,
-    pub signatures_history: Box<[SignatureHistory]>,
+    /// sorted by `validator_idx`
+    pub observed: Box<[ObservedHistory]>,
 }
 
 impl BlocksBatch {
     pub fn new(start_seqno: u32, len: NonZeroU32, map_ids: &[u16]) -> Self {
         let len = len.get() as usize;
 
+        let mut observed = map_ids
+            .iter()
+            .map(|validator_idx| ObservedHistory {
+                validator_idx: *validator_idx,
+                points_proven: 0,
+                bits: BitSet::with_capacity(len * 2),
+            })
+            .collect::<Vec<_>>();
+        observed.sort_unstable_by_key(|a| a.validator_idx);
+
         Self {
             start_seqno,
+            anchor_range: None,
             committed_blocks: BitSet::with_capacity(len),
-            signatures_history: map_ids
-                .iter()
-                .map(|validator_idx| SignatureHistory {
-                    validator_idx: *validator_idx,
-                    bits: BitSet::with_capacity(len * 2),
-                })
-                .collect::<Box<[_]>>(),
+            observed: observed.into_boxed_slice(),
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.committed_blocks.is_zero()
+        self.committed_blocks.is_zero() && self.anchor_range.is_none()
     }
 
     pub fn start_seqno(&self) -> u32 {
@@ -198,22 +206,49 @@ impl BlocksBatch {
     }
 
     pub fn validator_count(&self) -> usize {
-        self.signatures_history.len()
+        self.observed.len()
     }
 
     pub fn contains_seqno(&self, seqno: u32) -> bool {
         (self.start_seqno..self.seqno_after()).contains(&seqno)
     }
 
+    pub fn push_anchor_stats(
+        &mut self,
+        seqno: u32,
+        anchor_id: u32,
+        anchor_stats: &AnchorStats,
+    ) -> bool {
+        if !self.contains_seqno(seqno)
+            || (self.anchor_range.as_ref()).is_some_and(|r| r.contains(&anchor_id))
+            || anchor_stats.0.len() != self.observed.len()
+        {
+            return false;
+        }
+
+        match &mut self.anchor_range {
+            None => self.anchor_range = Some(anchor_id..=anchor_id),
+            Some(exist) => {
+                *exist = *exist.start()..=*exist.end().max(&anchor_id);
+            }
+        };
+
+        for (history, received) in std::iter::zip(&mut self.observed, &*anchor_stats.0) {
+            history.points_proven = (history.points_proven).saturating_add(received.points_proven);
+        }
+
+        true
+    }
+
     pub fn commit_signatures(&mut self, mut seqno: u32, signatures: &[ReceivedSignature]) -> bool {
-        if !self.contains_seqno(seqno) || signatures.len() != self.signatures_history.len() {
+        if !self.contains_seqno(seqno) || signatures.len() != self.observed.len() {
             return false;
         }
 
         seqno -= self.start_seqno;
 
         self.committed_blocks.set(seqno as usize, true);
-        for (history, received) in std::iter::zip(&mut self.signatures_history, signatures) {
+        for (history, received) in std::iter::zip(&mut self.observed, signatures) {
             let idx = (seqno as usize) * 2;
             history.bits.set(idx, received.has_invalid_signature());
             history.bits.set(idx + 1, received.has_valid_signature());
@@ -224,7 +259,8 @@ impl BlocksBatch {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct SignatureHistory {
+pub struct ObservedHistory {
     pub validator_idx: u16,
+    pub points_proven: u16,
     pub bits: BitSet,
 }
