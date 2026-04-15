@@ -1,4 +1,5 @@
 #![no_main]
+#![allow(clippy::disallowed_methods)]
 
 use libfuzzer_sys::fuzz_target;
 use tycho_block_util::message::{ExtMsgRepr, normalize_external_message};

@@ -10,6 +10,7 @@ license = "MIT OR Apache-2.0"
 resolver = "2"
 members = [
     "block-util",
+    "block-util/fuzz",
     "cli",
     "collator",
     "consensus",
@@ -69,6 +70,7 @@ humantime = "2"
 indexmap = "2.13"
 itertools = "0.14"
 libc = "0.2"
+libfuzzer-sys = "0.4"
 metrics = "0.24"
 metrics-exporter-prometheus = "0.18"
 moka = { version = "0.12", features = ["sync"] }
