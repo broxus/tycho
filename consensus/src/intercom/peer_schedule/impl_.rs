@@ -226,8 +226,7 @@ impl PeerSchedule {
 
         // atomic part is updated under lock too
         self.update_atomic(|stateless| {
-            stateless.set_next_peers(working_subset);
-            stateless.epoch_starts.next = Some(next_round);
+            stateless.set_next_peers(next_round, working_subset);
         });
 
         tracing::info!(

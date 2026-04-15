@@ -29,8 +29,8 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
 
         if let Some(ctx) = keeper_guard.state_update_queue.push(new_cx)? {
             self.process_state_update(&mut keeper_guard, &ctx).await?;
-            self.top_known_anchor
-                .set_max_raw(ctx.top_processed_to_anchor_id);
+            (self.top_known_anchor).set_max_raw(ctx.top_processed_to_anchor_id);
+            keeper_guard.last_state_update = Some(*ctx);
         }
 
         Ok(())
@@ -41,8 +41,8 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
 
         for ctx in keeper_guard.state_update_queue.signed(mc_block_seqno)? {
             self.process_state_update(&mut keeper_guard, &ctx).await?;
-            self.top_known_anchor
-                .set_max_raw(ctx.top_processed_to_anchor_id);
+            (self.top_known_anchor).set_max_raw(ctx.top_processed_to_anchor_id);
+            keeper_guard.last_state_update = Some(*ctx);
         }
         Ok(())
     }

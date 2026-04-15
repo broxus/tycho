@@ -13,6 +13,7 @@ use crate::types::processed_upto::BlockSeqno;
 pub struct StdSessionKeeper {
     pub config_builder: MempoolConfigBuilder,
     pub state_update_queue: StateUpdateQueue,
+    pub last_state_update: Option<StateUpdateContext>,
     pub engine_session: Option<EngineSession>,
     expect_genesis_change: Option<BlockSeqno>,
 }
@@ -22,6 +23,7 @@ impl StdSessionKeeper {
         Self {
             config_builder: MempoolConfigBuilder::new(mempool_node_config),
             state_update_queue: Default::default(),
+            last_state_update: None,
             engine_session: None,
             expect_genesis_change: None,
         }
@@ -117,9 +119,11 @@ impl StdSessionKeeper {
                 }
             }
 
-            // when genesis doesn't change - just (re-)schedule v_set change as defined by collator
+            // when genesis doesn't change - just schedule v_set change as defined by collator
             if new_cx.consensus_info.genesis_info == session.genesis_info() {
-                session.set_peers(VSetAdapter::init_peers(new_cx)?);
+                if (self.last_state_update.as_ref()).is_none_or(|last| last.vid() != new_cx.vid()) {
+                    session.set_peers(VSetAdapter::init_peers(new_cx)?);
+                }
                 return Ok(true);
             }
 
