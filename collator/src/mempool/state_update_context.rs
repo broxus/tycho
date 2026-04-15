@@ -21,7 +21,36 @@ pub struct StateUpdateContext {
     pub next_validator_set: Option<(HashBytes, Arc<ValidatorSet>)>,
 }
 
+/// Contains all data needed to deterministically derive all v(sub)sets
+#[derive(PartialEq, Eq)]
+pub struct VSetsId<'a> {
+    prev_vset_switch_round: u32,
+    prev_shuffle_mc_validators: bool,
+    prev_validator_set: Option<&'a HashBytes>,
+
+    vset_switch_round: u32,
+    shuffle_validators: bool,
+    current_validator_set: &'a HashBytes,
+
+    next_validator_set: Option<&'a HashBytes>,
+}
+
 impl StateUpdateContext {
+    /// equality by vid means all contained and derived v(sub)sets are the same
+    pub fn vid(&self) -> VSetsId<'_> {
+        VSetsId {
+            prev_vset_switch_round: self.consensus_info.prev_vset_switch_round,
+            prev_shuffle_mc_validators: self.consensus_info.prev_shuffle_mc_validators,
+            prev_validator_set: self.prev_validator_set.as_ref().map(|(hash, _)| hash),
+
+            vset_switch_round: self.consensus_info.vset_switch_round,
+            shuffle_validators: self.shuffle_validators,
+            current_validator_set: &self.current_validator_set.0,
+
+            next_validator_set: self.next_validator_set.as_ref().map(|(hash, _)| hash),
+        }
+    }
+
     pub fn prev_v_set(&self) -> Vec<PeerId> {
         Self::peer_ids((self.prev_validator_set.iter()).flat_map(|(_, v_set)| v_set.list.iter()))
     }

@@ -91,9 +91,10 @@ impl PeerScheduleStateless {
         array::from_fn(|i| self.peers_for(rounds[i]).clone())
     }
 
-    pub(super) fn set_next_peers(&mut self, peers: &[PeerId]) {
+    pub(super) fn set_next_peers(&mut self, next_epoch_start: Round, peers: &[PeerId]) {
         self.peer_sets[3] = Arc::new(peers.iter().copied().collect());
         self.peer_vecs[3] = Arc::new(peers.to_vec());
+        self.epoch_starts.next = Some(next_epoch_start);
         self.meter();
     }
 
