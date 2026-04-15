@@ -1816,6 +1816,7 @@ where
             author: PeerId(Default::default()),
             chain_time: anchor_ct,
             externals,
+            stats: None,
         });
 
         self.mempool.insert(anchor_id, anchor.clone());
