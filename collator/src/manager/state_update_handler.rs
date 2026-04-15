@@ -364,6 +364,7 @@ where
                             config: self.config.clone(),
                             collation_session: new_session_info.clone(),
                             zerostate_id: *self.state_node_adapter.zerostate_id(),
+                            stats_recorder: self.stats_recorder.clone(),
                             shard_id,
                             prev_blocks_ids: prev_blocks_ids.clone(),
                             mempool_config_override: self.mempool_config_override.clone(),

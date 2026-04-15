@@ -7,18 +7,22 @@
 */
 slasher.blocksBatch
     start_seqno:int
+    min_anchor:int
+    max_anchor:int
     committed_blocks:bitset
-    entries:(vector slasher.signatureHistory)
+    observed:(vector slasher.observedHistory)
     = slasher.BlocksBatch;
 
 /**
 * @param validator_idx  validator index relative to the validator set
+* @param points_proven  amount of points with proofs at rounds DAG closed in a given anchor range
 * @param bits           history bits (2 for each block)
 */
-slasher.signatureHistory
+slasher.observedHistory
     validator_idx:int
+    points_proven:int
     bits:bitset
-    = slasher.SignatureHistory;
+    = slasher.ObservedHistory;
 
 slasher.storedVsetInfo
     prev_vset_hash:int256
