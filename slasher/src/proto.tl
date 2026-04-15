@@ -7,8 +7,11 @@
 */
 slasher.blocksBatch
     start_seqno:int
+    min_anchor:int
+    max_anchor:int
     committed_blocks:bitset
     entries:(vector slasher.signatureHistory)
+    anchor_stats_history:(vector slasher.anchorStatsHistory)
     = slasher.BlocksBatch;
 
 /**
@@ -19,6 +22,15 @@ slasher.signatureHistory
     validator_idx:int
     bits:bitset
     = slasher.SignatureHistory;
+
+/**
+* @param validator_idx  validator index relative to the validator set
+* @param points_proven  occurrences of a point having the next one as a proof
+*/
+slasher.anchorStatsHistory
+    validator_idx:int
+    points_proven:int
+    = slasher.AnchorStatsHistory;
 
 /**
 * @param catchain_seqno              validation session catchain seqno

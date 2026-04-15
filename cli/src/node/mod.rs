@@ -271,6 +271,7 @@ impl Node {
             CollatorStdImplFactory {
                 wu_tuner_event_sender: Some(wu_tuner.event_sender.clone()),
             },
+            slasher.validator_events_listener(),
             self.mempool_config_override.clone(),
         );
         let collator = CollatorStateSubscriber {
