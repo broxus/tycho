@@ -1,5 +1,5 @@
 use tl_proto::{TlError, TlPacket, TlRead, TlResult, TlWrite};
-use tycho_slasher_traits::ValidationSessionId;
+use tycho_slasher_traits::{AnchorPeerStats, ValidationSessionId};
 use tycho_types::cell::HashBytes;
 use tycho_util::FastHashSet;
 
@@ -7,6 +7,7 @@ use crate::analyzer::{
     SessionMeta, SessionPenaltyReport, SessionValidatorScore, VsetEpoch, VsetPenaltyReport,
     VsetValidatorPenalty,
 };
+use crate::bc::AnchorStatsHistory;
 use crate::util::BitSet;
 use crate::{BlocksBatch, SignatureHistory};
 
@@ -31,24 +32,44 @@ impl TlWrite for StoredBlocksBatch {
 
     fn max_size_hint(&self) -> usize {
         4 + 4
+            + (4 + 4)
             + self.0.committed_blocks.max_size_hint()
             + 4
-            + self
-                .0
-                .signatures_history
+            + (self.0.signatures_history)
                 .iter()
                 .map(|item| 4 + item.bits.max_size_hint())
                 .sum::<usize>()
+            + 4
+            + (4 + 4) * self.0.anchor_stats_history.len()
     }
 
     fn write_to<P: TlPacket>(&self, packet: &mut P) {
         packet.write_u32(Self::TL_ID);
         packet.write_u32(self.0.start_seqno);
+        if let Some(anchor_range) = self.0.anchor_range.as_ref() {
+            packet.write_u32(*anchor_range.start());
+            packet.write_u32(*anchor_range.end());
+        } else {
+            packet.write_u32(0);
+            packet.write_u32(0);
+        };
+
         self.0.committed_blocks.write_to(packet);
         packet.write_u32(self.0.signatures_history.len() as u32);
         for item in &self.0.signatures_history {
             packet.write_u32(item.validator_idx as u32);
             item.bits.write_to(packet);
+        }
+
+        assert_eq!(
+            self.0.signatures_history.len(),
+            self.0.anchor_stats_history.len(),
+            "signature history and anchor stats must have the same length"
+        );
+        packet.write_u32(self.0.anchor_stats_history.len() as u32);
+        for entry in &self.0.anchor_stats_history {
+            packet.write_u32(entry.validator_idx as u32);
+            packet.write_u32(entry.stats.points_proven as u32);
         }
     }
 }
@@ -62,6 +83,9 @@ impl<'tl> TlRead<'tl> for StoredBlocksBatch {
         }
 
         let start_seqno = u32::read_from(packet)?;
+        let anchor_range = Some(u32::read_from(packet)?..=u32::read_from(packet)?)
+            .filter(|range| *range.end() > 0);
+
         let committed_blocks = BitSet::read_from(packet)?;
         let block_count = committed_blocks.len();
         if start_seqno.checked_add(block_count as u32).is_none() {
@@ -95,10 +119,27 @@ impl<'tl> TlRead<'tl> for StoredBlocksBatch {
             });
         }
 
+        if u32::read_from(packet)? as usize != history_count {
+            return Err(TlError::InvalidData);
+        }
+        let mut anchor_stats_history = Vec::with_capacity(history_count);
+        for _ in 0..history_count {
+            let validator_idx =
+                u16::try_from(u32::read_from(packet)?).map_err(|_e| TlError::InvalidData)?;
+            let points_proven =
+                u16::try_from(u32::read_from(packet)?).map_err(|_e| TlError::InvalidData)?;
+            anchor_stats_history.push(AnchorStatsHistory {
+                validator_idx,
+                stats: AnchorPeerStats { points_proven },
+            });
+        }
+
         Ok(Self(BlocksBatch {
             start_seqno,
+            anchor_range,
             committed_blocks,
             signatures_history: signatures_history.into_boxed_slice(),
+            anchor_stats_history: anchor_stats_history.into_boxed_slice(),
         }))
     }
 }

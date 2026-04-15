@@ -1,10 +1,11 @@
 use std::num::NonZeroU32;
+use std::ops::RangeInclusive;
 use std::time::Duration;
 
 use anyhow::Result;
 use tokio::sync::oneshot;
 use tycho_crypto::ed25519;
-use tycho_slasher_traits::{ReceivedSignature, ValidationSessionId};
+use tycho_slasher_traits::{AnchorPeerStats, AnchorStats, ReceivedSignature, ValidationSessionId};
 use tycho_types::cell::{HashBytes, Lazy};
 use tycho_types::models::{
     BlockchainConfigParams, OwnedMessage, SignatureContext, StdAddr, Transaction,
@@ -159,16 +160,29 @@ pub struct SubmitBlocksBatch {
 #[derive(Debug, PartialEq, Eq)]
 pub struct BlocksBatch {
     pub start_seqno: u32,
+    pub anchor_range: Option<RangeInclusive<u32>>,
     pub committed_blocks: BitSet,
     pub signatures_history: Box<[SignatureHistory]>,
+    /// sorted by `validator_idx` since mempool output
+    pub anchor_stats_history: Box<[AnchorStatsHistory]>,
 }
 
 impl BlocksBatch {
     pub fn new(start_seqno: u32, len: NonZeroU32, map_ids: &[u16]) -> Self {
         let len = len.get() as usize;
 
+        let mut anchor_stats_history = map_ids
+            .iter()
+            .map(|validator_idx| AnchorStatsHistory {
+                validator_idx: *validator_idx,
+                stats: AnchorPeerStats { points_proven: 0 },
+            })
+            .collect::<Vec<_>>();
+        anchor_stats_history.sort_unstable_by_key(|a| a.validator_idx);
+
         Self {
             start_seqno,
+            anchor_range: None,
             committed_blocks: BitSet::with_capacity(len),
             signatures_history: map_ids
                 .iter()
@@ -177,11 +191,12 @@ impl BlocksBatch {
                     bits: BitSet::with_capacity(len * 2),
                 })
                 .collect::<Box<[_]>>(),
+            anchor_stats_history: anchor_stats_history.into_boxed_slice(),
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.committed_blocks.is_zero()
+        self.committed_blocks.is_zero() && self.anchor_range.is_none()
     }
 
     pub fn start_seqno(&self) -> u32 {
@@ -207,6 +222,35 @@ impl BlocksBatch {
         (self.start_seqno..self.seqno_after()).contains(&seqno)
     }
 
+    pub fn push_anchor_stats(
+        &mut self,
+        seqno: u32,
+        anchor_id: u32,
+        anchor_stats: &AnchorStats,
+    ) -> bool {
+        if !self.contains_seqno(seqno)
+            || (self.anchor_range.as_ref()).is_some_and(|r| r.contains(&anchor_id))
+            || anchor_stats.0.len() != self.anchor_stats_history.len()
+        {
+            return false;
+        }
+
+        match &mut self.anchor_range {
+            None => self.anchor_range = Some(anchor_id..=anchor_id),
+            Some(exist) => {
+                *exist = *exist.start()..=*exist.end().max(&anchor_id);
+            }
+        };
+
+        for (history, received) in std::iter::zip(&mut self.anchor_stats_history, &*anchor_stats.0)
+        {
+            history.stats.points_proven =
+                (history.stats.points_proven).saturating_add(received.points_proven);
+        }
+
+        true
+    }
+
     pub fn commit_signatures(&mut self, mut seqno: u32, signatures: &[ReceivedSignature]) -> bool {
         if !self.contains_seqno(seqno) || signatures.len() != self.signatures_history.len() {
             return false;
@@ -229,4 +273,10 @@ impl BlocksBatch {
 pub struct SignatureHistory {
     pub validator_idx: u16,
     pub bits: BitSet,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct AnchorStatsHistory {
+    pub validator_idx: u16,
+    pub stats: AnchorPeerStats,
 }

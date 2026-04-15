@@ -3,8 +3,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use indexmap::IndexMap;
-use tycho_types::models::{BlockId, IndexedValidatorDescription};
+use tycho_types::models::{BlockId, BlockIdShort, IndexedValidatorDescription};
 use tycho_util::FastHasherState;
+
+use crate::AnchorStats;
 
 // TODO: Decide how to be with this collator-defined type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -230,6 +232,15 @@ pub trait ValidatorEventsListener: Send + Sync + 'static {
     /// Called when the session is complete.
     fn on_session_finished(&self, session_id: ValidationSessionId);
 
+    /// Called when anchor is imported
+    fn on_anchor_import(
+        &self,
+        session_id: ValidationSessionId,
+        block_id: &BlockIdShort,
+        anchor_id: u32,
+        anchor_stats: AnchorStats,
+    );
+
     /// Called when validation is complete for a block.
     fn on_block_validated(
         &self,
@@ -256,6 +267,15 @@ impl ValidatorEventsListener for NoopValidatorEventsRecorder {
     }
 
     fn on_session_finished(&self, _session_id: ValidationSessionId) {}
+
+    fn on_anchor_import(
+        &self,
+        _session_id: ValidationSessionId,
+        _block_id: &BlockIdShort,
+        _anchor_id: u32,
+        _anchor_stats: AnchorStats,
+    ) {
+    }
 
     fn on_block_validated(
         &self,
@@ -288,13 +308,33 @@ macro_rules! impl_recorder_for_tuples {
                 $(self.$n.on_session_finished(session_id);)+
             }
 
+            fn on_anchor_import(&self,
+                session_id: ValidationSessionId,
+                block_id: &BlockIdShort,
+                anchor_id: u32,
+                anchor_stats: AnchorStats,
+            ) {
+                impl_recorder_for_tuples!(@call_on_anchor_import self,
+                    session_id,
+                    block_id,
+                    anchor_id,
+                    anchor_stats,
+                    $($n)+
+                );
+            }
+
             fn on_block_validated(
                 &self,
                 session_id: ValidationSessionId,
                 block_id: &BlockId,
                 signatures: Arc<[ReceivedSignature]>,
             ) {
-                impl_recorder_for_tuples!(@call_on_validated self, session_id, block_id, signatures, $($n)+);
+                impl_recorder_for_tuples!(@call_on_validated self,
+                    session_id,
+                    block_id,
+                    signatures,
+                    $($n)+
+                );
             }
 
             fn on_block_skipped(&self, session_id: ValidationSessionId, block_id: &BlockId) {
@@ -303,9 +343,16 @@ macro_rules! impl_recorder_for_tuples {
         })*
     };
 
+    (@call_on_anchor_import $self:ident, $sid:ident, $block_id:ident, $anchor_id:ident, $anchor_stats:ident, $n:tt $($rest:tt)+) => {
+        $self.$n.on_anchor_import($sid, $block_id, $anchor_id, $anchor_stats.clone());
+        impl_recorder_for_tuples!(@call_on_anchor_import $self, $sid, $block_id, $anchor_id, $anchor_stats, $($rest)+)
+    };
     (@call_on_validated $self:ident, $sid:ident, $block_id:ident, $signatures:ident, $n:tt $($rest:tt)+) => {
         $self.$n.on_block_validated($sid, $block_id, $signatures.clone());
         impl_recorder_for_tuples!(@call_on_validated $self, $sid, $block_id, $signatures, $($rest)+)
+    };
+    (@call_on_anchor_import $self:ident, $sid:ident, $block_id:ident, $anchor_id:ident, $anchor_stats:ident, $n:tt) => {
+        $self.$n.on_anchor_import($sid, $block_id, $anchor_id, $anchor_stats);
     };
     (@call_on_validated $self:ident, $sid:ident, $block_id:ident, $signatures:ident, $n:tt) => {
         $self.$n.on_block_validated($sid, $block_id, $signatures);

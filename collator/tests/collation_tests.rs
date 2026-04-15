@@ -26,6 +26,7 @@ use tycho_core::global_config::ZerostateId;
 use tycho_core::node::NodeKeys;
 use tycho_core::storage::CoreStorage;
 use tycho_crypto::ed25519;
+use tycho_slasher_traits::NoopValidatorEventsRecorder;
 use tycho_storage::StorageContext;
 use tycho_types::models::{BlockId, BlockIdShort, ShardIdent};
 
@@ -216,6 +217,8 @@ fn start_collation_manager(
     ctx: &DumpCollationContext,
     dumped_anchors: Vec<DumpedAnchor>,
 ) -> RunningCollationManager {
+    let recorder = Arc::new(NoopValidatorEventsRecorder);
+
     CollationManager::create(
         ctx.keypair.clone(),
         ctx.config.clone(),
@@ -237,6 +240,7 @@ fn start_collation_manager(
         CollatorStdImplFactory {
             wu_tuner_event_sender: None,
         },
+        recorder,
         None,
     )
 }
