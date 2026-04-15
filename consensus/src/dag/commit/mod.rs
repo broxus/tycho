@@ -322,6 +322,7 @@ impl Committer {
             proof_key: next.proof.key(),
             history: committed,
             is_executable,
+            stats: None, // may be set later
         })
     }
 }
