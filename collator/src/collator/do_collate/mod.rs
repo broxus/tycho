@@ -332,6 +332,9 @@ impl CollatorStdImpl {
             execute_result,
             final_result,
         } = match do_collate_res {
+            Err(CollatorError::Cancelled(CollationCancelReason::ExternalCancel)) => {
+                return Ok(());
+            }
             Err(CollatorError::Cancelled(reason)) => {
                 // cancel collation
                 self.listener
