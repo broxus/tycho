@@ -7,4 +7,3 @@ pub const COLLATOR: &str = "collator";
 pub const COLLATOR_READ_NEXT_EXTS: &str = "collator::read_next_externals";
 pub const EXEC_MANAGER: &str = "exec_manager";
 pub const VALIDATOR: &str = "validator";
-pub const ASYNC_QUEUE_DISPATCHER: &str = "async_queued_dispatcher";
