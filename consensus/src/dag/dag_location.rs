@@ -260,7 +260,17 @@ impl InclusionState {
                 resolved.alt(),
             )
         }
-        ValidateCtx::resolved(dag_point); // meter after checks
+        let alt_valid_case =
+            if matches!(dag_point, DagPoint::Valid(_)) && !dag_point.is_first_resolved() {
+                Some(match self.0.resolved.get() {
+                    Some(FirstResolved::Closed) => "late",
+                    Some(FirstResolved::Valid(_, _)) | Some(FirstResolved::NotValid(_)) => "fork",
+                    None => "fork",
+                })
+            } else {
+                None
+            };
+        ValidateCtx::resolved(dag_point, alt_valid_case); // meter after checks
 
         // first valid
 

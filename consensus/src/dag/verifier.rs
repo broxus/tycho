@@ -940,8 +940,11 @@ impl ValidateCtx {
         metrics::counter!("tycho_mempool_points_verify_err", Self::KIND => label).increment(1);
     }
 
-    pub fn resolved(dag_point: &DagPoint) {
+    /// For `ord=alt` valid points, pass `fork` (equivocation vs first resolved) or `late` (location
+    /// was already closed for signing when this point resolved). First resolutions omit this.
+    pub fn resolved(dag_point: &DagPoint, alt_valid_case: Option<&'static str>) {
         const ORD: &str = "ord";
+        const CASE: &str = "case";
         let ord = if dag_point.is_first_resolved() {
             "first"
         } else {
@@ -953,7 +956,12 @@ impl ValidateCtx {
             DagPoint::Invalid(_) => "invalid",
             DagPoint::TransInvalid(_) => "trans_invalid",
             DagPoint::Valid(_) => {
-                metrics::counter!("tycho_mempool_points_resolved_ok", ORD => ord).increment(1);
+                if let Some(case) = alt_valid_case {
+                    metrics::counter!("tycho_mempool_points_resolved_ok", ORD => ord, CASE => case)
+                        .increment(1);
+                } else {
+                    metrics::counter!("tycho_mempool_points_resolved_ok", ORD => ord).increment(1);
+                }
                 return;
             }
         };
