@@ -17,8 +17,8 @@ use tycho_crypto::ed25519;
 use tycho_network::PeerId;
 use tycho_types::abi::{AbiType, AbiValue, AbiVersion, FromAbi, IntoAbi, WithAbiType};
 use tycho_types::models::{
-    Account, AccountState, AutoSignatureContext, BlockchainConfig, ExtInMsgInfo, MsgInfo,
-    OwnedMessage, StateInit, StdAddr, ValidatorStakeParams,
+    Account, AccountState, BlockchainConfig, SignatureContext, StateInit, StdAddr,
+    ValidatorStakeParams,
 };
 use tycho_types::prelude::*;
 use tycho_util::cli::logger::init_logger_simple;
@@ -737,7 +737,7 @@ struct ElectorMessage<'a> {
     stake: u128,
     stake_factor: u32,
     price_factor: u64,
-    signature_context: AutoSignatureContext,
+    signature_context: SignatureContext,
 }
 
 impl ElectionsContext<'_> {
@@ -925,14 +925,14 @@ struct Wallet {
     address: StdAddr,
     secret: ed25519_dalek::SigningKey,
     public: ed25519_dalek::VerifyingKey,
-    signature_context: AutoSignatureContext,
+    signature_context: SignatureContext,
 }
 
 impl Wallet {
     fn new(
         client: &Client,
         secret: &ed25519::SecretKey,
-        signature_context: AutoSignatureContext,
+        signature_context: SignatureContext,
     ) -> Self {
         let address = wallet::compute_address(-1, &ed25519::PublicKey::from(secret));
 
@@ -1051,32 +1051,15 @@ impl Wallet {
 
         let now_ms = now_millis();
         let expire_at = (now_ms / 1000) as u32 + ttl;
-        let body = {
-            let body = wallet::methods::send_transaction()
-                .encode_external(&inputs)
-                .with_address(&self.address)
-                .with_time(now_ms)
-                .with_expire_at(expire_at)
-                .with_pubkey(&self.public)
-                .build_input()?;
+        let message = wallet::methods::send_transaction()
+            .encode_external(&inputs)
+            .with_time(now_ms)
+            .with_expire_at(expire_at)
+            .with_pubkey(&self.public)
+            .build_message(&self.address)?
+            .with_state_init_opt(init)
+            .sign(&self.secret, self.signature_context)?;
 
-            // TODO: Make sign accept signature context.
-            let signature = self
-                .signature_context
-                .sign(&self.secret, body.hash.as_slice());
-            body.with_signature(&signature)?
-        };
-
-        let message = OwnedMessage {
-            info: MsgInfo::ExtIn(ExtInMsgInfo {
-                src: None,
-                dst: self.address.clone().into(),
-                ..Default::default()
-            }),
-            init,
-            body: body.into(),
-            layout: None,
-        };
         let message_cell = CellBuilder::build_from(message)?;
 
         self.client.broadcast_message(message_cell.as_ref()).await?;
@@ -1366,7 +1349,7 @@ struct Timings {
 
 struct ParsedBlockchainConfig {
     elector_addr: StdAddr,
-    signature_context: AutoSignatureContext,
+    signature_context: SignatureContext,
     stake_params: ValidatorStakeParams,
     config: BlockchainConfig,
 }
@@ -1375,7 +1358,7 @@ impl ParsedBlockchainConfig {
     fn new(global_id: i32, config: BlockchainConfig) -> Result<Self> {
         let elector_addr = StdAddr::new(-1, config.get_elector_address()?);
         let version = config.get_global_version()?;
-        let signature_context = AutoSignatureContext {
+        let signature_context = SignatureContext {
             global_id,
             capabilities: version.capabilities,
         };

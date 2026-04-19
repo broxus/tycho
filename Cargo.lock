@@ -4137,9 +4137,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-executor"
-version = "0.3.3"
+version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4ba91906bc028e800c91e232dfee409b5503e102f91d7931701d5b0d717e846"
+checksum = "30fc06f88c65ab0eb4725bd5082080cee3aa84c32923340c34389b15585657fe"
 dependencies = [
  "ahash",
  "anyhow",
@@ -4325,8 +4325,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-types"
-version = "0.3.2"
-source = "git+https://github.com/broxus/tycho-types.git?rev=47a4e746d008904d3d02aae398139cc7e7e25765#47a4e746d008904d3d02aae398139cc7e7e25765"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85ebf3e9cb2b0e515adc25e4b30f46bd70cbd4d67edfaca7e3440c0ab7405086"
 dependencies = [
  "ahash",
  "anyhow",
@@ -4344,6 +4345,8 @@ dependencies = [
  "rayon",
  "scc",
  "serde",
+ "serde_json",
+ "serde_path_to_error",
  "sha2",
  "smallvec",
  "thiserror 2.0.12",
@@ -4357,7 +4360,8 @@ dependencies = [
 [[package]]
 name = "tycho-types-abi-proc"
 version = "0.3.0"
-source = "git+https://github.com/broxus/tycho-types.git?rev=47a4e746d008904d3d02aae398139cc7e7e25765#47a4e746d008904d3d02aae398139cc7e7e25765"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c813c08a03554252747f9e5e88485d9af4c30077394a1c3bb6d774ddca56b07"
 dependencies = [
  "anyhow",
  "proc-macro2",
@@ -4368,7 +4372,8 @@ dependencies = [
 [[package]]
 name = "tycho-types-proc"
 version = "0.3.0"
-source = "git+https://github.com/broxus/tycho-types.git?rev=47a4e746d008904d3d02aae398139cc7e7e25765#47a4e746d008904d3d02aae398139cc7e7e25765"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ad05cf4ab89631f8c11d85c3aa80f781502440f75361d251f866e0d76ae9d31"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4428,9 +4433,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-vm"
-version = "0.3.3"
+version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bef4b5767addc9c546991fe85519684444814527f317a3bd80a852b501250d71"
+checksum = "1ed3cfdbb32ea373f1b450ef6b6ef69d737aa78f62b717d7dc4cb67ce59674e2"
 dependencies = [
  "ahash",
  "anyhow",

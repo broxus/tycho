@@ -24,8 +24,8 @@ use tycho_network::{
 };
 use tycho_types::cell::Lazy;
 use tycho_types::models::{
-    AccountState, AutoSignatureContext, DepthBalanceInfo, Message, OptionalAccount, ShardAccount,
-    ShardIdent, StdAddr,
+    AccountState, DepthBalanceInfo, Message, OptionalAccount, ShardAccount, ShardIdent,
+    SignatureContext, StdAddr,
 };
 use tycho_types::num::Tokens;
 use tycho_types::prelude::*;
@@ -856,7 +856,7 @@ impl proto::ControlServer for ControlServer {
             &req.address,
             &req.adnl_addr,
         );
-        let data = AutoSignatureContext {
+        let data = SignatureContext {
             global_id: req.global_id,
             capabilities: req.capabilities.into(),
         }

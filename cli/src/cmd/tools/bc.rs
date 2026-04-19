@@ -10,8 +10,8 @@ use tycho_block_util::config::{apply_price_factor, compute_gas_price_factor};
 use tycho_crypto::ed25519;
 use tycho_types::boc::Boc;
 use tycho_types::models::{
-    Account, AccountState, AutoSignatureContext, BlockchainConfigParams, ConfigParam11,
-    ExtInMsgInfo, MsgInfo, OwnedMessage, StdAddr, ValidatorSet,
+    Account, AccountState, BlockchainConfigParams, ConfigParam11, ExtInMsgInfo, MsgInfo,
+    OwnedMessage, SignatureContext, StdAddr, ValidatorSet,
 };
 use tycho_types::num::Tokens;
 use tycho_types::prelude::*;
@@ -741,7 +741,7 @@ impl CmdGenProposalVote {
         } = client.get_config().await?;
 
         let global = blockchain_config.get_global_version()?;
-        let signature_context = AutoSignatureContext {
+        let signature_context = SignatureContext {
             global_id,
             capabilities: global.capabilities,
         };
@@ -825,7 +825,7 @@ pub(crate) async fn send_config_action_ext(
     let config_addr = StdAddr::new(-1, res.config.address);
 
     let global = res.config.get_global_version()?;
-    let signature_context = AutoSignatureContext {
+    let signature_context = SignatureContext {
         global_id: res.global_id,
         capabilities: global.capabilities,
     };
@@ -883,7 +883,7 @@ fn create_message(
     config_addr: &StdAddr,
     action: Action,
     keypair: &ed25519::KeyPair,
-    signature_context: AutoSignatureContext,
+    signature_context: SignatureContext,
     ttl: u32,
 ) -> Result<(Box<OwnedMessage>, u32)> {
     let (action, data) = action.build().context("Failed to build action")?;
