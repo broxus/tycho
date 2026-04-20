@@ -389,7 +389,7 @@ impl CollatorStdImpl {
         mc_data: Arc<McData>,
         working_state_tx: oneshot::Sender<Result<Box<WorkingState>>>,
     ) -> Result<()> {
-        self.init_collator(prev_blocks_ids, mc_data, working_state_tx)
+        Box::pin(self.init_collator(prev_blocks_ids, mc_data, working_state_tx))
             .await
             .with_context(|| format!("next_block_id: {}", self.next_block_info))
     }
@@ -439,7 +439,7 @@ impl CollatorStdImpl {
 
         // trying to collate next block
         tracing::info!(target: tracing_targets::COLLATOR, "trying to collate next block after init...");
-        self.wait_state_and_try_collate(genesis_updated).await?;
+        Box::pin(self.wait_state_and_try_collate(genesis_updated)).await?;
 
         Ok(())
     }
@@ -813,10 +813,10 @@ impl CollatorStdImpl {
         working_state.resume_collation_elapsed = histogram.finish();
 
         if self.shard_id.is_masterchain() {
-            self.try_collate_next_master_block_impl(working_state, genesis_was_updated)
+            Box::pin(self.try_collate_next_master_block_impl(working_state, genesis_was_updated))
                 .await
         } else {
-            self.try_collate_next_shard_block_impl(working_state, genesis_was_updated)
+            Box::pin(self.try_collate_next_shard_block_impl(working_state, genesis_was_updated))
                 .await
         }
     }
@@ -1505,7 +1505,7 @@ impl CollatorStdImpl {
     }
 
     async fn wait_state_and_try_collate_wrapper(&mut self) -> Result<()> {
-        self.wait_state_and_try_collate(false)
+        Box::pin(self.wait_state_and_try_collate(false))
             .await
             .with_context(|| format!("next_block_id: {}", self.next_block_info))
     }
@@ -1514,10 +1514,12 @@ impl CollatorStdImpl {
         let working_state = self.delayed_working_state.wait().await?;
 
         if self.shard_id.is_masterchain() {
-            self.try_collate_next_master_block_impl(working_state, force_one_anchor_import)
-                .await
+            Box::pin(
+                self.try_collate_next_master_block_impl(working_state, force_one_anchor_import),
+            )
+            .await
         } else {
-            self.try_collate_next_shard_block_impl(working_state, force_one_anchor_import)
+            Box::pin(self.try_collate_next_shard_block_impl(working_state, force_one_anchor_import))
                 .await
         }
     }
@@ -1527,7 +1529,7 @@ impl CollatorStdImpl {
         top_shard_blocks_info: Vec<TopBlockDescription>,
         next_chain_time: u64,
     ) -> Result<()> {
-        self.wait_state_and_do_collate(top_shard_blocks_info, next_chain_time)
+        Box::pin(self.wait_state_and_do_collate(top_shard_blocks_info, next_chain_time))
             .await
             .with_context(|| format!("next_block_id: {}", self.next_block_info))
     }
@@ -1646,12 +1648,12 @@ impl CollatorStdImpl {
             }
         }
 
-        self.do_collate(
+        Box::pin(self.do_collate(
             working_state,
             Some(top_shard_blocks_info),
             next_chain_time,
             ForceMasterCollation::No,
-        )
+        ))
         .await
     }
 
@@ -2251,12 +2253,12 @@ impl CollatorStdImpl {
 
                 drop(histogram);
 
-                self.do_collate(
+                Box::pin(self.do_collate(
                     working_state,
                     None,
                     last_imported_chain_time,
                     force_next_mc_block,
-                )
+                ))
                 .await?;
             }
             TryCollateCheck::NoPendingMessages
