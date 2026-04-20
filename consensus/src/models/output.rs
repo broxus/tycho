@@ -32,7 +32,7 @@ impl std::fmt::Debug for AltFmt<'_, MempoolStatsOutput> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let inner = AltFormat::unpack(self);
         let mut data = Vec::from_iter(&inner.data);
-        data.sort_unstable_by(|(peer_a, _), (peer_b, _)| peer_a.cmp(peer_b));
+        data.sort_unstable_by_key(|(peer, _)| *peer);
         f.debug_struct("MempoolStatsOutput")
             .field("anchor_round", &inner.anchor_round)
             .field("data", &data)

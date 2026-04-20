@@ -217,11 +217,7 @@ impl PackedSmaBuffer {
             i += 1;
         }
 
-        if i == 0 {
-            None
-        } else {
-            Some((total / i) as u16)
-        }
+        total.checked_div(i).map(|i| i as u16)
     }
 }
 

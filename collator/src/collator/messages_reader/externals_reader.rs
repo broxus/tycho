@@ -176,19 +176,17 @@ impl<'a, 'b> ExternalsReader<'a, 'b> {
     }
 
     pub fn last_range_offsets_reached_in_all_partitions(&self) -> bool {
-        self.get_last_range_state()
-            .map(|(_, r)| {
-                r.by_partitions.iter().all(|(par_id, par)| {
-                    *par.processed_offset
-                        <= self
-                            .reader_state
-                            .by_partitions
-                            .get(par_id)
-                            .unwrap()
-                            .curr_processed_offset
-                })
+        self.get_last_range_state().map_or(true, |(_, r)| {
+            r.by_partitions.iter().all(|(par_id, par)| {
+                *par.processed_offset
+                    <= self
+                        .reader_state
+                        .by_partitions
+                        .get(par_id)
+                        .unwrap()
+                        .curr_processed_offset
             })
-            .unwrap_or(true)
+        })
     }
 
     pub fn count_messages_in_buffers_by_partitions(&self) -> BTreeMap<QueuePartitionIdx, usize> {

@@ -261,7 +261,7 @@ async fn persistent_queue_state_read_write() -> Result<()> {
         }
         target_message_count += messages.len();
 
-        messages.sort_unstable_by(|(a, _, _), (b, _, _)| a.cmp(b));
+        messages.sort_unstable_by_key(|(a, _, _)| *a);
         let out_msgs = OutMsgDescr::try_from_sorted_slice(&messages)?;
 
         let queue_diff = QueueDiffStuff::builder(shard, seqno, &prev_hash)

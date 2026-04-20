@@ -216,9 +216,9 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
     }
 
     pub fn last_range_offset_reached(&self) -> bool {
-        self.get_last_range_state()
-            .map(|(_, r)| *r.processed_offset <= *self.reader_state.curr_processed_offset)
-            .unwrap_or(true)
+        self.get_last_range_state().map_or(true, |(_, r)| {
+            *r.processed_offset <= *self.reader_state.curr_processed_offset
+        })
     }
 
     pub fn count_messages_in_buffers(&self) -> usize {

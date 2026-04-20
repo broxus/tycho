@@ -246,11 +246,7 @@ impl CellStorage {
             stack.push(iter);
         }
 
-        'outer: loop {
-            let Some(iter) = stack.last_mut() else {
-                break;
-            };
-
+        'outer: while let Some(iter) = stack.last_mut() {
             for ref child in iter {
                 if let InsertedCell::New(iter) = ctx.insert_cell(child)? {
                     stack.push(iter);
@@ -789,11 +785,7 @@ impl CellStorage {
                 stack.push(refs.iter());
 
                 // While some cells left
-                'outer: loop {
-                    let Some(iter) = stack.last_mut() else {
-                        break;
-                    };
-
+                'outer: while let Some(iter) = stack.last_mut() {
                     for child_hash in iter.by_ref() {
                         // Skip cell to remove it later in parallel
                         if self.split_at.contains(child_hash) {
@@ -980,11 +972,7 @@ impl CellStorage {
         stack.push(std::slice::from_ref(hash).iter());
 
         // While some cells left
-        'outer: loop {
-            let Some(iter) = stack.last_mut() else {
-                break;
-            };
-
+        'outer: while let Some(iter) = stack.last_mut() {
             for cell_id in iter.by_ref() {
                 // Process the current cell.
                 let refs = match transaction.entry(cell_id) {
