@@ -19,6 +19,9 @@ pub use self::public_overlay::{
     ChooseMultiplePublicOverlayEntries, PublicOverlay, PublicOverlayBuilder, PublicOverlayEntries,
     PublicOverlayEntriesReadGuard, PublicOverlayEntryData, UnknownPeersQueue,
 };
+pub use self::rate_limits::{
+    OverlayIngressPolicyDecision, PublicOverlayRateLimitPolicy, PublicOverlayRateLimiter,
+};
 use crate::dht::DhtService;
 use crate::network::Network;
 use crate::proto::overlay::{PublicEntriesResponse, PublicEntry, PublicEntryResponse, rpc};
@@ -32,6 +35,7 @@ mod metrics;
 mod overlay_id;
 mod private_overlay;
 mod public_overlay;
+mod rate_limits;
 mod tasks_stream;
 
 pub struct OverlayServiceBackgroundTasks {

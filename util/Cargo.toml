@@ -26,6 +26,7 @@ humantime = { workspace = true }
 libc = { workspace = true, optional = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true, optional = true }
+parking_lot = { workspace = true }
 rand = { workspace = true }
 rayon = { workspace = true }
 scopeguard = { workspace = true }

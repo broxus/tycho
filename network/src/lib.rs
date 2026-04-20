@@ -20,11 +20,12 @@ pub use types::{
 
 pub use self::overlay::{
     ChooseMultiplePrivateOverlayEntries, ChooseMultiplePublicOverlayEntries, OverlayConfig,
-    OverlayId, OverlayService, OverlayServiceBackgroundTasks, OverlayServiceBuilder,
-    PrivateOverlay, PrivateOverlayBuilder, PrivateOverlayEntries, PrivateOverlayEntriesEvent,
-    PrivateOverlayEntriesReadGuard, PrivateOverlayEntriesWriteGuard, PrivateOverlayEntryData,
-    PublicOverlay, PublicOverlayBuilder, PublicOverlayEntries, PublicOverlayEntriesReadGuard,
-    PublicOverlayEntryData, UnknownPeersQueue,
+    OverlayId, OverlayIngressPolicyDecision, OverlayService, OverlayServiceBackgroundTasks,
+    OverlayServiceBuilder, PrivateOverlay, PrivateOverlayBuilder, PrivateOverlayEntries,
+    PrivateOverlayEntriesEvent, PrivateOverlayEntriesReadGuard, PrivateOverlayEntriesWriteGuard,
+    PrivateOverlayEntryData, PublicOverlay, PublicOverlayBuilder, PublicOverlayEntries,
+    PublicOverlayEntriesReadGuard, PublicOverlayEntryData, PublicOverlayRateLimitPolicy,
+    PublicOverlayRateLimiter, UnknownPeersQueue,
 };
 pub use self::util::{
     NetworkExt, Routable, Router, RouterBuilder, UnknownPeerError, check_peer_signature,

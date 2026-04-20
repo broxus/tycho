@@ -14,6 +14,7 @@ use tycho_util::metrics::HistogramGuard;
 
 use crate::blockchain_rpc::broadcast_listener::{BroadcastListener, NoopBroadcastListener};
 use crate::blockchain_rpc::providers::{IntoRpcDataProvider, RpcDataProvider};
+use crate::blockchain_rpc::rate_limits::BlockchainRpcRateLimitsConfig;
 use crate::blockchain_rpc::{BAD_REQUEST_ERROR_CODE, INTERNAL_ERROR_CODE, NOT_FOUND_ERROR_CODE};
 use crate::proto::blockchain::*;
 use crate::proto::overlay;
@@ -64,6 +65,11 @@ pub struct BlockchainRpcServiceConfig {
     /// Default: yes.
     pub serve_persistent_states: bool,
 
+    /// Rate limits for inbound blockchain-rpc traffic.
+    ///
+    /// Default: disabled.
+    pub rate_limits: Option<BlockchainRpcRateLimitsConfig>,
+
     /// S3 proxy configuration.
     ///
     /// Default: enabled.
@@ -76,6 +82,7 @@ impl Default for BlockchainRpcServiceConfig {
         Self {
             max_key_blocks_list_len: 8,
             serve_persistent_states: true,
+            rate_limits: Some(BlockchainRpcRateLimitsConfig::default()),
             #[cfg(feature = "s3")]
             s3_proxy: Some(S3ProxyConfig::default()),
         }
