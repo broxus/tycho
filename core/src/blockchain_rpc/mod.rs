@@ -18,6 +18,7 @@ pub use self::service::{
 mod broadcast_listener;
 mod client;
 mod providers;
+mod rate_limits;
 mod service;
 
 pub const BAD_REQUEST_ERROR_CODE: u32 = 1;
