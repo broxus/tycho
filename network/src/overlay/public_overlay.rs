@@ -17,6 +17,7 @@ use crate::dht::{PeerResolver, PeerResolverHandle};
 use crate::network::Network;
 use crate::overlay::OverlayId;
 use crate::overlay::metrics::Metrics;
+use crate::overlay::rate_limits::PublicOverlayRateLimiter;
 use crate::proto::overlay::{PublicEntry, PublicEntryToSign, rpc};
 use crate::types::{BoxService, PeerId, Request, Response, Service, ServiceExt, ServiceRequest};
 use crate::util::NetworkExt;
@@ -27,6 +28,7 @@ pub struct PublicOverlayBuilder {
     entry_ttl: Duration,
     banned_peer_ids: FastDashSet<PeerId>,
     peer_resolver: Option<PeerResolver>,
+    rate_limiter: Option<PublicOverlayRateLimiter>,
     name: Option<&'static str>,
 }
 
@@ -68,6 +70,11 @@ impl PublicOverlayBuilder {
         self
     }
 
+    pub fn with_rate_limiter(mut self, rate_limiter: PublicOverlayRateLimiter) -> Self {
+        self.rate_limiter = Some(rate_limiter);
+        self
+    }
+
     /// Name of the overlay used in metrics.
     pub fn named(mut self, name: &'static str) -> Self {
         self.name = Some(name);
@@ -97,6 +104,7 @@ impl PublicOverlayBuilder {
                 min_capacity: self.min_capacity,
                 entry_ttl_sec,
                 peer_resolver: self.peer_resolver,
+                rate_limiter: self.rate_limiter,
                 entries: RwLock::new(entries),
                 entries_added: Notify::new(),
                 entries_changed: Notify::new(),
@@ -130,6 +138,7 @@ impl PublicOverlay {
             entry_ttl: Duration::from_secs(3600),
             banned_peer_ids: Default::default(),
             peer_resolver: None,
+            rate_limiter: None,
             name: None,
         }
     }
@@ -218,7 +227,7 @@ impl PublicOverlay {
 
     pub(crate) fn handle_query(&self, req: ServiceRequest) -> BoxFutureOrNoop<Option<Response>> {
         self.inner.metrics.record_rx(req.body.len());
-        if self.check_peer_id(&req.metadata.peer_id) {
+        if self.check_peer_id(&req.metadata.peer_id) && self.allow_query(&req) {
             BoxFutureOrNoop::future(self.inner.service.on_query(req))
         } else {
             BoxFutureOrNoop::Noop
@@ -227,11 +236,25 @@ impl PublicOverlay {
 
     pub(crate) fn handle_message(&self, req: ServiceRequest) -> BoxFutureOrNoop<()> {
         self.inner.metrics.record_rx(req.body.len());
-        if self.check_peer_id(&req.metadata.peer_id) {
+        if self.check_peer_id(&req.metadata.peer_id) && self.allow_message(&req) {
             BoxFutureOrNoop::future(self.inner.service.on_message(req))
         } else {
             BoxFutureOrNoop::Noop
         }
+    }
+
+    fn allow_query(&self, req: &ServiceRequest) -> bool {
+        self.inner
+            .rate_limiter
+            .as_ref()
+            .is_none_or(|rate_limiter| rate_limiter.allow_query(req))
+    }
+
+    fn allow_message(&self, req: &ServiceRequest) -> bool {
+        self.inner
+            .rate_limiter
+            .as_ref()
+            .is_none_or(|rate_limiter| rate_limiter.allow_message(req))
     }
 
     fn check_peer_id(&self, peer_id: &PeerId) -> bool {
@@ -416,6 +439,7 @@ struct Inner {
     min_capacity: usize,
     entry_ttl_sec: u32,
     peer_resolver: Option<PeerResolver>,
+    rate_limiter: Option<PublicOverlayRateLimiter>,
     entries: RwLock<PublicOverlayEntries>,
     entry_count: AtomicUsize,
     entries_added: Notify,

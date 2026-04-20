@@ -10,6 +10,7 @@ pub mod compression;
 pub mod config;
 pub mod io;
 pub mod progress_bar;
+pub mod rate_limit;
 pub mod serde_helpers;
 pub mod time;
 pub mod transactional;
