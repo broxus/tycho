@@ -205,7 +205,7 @@ fn dequantize_elapsed_ns(unit_cost_q: u128, base: u128) -> Option<u128> {
 #[cfg(test)]
 mod tests {
     use super::{
-        dequantize_elapsed_ns, quantize_unit_cost, RollingUnitCostClipper, UnitCostClippers,
+        RollingUnitCostClipper, UnitCostClippers, dequantize_elapsed_ns, quantize_unit_cost,
     };
 
     fn warm_window_with_samples(
