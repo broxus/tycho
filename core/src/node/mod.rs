@@ -610,10 +610,18 @@ impl ConfiguredNetwork {
             .with_broadcast_listener(remote_broadcast_listener)
             .build();
 
-        let public_overlay = PublicOverlay::builder(zerostate.compute_public_overlay_id())
-            .named("blockchain_rpc")
-            .with_peer_resolver(self.peer_resolver.clone())
-            .build(blockchain_rpc_service.clone());
+        let public_overlay = {
+            let mut builder = PublicOverlay::builder(zerostate.compute_public_overlay_id())
+                .named("blockchain_rpc")
+                .with_peer_resolver(self.peer_resolver.clone());
+
+            if let Some(config) = base_config.blockchain_rpc_service.rate_limits.clone() {
+                builder = builder.with_rate_limiter(config.into());
+            }
+
+            builder.build(blockchain_rpc_service.clone())
+        };
+
         self.overlay_service.add_public_overlay(&public_overlay);
 
         let blockchain_rpc_client = BlockchainRpcClient::builder()
