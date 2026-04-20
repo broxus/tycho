@@ -1090,7 +1090,7 @@ impl Phase<FinalizeState> {
 
         account_modifications
             .par_iter_mut()
-            .for_each(|(_, items)| items.sort_by(|(a, _), (b, _)| a.cmp(b)));
+            .for_each(|(_, items)| items.sort_by_key(|(a, _)| *a));
 
         let shard_accounts = {
             let split_shard_accounts = split_aug_dict(workchain, shard_accounts, split_depth)?;

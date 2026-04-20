@@ -198,7 +198,7 @@ impl RoundInspector {
         if prev_last_round == self.last_round.prev() {
             Self::exclude_witness(
                 &mut prev_last_round_data_map,
-                (self.last_round_data_map.iter()).flat_map(|(_, a)| &a.authored),
+                self.last_round_data_map.values().flat_map(|a| &a.authored),
             );
             for (signer, signer_prev_round) in prev_last_round_data_map {
                 if signer_prev_round.signed_proofs.is_empty() {

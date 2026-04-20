@@ -215,14 +215,14 @@ impl OverlayServiceInner {
                             let mut force_exchange = false;
                             match status {
                                 // Queue force update on each new dht peer
-                                DiscoveryStatus::Unchanged { is_empty } if is_empty => {
-                                    if empty_overlays.insert(&overlay_id) {
-                                        tracing::debug!(
-                                            %overlay_id,
-                                            "enqueued force public overlay peers discovery \
-                                            on new DHT peer",
-                                        );
-                                    }
+                                DiscoveryStatus::Unchanged { is_empty }
+                                    if is_empty && empty_overlays.insert(&overlay_id) =>
+                                {
+                                    tracing::debug!(
+                                        %overlay_id,
+                                        "enqueued force public overlay peers discovery \
+                                        on new DHT peer",
+                                    );
                                 }
                                 // Update local entries on discovery
                                 DiscoveryStatus::Changed => {

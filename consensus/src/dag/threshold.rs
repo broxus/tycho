@@ -138,10 +138,7 @@ impl Threshold {
 
         let max_time = UnixTime::now() + self.clock_skew;
 
-        loop {
-            let Some(next_key) = work.delayed.peek() else {
-                break;
-            };
+        while let Some(next_key) = work.delayed.peek() {
             // manually re-check expiration
             let info = work.delayed.remove(&next_key).into_inner();
             let to_delay = info.time() - max_time;

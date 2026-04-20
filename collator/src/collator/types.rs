@@ -872,7 +872,7 @@ impl PublicLibsDiff {
             // Otherwise apply a full modify.
             _ => {
                 self.original.modify_with_sorted_iter_ext(
-                    self.changes.into_iter(),
+                    self.changes,
                     |(key, _)| *key,
                     |(_, value)| value.finalize(),
                     Cell::empty_context(),
@@ -957,7 +957,7 @@ impl PublicLibrariesDiffItem {
                     return Ok(None);
                 }
 
-                self.publishers.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+                self.publishers.sort_unstable_by_key(|(a, _)| *a);
                 let root = dict::build_dict_from_sorted_iter(
                     self.publishers.into_iter().map(|(key, add)| {
                         debug_assert!(add, "must not remove publishers from nonexisting libraries");
@@ -978,7 +978,7 @@ impl PublicLibrariesDiffItem {
                     return Ok(Some(descr));
                 }
 
-                self.publishers.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+                self.publishers.sort_unstable_by_key(|(a, _)| *a);
                 descr.publishers.modify_with_sorted_iter_ext(
                     self.publishers,
                     |(key, _)| *key,

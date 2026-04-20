@@ -226,8 +226,7 @@ impl CmdGetNeighbours {
 
         self.args.rt(args, move |client| async move {
             let mut res = client.get_neighbours_info().await?;
-            res.neighbours
-                .sort_unstable_by(|left, right| left.id.cmp(&right.id));
+            res.neighbours.sort_unstable_by_key(|left| left.id);
 
             if self.human_readable {
                 let mut table = tabled::Table::new(res.neighbours.into_iter().map(TableRow));
@@ -884,8 +883,7 @@ impl CmdOverlayPeers {
 
         self.args.rt(args, move |client| async move {
             let mut res = client.get_overlay_peers(&self.overlay_id).await?;
-            res.peers
-                .sort_unstable_by(|left, right| left.peer_id.cmp(&right.peer_id));
+            res.peers.sort_unstable_by_key(|left| left.peer_id);
 
             if self.human_readable {
                 DisplayRelativeTimestamp::set_now(tycho_util::time::now_sec());

@@ -854,11 +854,11 @@ impl std::ops::Add for MessageGroup {
 
     fn add(mut self, other: Self) -> Self::Output {
         let last_slot_id = self.slots_info.last_slot_id.as_ref();
-        let mut next_slot_id = match last_slot_id {
+        let next_slot_ids = match last_slot_id {
             Some(slot_id) => *slot_id + 1,
             None => 0,
-        };
-        for (_, new_slot) in other.slots_info.slots {
+        }..;
+        for (next_slot_id, (_, new_slot)) in next_slot_ids.zip(other.slots_info.slots) {
             let slots_ids = self
                 .slots_info
                 .index_by_msgs_count
@@ -867,8 +867,6 @@ impl std::ops::Add for MessageGroup {
 
             self.slots_info.slots.insert(next_slot_id, new_slot);
             self.slots_info.last_slot_id = Some(next_slot_id);
-
-            next_slot_id += 1;
         }
         self.slots_info.int_count += other.slots_info.int_count;
         self.slots_info.ext_count += other.slots_info.ext_count;
