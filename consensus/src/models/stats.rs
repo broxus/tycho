@@ -99,6 +99,7 @@ impl MempoolPeerCounters {
         self.was_not_leader += other.was_not_leader;
         self.skipped_rounds += other.skipped_rounds;
         self.valid_points += other.valid_points;
+        self.points_proved += other.points_proved;
         self.equivocated += other.equivocated;
         self.trans_invalid_points += other.trans_invalid_points;
         self.invalid_points += other.invalid_points;

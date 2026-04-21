@@ -3,10 +3,11 @@ use std::sync::Arc;
 
 use tycho_crypto::ed25519::KeyPair;
 use tycho_network::PeerId;
-use tycho_util::FastHashSet;
+use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::effects::{AltFmt, AltFormat};
 use crate::intercom::peer_schedule::epoch_starts::EpochStarts;
+use crate::intercom::peer_schedule::stats_ranges::StatsRanges;
 use crate::models::Round;
 
 /// All collections are peer subsets, not full vsets
@@ -14,12 +15,14 @@ use crate::models::Round;
 pub struct PeerScheduleStateless {
     /// retrieved for arbitrary round
     local_keys: Arc<KeyPair>,
+    stats_slot_maps: [Arc<FastHashMap<PeerId, usize>>; 4],
     /// order matters to derive leader in `AnchorStage`
     peer_vecs: [Arc<Vec<PeerId>>; 4],
     peer_sets: [Arc<FastHashSet<PeerId>>; 4],
 
     pub(super) epoch_starts: EpochStarts,
 
+    empty_slot_map: Arc<FastHashMap<PeerId, usize>>,
     empty_vec: Arc<Vec<PeerId>>,
     empty_set: Arc<FastHashSet<PeerId>>,
 }
@@ -28,11 +31,13 @@ impl PeerScheduleStateless {
     pub fn new(local_keys: Arc<KeyPair>) -> Self {
         Self {
             local_keys,
+            stats_slot_maps: Default::default(),
             peer_vecs: Default::default(),
             peer_sets: Default::default(),
 
             epoch_starts: EpochStarts::default(),
 
+            empty_slot_map: Default::default(),
             empty_vec: Default::default(),
             empty_set: Default::default(),
         }
@@ -63,6 +68,13 @@ impl PeerScheduleStateless {
             Some(self.local_keys.clone())
         } else {
             None
+        }
+    }
+
+    pub fn stats_ranges(&self) -> StatsRanges {
+        StatsRanges {
+            stats_slot_maps: self.stats_slot_maps.clone(),
+            epoch_starts: self.epoch_starts.clone(),
         }
     }
 
@@ -97,6 +109,14 @@ impl PeerScheduleStateless {
         next_epoch_start: Round,
         working_subset: &[(PeerId, u16)],
     ) {
+        let mut bc_config_vset_ordered = working_subset.to_vec();
+        bc_config_vset_ordered.sort_unstable_by_key(|(_, validator_idx)| *validator_idx);
+        let stats_slots = bc_config_vset_ordered
+            .into_iter()
+            .enumerate()
+            .map(|(slot, (peer_id, _))| (peer_id, slot))
+            .collect();
+        self.stats_slot_maps[3] = Arc::new(stats_slots);
         self.peer_sets[3] = Arc::new(working_subset.iter().map(|(p, _)| *p).collect());
         self.peer_vecs[3] = Arc::new(working_subset.iter().map(|(p, _)| *p).collect());
         self.epoch_starts.next = Some(next_epoch_start);
@@ -113,12 +133,14 @@ impl PeerScheduleStateless {
 
         self.epoch_starts.rotate();
 
+        self.stats_slot_maps.rotate_left(1);
         self.peer_sets.rotate_left(1);
         self.peer_vecs.rotate_left(1);
         self.meter();
     }
 
     pub(super) fn forget_oldest(&mut self) {
+        self.stats_slot_maps[0] = self.empty_slot_map.clone();
         self.peer_sets[0] = self.empty_set.clone();
         self.peer_vecs[0] = self.empty_vec.clone();
         self.meter();

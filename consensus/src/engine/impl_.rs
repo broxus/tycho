@@ -90,8 +90,13 @@ impl Engine {
             &net.peer_schedule,
             &round_ctx,
         );
-        let committer_run =
-            CommitterTask::new(committer, &net.moderator, &bind.top_known_anchor, conf);
+        let committer_run = CommitterTask::new(
+            committer,
+            &net.moderator,
+            &net.peer_schedule,
+            &bind.top_known_anchor,
+            conf,
+        );
 
         let init_task = engine_ctx.task().spawn_blocking({
             let store = store.clone();

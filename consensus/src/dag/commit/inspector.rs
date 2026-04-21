@@ -99,7 +99,7 @@ impl RoundInspector {
             .collect()
     }
 
-    pub fn inspect(&mut self, r_0: &DagRound) -> TaskResult<()> {
+    pub fn inspect(&mut self, r_0: &DagRound, emit_stats: bool) -> TaskResult<()> {
         let leader_used = r_0
             .anchor_stage()
             .map(|a| (a.leader, a.is_used.load(atomic::Ordering::Relaxed)));
@@ -117,6 +117,10 @@ impl RoundInspector {
             let mut has_valid = false;
 
             for version in authored {
+                if emit_stats && version.has_proof() {
+                    // not more than one version can have a proving point
+                    author_counters.points_proved += 1;
+                }
                 match version {
                     DagPoint::Valid(_) => {
                         authored_versions += 1;
