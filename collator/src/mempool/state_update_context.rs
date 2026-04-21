@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use anyhow::Result;
 use tycho_network::PeerId;
 use tycho_types::cell::HashBytes;
 use tycho_types::models::{
@@ -51,51 +52,61 @@ impl StateUpdateContext {
         }
     }
 
+    /// Preserves blockchain config peer order to pass into mempool
     pub fn prev_v_set(&self) -> Vec<PeerId> {
         Self::peer_ids((self.prev_validator_set.iter()).flat_map(|(_, v_set)| v_set.list.iter()))
     }
 
+    /// Preserves blockchain config peer order to pass into mempool
     pub fn curr_v_set(&self) -> Vec<PeerId> {
         Self::peer_ids(self.current_validator_set.1.list.iter())
     }
 
+    /// Preserves blockchain config peer order to pass into mempool
     pub fn next_v_set(&self) -> Vec<PeerId> {
         Self::peer_ids((self.next_validator_set.iter()).flat_map(|(_, v_set)| v_set.list.iter()))
     }
 
-    pub fn prev_v_subset(&self) -> Vec<PeerId> {
+    /// Preserves shuffled peer order to pass into mempool;
+    /// contains `validator_idx` peer position in original blockchain config
+    pub fn prev_v_subset(&self) -> Result<Vec<(PeerId, u16)>> {
         let Some((_, prev_validator_set)) = self.prev_validator_set.as_ref() else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         Self::compute_subset(
             prev_validator_set,
             self.consensus_info.prev_vset_switch_round,
             self.consensus_info.prev_shuffle_mc_validators,
         )
+        .ok_or_else(|| anyhow::anyhow!("failed to compute previous validator subset"))
     }
 
-    pub fn curr_v_subset(&self) -> Vec<PeerId> {
+    /// Preserves shuffled peer order to pass into mempool;
+    /// contains `validator_idx` peer position in original blockchain config
+    pub fn curr_v_subset(&self) -> Result<Vec<(PeerId, u16)>> {
         Self::compute_subset(
             &self.current_validator_set.1,
             self.consensus_info.vset_switch_round,
             self.shuffle_validators,
         )
+        .ok_or_else(|| anyhow::anyhow!("failed to compute current validator subset"))
     }
 
     // NOTE: do not try to calculate subset from next set
-    //  because it is impossible without known future session_update_round
+    //  because it is impossible without known future `switch_round`
 
     fn compute_subset(
         validator_set: &ValidatorSet,
-        session_start_round: u32,
+        switch_round: u32,
         shuffle_validators: bool,
-    ) -> Vec<PeerId> {
-        Self::peer_ids(
-            validator_set
-                .compute_mc_subset(session_start_round, shuffle_validators)
-                .iter()
-                .flat_map(|(sub_list, _)| sub_list.iter()),
-        )
+    ) -> Option<Vec<(PeerId, u16)>> {
+        let (v_subset, _) =
+            validator_set.compute_mc_subset_indexed(switch_round, shuffle_validators)?;
+        let peer_idxs = v_subset
+            .into_iter()
+            .map(|desc| (PeerId(desc.public_key.0), desc.validator_idx))
+            .collect();
+        Some(peer_idxs)
     }
 
     fn peer_ids<'a>(iter: impl Iterator<Item = &'a ValidatorDescription>) -> Vec<PeerId> {

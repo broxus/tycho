@@ -9,6 +9,7 @@ use crate::effects::{AltFmt, AltFormat};
 use crate::intercom::peer_schedule::epoch_starts::EpochStarts;
 use crate::models::Round;
 
+/// All collections are peer subsets, not full vsets
 #[derive(Clone)]
 pub struct PeerScheduleStateless {
     /// retrieved for arbitrary round
@@ -91,9 +92,13 @@ impl PeerScheduleStateless {
         array::from_fn(|i| self.peers_for(rounds[i]).clone())
     }
 
-    pub(super) fn set_next_peers(&mut self, next_epoch_start: Round, peers: &[PeerId]) {
-        self.peer_sets[3] = Arc::new(peers.iter().copied().collect());
-        self.peer_vecs[3] = Arc::new(peers.to_vec());
+    pub(super) fn set_next_peers(
+        &mut self,
+        next_epoch_start: Round,
+        working_subset: &[(PeerId, u16)],
+    ) {
+        self.peer_sets[3] = Arc::new(working_subset.iter().map(|(p, _)| *p).collect());
+        self.peer_vecs[3] = Arc::new(working_subset.iter().map(|(p, _)| *p).collect());
         self.epoch_starts.next = Some(next_epoch_start);
         self.meter();
     }

@@ -47,27 +47,35 @@ pub enum PeerState {
     Resolved,
 }
 
+/// Full vsets preserve validator order in blockchain config,
+/// and subsets preserve validator order after shuffle
 #[cfg_attr(any(feature = "test", test), derive(Clone))]
 pub struct InitPeers {
     pub prev_start_round: u32,
     pub prev_v_set: Vec<PeerId>,
-    pub prev_v_subset: Vec<PeerId>,
+    pub prev_v_subset: Vec<(PeerId, u16)>,
+
     pub curr_start_round: u32,
     pub curr_v_set: Vec<PeerId>,
-    pub curr_v_subset: Vec<PeerId>,
+    pub curr_v_subset: Vec<(PeerId, u16)>,
+
     pub next_v_set: Vec<PeerId>,
 }
 
 impl InitPeers {
     #[cfg(any(feature = "test", test))]
-    pub fn new(curr_v_subset: Vec<PeerId>) -> Self {
+    pub fn new(curr_v_set: Vec<PeerId>) -> Self {
         Self {
             prev_start_round: 0,
             prev_v_set: vec![],
             prev_v_subset: vec![],
+
             curr_start_round: 0,
-            curr_v_set: curr_v_subset.clone(),
-            curr_v_subset,
+            curr_v_subset: (curr_v_set.iter().enumerate())
+                .map(|(i, p)| (*p, i as u16))
+                .collect(),
+            curr_v_set,
+
             next_v_set: vec![],
         }
     }
@@ -94,7 +102,7 @@ impl PeerSchedule {
             &mut locked,
             &[],
             genesis_round.prev(),
-            &[merged_conf.genesis_author()],
+            &[(merged_conf.genesis_author(), 0)],
             "Init genesis pseudo validator subset",
         );
         self.apply_scheduled_impl(&mut locked, genesis_round.prev());
@@ -197,7 +205,7 @@ impl PeerSchedule {
         locked: &mut PeerScheduleLocked,
         validator_set: &[PeerId],
         next_round: Round,
-        working_subset: &[PeerId],
+        working_subset: &[(PeerId, u16)],
         message: &'static str,
     ) {
         if next_round <= locked.data.epoch_starts.curr() || working_subset.is_empty() {
