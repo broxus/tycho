@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use tycho_collator::collator::work_units::{
     ExecuteWu, calc_target_scaled_wu_param_from_sums, calc_target_wu_param_from_sums,
-    report_anchor_lag_to_metrics,
+    f64_to_fraction, report_anchor_lag_to_metrics,
 };
 use tycho_collator::types::processed_upto::BlockSeqno;
 use tycho_types::models::{ShardIdent, WorkUnitsParams};
@@ -797,25 +797,28 @@ where
     ) -> WorkUnitsParams {
         // start from the latest observed params and only replace values that can be calculated safely
         let mut target_wu_params = wu_metrics_avg_res.wu_params.clone();
+        let Some(target_wu_price_fraction) = f64_to_fraction(target_wu_price) else {
+            return target_wu_params;
+        };
 
         // FINALIZE WU PARAMS
 
         let target_build_in_msg_wu_param = calc_target_wu_param_from_sums(
-            target_wu_price,
+            target_wu_price_fraction.clone(),
             &wu_metrics_avg.finalize.build_in_msg_sums_accum,
         )
         .unwrap_or(wu_metrics_avg_res.wu_params.finalize.build_in_msg as u64);
         target_wu_params.finalize.build_in_msg = sat_u16_from_u64(target_build_in_msg_wu_param);
 
         let target_build_out_msg_wu_param = calc_target_wu_param_from_sums(
-            target_wu_price,
+            target_wu_price_fraction.clone(),
             &wu_metrics_avg.finalize.build_out_msg_sums_accum,
         )
         .unwrap_or(wu_metrics_avg_res.wu_params.finalize.build_out_msg as u64);
         target_wu_params.finalize.build_out_msg = sat_u16_from_u64(target_build_out_msg_wu_param);
 
         let target_build_accounts_blocks_wu_param = calc_target_wu_param_from_sums(
-            target_wu_price,
+            target_wu_price_fraction.clone(),
             &wu_metrics_avg.finalize.build_accounts_blocks_sums_accum,
         )
         .unwrap_or(wu_metrics_avg_res.wu_params.finalize.build_transactions as u64);
@@ -825,7 +828,7 @@ where
         // calculate target update_shard_accounts_wu and param
         let scale = 10;
         let target_update_shard_accounts_wu_param = calc_target_scaled_wu_param_from_sums(
-            target_wu_price,
+            target_wu_price_fraction.clone(),
             scale,
             &wu_metrics_avg.finalize.update_shard_accounts_sums_accum,
         )
@@ -835,7 +838,7 @@ where
 
         // calculate target build_state_update_wu and param
         let target_build_state_update_wu_param = calc_target_scaled_wu_param_from_sums(
-            target_wu_price,
+            target_wu_price_fraction.clone(),
             scale,
             &wu_metrics_avg.finalize.build_state_update_sums_accum,
         )
@@ -845,7 +848,7 @@ where
 
         // calculate target build_block_wu and param
         if let Some(target_wu_param) = calc_target_wu_param_from_sums(
-            target_wu_price,
+            target_wu_price_fraction.clone(),
             &wu_metrics_avg.finalize.build_block_sums_accum,
         ) {
             target_wu_params.finalize.serialize_accounts = sat_u16_from_u64(target_wu_param);
@@ -858,14 +861,14 @@ where
         }
 
         let target_create_queue_diff_wu_param = calc_target_wu_param_from_sums(
-            target_wu_price,
+            target_wu_price_fraction.clone(),
             &wu_metrics_avg.finalize.create_diff_sums_accum,
         )
         .unwrap_or(wu_metrics_avg_res.wu_params.finalize.create_diff as u64);
         target_wu_params.finalize.create_diff = sat_u16_from_u64(target_create_queue_diff_wu_param);
 
         let target_apply_queue_diff_wu_param = calc_target_wu_param_from_sums(
-            target_wu_price,
+            target_wu_price_fraction.clone(),
             &wu_metrics_avg.finalize.apply_diff_sums_accum,
         )
         .unwrap_or(wu_metrics_avg_res.wu_params.finalize.apply_diff as u64);
@@ -874,14 +877,14 @@ where
         // READ MSGS GROUPS (PREPARE) WU PARAMS
 
         let target_read_ext_msgs_wu_param = calc_target_wu_param_from_sums(
-            target_wu_price,
+            target_wu_price_fraction.clone(),
             &wu_metrics_avg.prepare.read_ext_msgs_sums_accum,
         )
         .unwrap_or(wu_metrics_avg_res.wu_params.prepare.read_ext_msgs as u64);
         target_wu_params.prepare.read_ext_msgs = sat_u16_from_u64(target_read_ext_msgs_wu_param);
 
         let target_read_existing_int_msgs_wu_param = calc_target_wu_param_from_sums(
-            target_wu_price,
+            target_wu_price_fraction.clone(),
             &wu_metrics_avg.prepare.read_existing_int_msgs_sums_accum,
         )
         .unwrap_or(wu_metrics_avg_res.wu_params.prepare.read_int_msgs as u64);
@@ -889,7 +892,7 @@ where
             sat_u16_from_u64(target_read_existing_int_msgs_wu_param);
 
         let target_read_new_int_msgs_wu_param = calc_target_wu_param_from_sums(
-            target_wu_price,
+            target_wu_price_fraction.clone(),
             &wu_metrics_avg.prepare.read_new_int_msgs_sums_accum,
         )
         .unwrap_or(wu_metrics_avg_res.wu_params.prepare.read_new_msgs as u64);
@@ -897,7 +900,7 @@ where
             sat_u16_from_u64(target_read_new_int_msgs_wu_param);
 
         let target_add_msgs_to_groups_wu_param = calc_target_wu_param_from_sums(
-            target_wu_price,
+            target_wu_price_fraction.clone(),
             &wu_metrics_avg.prepare.add_msgs_to_groups_sums_accum,
         )
         .unwrap_or(wu_metrics_avg_res.wu_params.prepare.add_to_msg_groups as u64);
@@ -907,7 +910,7 @@ where
         // EXECUTE WU PARAMS
 
         let target_execute_wu_param = ExecuteWu::calc_target_execute_wu_param(
-            target_wu_price,
+            target_wu_price_fraction.clone(),
             target_wu_params.execute.prepare as u64,
             target_wu_params.execute.execute_delimiter as u64,
             &wu_metrics_avg.execute.execute_groups_vm_sums_accum,
@@ -916,7 +919,7 @@ where
         target_wu_params.execute.execute = sat_u16_from_u64(target_execute_wu_param);
 
         let target_process_txs_wu_param = calc_target_wu_param_from_sums(
-            target_wu_price,
+            target_wu_price_fraction.clone(),
             &wu_metrics_avg.execute.process_txs_sums_accum,
         );
         if let Some(target_wu_param) = target_process_txs_wu_param {
@@ -937,7 +940,7 @@ where
         // DO COLLATE WU PARAMS
 
         let target_resume_collation_wu_param = calc_target_scaled_wu_param_from_sums(
-            target_wu_price,
+            target_wu_price_fraction,
             // resume collation base already contains two scaled power terms, so invert it with `scale^2`
             scale * scale,
             &wu_metrics_avg.do_collate.resume_collation_sums_accum,

@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use tycho_collator::collator::work_units::DoCollateWu;
-use tycho_util::num::{SafeAccum, SafeUnsignedAvg};
+use tycho_collator::collator::work_units::{DoCollateWu, WuAccumSums};
+use tycho_util::num::SafeUnsignedAvg;
 
 use crate::unit_cost_clipper::UnitCostClippers;
 
@@ -18,7 +18,7 @@ pub struct DoCollateWuAvg {
     pub resume_collation_elapsed_ns: SafeUnsignedAvg,
     pub resume_collation_base: SafeUnsignedAvg,
     /// Stores `(clipped_elapsed_ns, resume_collation_base)` for the target param calculation
-    pub resume_collation_sums_accum: SafeAccum<(u128, u128)>,
+    pub resume_collation_sums_accum: WuAccumSums,
 
     pub resume_collation_wu_per_block: SafeUnsignedAvg,
     pub resume_collation_elapsed_per_block_ns: SafeUnsignedAvg,

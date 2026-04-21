@@ -1,11 +1,13 @@
 use std::time::Duration;
 
 use num_bigint::BigUint;
+use num_integer::Integer;
+use num_rational::BigRational;
+use num_traits::ToPrimitive;
 use tycho_types::models::{
     ShardIdent, WorkUnitsParams, WorkUnitsParamsExecute, WorkUnitsParamsFinalize,
     WorkUnitsParamsPrepare,
 };
-use tycho_util::num::SafeAccum;
 
 use crate::collator::messages_reader::MessagesReaderMetrics;
 use crate::collator::types::{ExecuteMetrics, FinalizeMetrics};
@@ -333,31 +335,54 @@ impl ExecuteWu {
         self.total_elapsed().as_nanos() as f64 / total_wu as f64
     }
 
-    /// Calcs target `execute.execute` wu param from.
-    ///
-    /// ATTENTION! Uses f64. It should not be used for deterministic calculations inside the collator.
+    /// Calcs target `execute.execute` wu param.
     pub fn calc_target_execute_wu_param(
-        target_wu_price: f64,
+        target_wu_price: (BigUint, BigUint),
         prepare_wu_param: u64,
         execute_delimiter: u64,
-        sums_accum: &SafeAccum<(u128, u128, u128)>,
+        sums_accum: &WuAccumSumsExecute,
     ) -> Option<u64> {
-        let (
-            sum_execute_groups_vm_elapsed_clip_ns,
-            sum_execute_groups_vm_sum_accounts_over_threads,
-            sum_execute_groups_vm_sum_gas_over_threads,
-        ) = **sums_accum;
-        if sum_execute_groups_vm_sum_gas_over_threads == 0 {
+        if sums_accum.is_sum_gas_over_threads_zero() {
             return None;
         }
-        // subtract the prepare term first and then calculate the remaining gas-dependent part for `execute` param
-        let target_wu_param = (execute_delimiter as f64)
-            * (((sum_execute_groups_vm_elapsed_clip_ns as f64 / target_wu_price)
-                * EXECUTE_OVER_THREADS_SCALE as f64)
-                - (prepare_wu_param as f64)
-                    * sum_execute_groups_vm_sum_accounts_over_threads as f64)
-            / sum_execute_groups_vm_sum_gas_over_threads as f64;
-        trunc_sat_u64_from_f64(target_wu_param)
+        let (price_num, price_den) = target_wu_price;
+        let gas = sums_accum.sum_gas_over_threads();
+        let prepare = sums_accum.sum_accounts_over_threads() * prepare_wu_param;
+
+        // elapsed = price * (prepare_p * accounts + execute * gas / execute_delimiter) / EXECUTE_OVER_THREADS_SCALE
+        // -> elapsed = price * (prepare + execute * gas / execute_delimiter) / EXECUTE_OVER_THREADS_SCALE
+        // -> elapsed = price_num / price_den * (prepare + execute * gas / execute_delimiter) / EXECUTE_OVER_THREADS_SCALE
+        // -> elapsed * EXECUTE_OVER_THREADS_SCALE * price_den / price_num = prepare + execute * gas / execute_delimiter
+        // -> elapsed_scaled = elapsed * EXECUTE_OVER_THREADS_SCALE * price_den
+        // -> elapsed_scaled / price_num = prepare + execute * gas / execute_delimiter
+        // -> elapsed_scaled = elapsed_scaled_q * price_num + elapsed_scaled_r
+        // -> (elapsed_scaled_q * price_num + elapsed_scaled_r) / price_num = prepare + execute * gas / execute_delimiter
+        // -> elapsed_scaled_q + elapsed_scaled_r / price_num = prepare + execute * gas / execute_delimiter
+        // -> execute = ((elapsed_scaled_q - prepare) + elapsed_scaled_r / price_num) * execute_delimiter / gas
+        // -> whole = (elapsed_scaled_q - prepare) * execute_delimiter
+        // -> execute = whole / gas + elapsed_scaled_r * execute_delimiter / (gas * price_num)
+        // -> execute = (whole_q * gas + whole_r) / gas + elapsed_scaled_r * execute_delimiter / (gas * price_num)
+        // -> execute = whole_q + whole_r / gas + elapsed_scaled_r * execute_delimiter / (gas * price_num)
+        // -> execute = whole_q + whole_r * price_num / (gas * price_num) + elapsed_scaled_r * execute_delimiter / (gas * price_num)
+        // -> execute = whole_q + (whole_r * price_num + elapsed_scaled_r * execute_delimiter) / (gas * price_num)
+
+        let elapsed_scaled =
+            sums_accum.sum_elapsed_clip_ns() * EXECUTE_OVER_THREADS_SCALE * &price_den;
+        let (elapsed_scaled_q, elapsed_scaled_r) = elapsed_scaled.div_rem(&price_num);
+
+        // if the prepare term already exceeds the available whole part then the execute-only part would be negative
+        if elapsed_scaled_q < prepare {
+            return None;
+        }
+
+        let whole = (elapsed_scaled_q - prepare) * execute_delimiter;
+        let (whole_q, whole_r) = whole.div_rem(gas);
+
+        // calculate target param with truncation of the fractional part
+        let target_param = whole_q
+            + (whole_r * &price_num + elapsed_scaled_r * execute_delimiter) / (gas * price_num);
+
+        Some(target_param.to_u64().unwrap_or(u64::MAX))
     }
 
     pub fn execute_groups_vm_only_wu_price(&self) -> f64 {
@@ -1261,43 +1286,131 @@ impl F64Ext for f64 {
     }
 }
 
-fn trunc_sat_u64_from_f64(value: f64) -> Option<u64> {
-    if !value.is_finite() || value < 0.0 {
-        return None;
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
+pub struct WuAccumSums {
+    sum_elapsed_clip_ns: BigUint,
+    sum_base: BigUint,
+}
+
+impl WuAccumSums {
+    pub fn add(&mut self, (elapsed_clip_ns, base): (u128, u128)) {
+        self.sum_elapsed_clip_ns += elapsed_clip_ns;
+        self.sum_base += base;
     }
-    if value >= u64::MAX as f64 {
-        return Some(u64::MAX);
+
+    pub fn merge(&mut self, other: &Self) {
+        self.sum_elapsed_clip_ns += &other.sum_elapsed_clip_ns;
+        self.sum_base += &other.sum_base;
     }
-    Some(value.trunc() as u64)
+
+    pub fn is_sum_base_zero(&self) -> bool {
+        self.sum_base == BigUint::ZERO
+    }
+
+    pub fn sum_elapsed_clip_ns(&self) -> &BigUint {
+        &self.sum_elapsed_clip_ns
+    }
+
+    pub fn sum_base(&self) -> &BigUint {
+        &self.sum_base
+    }
+}
+
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
+pub struct WuAccumSumsExecute {
+    sum_elapsed_clip_ns: BigUint,
+    sum_accounts_over_threads: BigUint,
+    sum_gas_over_threads: BigUint,
+}
+
+impl WuAccumSumsExecute {
+    pub fn add(
+        &mut self,
+        (elapsed_clip_ns, accounts_over_threads, gas_over_threads): (u128, u128, u128),
+    ) {
+        self.sum_elapsed_clip_ns += elapsed_clip_ns;
+        self.sum_accounts_over_threads += accounts_over_threads;
+        self.sum_gas_over_threads += gas_over_threads;
+    }
+
+    pub fn merge(&mut self, other: &Self) {
+        self.sum_elapsed_clip_ns += &other.sum_elapsed_clip_ns;
+        self.sum_accounts_over_threads += &other.sum_accounts_over_threads;
+        self.sum_gas_over_threads += &other.sum_gas_over_threads;
+    }
+
+    pub fn is_sum_gas_over_threads_zero(&self) -> bool {
+        self.sum_gas_over_threads == BigUint::ZERO
+    }
+
+    pub fn sum_elapsed_clip_ns(&self) -> &BigUint {
+        &self.sum_elapsed_clip_ns
+    }
+
+    pub fn sum_accounts_over_threads(&self) -> &BigUint {
+        &self.sum_accounts_over_threads
+    }
+
+    pub fn sum_gas_over_threads(&self) -> &BigUint {
+        &self.sum_gas_over_threads
+    }
 }
 
 /// Calcs target wu param from sum of elapsed times and sum of bases.
-///
-/// ATTENTION! Uses f64. It should not be used for deterministic calculations inside the collator.
 pub fn calc_target_wu_param_from_sums(
-    target_wu_price: f64,
-    sums_accum: &SafeAccum<(u128, u128)>,
+    target_wu_price: (BigUint, BigUint),
+    sums_accum: &WuAccumSums,
 ) -> Option<u64> {
     calc_target_scaled_wu_param_from_sums(target_wu_price, 1, sums_accum)
 }
 
-/// Calcs target wu param from sum of elapsed times and sum of bases.
+/// Calcs target wu param from elapsed sum and base sum.
 /// Applies scale that was used to calculate base.
-///
-/// ATTENTION! Uses f64. It should not be used for deterministic calculations inside the collator.
 pub fn calc_target_scaled_wu_param_from_sums(
-    target_wu_price: f64,
+    target_wu_price: (BigUint, BigUint),
     scale: u128,
-    sums_accum: &SafeAccum<(u128, u128)>,
+    sums_accum: &WuAccumSums,
 ) -> Option<u64> {
-    let (sum_elapsed_clip_ns, sum_base) = **sums_accum;
-    if sum_base == 0 {
+    if sums_accum.is_sum_base_zero() {
         return None;
     }
-    // invert `elapsed = price * param * base / scale` using clipped elapsed sums and accumulated bases
+
+    // elapsed = price * param * base / scale
+    // -> elapsed = price_num / price_den * param * base / scale
+    // -> param = elapsed * scale / base * price_den / price_num
+    // -> param = (scaled_elapsed_q * base + scaled_elapsed_r) / base * price_den / price_num
+    // -> param = (scaled_elapsed_q + scaled_elapsed_r / base) * price_den / price_num
+    // -> param = (scaled_elapsed_q * price_den + scaled_elapsed_r * price_den / base) / price_num
+    // -> whole = scaled_elapsed_q * price_den
+    // -> param = whole / price_num + scaled_elapsed_r * price_den / (base * price_num)
+    // -> param = (whole_q * price_num + whole_r) / price_num + scaled_elapsed_r * price_den / (base * price_num)
+    // -> param = whole_q + whole_r / price_num + scaled_elapsed_r * price_den / (base * price_num)
+    // -> param = whole_q + whole_r * base / (base * price_num) + scaled_elapsed_r * price_den / (base * price_num)
+    // -> param = whole_q + (whole_r * base + scaled_elapsed_r * price_den) / (base * price_num)
+
+    let (price_num, price_den) = target_wu_price;
+    let base = sums_accum.sum_base();
+    let scaled_elapsed = sums_accum.sum_elapsed_clip_ns() * scale;
+    let (scaled_elapsed_q, scaled_elapsed_r) = scaled_elapsed.div_rem(base);
+    let whole = scaled_elapsed_q * &price_den;
+    let (whole_q, whole_r) = whole.div_rem(&price_num);
+
+    // calculate target param with trancation of fractional part
     let target_param =
-        (sum_elapsed_clip_ns as f64 / target_wu_price) * scale as f64 / sum_base as f64;
-    trunc_sat_u64_from_f64(target_param)
+        whole_q + (whole_r * base + scaled_elapsed_r * price_den) / (base * price_num);
+
+    Some(target_param.to_u64().unwrap_or(u64::MAX))
+}
+
+pub fn f64_to_fraction(value: f64) -> Option<(BigUint, BigUint)> {
+    if !value.is_finite() || value <= 0.0 {
+        return None;
+    }
+    // convert the exact stored IEEE-754 value into a normalized rational and reuse its numerator/denominator
+    let ratio = BigRational::from_float(value)?;
+    let numerator = BigUint::try_from(ratio.numer()).ok()?;
+    let denominator = BigUint::try_from(ratio.denom()).ok()?;
+    Some((numerator, denominator))
 }
 
 /// Packs two numbers (0..=99) into a single u16: format "AA BB" -> AA*100 + BB
@@ -1361,59 +1474,117 @@ pub fn compute_scaled_pow(
     res.try_into().unwrap_or(u128::MAX)
 }
 
-#[test]
-fn test_compute_scaled_pow() {
-    let scale = 100;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    // 20k^1.2
-    let x = 20000;
-    let pow_coeff = 105;
-    let (pow_coeff_numerator, pow_coeff_denominator) = unpack_from_u16(pow_coeff);
+    #[test]
+    fn test_compute_scaled_pow() {
+        let scale = 100;
 
-    let res = compute_scaled_pow(
-        x,
-        pow_coeff_numerator as u32,
-        pow_coeff_denominator as u32,
-        scale,
-    );
-    println!(
-        "{x}^({pow_coeff_numerator}/{pow_coeff_denominator}) = {}",
-        (res as f64 / scale as f64),
-    );
+        // 20k^1.2
+        let x = 20000;
+        let pow_coeff = 105;
+        let (pow_coeff_numerator, pow_coeff_denominator) = unpack_from_u16(pow_coeff);
 
-    let res = x * res;
-    println!(
-        "{x}^(1+{pow_coeff_numerator}/{pow_coeff_denominator}) = {}",
-        (res as f64 / scale as f64),
-    );
+        let res = compute_scaled_pow(
+            x,
+            pow_coeff_numerator as u32,
+            pow_coeff_denominator as u32,
+            scale,
+        );
+        println!(
+            "{x}^({pow_coeff_numerator}/{pow_coeff_denominator}) = {}",
+            (res as f64 / scale as f64),
+        );
 
-    // 20k^0/0
-    let pow_coeff = 0;
-    let (pow_coeff_numerator, pow_coeff_denominator) = unpack_from_u16(pow_coeff);
-    let res = compute_scaled_pow(
-        x,
-        pow_coeff_numerator as u32,
-        pow_coeff_denominator as u32,
-        scale,
-    );
-    println!(
-        "{x}^({pow_coeff_numerator}/{pow_coeff_denominator}) = {}",
-        (res as f64 / scale as f64),
-    );
+        let res = x * res;
+        println!(
+            "{x}^(1+{pow_coeff_numerator}/{pow_coeff_denominator}) = {}",
+            (res as f64 / scale as f64),
+        );
 
-    // 10M^0.16
-    let x = 10000000;
-    let pow_coeff = 425;
-    let (pow_coeff_numerator, pow_coeff_denominator) = unpack_from_u16(pow_coeff);
+        // 20k^0/0
+        let pow_coeff = 0;
+        let (pow_coeff_numerator, pow_coeff_denominator) = unpack_from_u16(pow_coeff);
+        let res = compute_scaled_pow(
+            x,
+            pow_coeff_numerator as u32,
+            pow_coeff_denominator as u32,
+            scale,
+        );
+        println!(
+            "{x}^({pow_coeff_numerator}/{pow_coeff_denominator}) = {}",
+            (res as f64 / scale as f64),
+        );
 
-    let res = compute_scaled_pow(
-        x,
-        pow_coeff_numerator as u32,
-        pow_coeff_denominator as u32,
-        scale,
-    );
-    println!(
-        "{x}^({pow_coeff_numerator}/{pow_coeff_denominator}) = {}",
-        (res as f64 / scale as f64),
-    );
+        // 10M^0.16
+        let x = 10000000;
+        let pow_coeff = 425;
+        let (pow_coeff_numerator, pow_coeff_denominator) = unpack_from_u16(pow_coeff);
+
+        let res = compute_scaled_pow(
+            x,
+            pow_coeff_numerator as u32,
+            pow_coeff_denominator as u32,
+            scale,
+        );
+        println!(
+            "{x}^({pow_coeff_numerator}/{pow_coeff_denominator}) = {}",
+            (res as f64 / scale as f64),
+        );
+    }
+
+    #[test]
+    fn wu_param_sums2_add_and_merge_keep_exact_values() {
+        let mut sums = WuAccumSums::default();
+        sums.add((u128::MAX, 3));
+        sums.add((1, 4));
+        let mut merged = WuAccumSums::default();
+        merged.add((7, 8));
+        sums.merge(&merged);
+        assert_eq!(
+            sums.sum_elapsed_clip_ns(),
+            &(BigUint::from(u128::MAX) + BigUint::from(8u32))
+        );
+        assert_eq!(sums.sum_base(), &BigUint::from(15u32));
+    }
+
+    #[test]
+    fn wu_param_sums3_add_and_merge_keep_exact_values() {
+        let mut sums = WuAccumSumsExecute::default();
+        sums.add((u128::MAX, 11, 13));
+        sums.add((1, 17, 19));
+        let mut merged = WuAccumSumsExecute::default();
+        merged.add((23, 29, 31));
+        sums.merge(&merged);
+        assert_eq!(
+            sums.sum_elapsed_clip_ns(),
+            &(BigUint::from(u128::MAX) + BigUint::from(24u32))
+        );
+        assert_eq!(sums.sum_accounts_over_threads(), &BigUint::from(57u32));
+        assert_eq!(sums.sum_gas_over_threads(), &BigUint::from(63u32));
+    }
+
+    #[test]
+    fn calc_target_scaled_wu_param_from_sums_keeps_fraction_exact() {
+        let mut sums = WuAccumSums::default();
+        sums.add((23, 6));
+        let target_price_fraction = f64_to_fraction(1.5).unwrap();
+        assert_eq!(
+            calc_target_scaled_wu_param_from_sums(target_price_fraction, 10, &sums),
+            Some(25)
+        );
+    }
+
+    #[test]
+    fn calc_target_execute_wu_param_keeps_fraction_exact() {
+        let mut sums = WuAccumSumsExecute::default();
+        sums.add((10, 4, 6));
+        let target_price_fraction = f64_to_fraction(1.5).unwrap();
+        assert_eq!(
+            ExecuteWu::calc_target_execute_wu_param(target_price_fraction, 1, 5, &sums),
+            Some(55552)
+        );
+    }
 }

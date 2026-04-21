@@ -45,6 +45,9 @@ humantime = { workspace = true }
 indexmap = { workspace = true }
 metrics = { workspace = true }
 num-bigint = { workspace = true }
+num-integer = { workspace = true }
+num-rational = { workspace = true }
+num-traits = { workspace = true }
 parking_lot = { workspace = true, features = ["send_guard"] }
 rand = { workspace = true }
 rayon = { workspace = true }

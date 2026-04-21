@@ -75,6 +75,8 @@ metrics = "0.24"
 metrics-exporter-prometheus = "0.18"
 moka = { version = "0.12", features = ["sync"] }
 num-bigint = "0.4.6"
+num-integer = "0.1.46"
+num-rational = { version = "0.4.2", features = ["num-bigint"] }
 num-traits = "0.2.19"
 parking_lot = { version = "0.12.5" }
 parking_lot_core = "0.9.12"

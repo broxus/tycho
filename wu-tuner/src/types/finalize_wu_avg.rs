@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use tycho_collator::collator::work_units::FinalizeWu;
-use tycho_util::num::{SafeAccum, SafeUnsignedAvg};
+use tycho_collator::collator::work_units::{FinalizeWu, WuAccumSums};
+use tycho_util::num::SafeUnsignedAvg;
 
 use crate::unit_cost_clipper::UnitCostClippers;
 
@@ -68,21 +68,21 @@ pub struct FinalizeWuAvg {
     pub finalize_block_elapsed_ns: SafeUnsignedAvg,
 
     /// Stores `(clipped_elapsed_ns, build_in_msg_base)` for the target `build_in_msg` param calculation
-    pub build_in_msg_sums_accum: SafeAccum<(u128, u128)>,
+    pub build_in_msg_sums_accum: WuAccumSums,
     /// Stores `(clipped_elapsed_ns, build_out_msg_base)` for the target `build_out_msg` param calculation
-    pub build_out_msg_sums_accum: SafeAccum<(u128, u128)>,
+    pub build_out_msg_sums_accum: WuAccumSums,
     /// Stores `(clipped_elapsed_ns, build_accounts_blocks_base)` for the target `build_transactions` param calculation
-    pub build_accounts_blocks_sums_accum: SafeAccum<(u128, u128)>,
+    pub build_accounts_blocks_sums_accum: WuAccumSums,
     /// Stores `(clipped_elapsed_ns, update_shard_accounts_base)` for the target `build_accounts` param calculation
-    pub update_shard_accounts_sums_accum: SafeAccum<(u128, u128)>,
+    pub update_shard_accounts_sums_accum: WuAccumSums,
     /// Stores `(clipped_elapsed_ns, build_state_update_base)` for the target `state_update_accounts` param calculation
-    pub build_state_update_sums_accum: SafeAccum<(u128, u128)>,
+    pub build_state_update_sums_accum: WuAccumSums,
     /// Stores `(clipped_elapsed_ns, build_block_base)` for the target serialization params calculation
-    pub build_block_sums_accum: SafeAccum<(u128, u128)>,
+    pub build_block_sums_accum: WuAccumSums,
     /// Stores `(clipped_elapsed_ns, create_diff_base)` for the target `create_diff` param calculation
-    pub create_diff_sums_accum: SafeAccum<(u128, u128)>,
+    pub create_diff_sums_accum: WuAccumSums,
     /// Stores `(clipped_elapsed_ns, apply_diff_base)` for the target `apply_diff` param calculation
-    pub apply_diff_sums_accum: SafeAccum<(u128, u128)>,
+    pub apply_diff_sums_accum: WuAccumSums,
 
     pub total_elapsed_ns: SafeUnsignedAvg,
 }

@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use tycho_collator::collator::work_units::ExecuteWu;
-use tycho_util::num::{SafeAccum, SafeUnsignedAvg};
+use tycho_collator::collator::work_units::{ExecuteWu, WuAccumSums, WuAccumSumsExecute};
+use tycho_util::num::SafeUnsignedAvg;
 
 use crate::unit_cost_clipper::UnitCostClippers;
 
@@ -28,9 +28,9 @@ pub struct ExecuteWuAvg {
     pub process_txs_elapsed_ns: SafeUnsignedAvg,
 
     /// Stores `(clipped_elapsed_ns, accounts_over_threads, gas_over_threads)` for the target `execute` param calculation
-    pub execute_groups_vm_sums_accum: SafeAccum<(u128, u128, u128)>,
+    pub execute_groups_vm_sums_accum: WuAccumSumsExecute,
     /// Stores `(clipped_elapsed_ns, process_txs_base)` for the target param calculation
-    pub process_txs_sums_accum: SafeAccum<(u128, u128)>,
+    pub process_txs_sums_accum: WuAccumSums,
 }
 
 impl ExecuteWuAvg {
