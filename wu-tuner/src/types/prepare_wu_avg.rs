@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use tycho_collator::collator::work_units::PrepareMsgGroupsWu;
-use tycho_util::num::{SafeAccum, SafeUnsignedAvg};
+use tycho_collator::collator::work_units::{PrepareMsgGroupsWu, WuAccumSums};
+use tycho_util::num::SafeUnsignedAvg;
 
 use crate::unit_cost_clipper::UnitCostClippers;
 
@@ -39,13 +39,13 @@ pub struct PrepareMsgGroupsWuAvg {
     pub add_msgs_to_groups_base: SafeUnsignedAvg,
 
     /// Stores `(clipped_elapsed_ns, read_ext_msgs_base)` for the target `read_ext_msgs` param calculation
-    pub read_ext_msgs_sums_accum: SafeAccum<(u128, u128)>,
+    pub read_ext_msgs_sums_accum: WuAccumSums,
     /// Stores `(clipped_elapsed_ns, read_existing_int_msgs_base)` for the target `read_int_msgs` param calculation
-    pub read_existing_int_msgs_sums_accum: SafeAccum<(u128, u128)>,
+    pub read_existing_int_msgs_sums_accum: WuAccumSums,
     /// Stores `(clipped_elapsed_ns, read_new_int_msgs_base)` for the target `read_new_msgs` param calculation
-    pub read_new_int_msgs_sums_accum: SafeAccum<(u128, u128)>,
+    pub read_new_int_msgs_sums_accum: WuAccumSums,
     /// Stores `(clipped_elapsed_ns, add_msgs_to_groups_base)` for the target `add_to_msg_groups` param calculation
-    pub add_msgs_to_groups_sums_accum: SafeAccum<(u128, u128)>,
+    pub add_msgs_to_groups_sums_accum: WuAccumSums,
 
     pub total_elapsed_ns: SafeUnsignedAvg,
 }

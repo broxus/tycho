@@ -118,6 +118,8 @@ mod tests {
     use std::time::Duration;
 
     use anyhow::Result;
+    use num_bigint::BigUint;
+    use tycho_collator::collator::work_units::WuAccumSums;
 
     use super::*;
     use crate::config::WuTunerConfig;
@@ -155,6 +157,14 @@ mod tests {
 
     fn roundtrip_elapsed_ns(elapsed_ns: u128, base: u128) -> u128 {
         ((elapsed_ns * 1_000_000_000) / base * base) / 1_000_000_000
+    }
+
+    fn assert_accum_sums_eq(sums: &WuAccumSums, sum_elapsed_clip_ns: u128, sum_base: u128) {
+        assert_eq!(
+            sums.sum_elapsed_clip_ns(),
+            &BigUint::from(sum_elapsed_clip_ns)
+        );
+        assert_eq!(sums.sum_base(), &BigUint::from(sum_base));
     }
 
     fn sample_metrics(
@@ -516,7 +526,7 @@ mod tests {
                 .as_nanos(),
             10
         );
-        assert_eq!(*avg.prepare.read_ext_msgs_sums_accum, (1010, 1010));
+        assert_accum_sums_eq(&avg.prepare.read_ext_msgs_sums_accum, 1010, 1010);
     }
 
     #[test]
@@ -539,7 +549,7 @@ mod tests {
                 .as_nanos(),
             150
         );
-        assert_eq!(*avg.prepare.read_ext_msgs_sums_accum, (0, 0));
+        assert_accum_sums_eq(&avg.prepare.read_ext_msgs_sums_accum, 0, 0);
     }
 
     #[test]
@@ -575,7 +585,7 @@ mod tests {
         let avg_metrics = avg.get_avg().expect("average result should exist");
 
         assert_eq!(avg_metrics.wu_on_prepare_msg_groups.fixed_part, 17);
-        assert_eq!(*avg.prepare.read_ext_msgs_sums_accum, (76, 72));
+        assert_accum_sums_eq(&avg.prepare.read_ext_msgs_sums_accum, 76, 72);
     }
 
     #[test]
@@ -606,7 +616,7 @@ mod tests {
                 .as_nanos(),
             10
         );
-        assert_eq!(*merged.prepare.read_ext_msgs_sums_accum, (1010, 1010));
+        assert_accum_sums_eq(&merged.prepare.read_ext_msgs_sums_accum, 1010, 1010);
     }
 
     #[test]
@@ -1034,8 +1044,8 @@ mod tests {
         let mut unit_cost_clippers = test_unit_cost_clippers();
         avg.accum(&first, &mut unit_cost_clippers);
         avg.accum(&second, &mut unit_cost_clippers);
-        assert_eq!(*avg.finalize.build_state_update_sums_accum, (200, 10));
-        assert_eq!(*avg.finalize.build_block_sums_accum, (500, 5));
+        assert_accum_sums_eq(&avg.finalize.build_state_update_sums_accum, 200, 10);
+        assert_accum_sums_eq(&avg.finalize.build_block_sums_accum, 500, 5);
         let avg_metrics = avg.get_avg().expect("average should exist");
         assert_eq!(
             avg_metrics
@@ -1075,11 +1085,32 @@ mod tests {
         let mut avg = WuMetricsAvg::new();
         let mut unit_cost_clippers = test_unit_cost_clippers();
         avg.accum(&sample, &mut unit_cost_clippers);
-        assert_eq!(*avg.prepare.read_ext_msgs_sums_accum, (0, 0));
+        assert_accum_sums_eq(&avg.prepare.read_ext_msgs_sums_accum, 0, 0);
         let target = calc_target_params(1.0, &avg);
         assert_eq!(
             target.prepare.read_ext_msgs,
             sample.wu_params.prepare.read_ext_msgs
+        );
+    }
+
+    #[test]
+    fn merge_sums_accum_keeps_values_above_u128_limit() {
+        let mut first = WuMetricsAvg::new();
+        first.prepare.read_ext_msgs_sums_accum.add((u128::MAX, 10));
+        first.prepare.read_ext_msgs_sums_accum.add((1, 11));
+
+        let mut second = WuMetricsAvg::new();
+        second.prepare.read_ext_msgs_sums_accum.add((17, 19));
+
+        first.merge_sums_accum(&second);
+
+        assert_eq!(
+            first.prepare.read_ext_msgs_sums_accum.sum_elapsed_clip_ns(),
+            &(BigUint::from(u128::MAX) + BigUint::from(18u32))
+        );
+        assert_eq!(
+            first.prepare.read_ext_msgs_sums_accum.sum_base(),
+            &BigUint::from(40u32)
         );
     }
 }
