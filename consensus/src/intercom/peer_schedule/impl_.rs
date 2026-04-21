@@ -200,11 +200,11 @@ impl PeerSchedule {
         working_subset: &[PeerId],
         message: &'static str,
     ) {
-        if next_round <= locked.data.curr_epoch_start() || working_subset.is_empty() {
+        if next_round <= locked.data.epoch_starts.curr() || working_subset.is_empty() {
             tracing::trace!(
                 message,
                 set_round = next_round.0,
-                curr_start = locked.data.curr_epoch_start().0,
+                curr_start = locked.data.epoch_starts.curr().0,
                 len = working_subset.len(),
                 vset_len = validator_set.len(),
                 note = "cannot schedule outdated round"
@@ -222,12 +222,12 @@ impl PeerSchedule {
         locked.set_next_set(self.downgrade(), validator_set);
 
         locked.data.set_next_subset(working_subset);
-        locked.data.next_epoch_start = Some(next_round);
+        locked.data.epoch_starts.next = Some(next_round);
 
         // atomic part is updated under lock too
         self.update_atomic(|stateless| {
             stateless.set_next_peers(working_subset);
-            stateless.next_epoch_start = Some(next_round);
+            stateless.epoch_starts.next = Some(next_round);
         });
 
         tracing::info!(
@@ -238,7 +238,7 @@ impl PeerSchedule {
     }
 
     pub fn apply_scheduled(&self, current: Round) {
-        if (self.atomic().next_epoch_start).is_none_or(|scheduled| scheduled > current) {
+        if (self.atomic().epoch_starts.next).is_none_or(|scheduled| scheduled > current) {
             return; // will double-check because arc-swap is racy with `self.set_next_subset()`
         }
         let mut locked = self.write();
@@ -247,7 +247,7 @@ impl PeerSchedule {
 
     /// on peer set change
     fn apply_scheduled_impl(&self, locked: &mut PeerScheduleLocked, current: Round) {
-        if (locked.data.next_epoch_start).is_none_or(|scheduled| scheduled > current) {
+        if (locked.data.epoch_starts.next).is_none_or(|scheduled| scheduled > current) {
             return;
         }
 

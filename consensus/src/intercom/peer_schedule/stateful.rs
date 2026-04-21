@@ -5,36 +5,21 @@ use tycho_network::PeerId;
 use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::intercom::peer_schedule::PeerState;
+use crate::intercom::peer_schedule::epoch_starts::EpochStarts;
 use crate::models::Round;
 
-#[derive(Debug)]
+#[derive(Default, Debug)]
 pub struct PeerScheduleStateful {
     // whole validator sets except local id for peer resolver
     validator_set: [FastHashMap<PeerId, PeerState>; 4],
     // working subset
     active_subset: [Arc<FastHashMap<PeerId, PeerState>>; 4],
-    epoch_starts: [Round; 3],
-    pub(super) next_epoch_start: Option<Round>,
+    pub(super) epoch_starts: EpochStarts,
     empty: Arc<FastHashMap<PeerId, PeerState>>,
     // resolved peers from current or next subset
     broadcast_receivers: FastHashSet<PeerId>,
     all_resolved: FastHashSet<PeerId>,
     pub(super) to_forget: Vec<PeerId>,
-}
-
-impl Default for PeerScheduleStateful {
-    fn default() -> Self {
-        Self {
-            validator_set: Default::default(),
-            active_subset: Default::default(),
-            epoch_starts: [Round::BOTTOM, Round::BOTTOM, Round::BOTTOM],
-            next_epoch_start: None,
-            empty: Default::default(),
-            broadcast_receivers: Default::default(),
-            all_resolved: Default::default(),
-            to_forget: Vec::new(),
-        }
-    }
 }
 
 impl PeerScheduleStateful {
@@ -43,35 +28,16 @@ impl PeerScheduleStateful {
         &self.broadcast_receivers
     }
 
-    pub(super) fn curr_epoch_start(&self) -> Round {
-        self.epoch_starts[2]
-    }
-
     pub(super) fn is_in_any_vset(&self, peer_id: &PeerId) -> bool {
         (self.validator_set.iter()).any(|vset| vset.contains_key(peer_id))
     }
 
     /// local peer id is always kept as not resolved
     pub fn peers_state_for(&self, round: Round) -> &Arc<FastHashMap<PeerId, PeerState>> {
-        let result = if self.next_epoch_start.is_some_and(|r| round >= r) {
-            &self.active_subset[3]
-        } else if round >= self.epoch_starts[2] {
-            &self.active_subset[2]
-        } else if round >= self.epoch_starts[1] {
-            &self.active_subset[1]
-        } else if round >= self.epoch_starts[0] {
-            &self.active_subset[0]
-        } else {
-            &self.empty
-        };
+        let result =
+            (self.epoch_starts.arr_idx(round)).map_or(&self.empty, |i| &self.active_subset[i]);
         if result.is_empty() {
-            tracing::error!(
-                "empty peer set for {round:?}; epoch starts: oldest={} prev={} curr={} next={:?}",
-                self.epoch_starts[0].0,
-                self.epoch_starts[1].0,
-                self.epoch_starts[2].0,
-                self.next_epoch_start.map(|r| r.0)
-            );
+            tracing::error!("empty peer set for {round:?}; {:?}", self.epoch_starts);
         }
         result
     }
@@ -192,20 +158,7 @@ impl PeerScheduleStateful {
             "oldest peer set was not cleaned {self:?}"
         );
 
-        // make next from oldest
-        let next = self
-            .next_epoch_start
-            .ok_or_else(|| format!("{self:?}"))
-            .expect("attempt to change epoch, but next epoch start is not set");
-
-        assert!(
-            next > self.curr_epoch_start(),
-            "next start is not in future {self:?}"
-        );
-
-        self.next_epoch_start = None; // makes next epoch peers inaccessible for reads
-        self.epoch_starts[0] = next;
-        self.epoch_starts.rotate_left(1);
+        self.epoch_starts.rotate();
 
         self.validator_set.rotate_left(1);
         self.active_subset.rotate_left(1);
