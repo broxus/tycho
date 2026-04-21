@@ -333,6 +333,9 @@ impl ExecuteWu {
         self.total_elapsed().as_nanos() as f64 / total_wu as f64
     }
 
+    /// Calcs target `execute.execute` wu param from.
+    ///
+    /// ATTENTION! Uses f64. It should not be used for deterministic calculations inside the collator.
     pub fn calc_target_execute_wu_param(
         target_wu_price: f64,
         prepare_wu_param: u64,
@@ -1268,6 +1271,9 @@ fn trunc_sat_u64_from_f64(value: f64) -> Option<u64> {
     Some(value.trunc() as u64)
 }
 
+/// Calcs target wu param from sum of elapsed times and sum of bases.
+///
+/// ATTENTION! Uses f64. It should not be used for deterministic calculations inside the collator.
 pub fn calc_target_wu_param_from_sums(
     target_wu_price: f64,
     sums_accum: &SafeAccum<(u128, u128)>,
@@ -1275,6 +1281,10 @@ pub fn calc_target_wu_param_from_sums(
     calc_target_scaled_wu_param_from_sums(target_wu_price, 1, sums_accum)
 }
 
+/// Calcs target wu param from sum of elapsed times and sum of bases.
+/// Applies scale that was used to calculate base.
+///
+/// ATTENTION! Uses f64. It should not be used for deterministic calculations inside the collator.
 pub fn calc_target_scaled_wu_param_from_sums(
     target_wu_price: f64,
     scale: u128,
