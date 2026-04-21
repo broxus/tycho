@@ -6,6 +6,7 @@ use tycho_network::PeerId;
 use tycho_util::FastHashSet;
 
 use crate::effects::{AltFmt, AltFormat};
+use crate::intercom::peer_schedule::epoch_starts::EpochStarts;
 use crate::models::Round;
 
 #[derive(Clone)]
@@ -15,8 +16,9 @@ pub struct PeerScheduleStateless {
     /// order matters to derive leader in `AnchorStage`
     peer_vecs: [Arc<Vec<PeerId>>; 4],
     peer_sets: [Arc<FastHashSet<PeerId>>; 4],
-    epoch_starts: [Round; 3],
-    pub(super) next_epoch_start: Option<Round>,
+
+    pub(super) epoch_starts: EpochStarts,
+
     empty_vec: Arc<Vec<PeerId>>,
     empty_set: Arc<FastHashSet<PeerId>>,
 }
@@ -27,8 +29,9 @@ impl PeerScheduleStateless {
             local_keys,
             peer_vecs: Default::default(),
             peer_sets: Default::default(),
-            epoch_starts: [Round::BOTTOM, Round::BOTTOM, Round::BOTTOM],
-            next_epoch_start: None,
+
+            epoch_starts: EpochStarts::default(),
+
             empty_vec: Default::default(),
             empty_set: Default::default(),
         }
@@ -62,8 +65,22 @@ impl PeerScheduleStateless {
         }
     }
 
-    pub(super) fn curr_epoch_start(&self) -> Round {
-        self.epoch_starts[2]
+    pub fn peers_ordered_for(&self, round: Round) -> &Arc<Vec<PeerId>> {
+        let result =
+            (self.epoch_starts.arr_idx(round)).map_or(&self.empty_vec, |idx| &self.peer_vecs[idx]);
+        if result.is_empty() {
+            tracing::error!("empty peer vec for {round:?}: {:?}", self.alt());
+        }
+        result
+    }
+
+    pub fn peers_for(&self, round: Round) -> &Arc<FastHashSet<PeerId>> {
+        let result =
+            (self.epoch_starts.arr_idx(round)).map_or(&self.empty_set, |idx| &self.peer_sets[idx]);
+        if result.is_empty() {
+            tracing::error!("empty peer set for {round:?}: {:?}", self.alt());
+        }
+        result
     }
 
     /// local peer id is always kept as not resolved
@@ -72,42 +89,6 @@ impl PeerScheduleStateless {
         rounds: [Round; N],
     ) -> [Arc<FastHashSet<PeerId>>; N] {
         array::from_fn(|i| self.peers_for(rounds[i]).clone())
-    }
-
-    pub fn peers_for(&self, round: Round) -> &Arc<FastHashSet<PeerId>> {
-        let result = if self.next_epoch_start.is_some_and(|r| round >= r) {
-            &self.peer_sets[3]
-        } else if round >= self.epoch_starts[2] {
-            &self.peer_sets[2]
-        } else if round >= self.epoch_starts[1] {
-            &self.peer_sets[1]
-        } else if round >= self.epoch_starts[0] {
-            &self.peer_sets[0]
-        } else {
-            &self.empty_set
-        };
-        if result.is_empty() {
-            tracing::error!("empty peer set for {round:?}: {:?}", self.alt());
-        }
-        result
-    }
-
-    pub fn peers_ordered_for(&self, round: Round) -> &Arc<Vec<PeerId>> {
-        let result = if self.next_epoch_start.is_some_and(|r| round >= r) {
-            &self.peer_vecs[3]
-        } else if round >= self.epoch_starts[2] {
-            &self.peer_vecs[2]
-        } else if round >= self.epoch_starts[1] {
-            &self.peer_vecs[1]
-        } else if round >= self.epoch_starts[0] {
-            &self.peer_vecs[0]
-        } else {
-            &self.empty_vec
-        };
-        if result.is_empty() {
-            tracing::error!("empty peer set for {round:?}: {:?}", self.alt());
-        }
-        result
     }
 
     pub(super) fn set_next_peers(&mut self, peers: &[PeerId]) {
@@ -123,21 +104,8 @@ impl PeerScheduleStateless {
             "oldest peer set was not cleaned; {:?}",
             self.alt()
         );
-        // make next from oldest
-        let next = self
-            .next_epoch_start
-            .ok_or_else(|| format!("{:?}", self.alt()))
-            .expect("attempt to change epoch, but next epoch start is not set");
 
-        assert!(
-            next > self.curr_epoch_start(),
-            "next start is not in future {:?}",
-            self.alt()
-        );
-
-        self.next_epoch_start = None; // makes next epoch peers inaccessible for reads
-        self.epoch_starts[0] = next;
-        self.epoch_starts.rotate_left(1);
+        self.epoch_starts.rotate();
 
         self.peer_sets.rotate_left(1);
         self.peer_vecs.rotate_left(1);
@@ -145,15 +113,15 @@ impl PeerScheduleStateless {
     }
 
     pub(super) fn forget_oldest(&mut self) {
-        self.peer_sets[0] = Default::default();
-        self.peer_vecs[0] = Default::default();
+        self.peer_sets[0] = self.empty_set.clone();
+        self.peer_vecs[0] = self.empty_vec.clone();
         self.meter();
     }
 
     fn meter(&self) {
         fn pos(among: &[PeerId], local_id: &PeerId) -> u8 {
             (among.iter())
-                .position(|peer_id| local_id == peer_id)
+                .position(|peer_id| peer_id == local_id)
                 .map(|pos| pos + 1)
                 .unwrap_or_default() as u8
         }
@@ -164,11 +132,10 @@ impl PeerScheduleStateless {
             .set(pos(&self.peer_vecs[3], &local_id));
 
         metrics::gauge!("tycho_mempool_peer_vsubset_change", "epoch" => "curr")
-            .set(self.epoch_starts[2].0);
+            .set(self.epoch_starts.curr().0);
         metrics::gauge!("tycho_mempool_peer_vsubset_change", "epoch" => "next").set(
             // decrease to prev means unset
-            self.next_epoch_start
-                .map_or(self.epoch_starts[1].0, |round| round.0),
+            (self.epoch_starts.next).map_or(self.epoch_starts.prev().0, |round| round.0),
         );
     }
 }
@@ -180,16 +147,16 @@ impl std::fmt::Debug for AltFmt<'_, PeerScheduleStateless> {
 
         f.write_str("PeerScheduleStateless { ")?;
 
-        write!(f, "oldest: {{ start: {}, ", inner.epoch_starts[0].0)?;
+        write!(f, "oldest: {{ start: {}, ", inner.epoch_starts.oldest().0)?;
         write!(f, "{} }}, ", inner.peer_vecs[0].as_slice().alt())?;
 
-        write!(f, "prev: {{ start: {}, ", inner.epoch_starts[1].0)?;
+        write!(f, "prev: {{ start: {}, ", inner.epoch_starts.prev().0)?;
         write!(f, "{} }}, ", inner.peer_vecs[1].as_slice().alt())?;
 
-        write!(f, "current: {{ start: {}, ", inner.curr_epoch_start().0)?;
+        write!(f, "curr: {{ start: {}, ", inner.epoch_starts.curr().0)?;
         write!(f, "{} }}, ", inner.peer_vecs[2].as_slice().alt())?;
 
-        let next_epoch_start = inner.next_epoch_start.map(|a| a.0);
+        let next_epoch_start = inner.epoch_starts.next.map(|a| a.0);
         write!(f, "next: {{ start: {next_epoch_start:?}, ")?;
         write!(f, "{} }} ", inner.peer_vecs[3].as_slice().alt())?;
 
