@@ -39,7 +39,8 @@ impl MockFeedbackSender {
         init_peers: &InitPeers,
         peer_id: &PeerId,
     ) -> Self {
-        let Some((index, _)) = (init_peers.curr_v_subset.iter()).find_position(|a| *a == peer_id)
+        let Some((index, _)) =
+            (init_peers.curr_v_subset.iter()).find_position(|(a, _)| *a == peer_id)
         else {
             panic!("local peer id not found in init peer set")
         };

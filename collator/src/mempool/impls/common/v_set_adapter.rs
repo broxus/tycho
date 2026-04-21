@@ -11,10 +11,10 @@ impl VSetAdapter {
         let peers = InitPeers {
             prev_start_round: new_cx.consensus_info.prev_vset_switch_round,
             prev_v_set: new_cx.prev_v_set(),
-            prev_v_subset: new_cx.prev_v_subset(),
+            prev_v_subset: new_cx.prev_v_subset()?,
             curr_start_round: new_cx.consensus_info.vset_switch_round,
             curr_v_set: new_cx.curr_v_set(),
-            curr_v_subset: new_cx.curr_v_subset(),
+            curr_v_subset: new_cx.curr_v_subset()?,
             next_v_set: new_cx.next_v_set(),
         };
 

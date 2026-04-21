@@ -129,10 +129,10 @@ impl PeerScheduleStateful {
         to_forget
     }
 
-    pub(super) fn set_next_subset(&mut self, peers: &[PeerId]) {
+    pub(super) fn set_next_subset(&mut self, peers: &[(PeerId, u16)]) {
         let peers_state = peers
             .iter()
-            .map(|peer_id| {
+            .map(|(peer_id, _)| {
                 let state = if self.all_resolved.contains(peer_id) {
                     PeerState::Resolved
                 } else {
