@@ -14,6 +14,7 @@ use crate::dag::commit::back::DagBack;
 use crate::dag::commit::inspector::RoundInspector;
 use crate::effects::{AltFmt, AltFormat, Cancelled, TaskResult};
 use crate::engine::MempoolConfig;
+use crate::intercom::StatsRanges;
 use crate::models::{AnchorData, AnchorStageRole, MempoolPeerStats, Round};
 use crate::moderator::JournalEvent;
 
@@ -123,16 +124,18 @@ impl Committer {
 
     pub fn remove_committed(
         &mut self,
-        last_anchor: Round,
+        anchor_round: Round,
+        stats_ranges: &StatsRanges,
         conf: &MempoolConfig,
     ) -> TaskResult<(FastHashMap<PeerId, MempoolPeerStats>, Vec<JournalEvent>)> {
         // in case previous anchor was triggered directly - rounds are already dropped
         let drained =
-            (self.dag).drain_upto(last_anchor - conf.consensus.commit_history_rounds.get());
+            (self.dag).drain_upto(anchor_round - conf.consensus.commit_history_rounds.get());
         let last_non_executable = self.first_executable.prev().max(conf.genesis_round);
         for r_0 in &drained {
             if r_0.round() >= last_non_executable {
-                self.inspector.inspect(r_0)?;
+                let emit_stats = stats_ranges.can_emit_stats(r_0.round(), anchor_round);
+                self.inspector.inspect(r_0, emit_stats)?;
             }
             if r_0.round() == last_non_executable {
                 self.inspector.take_stats(); // was used only to refill state
@@ -407,6 +410,11 @@ mod test {
 
         let mut dag = DagFront::default();
         let mut committer = dag.init(genesis_round, FixHistoryFlag(false), conf);
+        let stats_ranges = peer_schedule.atomic().stats_ranges();
+
+        let commit = |committer: &mut Committer, up_to: Option<Round>| {
+            _commit(committer, up_to, &stats_ranges, conf)
+        };
 
         for round in (0..100).map(Round) {
             // println!("{}", round.0);
@@ -439,10 +447,10 @@ mod test {
             .await;
 
             if round.0 == 33 {
-                assert_eq!(commit(&mut committer, Some(Round(48)), conf).len(), 9);
+                assert_eq!(commit(&mut committer, Some(Round(48))).len(), 9);
             }
             if round.0 == 66 {
-                assert_eq!(commit(&mut committer, Some(Round(48)), conf).len(), 5);
+                assert_eq!(commit(&mut committer, Some(Round(48))).len(), 5);
             }
         }
 
@@ -467,21 +475,21 @@ mod test {
 
         let r_round = remove_round(&mut committer.dag, Round(70));
 
-        assert_eq!(commit(&mut committer, None, conf).len(), 1);
+        assert_eq!(commit(&mut committer, None).len(), 1);
 
         for pack in r_points {
             restore_point(&mut committer.dag, pack);
         }
 
-        assert_eq!(commit(&mut committer, None, conf).len(), 4);
+        assert_eq!(commit(&mut committer, None).len(), 4);
 
         restore_point(&mut committer.dag, r_leader);
 
-        assert_eq!(commit(&mut committer, None, conf).len(), 2);
+        assert_eq!(commit(&mut committer, None).len(), 2);
 
         restore_round(&mut committer.dag, r_round);
 
-        assert_eq!(commit(&mut committer, None, conf).len(), 10);
+        assert_eq!(commit(&mut committer, None).len(), 10);
 
         std::io::stderr().flush().ok();
         std::io::stdout().flush().ok();
@@ -557,9 +565,10 @@ mod test {
         }
     }
 
-    fn commit(
+    fn _commit(
         committer: &mut Committer,
         up_to: Option<Round>,
+        stats_ranges: &StatsRanges,
         conf: &MempoolConfig,
     ) -> Vec<AnchorData> {
         let committed = if let Some(up_to) = up_to {
@@ -582,7 +591,7 @@ mod test {
         };
         if let Some(last) = committed.last() {
             committer
-                .remove_committed(last.anchor.round(), conf)
+                .remove_committed(last.anchor.round(), stats_ranges, conf)
                 .expect("no task can be cancelled");
         }
         committed

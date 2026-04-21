@@ -171,6 +171,16 @@ impl DagPoint {
             Self::NotFound(not_found) => not_found.is_certified(),
         }
     }
+
+    pub fn has_proof(&self) -> bool {
+        match self {
+            Self::Valid(valid) => valid.0.cert.has_proof(),
+            Self::TransInvalid(trans_invalid) => trans_invalid.0.cert.has_proof(),
+            Self::Invalid(invalid) => invalid.0.cert.has_proof(),
+            Self::IllFormed(ill) => ill.0.cert.has_proof(),
+            Self::NotFound(not_found) => not_found.0.cert.has_proof(),
+        }
+    }
 }
 
 pub struct Committable(CommittableInner);

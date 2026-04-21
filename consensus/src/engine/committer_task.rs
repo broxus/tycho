@@ -15,6 +15,7 @@ use crate::engine::round_watch::{RoundWatch, TopKnownAnchor};
 use crate::engine::{
     ConsensusConfigExt, DAG_ROUNDS_TO_DROP, EngineResult, MempoolConfig, NodeConfig,
 };
+use crate::intercom::PeerSchedule;
 use crate::models::{
     AnchorData, MempoolOutput, MempoolPeerStats, MempoolStatsMergeError, PointInfo, Round,
 };
@@ -34,6 +35,7 @@ enum State {
 struct Inner {
     committer: Committer,
     moderator: Moderator,
+    peer_schedule: PeerSchedule,
     top_known_anchor: RoundWatch<TopKnownAnchor>,
 }
 
@@ -41,6 +43,7 @@ impl CommitterTask {
     pub fn new(
         committer: Committer,
         moderator: &Moderator,
+        peer_schedule: &PeerSchedule,
         top_known_anchor: &RoundWatch<TopKnownAnchor>,
         conf: &MempoolConfig,
     ) -> Self {
@@ -53,6 +56,7 @@ impl CommitterTask {
             state: State::Ready(Box::new(Inner {
                 committer,
                 moderator: moderator.clone(),
+                peer_schedule: peer_schedule.clone(),
                 top_known_anchor: top_known_anchor.clone(),
             })),
             interval,
@@ -172,11 +176,16 @@ impl State {
                 // stats should be reported for each round separately - to be grouped by consumer
                 let mut all_stats = Vec::with_capacity(committed.len());
 
+                let stats_ranges = inner.peer_schedule.atomic().stats_ranges();
+
                 for adata in committed {
                     let anchor_round = adata.anchor.round();
 
-                    let (stat_map, events) =
-                        (inner.committer).remove_committed(anchor_round, round_ctx.conf())?;
+                    let (stat_map, events) = (inner.committer).remove_committed(
+                        anchor_round,
+                        &stats_ranges,
+                        round_ctx.conf(),
+                    )?;
                     all_stats.push(stat_map);
 
                     round_ctx.commit_metrics(&adata.anchor);
@@ -286,6 +295,7 @@ impl RoundCtx {
                     was_not_leader,
                     skipped_rounds,
                     valid_points,
+                    points_proved,
                     equivocated,
                     trans_invalid_points,
                     invalid_points,
