@@ -375,7 +375,7 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
             self.msgs_exec_params.current().range_messages_limit
         };
 
-        let (reader, state) = self.create_next_range(Some(range_max_messages))?;
+        let (reader, state) = self.create_next_range_reader(Some(range_max_messages))?;
         let seqno = reader.seqno;
         // we should add created range reader using calculated reader seqno instead of current block seqno
         // otherwise the next range will exeed the max blocks limit
@@ -398,7 +398,7 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
     }
 
     #[tracing::instrument(skip_all)]
-    fn create_next_range(
+    fn create_next_range_reader(
         &self,
         range_max_messages: Option<u32>,
     ) -> Result<(InternalsRangeReader<V>, InternalsRangeReaderState), CollatorError> {
@@ -411,6 +411,7 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
                 })
             })
             .unwrap_or_default();
+        let last_range_reader_exists = last_range_reader_info_opt.is_some();
 
         let mut shard_reader_states = BTreeMap::new();
 
@@ -425,12 +426,29 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
             last_range_block_seqno,
         } = last_range_reader_info_opt.unwrap_or_default();
 
-        let (range_seqno, current_shard_range_to) = match range_max_messages {
-            None => (
+        tracing::debug!(target: tracing_targets::COLLATOR,
+            partition_id = %self.partition_id,
+            last_range_reader_exists,
+            ?last_to_lts,
+            last_range_block_seqno,
+            all_end_lts = ?DebugIter(all_end_lts.clone().collect::<Vec<_>>().iter()),
+            ?range_max_messages,
+            "internals reader: creating next range reader",
+        );
+
+        let (range_seqno, current_shard_range_to) = match (
+            range_max_messages,
+            last_range_reader_exists,
+        ) {
+            // NOTE: when there is no existing range readers in state,
+            //      it means that we starting from zerostate or hardfork,
+            //      then we unable to get previous diffs info,
+            //      so we should omit max range reader messages check
+            (None, _) | (_, false) => (
                 self.block_seqno,
                 QueueKey::max_for_lt(self.prev_state_gen_lt),
             ),
-            Some(max_messages) => {
+            (Some(max_messages), _) => {
                 let mut next_seqno = last_range_block_seqno + 1;
                 let mut range_to = QueueKey::max_for_lt(self.prev_state_gen_lt);
 
@@ -865,7 +883,7 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
         if last_seqno < self.block_seqno {
             // we should look thru the whole range to check for pending messages
             // so we do not pass `range_max_messages` to force use the prev block end lt
-            let (mut range_reader, mut state) = self.create_next_range(None)?;
+            let (mut range_reader, mut state) = self.create_next_range_reader(None)?;
 
             if !state.is_fully_read() {
                 range_reader.init(&mut state, &self.mq_adapter)?;

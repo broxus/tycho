@@ -19,7 +19,7 @@ type SlotId = u16;
 type FastIndexMap<K, V> = indexmap::IndexMap<K, V, ahash::RandomState>;
 pub type FastIndexSet<K> = indexmap::IndexSet<K, ahash::RandomState>;
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct MessagesBufferLimits {
     pub max_count: usize,
     pub slots_count: usize,

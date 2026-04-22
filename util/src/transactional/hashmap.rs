@@ -82,7 +82,7 @@ impl<K: Hash + Eq + Clone, V: Transactional> TransactionalHashMap<K, V> {
         self.inner.is_empty()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> + Clone {
         self.inner.iter()
     }
 

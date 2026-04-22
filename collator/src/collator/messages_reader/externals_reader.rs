@@ -399,7 +399,7 @@ impl<'a, 'b> ExternalsReader<'a, 'b> {
             seqno = self.block_seqno,
             fully_read = reader_state.fully_read,
             reader_state = ?DebugExternalsRangeReaderState(&reader_state),
-            "externals reader: created next range state",
+            "externals reader: created next range reader state",
         );
 
         reader_state

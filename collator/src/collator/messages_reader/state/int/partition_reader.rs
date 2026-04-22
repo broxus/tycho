@@ -5,9 +5,10 @@ use tycho_util::transactional::value::TransactionalValue;
 use tycho_util_proc::Transactional;
 
 use crate::collator::messages_reader::state;
+use crate::collator::messages_reader::state::int::DebugInternalsRangeReaderState;
 use crate::collator::messages_reader::state::int::range_reader::InternalsRangeReaderState;
-use crate::types::ProcessedTo;
 use crate::types::processed_upto::{BlockSeqno, InternalsProcessedUptoStuff};
+use crate::types::{DebugIter, ProcessedTo};
 
 #[derive(Transactional, Default)]
 pub struct InternalsPartitionReaderState {
@@ -58,5 +59,25 @@ impl From<&InternalsProcessedUptoStuff> for InternalsPartitionReaderState {
             processed_to: value.processed_to.clone().into(),
             ranges: ranges.into(),
         }
+    }
+}
+
+pub struct DebugInternalsPartitionReaderState<'a>(pub &'a InternalsPartitionReaderState);
+
+impl std::fmt::Debug for DebugInternalsPartitionReaderState<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("")
+            .field(
+                "ranges",
+                &DebugIter(
+                    self.0
+                        .ranges
+                        .iter()
+                        .map(|(seqno, state)| (seqno, DebugInternalsRangeReaderState(state))),
+                ),
+            )
+            .field("processed_to", &*self.0.processed_to)
+            .field("curr_processed_offset", &*self.0.curr_processed_offset)
+            .finish()
     }
 }

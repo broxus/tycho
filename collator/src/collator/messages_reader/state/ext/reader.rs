@@ -7,7 +7,10 @@ use tycho_util::transactional::value::TransactionalValue;
 use tycho_util_proc::Transactional;
 
 use crate::collator::messages_reader::state::ext::partition_reader::ExternalsPartitionReaderState;
-use crate::collator::messages_reader::state::ext::range_reader::ExternalsRangeReaderState;
+use crate::collator::messages_reader::state::ext::range_reader::{
+    DebugExternalsRangeReaderState, ExternalsRangeReaderState,
+};
+use crate::types::DebugIter;
 use crate::types::processed_upto::BlockSeqno;
 
 #[derive(Transactional, Default)]
@@ -39,5 +42,28 @@ impl ExternalsReaderState {
         self.by_partitions
             .get(&par_id)
             .with_context(|| format!("externals reader state not exists for partition {par_id}"))
+    }
+}
+
+pub struct DebugExternalsReaderState<'a>(pub &'a ExternalsReaderState);
+
+impl std::fmt::Debug for DebugExternalsReaderState<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("")
+            .field(
+                "ranges",
+                &DebugIter(
+                    self.0
+                        .ranges
+                        .iter()
+                        .map(|(seqno, state)| (seqno, DebugExternalsRangeReaderState(state))),
+                ),
+            )
+            .field("by_partitions", &DebugIter(self.0.by_partitions.iter()))
+            .field(
+                "last_read_to_anchor_chain_time",
+                &*self.0.last_read_to_anchor_chain_time,
+            )
+            .finish()
     }
 }
