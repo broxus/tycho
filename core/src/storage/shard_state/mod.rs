@@ -26,6 +26,7 @@ use tycho_util::sync::rayon_run;
 use tycho_util::{FastDashMap, FastHashMap, FastHashSet};
 use weedb::rocksdb;
 
+pub(crate) use self::cell_storage::encode_indexed_value;
 use self::cell_storage::*;
 use self::store_state_raw::StoreStateContext;
 use super::{
@@ -36,7 +37,7 @@ use crate::storage::BlockConnection;
 
 mod cell_storage;
 pub mod counters;
-mod cell_storage;
+pub mod db_state;
 mod entries_buffer;
 mod store_state_raw;
 
@@ -74,7 +75,7 @@ impl ShardStateStorage {
             cells_db.clone(),
             config.cells_cache_size,
             config.drop_interval,
-        );
+        )?;
 
         Ok(Arc::new(Self {
             cells_db,

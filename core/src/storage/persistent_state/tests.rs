@@ -21,6 +21,7 @@ use crate::storage::persistent_state::{
     CacheKey, PersistentStateKind, QueueStateReader, QueueStateWriter,
 };
 use crate::storage::{CoreStorage, CoreStorageConfig, NewBlockMeta};
+use crate::test_utils::ZEROSTATE_BOC;
 
 #[tokio::test]
 async fn persistent_shard_state() -> Result<()> {
@@ -35,7 +36,6 @@ async fn persistent_shard_state() -> Result<()> {
     let persistent_states = storage.persistent_state_storage();
 
     // Read zerostate
-    static ZEROSTATE_BOC: &[u8] = include_bytes!("../../../../core/tests/data/zerostate.boc");
     let zerostate_root = Boc::decode(ZEROSTATE_BOC)?;
     let zerostate_id = BlockId {
         shard: ShardIdent::MASTERCHAIN,

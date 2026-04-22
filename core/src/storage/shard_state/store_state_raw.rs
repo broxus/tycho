@@ -15,6 +15,7 @@ use tycho_util::progress_bar::*;
 use weedb::{BoundedCfHandle, rocksdb};
 
 use super::cell_storage::*;
+use super::db_state::{CellsDbStateKey, ensure_table_is_empty};
 use super::entries_buffer::*;
 use crate::storage::{BriefBocHeader, CellsDb, ShardStateReader};
 
@@ -33,6 +34,8 @@ impl StoreStateContext {
         R: std::io::Read,
     {
         let preprocessed = self.preprocess(reader)?;
+        self.ensure_bootstrap_target_is_empty()?;
+        self.mark_raw_import_in_progress()?;
         self.finalize(block_id, preprocessed)
     }
 
@@ -210,12 +213,19 @@ impl StoreStateContext {
 
         self.cell_storage
             .apply_temp_cell(HashBytes::wrap(root_hash))?;
-        ctx.clear_temp_cells(&self.cells_db)?;
-
         let shard_state_key = block_id.to_vec();
-        self.cells_db
-            .shard_states
-            .insert(&shard_state_key, root_hash.as_slice())?;
+        let mut finalize_batch = rocksdb::WriteBatch::default();
+        finalize_batch.delete_range_cf(&self.cells_db.temp_cells.cf(), &[0x00; 32], &[0xff; 32]);
+        finalize_batch.put_cf(
+            &self.cells_db.shard_states.cf(),
+            shard_state_key.as_slice(),
+            root_hash.as_slice(),
+        );
+        finalize_batch.delete_cf(
+            &self.cells_db.state.cf(),
+            CellsDbStateKey::RawImportInProgress.as_bytes(),
+        );
+        self.cells_db.rocksdb().write(finalize_batch)?;
 
         pg.complete();
 
@@ -224,6 +234,48 @@ impl StoreStateContext {
             Some(root) => Ok(HashBytes::from_slice(&root[..32])),
             None => Err(StoreStateError::NotFound.into()),
         }
+    }
+
+    fn ensure_bootstrap_target_is_empty(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.cells_db
+                .state
+                .get(CellsDbStateKey::RawImportInProgress.as_bytes())?
+                .is_none(),
+            "raw bootstrap import is already marked in progress; reopen storage first"
+        );
+        anyhow::ensure!(
+            self.cells_db
+                .state
+                .get(CellsDbStateKey::CounterSnapshotLatest.as_bytes())?
+                .is_none(),
+            "raw bootstrap import requires an empty indexed cells DB",
+        );
+        ensure_table_is_empty(
+            &self.cells_db.cells,
+            "raw bootstrap import requires an empty indexed cells DB",
+        )?;
+        ensure_table_is_empty(
+            &self.cells_db.shard_states,
+            "raw bootstrap import requires an empty indexed cells DB",
+        )?;
+        ensure_table_is_empty(
+            &self.cells_db.temp_cells,
+            "raw bootstrap import requires an empty bootstrap temp state",
+        )?;
+        Ok(())
+    }
+
+    fn mark_raw_import_in_progress(&self) -> Result<()> {
+        let mut batch = rocksdb::WriteBatch::default();
+        // The marker makes early indexed writes crash-safe by forcing open-time cleanup.
+        batch.put_cf(
+            &self.cells_db.state.cf(),
+            CellsDbStateKey::RawImportInProgress.as_bytes(),
+            [1u8],
+        );
+        self.cells_db.rocksdb().write(batch)?;
+        Ok(())
     }
 }
 
@@ -530,17 +582,27 @@ enum StoreStateError {
 mod test {
     use std::collections::BTreeSet;
 
+    use bytes::Bytes;
     use bytesize::ByteSize;
     use rand::seq::IndexedRandom;
     use rand::{Rng, SeedableRng};
+    use tycho_storage::kv::{StateVersionProvider, StoredValue};
     use tycho_storage::{StorageConfig, StorageContext};
-    use tycho_types::models::ShardIdent;
+    use tycho_types::boc::Boc;
+    use tycho_types::models::{BlockId, ShardIdent, ShardStateUnsplit};
     use tycho_types::prelude::Dict;
     use tycho_util::project_root;
+    use weedb::VersionProvider;
     use weedb::rocksdb::{IteratorMode, WriteBatch};
 
     use super::*;
-    use crate::storage::{CoreStorage, CoreStorageConfig};
+    use crate::storage::db::CellsTables;
+    use crate::storage::shard_state::counters::{Counters, Idx, NextIdx};
+    use crate::storage::shard_state::db_state::{
+        CellsDbStateKey, load_counter_snapshot, put_counter_snapshot,
+    };
+    use crate::storage::{CELLS_DB_SUBDIR, CoreStorage, CoreStorageConfig};
+    use crate::test_utils::ZEROSTATE_BOC;
 
     #[tokio::test]
     #[ignore]
@@ -742,6 +804,132 @@ mod test {
         let cells_left = cells_db.cells.iterator(IteratorMode::Start).count();
         tracing::info!("States GC finished. Cells left: {cells_left}");
         assert_eq!(cells_left, 0, "Gc is broken. Press F to pay respect");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn interrupted_bootstrap_import_is_wiped_on_reopen() -> Result<()> {
+        let (ctx, _tempdir) = StorageContext::new_temp().await?;
+        let cells_db: CellsDb = ctx.open_preconfigured(CELLS_DB_SUBDIR)?;
+        StateVersionProvider::<crate::storage::tables::State>::new::<CellsTables>()
+            .set_version(cells_db.raw(), [0, 0, 3])?;
+
+        let root = Boc::decode(ZEROSTATE_BOC)?;
+        let state = root.parse::<ShardStateUnsplit>()?;
+        let block_id = BlockId {
+            shard: state.shard_ident,
+            seqno: state.seqno,
+            root_hash: *root.repr_hash(),
+            file_hash: Boc::file_hash_blake(ZEROSTATE_BOC),
+        };
+
+        let mut indexed_value = Vec::new();
+        encode_indexed_value(Idx::new(7), &[1, 2, 3, 4], &mut indexed_value);
+
+        let mut batch = WriteBatch::default();
+        batch.put_cf(
+            &cells_db.state.cf(),
+            CellsDbStateKey::RawImportInProgress.as_bytes(),
+            [1u8],
+        );
+        batch.put_cf(&cells_db.cells.cf(), [0x11; 32], indexed_value);
+        batch.put_cf(&cells_db.temp_cells.cf(), [0x22; 32], [9u8, 8, 7]);
+        batch.put_cf(
+            &cells_db.shard_states.cf(),
+            block_id.to_vec(),
+            block_id.root_hash.as_slice(),
+        );
+        put_counter_snapshot(
+            &mut batch,
+            &cells_db,
+            CellsDbStateKey::CounterSnapshotLatest,
+            &Counters::new(NextIdx::new(8)),
+        )?;
+        cells_db.rocksdb().write(batch)?;
+        drop(cells_db);
+
+        let reopened = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
+        let cells_db = &reopened.shard_state_storage().cells_db;
+
+        assert!(
+            cells_db
+                .state
+                .get(CellsDbStateKey::RawImportInProgress.as_bytes())?
+                .is_none()
+        );
+        assert!(
+            cells_db
+                .state
+                .get(CellsDbStateKey::CounterSnapshotLatest.as_bytes())?
+                .is_none()
+        );
+        assert_eq!(cells_db.cells.iterator(IteratorMode::Start).count(), 0);
+        assert_eq!(cells_db.temp_cells.iterator(IteratorMode::Start).count(), 0);
+        assert_eq!(
+            cells_db.shard_states.iterator(IteratorMode::Start).count(),
+            0
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn bootstrap_import_success_persists_snapshot_and_clears_marker() -> Result<()> {
+        let (ctx, _tempdir) = StorageContext::new_temp().await?;
+        let storage = CoreStorage::open(ctx.clone(), CoreStorageConfig::new_potato()).await?;
+
+        let root = Boc::decode(ZEROSTATE_BOC)?;
+        let state = root.parse::<ShardStateUnsplit>()?;
+        let block_id = BlockId {
+            shard: state.shard_ident,
+            seqno: state.seqno,
+            root_hash: *root.repr_hash(),
+            file_hash: Boc::file_hash_blake(ZEROSTATE_BOC),
+        };
+
+        let root_hash = storage
+            .shard_state_storage()
+            .store_state_bytes(&block_id, Bytes::from_static(ZEROSTATE_BOC))
+            .await?;
+        assert_eq!(root_hash, block_id.root_hash);
+
+        let cells_db = &storage.shard_state_storage().cells_db;
+        assert!(
+            cells_db
+                .state
+                .get(CellsDbStateKey::RawImportInProgress.as_bytes())?
+                .is_none()
+        );
+        assert_eq!(cells_db.temp_cells.iterator(IteratorMode::Start).count(), 0);
+        assert!(
+            cells_db
+                .state
+                .get(CellsDbStateKey::CounterSnapshotLatest.as_bytes())?
+                .is_some()
+        );
+        assert_eq!(
+            HashBytes::from_slice(
+                cells_db
+                    .shard_states
+                    .get(block_id.to_vec())?
+                    .expect("state root must be stored")
+                    .as_ref(),
+            ),
+            block_id.root_hash,
+        );
+        let counters = load_counter_snapshot(cells_db, CellsDbStateKey::CounterSnapshotLatest)?;
+        assert!(counters.next_idx().get() > 0);
+
+        drop(storage);
+
+        let reopened = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
+        assert_eq!(
+            reopened
+                .shard_state_storage()
+                .load_state_root_hash(&block_id)?,
+            block_id.root_hash,
+        );
+
         Ok(())
     }
 

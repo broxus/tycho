@@ -27,6 +27,7 @@ pub use self::persistent_state::{
     PersistentStateStorage, QueueDiffReader, QueueStateReader, QueueStateWriter, ShardStateReader,
     ShardStateWriter,
 };
+use self::shard_state::db_state::cleanup_interrupted_raw_import;
 pub use self::shard_state::{
     BlockInfoForApply, InitiatedStoreState, LoadStateHint, ShardStateStorage,
     ShardStateStorageMetrics, StateNotFound, StoreStateHint, split_shard_accounts,
@@ -63,6 +64,7 @@ impl CoreStorage {
         let cells_db: CellsDb = ctx.open_preconfigured(CELLS_DB_SUBDIR)?;
         cells_db.normalize_version()?;
         cells_db.apply_migrations().await?;
+        cleanup_interrupted_raw_import(&cells_db)?;
 
         let node_state_storage = Arc::new(NodeStateStorage::new(db.clone()));
 

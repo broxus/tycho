@@ -5,6 +5,7 @@ use tycho_util::sync::CancellationFlag;
 use weedb::{MigrationError, Semver, VersionProvider, WeeDb};
 
 use super::tables;
+use crate::storage::shard_state::db_state::is_table_empty;
 mod migrations;
 
 pub type CoreDb = WeeDb<CoreTables>;
@@ -25,13 +26,8 @@ impl CoreDbExt for CoreDb {
         }
 
         // Check if the DB is NOT EMPTY
-        {
-            let mut block_handles_iter = self.block_handles.raw_iterator();
-            block_handles_iter.seek_to_first();
-            block_handles_iter.status()?;
-            if block_handles_iter.item().is_none() {
-                return Ok(());
-            }
+        if is_table_empty(&self.block_handles)? {
+            return Ok(());
         }
 
         // Set the initial version
@@ -51,13 +47,8 @@ impl CoreDbExt for CellsDb {
         }
 
         // Check if the DB is NOT EMPTY
-        {
-            let mut cells_iter = self.cells.raw_iterator();
-            cells_iter.seek_to_first();
-            cells_iter.status()?;
-            if cells_iter.item().is_none() {
-                return Ok(());
-            }
+        if is_table_empty(&self.cells)? {
+            return Ok(());
         }
 
         // Set the initial version
@@ -115,7 +106,7 @@ impl NamedTables for CellsTables {
 }
 
 impl WithMigrations for CellsTables {
-    const VERSION: Semver = [0, 0, 2];
+    const VERSION: Semver = [0, 0, 3];
 
     type VersionProvider = StateVersionProvider<tables::State>;
 
@@ -127,8 +118,13 @@ impl WithMigrations for CellsTables {
         migrations: &mut Migrations<Self::VersionProvider, Self>,
         cancelled: CancellationFlag,
     ) -> Result<(), MigrationError> {
+        let cancelled_v1_to_v2 = cancelled.clone();
         migrations.register([0, 0, 1], [0, 0, 2], move |db| {
-            migrations::cells_v1_to_v2(db, &cancelled)
+            migrations::cells_v1_to_v2(db, &cancelled_v1_to_v2)
+        })?;
+        let cancelled_v2_to_v3 = cancelled;
+        migrations.register([0, 0, 2], [0, 0, 3], move |db| {
+            migrations::cells_v2_to_v3(db, &cancelled_v2_to_v3)
         })
     }
 }

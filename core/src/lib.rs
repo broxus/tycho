@@ -9,6 +9,9 @@ pub mod storage;
 #[cfg(feature = "s3")]
 pub mod s3;
 
+#[cfg(test)]
+pub(crate) mod test_utils;
+
 mod util {
     pub(crate) mod downloader;
 }

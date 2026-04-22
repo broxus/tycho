@@ -57,17 +57,17 @@ impl Counters {
             return Ok(SetResult { old, new: count });
         }
 
-        let raw = idx.get();
-        let old_small = Self::encode_small_count(old);
-        let new_small = Self::encode_small_count(count);
-
         if count >= RefCount::BIG_MIN {
             self.big.insert(idx, count);
         } else {
-            self.big.remove(&idx);
+            self.clear_override(idx, old);
         }
 
-        self.update_small_bits(raw, old_small, new_small);
+        self.update_small_bits(
+            idx.get(),
+            Self::encode_small_count(old),
+            Self::encode_small_count(count),
+        );
 
         Ok(SetResult { old, new: count })
     }
@@ -78,11 +78,7 @@ impl Counters {
     /// whether the row still exists.
     pub fn remove(&mut self, idx: Idx) -> Result<(), CountersError> {
         self.ensure_allocated_idx(idx)?;
-
-        let raw = idx.get();
-        let old = self.get_allocated(idx);
-        self.big.remove(&idx);
-        self.update_small_bits(raw, Self::encode_small_count(old), 0);
+        self.clear_override(idx, self.get_allocated(idx));
 
         Ok(())
     }
@@ -176,6 +172,11 @@ impl Counters {
                 set.remove(raw);
             }
         }
+    }
+
+    fn clear_override(&mut self, idx: Idx, old: RefCount) {
+        self.big.remove(&idx);
+        self.update_small_bits(idx.get(), Self::encode_small_count(old), 0);
     }
 
     fn encode_small_count(count: RefCount) -> u8 {
