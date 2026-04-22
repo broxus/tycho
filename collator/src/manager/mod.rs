@@ -2449,6 +2449,13 @@ where
                     tracing::debug!(
                         target: tracing_targets::COLLATION_MANAGER,
                         public_key = %self.keypair.public_key,
+                        current_session_seqno,
+                        hash_short,
+                        "Current node was not authorized to collate shard {}. Use TRACE to see subset",
+                        shard_id,
+                    );
+                    tracing::trace!(target: tracing_targets::COLLATION_MANAGER,
+                        subset = ?DebugIter(subset.values()),
                         "Current node was not authorized to collate shard {}",
                         shard_id,
                     );

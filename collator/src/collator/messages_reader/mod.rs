@@ -22,7 +22,10 @@ use crate::collator::messages_buffer::DebugMessageGroup;
 use crate::collator::messages_reader::internals_range_reader::{
     InternalsRangeReader, InternalsRangeReaderKind,
 };
-use crate::collator::messages_reader::state::int::reader::InternalsReaderState;
+use crate::collator::messages_reader::state::ext::reader::DebugExternalsReaderState;
+use crate::collator::messages_reader::state::int::reader::{
+    DebugInternalsReaderState, InternalsReaderState,
+};
 use crate::collator::statistics::cumulative::CumulativeStatistics;
 use crate::collator::statistics::queue::TrackedQueueStatistics;
 use crate::internal_queue::types::diff::QueueDiffWithMessages;
@@ -111,8 +114,8 @@ impl<'a, 'b, V: InternalMessageValue> MessagesReader<'a, 'b, V> {
     ) -> Result<Self> {
         let current_msgs_exec_params = cx.msgs_exec_params.current();
         let CurrentMessagesBufferLimits {
-            externals,
-            internals,
+            externals: externals_buffer_limits,
+            internals: internals_buffer_limits,
         } = Self::get_buffer_limits(&current_msgs_exec_params)?;
 
         Self::msgs_exec_params_metrics(&current_msgs_exec_params)?;
@@ -127,6 +130,14 @@ impl<'a, 'b, V: InternalMessageValue> MessagesReader<'a, 'b, V> {
             externals: externals_reader_state,
             internals: internals_reader_state,
         } = cx.reader_state;
+
+        tracing::trace!(target: tracing_targets::COLLATOR,
+            externals_reader_state = ?DebugExternalsReaderState(externals_reader_state),
+            ?externals_buffer_limits,
+            internals_reader_state = ?DebugInternalsReaderState(internals_reader_state),
+            ?internals_buffer_limits,
+            "creating messages reader",
+        );
 
         if let Some(params) = cx.cumulative_stats_calc_params {
             // if cumulative statistics are already present, then we should
@@ -197,7 +208,7 @@ impl<'a, 'b, V: InternalMessageValue> MessagesReader<'a, 'b, V> {
             cx.block_seqno,
             cx.next_chain_time,
             msgs_exec_params.clone(),
-            externals,
+            externals_buffer_limits,
             cx.anchors_cache,
             externals_reader_state,
         );
@@ -245,7 +256,7 @@ impl<'a, 'b, V: InternalMessageValue> MessagesReader<'a, 'b, V> {
             unreachable!("partition must exist after ensure_partition()");
         };
 
-        let BufferLimits { target, max } = internals.get(&MAIN_PARTITION_ID).unwrap();
+        let BufferLimits { target, max } = internals_buffer_limits.get(&MAIN_PARTITION_ID).unwrap();
 
         let main_par_reader = InternalsPartitionReader::new(
             InternalsPartitionReaderContext {
@@ -264,7 +275,7 @@ impl<'a, 'b, V: InternalMessageValue> MessagesReader<'a, 'b, V> {
             mq_adapter.clone(),
         )?;
 
-        let BufferLimits { target, max } = internals.get(&LP_PARTITION_ID).unwrap();
+        let BufferLimits { target, max } = internals_buffer_limits.get(&LP_PARTITION_ID).unwrap();
 
         let lp_par_reader = InternalsPartitionReader::new(
             InternalsPartitionReaderContext {
@@ -1606,6 +1617,7 @@ struct CurrentMessagesBufferLimits {
     pub internals: BTreeMap<QueuePartitionIdx, BufferLimits>,
 }
 
+#[derive(Debug)]
 struct BufferLimits {
     pub target: MessagesBufferLimits,
     pub max: MessagesBufferLimits,

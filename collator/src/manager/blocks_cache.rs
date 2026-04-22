@@ -243,6 +243,8 @@ impl BlocksCache {
     /// ```
     /// and MB2 is first applied
     /// then will return `[MB1, SB2]`
+    ///
+    /// Returns empty on zerostate or hard fork.
     pub fn read_before_tail_ids_of_mc_block(
         &self,
         mc_block_key: &BlockCacheKey,

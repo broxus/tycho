@@ -4,9 +4,11 @@ use tycho_util::transactional::hashmap::TransactionalHashMap;
 use tycho_util::transactional::option::TransactionalOption;
 use tycho_util_proc::Transactional;
 
-use crate::collator::messages_reader::state::int::partition_reader::InternalsPartitionReaderState;
+use crate::collator::messages_reader::state::int::partition_reader::{
+    DebugInternalsPartitionReaderState, InternalsPartitionReaderState,
+};
 use crate::collator::statistics::cumulative::CumulativeStatistics;
-use crate::types::ProcessedTo;
+use crate::types::{DebugIter, ProcessedTo};
 
 #[derive(Transactional, Default)]
 pub struct InternalsReaderState {
@@ -42,5 +44,23 @@ impl InternalsReaderState {
         if !self.partitions.contains_key(&par_id) {
             self.partitions.insert(par_id, Default::default());
         }
+    }
+}
+
+pub struct DebugInternalsReaderState<'a>(pub &'a InternalsReaderState);
+
+impl std::fmt::Debug for DebugInternalsReaderState<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("")
+            .field(
+                "partitions",
+                &DebugIter(
+                    self.0
+                        .partitions
+                        .iter()
+                        .map(|(par_id, state)| (par_id, DebugInternalsPartitionReaderState(state))),
+                ),
+            )
+            .finish()
     }
 }
