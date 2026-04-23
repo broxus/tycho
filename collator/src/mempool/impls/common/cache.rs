@@ -356,6 +356,7 @@ mod tests {
             author: PeerId(Default::default()),
             chain_time: id as u64,
             externals: vec![],
+            stats: None,
         })
     }
 

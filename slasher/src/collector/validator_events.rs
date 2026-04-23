@@ -7,8 +7,10 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 use tracing::instrument;
 use tycho_crypto::ed25519;
-use tycho_slasher_traits::{ReceivedSignature, ValidationSessionId, ValidatorEventsListener};
-use tycho_types::models::{BlockId, IndexedValidatorDescription};
+use tycho_slasher_traits::{
+    AnchorStats, ReceivedSignature, ValidationSessionId, ValidatorEventsListener,
+};
+use tycho_types::models::{BlockId, BlockIdShort, IndexedValidatorDescription};
 use tycho_util::{DashMapEntry, FastDashMap};
 
 use crate::bc::BlocksBatch;
@@ -40,6 +42,8 @@ struct SessionState {
     /// Maps each subset item with its original vset index.
     validator_indices: Box<[u16]>,
     current_batch: BlocksBatch,
+    /// Imported anchors can arrive one batch window before block callbacks rotate the session.
+    next_batch: BlocksBatch,
     first_seqno: u32,
     next_expected_seqno: u32,
     complete_batches: Option<mpsc::UnboundedSender<BlocksBatch>>,
@@ -106,11 +110,8 @@ impl ValidatorEventsCollector {
         // TODO: Split or grow the previous batch to not discard events.
         if session.batch_size != batch_size {
             session.batch_size = batch_size;
-            session.current_batch = BlocksBatch::new(
-                session.align_seqno(session.next_expected_seqno),
-                batch_size,
-                &session.validator_indices,
-            );
+            let next_expected_seqno = session.next_expected_seqno;
+            session.reset_batches(next_expected_seqno);
         }
 
         session.complete_batches = Some(complete_batches);
@@ -145,6 +146,8 @@ impl ValidatorEventsListener for ValidatorEventsCollector {
 
         let batch_size = NonZeroU32::new(self.default_batch_size.load(Ordering::Acquire)).unwrap();
         let current_batch = BlocksBatch::new(first_mc_seqno, batch_size, &validator_indices);
+        let next_batch =
+            BlocksBatch::new(current_batch.seqno_after(), batch_size, &validator_indices);
 
         let validators = Arc::<[IndexedValidatorDescription]>::from(validators);
 
@@ -153,6 +156,7 @@ impl ValidatorEventsListener for ValidatorEventsCollector {
                 batch_size,
                 validator_indices,
                 current_batch,
+                next_batch,
                 first_seqno: first_mc_seqno,
                 next_expected_seqno: first_mc_seqno,
                 // Will be initialized later via `init_session`.
@@ -181,6 +185,34 @@ impl ValidatorEventsListener for ValidatorEventsCollector {
                 "failed to commit blocks batch on finish: {e:?}"
             );
         }
+    }
+
+    #[instrument(skip_all, fields(session_id = ?session_id))]
+    fn on_anchor_import(
+        &self,
+        session_id: ValidationSessionId,
+        block_id: &BlockIdShort,
+        anchor_id: u32,
+        anchor_stats: AnchorStats,
+    ) {
+        if !block_id.is_masterchain() {
+            // Ignore for non-masterchain blocks (just in case).
+            return;
+        }
+
+        tracing::debug!(
+            target: tracing_targets::SLASHER,
+            %block_id,
+            "on_anchor_import"
+        );
+        let Some(mut session) = self.sessions.get_mut(&session_id) else {
+            tracing::warn!(
+                target: tracing_targets::SLASHER,
+                "session not found, ignoring on_anchor_import event"
+            );
+            return;
+        };
+        session.push_anchor_stats(block_id.seqno, anchor_id, &anchor_stats);
     }
 
     #[instrument(skip_all, fields(session_id = ?session_id))]
@@ -252,11 +284,34 @@ impl ValidatorSessionInfo {
 // === Session state impl ===
 
 impl SessionState {
+    fn push_anchor_stats(
+        &mut self,
+        seqno: u32,
+        anchor_id: u32,
+        anchor_stats: &AnchorStats,
+    ) -> bool {
+        if self.current_batch.contains_seqno(seqno) {
+            (self.current_batch).push_anchor_stats(anchor_id, anchor_stats)
+        } else if self.next_batch.contains_seqno(seqno) {
+            (self.next_batch).push_anchor_stats(anchor_id, anchor_stats)
+        } else {
+            tracing::warn!(
+                target: tracing_targets::SLASHER,
+                anchor_id,
+                seqno,
+                current_batch_seqnos = ?self.current_batch.seqno_range(),
+                next_batch_seqnos = ?self.next_batch.seqno_range(),
+                "anchor import outside block batches"
+            );
+            false
+        }
+    }
+
     fn handle_block(&mut self, seqno: u32, signatures: Option<&[ReceivedSignature]>) -> bool {
-        let to_commit = match self.try_advance_current_batch(seqno) {
+        let batches = match self.try_advance_current_batch(seqno) {
             AdvanceBlockStatus::TooOld => return false,
-            AdvanceBlockStatus::Unchanged => None,
-            AdvanceBlockStatus::Replaced(batch) => Some(batch),
+            AdvanceBlockStatus::Unchanged => [None, None],
+            AdvanceBlockStatus::Rotated { first, second } => [Some(first), second],
         };
 
         let event_type = match signatures {
@@ -267,14 +322,14 @@ impl SessionState {
             None => "skipped",
         };
 
-        if let Some(batch) = to_commit
-            && let Err(e) = self.commit_batch(batch)
-        {
-            tracing::error!(
-                target: tracing_targets::SLASHER,
-                event_type,
-                "failed to commit blocks batch: {e:?}"
-            );
+        for (batch, ith) in batches.into_iter().flatten().zip(["1st", "2nd"]) {
+            if let Err(e) = self.commit_batch(batch) {
+                tracing::error!(
+                    target: tracing_targets::SLASHER,
+                    event_type,
+                    "{ith} blocks batch failed to commit: {e:?}"
+                );
+            }
         }
         true
     }
@@ -286,14 +341,19 @@ impl SessionState {
             return AdvanceBlockStatus::Unchanged;
         }
 
-        let start_seqno = self.align_seqno(seqno);
-        let prev_batch = std::mem::replace(
-            &mut self.current_batch,
-            BlocksBatch::new(start_seqno, self.batch_size, &self.validator_indices),
-        );
         self.next_expected_seqno = seqno + 1;
 
-        AdvanceBlockStatus::Replaced(prev_batch)
+        if self.next_batch.contains_seqno(seqno) {
+            let next = self.make_batch(self.next_batch.seqno_after());
+            let current = std::mem::replace(&mut self.next_batch, next);
+
+            AdvanceBlockStatus::Rotated {
+                first: std::mem::replace(&mut self.current_batch, current),
+                second: None,
+            }
+        } else {
+            self.reset_batches(seqno)
+        }
     }
 
     fn commit_batch(&self, batch: BlocksBatch) -> Result<()> {
@@ -301,7 +361,8 @@ impl SessionState {
     }
 
     fn commit_final_batch(self) -> Result<()> {
-        Self::commit_batch_impl(&self.complete_batches, self.current_batch)
+        Self::commit_batch_impl(&self.complete_batches, self.current_batch)?;
+        Self::commit_batch_impl(&self.complete_batches, self.next_batch)
     }
 
     fn commit_batch_impl(
@@ -322,6 +383,20 @@ impl SessionState {
         Ok(())
     }
 
+    fn reset_batches(&mut self, seqno: u32) -> AdvanceBlockStatus {
+        let current = self.make_batch(self.align_seqno(seqno));
+        let next = self.make_batch(current.seqno_after());
+
+        AdvanceBlockStatus::Rotated {
+            first: std::mem::replace(&mut self.current_batch, current),
+            second: Some(std::mem::replace(&mut self.next_batch, next)),
+        }
+    }
+
+    fn make_batch(&self, start_seqno: u32) -> BlocksBatch {
+        BlocksBatch::new(start_seqno, self.batch_size, &self.validator_indices)
+    }
+
     fn align_seqno(&self, seqno: u32) -> u32 {
         assert!(seqno >= self.first_seqno);
 
@@ -337,5 +412,8 @@ impl SessionState {
 enum AdvanceBlockStatus {
     TooOld,
     Unchanged,
-    Replaced(BlocksBatch),
+    Rotated {
+        first: BlocksBatch,
+        second: Option<BlocksBatch>,
+    },
 }
