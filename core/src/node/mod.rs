@@ -3,9 +3,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use futures_util::future::select_ok;
 use tycho_crypto::ed25519;
 use tycho_network::{
-    DhtClient, DhtService, Network, OverlayService, PeerInfo, PeerResolver, PublicOverlay, Router,
+    DhtClient, DhtService, Network, NetworkExt, OverlayService, PeerInfo, PeerResolver,
+    PublicOverlay, Router,
 };
 use tycho_storage::{StorageConfig, StorageContext};
 use tycho_types::models::{BlockId, ValidatorSet};
@@ -293,6 +295,40 @@ impl<'a> NodeBaseBuilder<'a, ()> {
 }
 
 impl<'a> NodeBaseBuilder<'a, init::Step0> {
+    async fn check_bootstrap_peer(&self, peer: &PeerInfo) -> Result<()> {
+        let request = tycho_network::Request::from_tl(tycho_network::proto::dht::rpc::GetNodeInfo);
+        tokio::time::timeout(
+            self.step.net.network.connect_timeout(),
+            self.step.net.network.query(&peer.id, request),
+        )
+        .await??;
+        Ok(())
+    }
+
+    pub async fn check_any_bootstrap_peer_is_alive(&self) {
+        let bootstrap_peers = &self.common.global_config.bootstrap_peers;
+        if bootstrap_peers.is_empty() {
+            return;
+        }
+        let local_peer_id = *self.step.net.network.peer_id();
+
+        let checks: Vec<_> = bootstrap_peers
+            .iter()
+            .filter(|peer| peer.id != local_peer_id)
+            .map(|peer| Box::pin(self.check_bootstrap_peer(peer)))
+            .collect();
+
+        let reachable_any = select_ok(checks).await.is_ok();
+
+        if !reachable_any {
+            panic!(
+                "all bootstrap peers from global config are unreachable; \
+                 your node global config is likely stale. \
+                 update node global config to include live bootstrap peers"
+            );
+        }
+    }
+
     // TODO: Add some options here if needed.
     pub async fn init_storage(self) -> Result<NodeBaseBuilder<'a, init::Step1>> {
         let store = ConfiguredStorage::new(
