@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
 use tycho_types::models::BlockId;
 
@@ -52,6 +54,10 @@ impl NodeBaseInitRpc for tycho_core::node::NodeBase {
             .build()?;
 
         rpc_state.init(last_block_id).await?;
+
+        if config.validate_external_messages {
+            self.set_external_message_validator(Arc::new(rpc_state.clone()));
+        }
 
         let endpoint = rpc_state
             .bind_endpoint()

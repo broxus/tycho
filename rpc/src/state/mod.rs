@@ -16,9 +16,10 @@ use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_core::block_strider::{
     BlockSubscriber, BlockSubscriberContext, StateSubscriber, StateSubscriberContext,
 };
-use tycho_core::blockchain_rpc::BlockchainRpcClient;
+use tycho_core::blockchain_rpc::{BlockchainRpcClient, ExternalMessageValidator};
 use tycho_core::global_config::ZerostateId;
 use tycho_core::storage::{CoreStorage, KeyBlocksDirection};
+use tycho_executor::{Executor, ExecutorInspector, ExecutorParams, ParsedConfig, TxError};
 use tycho_rpc_subscriptions::SubscriberManagerConfig;
 use tycho_types::models::*;
 use tycho_types::prelude::*;
@@ -316,6 +317,114 @@ impl RpcState {
             .await;
     }
 
+    pub async fn check_external_message(&self, msg_cell: Cell) -> Result<(), RpcStateError> {
+        let bc_config = self.inner.blockchain_config.load_full();
+        let parsed_config = bc_config
+            .parsed_config
+            .clone()
+            .ok_or(RpcStateError::NotReady)?;
+
+        // Extract destination address from the message.
+        let dst = {
+            let mut slice = msg_cell.as_slice_allow_exotic();
+            let Ok(MsgInfo::ExtIn(info)) = MsgInfo::load_from(&mut slice) else {
+                return Err(RpcStateError::bad_request(anyhow::anyhow!(
+                    "invalid message"
+                )));
+            };
+            let IntAddr::Std(dst) = info.dst else {
+                return Err(RpcStateError::bad_request(anyhow::anyhow!(
+                    "invalid message"
+                )));
+            };
+            if dst.anycast.is_some() {
+                return Err(RpcStateError::bad_request(anyhow::anyhow!(
+                    "invalid message"
+                )));
+            }
+            dst
+        };
+
+        // Get the current account state.
+        let (shard_account, libraries, mc_ref_handle) = match self.inner.get_account_state(&dst)? {
+            LoadedAccountState::Found {
+                state,
+                mc_ref_handle,
+                ..
+            } => {
+                let libraries = if dst.is_masterchain() {
+                    self.inner
+                        .mc_accounts
+                        .read()
+                        .as_ref()
+                        .map(|c| c.libraries.clone())
+                        .unwrap_or_default()
+                } else {
+                    let cache = self.inner.sc_accounts.read();
+                    cache
+                        .iter()
+                        .find(|(shard, _)| shard.contains_account(&dst.address))
+                        .map(|(_, c)| c.libraries.clone())
+                        .unwrap_or_default()
+                };
+                (state, libraries, mc_ref_handle)
+            }
+            LoadedAccountState::NotFound { .. } => {
+                return Err(RpcStateError::bad_request(anyhow::anyhow!(
+                    "account not exist"
+                )));
+            }
+        };
+
+        let mc_info = self.inner.mc_info.read().clone();
+        let block_lt = mc_info.timings.gen_lt;
+        let prev_mc_block_id = *mc_info.block_id;
+
+        tycho_util::sync::rayon_run(move || {
+            let _guard = mc_ref_handle;
+
+            let global_id = parsed_config.global_id;
+            let capabilities = parsed_config.global.capabilities;
+
+            let params = ExecutorParams {
+                libraries,
+                rand_seed: HashBytes::ZERO,
+                block_lt,
+                block_unixtime: now_sec(),
+                prev_mc_block_id: Some(prev_mc_block_id),
+                disable_delete_frozen_accounts: true,
+                full_body_in_bounced: capabilities.contains(GlobalCapability::CapFullBodyInBounced),
+                charge_action_fees_on_fail: true,
+                strict_extra_currency: true,
+                authority_marks_enabled: capabilities.contains(GlobalCapability::CapSuspendByMarks),
+                vm_modifiers: tycho_vm::BehaviourModifiers {
+                    signature_with_id: capabilities
+                        .contains(GlobalCapability::CapSignatureWithId)
+                        .then_some(global_id),
+                    enable_signature_domains: capabilities
+                        .contains(GlobalCapability::CapSignatureDomain),
+                    ..Default::default()
+                },
+            };
+
+            let executor = Executor::new(&params, &parsed_config);
+            let mut inspector = ExecutorInspector::default();
+            match executor.check_ordinary_ext(&dst, msg_cell, &shard_account, Some(&mut inspector))
+            {
+                Ok(()) => Ok(()),
+                Err(TxError::Skipped | TxError::Fatal(_)) => match inspector.exit_code {
+                    Some(exit_code) => Err(RpcStateError::NotAccepted { exit_code }),
+                    None => Err(RpcStateError::bad_request(anyhow::anyhow!(
+                        "invalid message"
+                    ))),
+                },
+            }
+        })
+        .await
+    }
+}
+
+impl RpcState {
     pub fn get_unpacked_blockchain_config(&self) -> Arc<LatestBlockchainConfig> {
         self.inner.blockchain_config.load_full()
     }
@@ -557,6 +666,15 @@ impl RpcState {
     }
 }
 
+#[async_trait::async_trait]
+impl ExternalMessageValidator for RpcState {
+    async fn validate(&self, msg_cell: Cell) -> Result<()> {
+        self.check_external_message(msg_cell)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
+    }
+}
+
 pub struct RpcStateSubscriber {
     inner: Arc<Inner>,
 }
@@ -661,6 +779,7 @@ pub struct LatestBlockchainConfig {
     pub raw: BlockchainConfigParams,
     pub unpacked: tycho_vm::UnpackedConfig,
     pub modifiers: tycho_vm::BehaviourModifiers,
+    pub parsed_config: Option<Arc<ParsedConfig>>,
 }
 
 impl Default for LatestBlockchainConfig {
@@ -677,6 +796,7 @@ impl Default for LatestBlockchainConfig {
                 size_limits_config: None,
             },
             modifiers: Default::default(),
+            parsed_config: None,
         }
     }
 }
@@ -787,7 +907,9 @@ impl Inner {
             }
 
             // Fill config.
-            if let Some(config) = load_blockchain_config(&mc_state) {
+            if let Some(config) =
+                load_blockchain_config(&mc_state, self.config.validate_external_messages)
+            {
                 self.blockchain_config.store(config);
             }
 
@@ -1043,7 +1165,9 @@ impl Inner {
 
         if shard.is_masterchain() {
             // Fill config.
-            if let Some(config) = load_blockchain_config(state) {
+            if let Some(config) =
+                load_blockchain_config(state, self.config.validate_external_messages)
+            {
                 self.blockchain_config.store(config);
             }
 
@@ -1111,7 +1235,10 @@ impl Drop for Inner {
     }
 }
 
-fn load_blockchain_config(mc_state: &ShardStateStuff) -> Option<Arc<LatestBlockchainConfig>> {
+fn load_blockchain_config(
+    mc_state: &ShardStateStuff,
+    parse_executor_config: bool,
+) -> Option<Arc<LatestBlockchainConfig>> {
     let extra = mc_state.state_extra().ok()?;
 
     // Fill config.
@@ -1128,10 +1255,26 @@ fn load_blockchain_config(mc_state: &ShardStateStuff) -> Option<Arc<LatestBlockc
                     .then_some(global_id);
             }
 
+            let parsed_config = if parse_executor_config {
+                match ParsedConfig::parse(extra.config.clone(), now) {
+                    Ok(config) => Some(Arc::new(config)),
+                    Err(e) => {
+                        tracing::error!(
+                            block_id = %mc_state.block_id(),
+                            "failed to parse config for executor: {e:?}",
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
             Some(Arc::new(LatestBlockchainConfig {
                 raw: extra.config.params.clone(),
                 unpacked,
                 modifiers,
+                parsed_config,
             }))
         }
         Err(e) => {
@@ -1306,6 +1449,8 @@ pub enum RpcStateError {
     NotReady,
     #[error("not supported")]
     NotSupported,
+    #[error("message not accepted, exit code: {exit_code}")]
+    NotAccepted { exit_code: i32 },
     #[error("internal: {0}")]
     Internal(#[from] anyhow::Error),
     #[error(transparent)]
