@@ -1,6 +1,3 @@
-use std::sync::Arc;
-
-use async_trait::async_trait;
 use tycho_block_util::queue::QueuePartitionIdx;
 use tycho_block_util::state::MinRefMcStateTracker;
 use tycho_types::cell::HashBytes;
@@ -11,28 +8,13 @@ use tycho_types::models::{
 
 use crate::collator::types::AnchorsCache;
 use crate::collator::{CollatorStdImpl, ImportInitAnchorsResult, InitAnchorSource};
-use crate::mempool::{MempoolAdapterStubImpl, MempoolAnchor, MempoolEventListener};
+use crate::mempool::MempoolAdapterStubImpl;
 use crate::test_utils::try_init_test_tracing;
 use crate::types::processed_upto::{
     ExternalsProcessedUptoStuff, ExternalsRangeInfo, ProcessedUptoInfoExtension,
     ProcessedUptoInfoStuff, ProcessedUptoPartitionStuff,
 };
 use crate::types::{McData, ShardDescriptionShort};
-
-struct MempoolEventStubListener;
-#[async_trait]
-impl MempoolEventListener for MempoolEventStubListener {
-    async fn on_new_anchor(&self, anchor: Arc<MempoolAnchor>) -> anyhow::Result<()> {
-        tracing::trace!(
-            "MempoolEventStubListener: on_new_anchor event emitted for anchor \
-            (id: {}, chain_time: {}, externals: {})",
-            anchor.id,
-            anchor.chain_time,
-            anchor.externals.len(),
-        );
-        Ok(())
-    }
-}
 
 #[tokio::test]
 async fn test_import_init_anchors() {
@@ -41,8 +23,7 @@ async fn test_import_init_anchors() {
     let shard_id = ShardIdent::new_full(0);
     let mut anchors_cache = AnchorsCache::default();
 
-    let adapter =
-        MempoolAdapterStubImpl::with_stub_externals(Arc::new(MempoolEventStubListener), None);
+    let adapter = MempoolAdapterStubImpl::with_stub_externals(None);
     let mpool_adapter = adapter;
 
     let filter_imported = |init_anchors_info: Vec<InitAnchorSource>| {

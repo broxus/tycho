@@ -31,25 +31,17 @@ mod impls {
 // === Factory ===
 
 pub trait MempoolAdapterFactory {
-    fn create(self, listener: Arc<dyn MempoolEventListener>) -> Arc<dyn MempoolAdapter>;
+    fn create(self) -> Arc<dyn MempoolAdapter>;
 }
 
 impl<F, R> MempoolAdapterFactory for F
 where
-    F: FnOnce(Arc<dyn MempoolEventListener>) -> Arc<R>,
+    F: FnOnce() -> Arc<R>,
     R: MempoolAdapter,
 {
-    fn create(self, listener: Arc<dyn MempoolEventListener>) -> Arc<dyn MempoolAdapter> {
-        self(listener)
+    fn create(self) -> Arc<dyn MempoolAdapter> {
+        self()
     }
-}
-
-// === Events Listener ===
-
-#[async_trait]
-pub trait MempoolEventListener: Send + Sync {
-    /// Process new anchor from mempool
-    async fn on_new_anchor(&self, anchor: Arc<MempoolAnchor>) -> Result<()>;
 }
 
 // === Adapter ===
@@ -96,7 +88,7 @@ pub trait MempoolAdapter: Send + Sync + 'static {
 }
 
 impl MempoolAdapterFactory for Arc<dyn MempoolAdapter> {
-    fn create(self, _listener: Arc<dyn MempoolEventListener>) -> Arc<dyn MempoolAdapter> {
+    fn create(self) -> Arc<dyn MempoolAdapter> {
         self
     }
 }
