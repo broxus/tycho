@@ -37,10 +37,7 @@ use crate::collator::{
 use crate::internal_queue::types::diff::{DiffZone, QueueDiffWithMessages};
 use crate::internal_queue::types::message::EnqueuedMessage;
 use crate::internal_queue::types::stats::DiffStatistics;
-use crate::mempool::{
-    MempoolAdapter, MempoolAdapterFactory, MempoolAnchor, MempoolAnchorId, MempoolEventListener,
-    StateUpdateContext,
-};
+use crate::mempool::{MempoolAdapter, MempoolAdapterFactory, MempoolAnchorId, StateUpdateContext};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::{StateNodeAdapter, StateNodeAdapterFactory, StateNodeEventListener};
 use crate::types::processed_upto::{
@@ -145,21 +142,6 @@ where
 
     /// `McData` which processing was delayed until block is validated.
     delayed_mc_state_update: Arc<Mutex<Option<Arc<McData>>>>,
-}
-
-#[async_trait]
-impl<CF, V> MempoolEventListener for AsyncDispatcher<CollationManager<CF, V>>
-where
-    CF: CollatorFactory,
-    V: Validator,
-{
-    async fn on_new_anchor(&self, anchor: Arc<MempoolAnchor>) -> Result<()> {
-        self.spawn_task(method_to_async_closure!(
-            process_new_anchor_from_mempool,
-            anchor
-        ))
-        .await
-    }
 }
 
 #[async_trait]
@@ -327,7 +309,7 @@ where
             Arc::new(state_node_adapter_factory.create(arc_dispatcher.clone()));
 
         // create mempool adapter
-        let mpool_adapter = mpool_adapter_factory.create(arc_dispatcher.clone());
+        let mpool_adapter = mpool_adapter_factory.create();
 
         let validator = Arc::new(validator);
 
@@ -400,14 +382,6 @@ where
             mpool_adapter,
             mq_adapter,
         }
-    }
-
-    /// (TODO) Check sync status between mempool and blockchain state
-    /// and pause collation when we are far behind other nodesб
-    /// jusct sync blcoks from blockchain
-    pub async fn process_new_anchor_from_mempool(&self, _anchor: Arc<MempoolAnchor>) -> Result<()> {
-        // TODO: make real implementation, currently does nothing
-        Ok(())
     }
 
     /// Tries to determine top anchor that was processed to

@@ -16,34 +16,27 @@ use tycho_types::prelude::*;
 
 use crate::mempool::{
     DebugStateUpdateContext, DumpedAnchor, ExternalMessage, GetAnchorResult, MempoolAdapter,
-    MempoolAnchor, MempoolAnchorId, MempoolEventListener, StateUpdateContext,
+    MempoolAnchor, MempoolAnchorId, StateUpdateContext,
 };
 use crate::tracing_targets;
 use crate::types::processed_upto::BlockSeqno;
 
 pub struct MempoolAdapterStubImpl {
-    listener: Arc<dyn MempoolEventListener>,
     anchors_cache: Arc<RwLock<BTreeMap<MempoolAnchorId, Arc<MempoolAnchor>>>>,
     sleep_between_anchors: AtomicBool,
 }
 
 impl MempoolAdapterStubImpl {
-    pub fn with_stub_externals(
-        listener: Arc<dyn MempoolEventListener>,
-        now: Option<u64>,
-    ) -> Arc<Self> {
-        Self::with_generator(listener, |a| {
+    pub fn with_stub_externals(now: Option<u64>) -> Arc<Self> {
+        Self::with_generator(|a| {
             tokio::spawn(Self::stub_externals_generator(a, now));
             Ok(())
         })
         .unwrap()
     }
 
-    pub fn with_externals_from_dir(
-        listener: Arc<dyn MempoolEventListener>,
-        dir_path: impl AsRef<Path>,
-    ) -> Result<Arc<Self>> {
-        Self::with_generator(listener, move |a| {
+    pub fn with_externals_from_dir(dir_path: impl AsRef<Path>) -> Result<Arc<Self>> {
+        Self::with_generator(move |a| {
             let mut paths = std::fs::read_dir(dir_path)?
                 .map(|res| res.map(|e| e.path()))
                 .collect::<Result<Vec<_>, _>>()?;
@@ -54,14 +47,13 @@ impl MempoolAdapterStubImpl {
         })
     }
 
-    fn with_generator<F>(listener: Arc<dyn MempoolEventListener>, start: F) -> Result<Arc<Self>>
+    fn with_generator<F>(start: F) -> Result<Arc<Self>>
     where
         F: FnOnce(Arc<Self>) -> Result<()>,
     {
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "creating mempool adapter");
 
         let adapter = Self {
-            listener,
             anchors_cache: Arc::new(RwLock::new(BTreeMap::new())),
             sleep_between_anchors: AtomicBool::new(true),
         };
@@ -75,15 +67,12 @@ impl MempoolAdapterStubImpl {
 
     #[allow(clippy::too_many_arguments)]
     pub fn with_anchors_from_dump(
-        listener: Arc<dyn MempoolEventListener>,
         now: Option<u64>,
         dumped_anchors: Vec<DumpedAnchor>,
     ) -> Result<Arc<Self>> {
-        Self::with_generator(listener.clone(), {
-            move |a| {
-                tokio::spawn(Self::anchors_generator(a, now, dumped_anchors));
-                Ok(())
-            }
+        Self::with_generator(move |a| {
+            tokio::spawn(Self::anchors_generator(a, now, dumped_anchors));
+            Ok(())
         })
     }
 
@@ -121,8 +110,6 @@ impl MempoolAdapterStubImpl {
                 externals = anchor.externals.len(),
                 "anchor added to cache",
             );
-
-            self.listener.on_new_anchor(anchor).await.unwrap();
         }
     }
 
@@ -193,8 +180,6 @@ impl MempoolAdapterStubImpl {
                 externals = anchor.externals.len(),
                 "anchor added to cache",
             );
-
-            self.listener.on_new_anchor(anchor).await.unwrap();
         }
     }
 
@@ -248,8 +233,6 @@ impl MempoolAdapterStubImpl {
                 externals = anchor.externals.len(),
                 "anchor added to cache",
             );
-
-            self.listener.on_new_anchor(anchor).await.unwrap();
         }
     }
 }
@@ -558,27 +541,11 @@ fn make_round_interval() -> Duration {
 mod tests {
     use super::*;
 
-    struct MempoolEventStubListener;
-    #[async_trait]
-    impl MempoolEventListener for MempoolEventStubListener {
-        async fn on_new_anchor(&self, anchor: Arc<MempoolAnchor>) -> Result<()> {
-            tracing::trace!(
-                "MempoolEventStubListener: on_new_anchor event emitted for anchor \
-                (id: {}, chain_time: {}, externals: {})",
-                anchor.id,
-                anchor.chain_time,
-                anchor.externals.len(),
-            );
-            Ok(())
-        }
-    }
-
     #[tokio::test]
     async fn test_stub_anchors_generator() -> Result<()> {
         tycho_util::test::init_logger("test_stub_anchors_generator", "trace");
 
-        let adapter =
-            MempoolAdapterStubImpl::with_stub_externals(Arc::new(MempoolEventStubListener), None);
+        let adapter = MempoolAdapterStubImpl::with_stub_externals(None);
 
         // try get existing anchor by id
         let result = adapter.get_anchor_by_id(3).await?;

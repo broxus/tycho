@@ -231,14 +231,11 @@ fn start_collation_manager(
                 ctx.zerostate_id,
             )
         },
-        |listener| {
-            MempoolAdapterStubImpl::with_anchors_from_dump(
-                listener,
-                Some(ctx.mc_data.gen_chain_time),
-                dumped_anchors,
-            )
-            .unwrap()
-        },
+        MempoolAdapterStubImpl::with_anchors_from_dump(
+            Some(ctx.mc_data.gen_chain_time),
+            dumped_anchors,
+        )
+        .unwrap(),
         validator,
         CollatorStdImplFactory {
             wu_tuner_event_sender: None,
