@@ -1,20 +1,22 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use axum::RequestExt;
 use axum::extract::{DefaultBodyLimit, FromRef, Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
+use axum::{Extension, RequestExt, middleware};
 use tokio::net::TcpListener;
 
 pub use self::jrpc::JrpcEndpointCache;
 pub use self::proto::ProtoEndpointCache;
+pub use self::rate_limits::RpcRateLimitsConfig;
 use crate::state::RpcState;
 use crate::util::mime::{APPLICATION_JSON, APPLICATION_PROTOBUF, get_mime_type};
 
 pub mod jrpc;
 pub mod proto;
+mod rate_limits;
 
 pub struct RpcEndpointBuilder<C = ()> {
     common: RpcEndpointBuilderCommon,
@@ -55,9 +57,11 @@ impl RpcEndpointBuilder<()> {
 
     pub async fn bind(self, state: RpcState) -> Result<RpcEndpoint> {
         let listener = state.bind_socket().await?;
+        let rate_limiter = state.config().rate_limits.clone().map(Into::into);
         Ok(RpcEndpoint::from_parts(
             listener,
             self.common.build(),
+            rate_limiter,
             state,
         ))
     }
@@ -85,10 +89,15 @@ where
     S: Send + Sync + Clone + 'static,
 {
     pub async fn bind(self, state: S) -> Result<RpcEndpoint> {
-        let listener = RpcState::from_ref(&state).bind_socket().await?;
+        let rpc_state = RpcState::from_ref(&state);
+
+        let listener = rpc_state.bind_socket().await?;
+        let rate_limiter = rpc_state.config().rate_limits.clone().map(Into::into);
+
         Ok(RpcEndpoint::from_parts(
             listener,
             self.common.build::<S>().merge(self.custom_routes),
+            rate_limiter,
             state,
         ))
     }
@@ -149,7 +158,12 @@ impl RpcEndpoint {
         RpcEndpointBuilder::empty()
     }
 
-    pub fn from_parts<S>(listener: TcpListener, router: axum::Router<S>, state: S) -> Self
+    pub fn from_parts<S>(
+        listener: TcpListener,
+        router: axum::Router<S>,
+        rate_limiter: Option<rate_limits::RpcRateLimiter>,
+        state: S,
+    ) -> Self
     where
         S: Clone + Send + Sync + 'static,
     {
@@ -170,14 +184,33 @@ impl RpcEndpoint {
         let service = service.layer(tower_http::compression::CompressionLayer::new().gzip(true));
 
         // Prepare routes
-        let router = router.layer(service).with_state(state);
+        let router = match rate_limiter {
+            Some(rate_limiter) => router.layer(middleware::from_fn_with_state(
+                rate_limiter,
+                rate_limits::rate_limit,
+            )),
+            None => router,
+        };
+
+        // Limits concurrent SSE streams per IP
+        let active_streams = rate_limits::ActiveStreamLimiter::default();
+
+        let router = router
+            .layer(Extension(active_streams))
+            .layer(service)
+            .with_state(state);
 
         // Done
         Self { listener, router }
     }
 
     pub async fn serve(self) -> std::io::Result<()> {
-        axum::serve(self.listener, self.router).await
+        axum::serve(
+            self.listener,
+            self.router
+                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
     }
 }
 

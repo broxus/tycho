@@ -4535,7 +4535,6 @@ dependencies = [
  "libc",
  "metrics",
  "metrics-exporter-prometheus",
- "parking_lot",
  "rand 0.9.2",
  "rayon",
  "scopeguard",

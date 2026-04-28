@@ -14,23 +14,14 @@ use crate::proto::overlay;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BlockchainRpcRateLimitsConfig {
-    pub limiter: RateLimitConfig,
-    pub whitelist: Vec<PeerId>,
-    pub traffic: BlockchainRpcTrafficLimits,
+    limiter: RateLimitConfig,
+    whitelist: Vec<PeerId>,
+    traffic: BlockchainRpcTrafficLimits,
 }
-
-// impl BlockchainRpcRateLimitsConfig {
-//     pub fn into_overlay_rate_limiter(self) -> PublicOverlayRateLimiter {
-//         PublicOverlayRateLimiter::new(self.limiter, BlockchainRpcOverlayRateLimitPolicy {
-//             traffic: self.traffic,
-//             whitelist: self.whitelist.into_iter().collect(),
-//         })
-//     }
-// }
 
 impl From<BlockchainRpcRateLimitsConfig> for PublicOverlayRateLimiter {
     fn from(config: BlockchainRpcRateLimitsConfig) -> Self {
-        PublicOverlayRateLimiter::new(config.limiter, BlockchainRpcOverlayRateLimitPolicy {
+        PublicOverlayRateLimiter::new(config.limiter, BlockchainRpcRateLimitPolicy {
             traffic: config.traffic,
             whitelist: config.whitelist.into_iter().collect(),
         })
@@ -40,17 +31,17 @@ impl From<BlockchainRpcRateLimitsConfig> for PublicOverlayRateLimiter {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BlockchainRpcTrafficLimits {
-    pub light_queries: TokenBucketConfig,
-    pub heavy_queries: TokenBucketConfig,
-    pub broadcasts: TokenBucketConfig,
+    light_queries: TokenBucketConfig,
+    heavy_queries: TokenBucketConfig,
+    broadcasts: TokenBucketConfig,
 }
 
 impl Default for BlockchainRpcTrafficLimits {
     fn default() -> Self {
         Self {
             light_queries: TokenBucketConfig::new(
-                NonZeroU32::new(20).unwrap(),
-                NonZeroU32::new(20).unwrap(),
+                NonZeroU32::new(10).unwrap(),
+                NonZeroU32::new(10).unwrap(),
             ),
             heavy_queries: TokenBucketConfig::new(
                 NonZeroU32::new(5).unwrap(),
@@ -79,13 +70,13 @@ impl BlockchainRpcTrafficLimits {
     }
 }
 
-struct BlockchainRpcOverlayRateLimitPolicy {
+struct BlockchainRpcRateLimitPolicy {
     traffic: BlockchainRpcTrafficLimits,
     whitelist: FastHashSet<PeerId>,
 }
 
-impl BlockchainRpcOverlayRateLimitPolicy {
-    fn classify_query_constructor(constructor: u32) -> BlockchainRpcTrafficClass {
+impl BlockchainRpcRateLimitPolicy {
+    fn classify(constructor: u32) -> BlockchainRpcTrafficClass {
         match constructor {
             overlay::Ping::TL_ID
             | rpc::GetArchiveInfo::TL_ID
@@ -96,7 +87,7 @@ impl BlockchainRpcOverlayRateLimitPolicy {
     }
 }
 
-impl PublicOverlayRateLimitPolicy for BlockchainRpcOverlayRateLimitPolicy {
+impl PublicOverlayRateLimitPolicy for BlockchainRpcRateLimitPolicy {
     type Class = BlockchainRpcTrafficClass;
 
     fn classify_query(&self, req: &ServiceRequest) -> OverlayIngressPolicyDecision<Self::Class> {
@@ -112,7 +103,7 @@ impl PublicOverlayRateLimitPolicy for BlockchainRpcOverlayRateLimitPolicy {
             }
         };
 
-        let class = BlockchainRpcOverlayRateLimitPolicy::classify_query_constructor(constructor);
+        let class = BlockchainRpcRateLimitPolicy::classify(constructor);
         OverlayIngressPolicyDecision::Allow(self.traffic.policy(class))
     }
 
