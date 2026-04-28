@@ -1170,7 +1170,9 @@ impl CollatorStdImpl {
             let hint = StoreStateHint {
                 block_data_size: finalized.block_candidate.block.data_size(),
                 new_cell_count: Some(finalized.merkle_build.stats.new_cells_count),
-                is_top_block: None,
+                // NOTE: We are only sure that the masterchain block is the "top block",
+                // for shards this field is left `None`.
+                is_top_block: block_id.is_masterchain().then_some(true),
             };
 
             adapter.fill_shard_blocks_cache(

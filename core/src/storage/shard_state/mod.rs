@@ -30,7 +30,7 @@ use self::cell_storage::*;
 use self::store_state_raw::StoreStateContext;
 use super::{
     BlockConnectionStorage, BlockHandle, BlockHandleStorage, BlockStorage, CellsDb,
-    CoreStorageConfig,
+    CoreStorageConfig, tables,
 };
 use crate::storage::BlockConnection;
 
@@ -1065,11 +1065,58 @@ impl ShardStateStorage {
         };
 
         // Compute `TopBlocks` from block data
-        self.block_storage
-            .load_block_data(&min_ref_block_handle)
-            .await
-            .and_then(|block_data| TopBlocks::from_mc_block(&block_data))
-            .map(Some)
+        let block_storage = self.block_storage.clone();
+        let cell_db = self.cells_db.clone();
+        let span = tracing::Span::current();
+        tokio::task::spawn_blocking(move || {
+            let _span = span.enter();
+
+            let block_data = block_storage.blocking_load_block_data(&min_ref_block_handle)?;
+
+            let mut shard_heights = FastHashMap::default();
+
+            let mut iter = cell_db.shard_states.raw_iterator();
+            for entry in block_data.load_custom()?.shards.latest_blocks() {
+                let block_id = entry?;
+
+                // <wc>:<shard>:<seqno>:<root_hash=FFFF...>:<file_hash=FFFF...>
+                let mut key = [0xffu8; tables::ShardStates::KEY_LEN];
+                key[0..4].copy_from_slice(&block_id.shard.workchain().to_be_bytes());
+                key[4..12].copy_from_slice(&block_id.shard.prefix().to_be_bytes());
+                key[12..16].copy_from_slice(&block_id.seqno.to_be_bytes());
+                iter.seek_for_prev(key);
+
+                if let Some(key) = iter.key()
+                    && let parsed = BlockId::from_slice(key)
+                    && parsed.shard == block_id.shard
+                {
+                    if parsed.seqno != block_id.seqno {
+                        tracing::info!(
+                            mc_block_id = %block_data.id().as_short_id(),
+                            top_block_id = %block_id.as_short_id(),
+                            safe_block_id = %parsed.as_short_id(),
+                            "overriding top blocks seqno with the latest direct state"
+                        );
+                    }
+
+                    assert!(parsed.seqno <= block_id.seqno);
+                    shard_heights.insert(block_id.shard, parsed.seqno);
+                } else {
+                    tracing::warn!(
+                        mc_block_id = %block_data.id().as_short_id(),
+                        shard_block_id = %block_id.as_short_id(),
+                        "no direct state found for shard"
+                    );
+                    return Ok(None);
+                }
+            }
+
+            Ok::<_, anyhow::Error>(Some(TopBlocks {
+                mc_block: block_data.id().as_short_id(),
+                shard_heights: shard_heights.into(),
+            }))
+        })
+        .await?
     }
 
     fn find_mc_block_id(
