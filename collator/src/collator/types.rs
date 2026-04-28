@@ -28,6 +28,7 @@ use tycho_types::num::Tokens;
 use tycho_util::{FastHashMap, FastHashSet};
 
 use super::do_collate::work_units::PrepareMsgGroupsWu;
+use super::error::CollationCancelReason;
 use super::messages_reader::MessagesReaderMetrics;
 use crate::collator::do_collate::work_units::{DoCollateWu, ExecuteWu, FinalizeWu};
 use crate::collator::messages_reader::MetricsTimer;
@@ -36,7 +37,9 @@ use crate::internal_queue::types::diff::QueueDiffWithMessages;
 use crate::internal_queue::types::message::EnqueuedMessage;
 use crate::tracing_targets;
 use crate::types::processed_upto::{BlockSeqno, ProcessedUptoInfoStuff};
-use crate::types::{BlockCandidate, McData, ProcessedToByPartitions, TopShardBlockInfo};
+use crate::types::{
+    BlockCandidate, BlockCollationResult, McData, ProcessedToByPartitions, TopShardBlockInfo,
+};
 
 pub(super) struct WorkingState {
     pub next_block_id_short: BlockIdShort,
@@ -195,6 +198,61 @@ impl PrevData {
 
     pub fn prev_queue_diff_hashes(&self) -> &Vec<HashBytes> {
         &self.prev_queue_diff_hashes
+    }
+}
+
+pub(super) enum NextCollationFlowStep {
+    Continue,
+    Cancel(CancelledContext),
+}
+
+pub struct CancelledContext {
+    pub prev_mc_block_id: BlockId,
+    pub next_block_id_short: BlockIdShort,
+    pub cancel_reason: CollationCancelReason,
+}
+
+pub enum CollatorResult {
+    Skipped {
+        prev_mc_block_id: BlockId,
+        next_block_id_short: BlockIdShort,
+        anchor_chain_time: u64,
+        force_mc_block: ForceMasterCollation,
+        collation_config: Arc<CollationConfig>,
+    },
+    Cancelled(CancelledContext),
+    BlockCandidate {
+        collation_result: BlockCollationResult,
+    },
+}
+
+impl CollatorResult {
+    pub fn skipped(
+        prev_mc_block_id: BlockId,
+        next_block_id_short: BlockIdShort,
+        anchor_chain_time: u64,
+        force_mc_block: ForceMasterCollation,
+        collation_config: Arc<CollationConfig>,
+    ) -> Self {
+        Self::Skipped {
+            prev_mc_block_id,
+            next_block_id_short,
+            anchor_chain_time,
+            force_mc_block,
+            collation_config,
+        }
+    }
+
+    pub fn cancelled(
+        prev_mc_block_id: BlockId,
+        next_block_id_short: BlockIdShort,
+        cancel_reason: CollationCancelReason,
+    ) -> Self {
+        Self::Cancelled(CancelledContext {
+            prev_mc_block_id,
+            next_block_id_short,
+            cancel_reason,
+        })
     }
 }
 
@@ -1224,7 +1282,7 @@ pub struct FinalizeMessagesReaderResult {
 }
 
 pub struct FinalizeCollationResult {
-    pub handle_block_candidate_elapsed: Duration,
+    pub collation_result: BlockCollationResult,
 }
 
 pub struct ExecuteResult {

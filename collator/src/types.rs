@@ -112,6 +112,7 @@ pub fn supported_capabilities() -> GlobalCapabilities {
     ])
 }
 
+// TODO: move to Collator types
 pub struct BlockCollationResult {
     pub collation_session_id: CollationSessionId,
     pub candidate: Box<BlockCandidate>,

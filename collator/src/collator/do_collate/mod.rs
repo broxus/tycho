@@ -4,8 +4,6 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use humantime::format_duration;
-use phase::{ActualState, Phase};
-use prepare::PrepareState;
 use tycho_block_util::config::{apply_price_factor, compute_gas_price_factor};
 use tycho_block_util::queue::{QueueDiffStuff, QueueKey, SerializedQueueDiff};
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
@@ -22,18 +20,20 @@ use tycho_util::sync::CancellationFlag;
 use tycho_util::time::now_millis;
 use tycho_util::transactional::TransactionGuard;
 
-use super::types::{
-    AnchorsCache, BlockCollationData, BlockCollationDataBuilder, BlockSerializerCache,
-    CollationResult, ExecuteResult, FinalResult, FinalizeBlockResult, FinalizeCollationResult,
-    FinalizeMessagesReaderResult, PrevData, WorkingState,
-};
-use super::{CollatorStdImpl, ForceMasterCollation, ShardDescriptionExt};
+use self::finalize::FinalizeBlockContext;
+use self::phase::{ActualState, Phase};
+use self::prepare::PrepareState;
+use self::work_units::{DoCollateWu, WuEvent, WuEventData};
 use crate::collator::anchors_cache::AnchorsCacheTransaction;
-use crate::collator::do_collate::finalize::FinalizeBlockContext;
-use crate::collator::do_collate::work_units::{DoCollateWu, WuEvent, WuEventData};
 use crate::collator::error::{CollationCancelReason, CollatorError};
 use crate::collator::messages_reader::state::ReaderState;
-use crate::collator::types::{FinalizeMetrics, PartialValueFlow, RandSeed};
+use crate::collator::types::{
+    AnchorsCache, BlockCollationData, BlockCollationDataBuilder, BlockSerializerCache,
+    CollationResult, CollatorResult, ExecuteResult, FinalResult, FinalizeBlockResult,
+    FinalizeCollationResult, FinalizeMessagesReaderResult, FinalizeMetrics, PartialValueFlow,
+    PrevData, RandSeed, WorkingState,
+};
+use crate::collator::{CollatorStdImpl, ForceMasterCollation, ShardDescriptionExt};
 use crate::internal_queue::queue::PendingQueueDiff;
 use crate::internal_queue::types::diff::{DiffZone, QueueDiffWithMessages};
 use crate::internal_queue::types::message::EnqueuedMessage;
@@ -81,6 +81,7 @@ pub struct FinalizeCollationCtx {
 impl CollatorStdImpl {
     /// [`force_next_mc_block`] - should force next master block collation after this block
     #[tracing::instrument(
+        "do_collate",
         parent =  None,
         skip_all,
         fields(
@@ -88,13 +89,13 @@ impl CollatorStdImpl {
             ct = next_chain_time,
         )
     )]
-    pub(super) async fn do_collate(
+    pub(super) async fn do_collate_impl(
         &mut self,
         working_state: Box<WorkingState>,
         top_shard_blocks_info: Option<Vec<TopBlockDescription>>,
         next_chain_time: u64,
         force_next_mc_block: ForceMasterCollation,
-    ) -> Result<()> {
+    ) -> Result<CollatorResult> {
         let labels: [(&str, String); 1] = [("workchain", self.shard_id.workchain().to_string())];
         let total_collation_histogram =
             HistogramGuard::begin_with_labels("tycho_do_collate_total_time_high", &labels);
@@ -334,10 +335,11 @@ impl CollatorStdImpl {
         } = match do_collate_res {
             Err(CollatorError::Cancelled(reason)) => {
                 // cancel collation
-                self.listener
-                    .on_cancelled(mc_block_id, next_block_id_short, reason)
-                    .await?;
-                return Ok(());
+                return Ok(CollatorResult::cancelled(
+                    mc_block_id,
+                    next_block_id_short,
+                    reason,
+                ));
             }
             res => res?,
         };
@@ -368,9 +370,7 @@ impl CollatorStdImpl {
         self.log_block_and_stats(&execute_result, &finalized, &final_result);
 
         // finalize collation
-        let FinalizeCollationResult {
-            handle_block_candidate_elapsed,
-        } = self
+        let FinalizeCollationResult { collation_result } = self
             .finalize_collation(FinalizeCollationCtx {
                 has_unprocessed_messages: final_result.has_unprocessed_messages,
                 finalized,
@@ -449,10 +449,9 @@ impl CollatorStdImpl {
             block_time_diff,
             collation_mngmnt_overhead,
             elapsed_from_prev_block,
-            handle_block_candidate_elapsed,
         );
 
-        Ok(())
+        Ok(CollatorResult::BlockCandidate { collation_result })
     }
 
     /// Run collation phase. Returns `CollationResult` and pending queue diff transaction.
@@ -1131,8 +1130,6 @@ impl CollatorStdImpl {
         &mut self,
         ctx: FinalizeCollationCtx,
     ) -> Result<FinalizeCollationResult> {
-        let labels = [("workchain", self.shard_id.workchain().to_string())];
-
         let FinalizeCollationCtx {
             has_unprocessed_messages,
             finalized,
@@ -1196,71 +1193,56 @@ impl CollatorStdImpl {
             op.wait_reload()
         });
 
-        let handle_block_candidate_elapsed;
-        {
-            let histogram = HistogramGuard::begin_with_labels(
-                "tycho_do_collate_handle_block_candidate_time_high",
-                &labels,
-            );
+        let new_queue_diff_hash = *finalized.block_candidate.queue_diff_aug.diff_hash();
 
-            let new_queue_diff_hash = *finalized.block_candidate.queue_diff_aug.diff_hash();
+        let collation_config = match &finalized.mc_data {
+            Some(mcd) => Arc::new(mcd.config.get_collation_config()?),
+            None => finalized.collation_config,
+        };
 
-            let collation_config = match &finalized.mc_data {
-                Some(mcd) => Arc::new(mcd.config.get_collation_config()?),
-                None => finalized.collation_config,
-            };
+        // force next master block if there are no pending messages after current shard block
+        let force_next_mc_block = if !self.shard_id.is_masterchain() && !has_unprocessed_messages {
+            ForceMasterCollation::NoPendingMessagesAfterShardBlocks
+        } else {
+            force_next_mc_block
+        };
 
-            // force next master block if there are no pending messages after current shard block
-            let force_next_mc_block =
-                if !self.shard_id.is_masterchain() && !has_unprocessed_messages {
-                    ForceMasterCollation::NoPendingMessagesAfterShardBlocks
-                } else {
-                    force_next_mc_block
-                };
+        // build collation result
+        let collation_result = BlockCollationResult {
+            collation_session_id: self.collation_session.id(),
+            candidate: finalized.block_candidate,
+            prev_mc_block_id: finalized.old_mc_data.block_id,
+            mc_data: finalized.mc_data.clone(),
+            collation_config: collation_config.clone(),
+            force_next_mc_block,
+            has_processed_externals: finalized.collation_data.execute_count_ext > 0,
+        };
 
-            // return collation result
-            self.listener
-                .on_block_candidate(BlockCollationResult {
-                    collation_session_id: self.collation_session.id(),
-                    candidate: finalized.block_candidate,
-                    prev_mc_block_id: finalized.old_mc_data.block_id,
-                    mc_data: finalized.mc_data.clone(),
-                    collation_config: collation_config.clone(),
-                    force_next_mc_block,
-                    has_processed_externals: finalized.collation_data.execute_count_ext > 0,
-                })
-                .await?;
+        let new_mc_data = finalized.mc_data.unwrap_or(finalized.old_mc_data);
 
-            let new_mc_data = finalized.mc_data.unwrap_or(finalized.old_mc_data);
+        // spawn update PrevData and working state
+        self.prepare_working_state_update(
+            new_observable_state,
+            store_new_state_task,
+            new_queue_diff_hash,
+            new_mc_data,
+            collation_config,
+            has_unprocessed_messages,
+            reader_state,
+            resume_collation_elapsed,
+        )?;
 
-            // spawn update PrevData and working state
-            self.prepare_working_state_update(
-                new_observable_state,
-                store_new_state_task,
-                new_queue_diff_hash,
-                new_mc_data,
-                collation_config,
-                has_unprocessed_messages,
-                reader_state,
-                resume_collation_elapsed,
-            )?;
+        tracing::debug!(target: tracing_targets::COLLATOR,
+            "working state updated prepare spawned",
+        );
 
-            tracing::debug!(target: tracing_targets::COLLATOR,
-                "working state updated prepare spawned",
-            );
-
-            // update next block info
-            self.next_block_info = block_id.get_next_id_short();
-
-            handle_block_candidate_elapsed = histogram.finish();
-        }
+        // update next block info
+        self.next_block_info = block_id.get_next_id_short();
 
         // NOTE: Collation data can be quite large so drop it outside of tokio.
         Reclaimer::instance().drop(finalized.collation_data);
 
-        Ok(FinalizeCollationResult {
-            handle_block_candidate_elapsed,
-        })
+        Ok(FinalizeCollationResult { collation_result })
     }
 
     fn report_collation_metrics(&self, collation_data: &BlockCollationData) {
@@ -1407,7 +1389,6 @@ impl CollatorStdImpl {
         block_time_diff: i64,
         collation_mngmnt_overhead: Duration,
         elapsed_from_prev_block: Duration,
-        handle_block_candidate_elapsed: Duration,
     ) {
         tracing::info!(target: tracing_targets::COLLATOR,
             "collated_block_id={}, time_diff={}, \
@@ -1422,7 +1403,6 @@ impl CollatorStdImpl {
             from_prev_block = %format_duration(elapsed_from_prev_block),
             overhead = %format_duration(collation_mngmnt_overhead),
             total = %format_duration(collation_total_elapsed),
-            handle_block_candidate = %format_duration(handle_block_candidate_elapsed),
             "total collation timings"
         );
     }

@@ -240,7 +240,7 @@ impl Node {
             Some(NodeSyncState::Blocks) => CollatorSyncContext::Historical,
         };
 
-        let collation_manager = CollationManager::start(
+        let mut collation_manager = CollationManager::start(
             base.keypair.clone(),
             self.collator_config.clone(),
             Arc::new(message_queue_adapter),
@@ -357,10 +357,17 @@ impl Node {
             ),
         );
 
-        // Run block strider
+        // run block strider and wait when it or collation manager main flow finished
         tracing::info!("block strider started");
-        block_strider.run().await?;
-        tracing::info!("block strider finished");
+        tokio::select! {
+            res = block_strider.run() => {
+                res?;
+                tracing::info!("block strider finished");
+            },
+            _ = collation_manager.wait_main_flow() => {
+                tracing::info!("block strider cancelled");
+            }
+        }
 
         Ok(())
     }

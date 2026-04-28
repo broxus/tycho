@@ -28,7 +28,7 @@ struct MockEventListener {
 
 #[async_trait]
 impl StateNodeEventListener for MockEventListener {
-    async fn on_block_accepted(&self, _block_id: &ShardStateStuff) -> Result<()> {
+    async fn on_block_accepted(&self, _: &BlockId, _block_id: &ShardStateStuff) -> Result<()> {
         self.accepted_count.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
