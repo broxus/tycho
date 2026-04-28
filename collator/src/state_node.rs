@@ -51,7 +51,8 @@ where
 #[async_trait]
 pub trait StateNodeEventListener: Send + Sync {
     /// When our collated block was accepted and applied
-    async fn on_block_accepted(&self, state: &ShardStateStuff) -> Result<()>;
+    async fn on_block_accepted(&self, mc_block_id: &BlockId, state: &ShardStateStuff)
+    -> Result<()>;
     /// When new block was received and applied from blockchain
     async fn on_block_accepted_external(
         &self,
@@ -756,7 +757,7 @@ impl DelayedStateNotifier {
                 .await
         } else {
             tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "handle_state: handled own: {}", state.block_id());
-            listener.on_block_accepted(&state).await
+            listener.on_block_accepted(&mc_block_id, &state).await
         }
     }
 }

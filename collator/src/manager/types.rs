@@ -11,8 +11,10 @@ use tycho_types::cell::Lazy;
 use tycho_types::models::{
     BlockId, BlockIdShort, BlockInfo, OutMsgDescr, ProcessedUptoInfo, ShardIdent,
 };
+use tycho_util::futures::JoinTask;
 use tycho_util::{FastHashMap, FastHashSet};
 
+use crate::collator::CollatorResult;
 use crate::mempool::MempoolAnchorId;
 use crate::types::processed_upto::{
     BlockSeqno, ProcessedUptoInfoExtension, ProcessedUptoInfoStuff,
@@ -22,8 +24,12 @@ use crate::types::{
     ShardHashesExt, TopBlockId, TopBlockIdUpdated,
 };
 use crate::utils::block::detect_top_processed_to_anchor;
+use crate::validator::ValidationStatus;
 
 pub(super) type BlockCacheKey = BlockIdShort;
+
+pub(super) type CollatorJoinTask<C> = JoinTask<Result<(Box<C>, CollatorResult)>>;
+pub(super) type ValidatorJoinTask = JoinTask<Result<(BlockId, ValidationStatus)>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CollatorState {
@@ -34,7 +40,7 @@ pub(super) enum CollatorState {
 }
 
 pub(super) struct ActiveCollator<C> {
-    pub collator: C,
+    pub collator: Option<C>,
     pub state: CollatorState,
 
     /// For graceful collation cancellation

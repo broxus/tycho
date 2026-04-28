@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use ahash::HashMapExt;
 use anyhow::{Context, Result, anyhow, bail};
-use async_trait::async_trait;
-use futures_util::TryFutureExt;
+use futures_util::stream::FuturesUnordered;
+use futures_util::{StreamExt, TryFutureExt};
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -18,28 +18,32 @@ use tycho_types::models::{
     BlockId, BlockIdShort, CollationConfig, GlobalCapabilities, ProcessedUptoInfo, ShardIdent,
     ValidatorDescription,
 };
-use tycho_util::futures::AwaitBlocking;
+use tycho_util::futures::{AwaitBlocking, JoinTask};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{DashMapEntry, FastDashMap, FastHashMap, FastHashSet};
-use types::{
-    ActiveCollator, ActiveSync, BlockCacheEntry, BlockCacheEntryData, BlockCacheStoreResult,
-    CollatedBlockInfo, CollationState, CollationStatus, CollatorState, HandledBlockFromBcCtx,
-    ImportedAnchorEvent, McBlockSubgraph, NextCollationStep,
-};
 
 use self::blocks_cache::BlocksCache;
-use self::types::{BlockCacheKey, CandidateStatus, CollationSyncState, McBlockSubgraphExtract};
+use self::cancel_validation_runner::CancelValidationRunnerState;
+use self::state_event_listener::{ChannelStateEventListener, StateEvent};
+use self::types::{
+    ActiveCollator, ActiveSync, BlockCacheEntry, BlockCacheEntryData, BlockCacheKey,
+    BlockCacheStoreResult, CandidateStatus, CollatedBlockInfo, CollationState, CollationStatus,
+    CollationSyncState, CollatorJoinTask, CollatorState, HandledBlockFromBcCtx,
+    ImportedAnchorEvent, McBlockSubgraph, McBlockSubgraphExtract, NextCollationStep,
+    ValidatorJoinTask,
+};
 use self::utils::find_us_in_collators_set;
 use crate::collator::{
-    CollationCancelReason, Collator, CollatorContext, CollatorEventListener, CollatorFactory,
-    ForceMasterCollation,
+    CancelledContext, CollationCancelReason, Collator, CollatorContext, CollatorFactory,
+    CollatorResult, ForceMasterCollation,
 };
 use crate::internal_queue::types::diff::{DiffZone, QueueDiffWithMessages};
 use crate::internal_queue::types::message::EnqueuedMessage;
 use crate::internal_queue::types::stats::DiffStatistics;
 use crate::mempool::{MempoolAdapter, MempoolAdapterFactory, MempoolAnchorId, StateUpdateContext};
 use crate::queue_adapter::MessageQueueAdapter;
-use crate::state_node::{StateNodeAdapter, StateNodeAdapterFactory, StateNodeEventListener};
+use crate::state_node::{StateNodeAdapter, StateNodeAdapterFactory};
+use crate::tracing_targets;
 use crate::types::processed_upto::{
     BlockSeqno, ProcessedUptoInfoExtension, ProcessedUptoInfoStuff, find_min_processed_to_by_shards,
 };
@@ -48,14 +52,14 @@ use crate::types::{
     DebugIter, DisplayAsShortId, DisplayBlockIdsIntoIter, McData, ProcessedToByPartitions,
     ShardDescriptionShort, ShardDescriptionShortExt, ShardHashesExt, TopBlockId, TopBlockIdUpdated,
 };
-use crate::utils::async_dispatcher::{AsyncDispatcher, STANDARD_ASYNC_DISPATCHER_BUFFER_SIZE};
 use crate::utils::block::detect_top_processed_to_anchor;
 use crate::utils::shard::calc_split_merge_actions;
 use crate::utils::vset_cache::ValidatorSetCache;
 use crate::validator::{AddSession, ValidationStatus, Validator};
-use crate::{method_to_async_closure, tracing_targets};
 
 mod blocks_cache;
+mod cancel_validation_runner;
+mod state_event_listener;
 mod types;
 mod utils;
 
@@ -65,22 +69,15 @@ pub(super) mod tests;
 
 const BLOCKS_FROM_BC_QUEUE_LIMIT: usize = 1000;
 
-pub struct RunningCollationManager<CF, V>
-where
-    CF: CollatorFactory,
-{
+pub struct RunningCollationManager {
     cancel_async_tasks: CancellationToken,
-    dispatcher: AsyncDispatcher<CollationManager<CF, V>>,
+    main_flow_handle: tokio::task::JoinHandle<Result<()>>,
     state_node_adapter: Arc<dyn StateNodeAdapter>,
     mpool_adapter: Arc<dyn MempoolAdapter>,
     mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
 }
 
-impl<CF: CollatorFactory, V> RunningCollationManager<CF, V> {
-    pub fn dispatcher(&self) -> &AsyncDispatcher<CollationManager<CF, V>> {
-        &self.dispatcher
-    }
-
+impl RunningCollationManager {
     pub fn state_node_adapter(&self) -> &Arc<dyn StateNodeAdapter> {
         &self.state_node_adapter
     }
@@ -92,11 +89,33 @@ impl<CF: CollatorFactory, V> RunningCollationManager<CF, V> {
     pub fn mq_adapter(&self) -> &Arc<dyn MessageQueueAdapter<EnqueuedMessage>> {
         &self.mq_adapter
     }
+
+    pub async fn wait_main_flow(&mut self) {
+        let handle = &mut self.main_flow_handle;
+        Self::handle_main_flow_join_result(handle.await);
+    }
+
+    pub fn handle_main_flow_join_result(join_res: Result<Result<()>, tokio::task::JoinError>) {
+        match join_res {
+            Err(e) => tracing::warn!(target: tracing_targets::COLLATION_MANAGER,
+                "collation manager main flow join error: {e:?}",
+            ),
+            Ok(Err(e)) => tracing::error!(target: tracing_targets::COLLATION_MANAGER,
+                "collation manager main flow exited with error: {e:?}",
+            ),
+            _ => tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+                "collation manager main flow stopped",
+            ),
+        }
+    }
 }
 
-impl<CF: CollatorFactory, V> Drop for RunningCollationManager<CF, V> {
+impl Drop for RunningCollationManager {
     fn drop(&mut self) {
-        self.cancel_async_tasks.cancel();
+        if !self.main_flow_handle.is_finished() {
+            self.cancel_async_tasks.cancel();
+            self.wait_main_flow().await_blocking();
+        }
     }
 }
 
@@ -107,18 +126,18 @@ where
     keypair: Arc<KeyPair>,
     config: Arc<CollatorConfig>,
 
-    dispatcher: Arc<AsyncDispatcher<Self>>,
     state_node_adapter: Arc<dyn StateNodeAdapter>,
     mpool_adapter: Arc<dyn MempoolAdapter>,
     mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
 
     collator_factory: CF,
+
     validator: Arc<V>,
+    cancel_validation_runner: Mutex<CancelValidationRunnerState>,
 
     active_collation_sessions: RwLock<FastHashMap<ShardIdent, Arc<CollationSessionInfo>>>,
     collation_sessions_to_finish: FastDashMap<CollationSessionId, Arc<CollationSessionInfo>>,
-    active_collators: FastDashMap<ShardIdent, ActiveCollator<Arc<CF::Collator>>>,
-    collators_to_stop: FastDashMap<CollationSessionId, ActiveCollator<Arc<CF::Collator>>>,
+    active_collators: FastDashMap<ShardIdent, ActiveCollator<Box<CF::Collator>>>,
 
     blocks_cache: BlocksCache,
 
@@ -142,61 +161,11 @@ where
 
     /// `McData` which processing was delayed until block is validated.
     delayed_mc_state_update: Arc<Mutex<Option<Arc<McData>>>>,
+
+    cancel_async_tasks: CancellationToken,
 }
 
-#[async_trait]
-impl<CF, V> StateNodeEventListener for AsyncDispatcher<CollationManager<CF, V>>
-where
-    CF: CollatorFactory,
-    V: Validator,
-{
-    async fn on_block_accepted(&self, state: &ShardStateStuff) -> Result<()> {
-        let processed_upto = state.state().processed_upto.load()?;
-
-        metrics_report_last_applied_block_and_anchor(state, &processed_upto)?;
-
-        let state_cloned = state.clone();
-
-        self.spawn_task(method_to_async_closure!(
-            detect_top_processed_to_anchor_and_notify_mempool,
-            state_cloned,
-            processed_upto.get_min_externals_processed_to()?.0
-        ))
-        .await?;
-
-        let state_cloned = state.clone();
-        self.spawn_task(move |worker| {
-            Box::pin(async move { worker.cancel_validation_sessions_until_block(state_cloned) })
-        })
-        .await?;
-
-        Ok(())
-    }
-
-    async fn on_block_accepted_external(
-        &self,
-        mc_block_id: &BlockId,
-        state: &ShardStateStuff,
-    ) -> Result<()> {
-        let processed_upto = state.state().processed_upto.load()?;
-
-        metrics_report_last_applied_block_and_anchor(state, &processed_upto)?;
-
-        let state = state.clone();
-        let ctx = HandledBlockFromBcCtx {
-            mc_block_id: *mc_block_id,
-            state,
-            processed_upto,
-        };
-
-        self.enqueue_task(method_to_async_closure!(enqueue_handle_block_from_bc, ctx))
-            .await?;
-
-        Ok(())
-    }
-}
-
-fn metrics_report_last_applied_block_and_anchor(
+pub fn metrics_report_last_applied_block_and_anchor(
     state: &ShardStateStuff,
     processed_upto: &ProcessedUptoInfo,
 ) -> Result<()> {
@@ -219,62 +188,6 @@ fn metrics_report_last_applied_block_and_anchor(
     Ok(())
 }
 
-#[async_trait]
-impl<CF, V> CollatorEventListener for AsyncDispatcher<CollationManager<CF, V>>
-where
-    CF: CollatorFactory,
-    V: Validator,
-{
-    async fn on_skipped(
-        &self,
-        prev_mc_block_id: BlockId,
-        next_block_id_short: BlockIdShort,
-        anchor_chain_time: u64,
-        force_mc_block: ForceMasterCollation,
-        collation_config: Arc<CollationConfig>,
-    ) -> Result<()> {
-        self.spawn_task(method_to_async_closure!(
-            handle_collation_skipped,
-            prev_mc_block_id,
-            next_block_id_short,
-            anchor_chain_time,
-            force_mc_block,
-            collation_config
-        ))
-        .await
-    }
-
-    async fn on_cancelled(
-        &self,
-        prev_mc_block_id: BlockId,
-        next_block_id_short: BlockIdShort,
-        cancel_reason: CollationCancelReason,
-    ) -> Result<()> {
-        self.spawn_task(method_to_async_closure!(
-            handle_collation_cancelled,
-            prev_mc_block_id,
-            next_block_id_short,
-            cancel_reason
-        ))
-        .await
-    }
-
-    async fn on_block_candidate(&self, collation_result: BlockCollationResult) -> Result<()> {
-        self.spawn_task(method_to_async_closure!(
-            handle_collated_block_candidate,
-            collation_result
-        ))
-        .await
-    }
-
-    async fn on_collator_stopped(&self, stop_key: CollationSessionId) -> Result<()> {
-        self.spawn_task(move |worker| {
-            Box::pin(async move { worker.handle_collator_stopped(stop_key) })
-        })
-        .await
-    }
-}
-
 impl<CF, V> CollationManager<CF, V>
 where
     CF: CollatorFactory,
@@ -290,23 +203,16 @@ where
         validator: V,
         collator_factory: CF,
         mempool_config_override: Option<MempoolGlobalConfig>,
-    ) -> RunningCollationManager<CF, V>
+    ) -> RunningCollationManager
     where
         STF: StateNodeAdapterFactory,
         MPF: MempoolAdapterFactory,
     {
         tracing::info!(target: tracing_targets::COLLATION_MANAGER, "Creating collation manager...");
 
-        // create dispatcher for own tasks
-        let (dispatcher, dispatcher_ctx) = AsyncDispatcher::new(
-            "collation_manager_async_dispatcher",
-            STANDARD_ASYNC_DISPATCHER_BUFFER_SIZE,
-        );
-        let arc_dispatcher = Arc::new(dispatcher.clone());
-
         // create state node adapter
-        let state_node_adapter =
-            Arc::new(state_node_adapter_factory.create(arc_dispatcher.clone()));
+        let (state_event_listener, state_event_receiver) = ChannelStateEventListener::build(100);
+        let state_node_adapter = Arc::new(state_node_adapter_factory.create(state_event_listener));
 
         // create mempool adapter
         let mpool_adapter = mpool_adapter_factory.create();
@@ -321,20 +227,24 @@ where
 
         let blocks_cache = BlocksCache::new(state_node_adapter.zerostate_id());
 
+        let cancel_async_tasks = CancellationToken::new();
+
         let collation_manager = Self {
             keypair,
             config: Arc::new(config),
-            dispatcher: arc_dispatcher.clone(),
+
             state_node_adapter: state_node_adapter.clone(),
             mpool_adapter: mpool_adapter.clone(),
             mq_adapter: mq_adapter.clone(),
+
             collator_factory,
+
             validator,
+            cancel_validation_runner: Default::default(),
 
             active_collation_sessions: Default::default(),
             collation_sessions_to_finish: Default::default(),
             active_collators: Default::default(),
-            collators_to_stop: Default::default(),
 
             blocks_cache,
 
@@ -351,37 +261,196 @@ where
             mempool_config_override,
 
             delayed_mc_state_update: Arc::new(Mutex::new(None)),
+
+            cancel_async_tasks: cancel_async_tasks.clone(),
         };
         let collation_manager = Arc::new(collation_manager);
 
-        let cancel_async_tasks = CancellationToken::new();
-
-        // start additional async tasks
-        tokio::spawn(
+        // run main flow
+        let main_flow_handle = tokio::spawn(
             collation_manager
-                .clone()
-                .process_handle_block_from_bc_queue(
-                    blocks_from_bc_queue_receiver,
-                    cancel_async_tasks.clone(),
-                )
+                .run(state_event_receiver, blocks_from_bc_queue_receiver)
                 .map_err(|e| {
-                    tracing::error!("initial process_handle_block_from_bc_queue failed: {e:?}");
+                    tracing::error!(target: tracing_targets::COLLATION_MANAGER, "main flow error: {e:?}");
+                    e
                 }),
         );
-
-        // start tasks dispatcher
-        arc_dispatcher.run(collation_manager, dispatcher_ctx);
-        tracing::trace!(target: tracing_targets::COLLATION_MANAGER, "Tasks dispatchers started");
 
         tracing::info!(target: tracing_targets::COLLATION_MANAGER, "Collation manager created");
 
         RunningCollationManager {
             cancel_async_tasks,
-            dispatcher,
+            main_flow_handle,
             state_node_adapter,
             mpool_adapter,
             mq_adapter,
         }
+    }
+
+    /// Run main flow
+    async fn run(
+        self: Arc<Self>,
+        mut state_event_receiver: tokio::sync::mpsc::Receiver<StateEvent>,
+        mut blocks_from_bc_queue_receiver: tokio::sync::mpsc::Receiver<HandledBlockFromBcCtx>,
+    ) -> Result<()> {
+        // spawn parallel task to handle block applied events
+        let mut handle_state_events_task = JoinTask::new({
+            let mgr = self.clone();
+            async move {
+                tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+                    "state events processing: started",
+                );
+                scopeguard::defer!(tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+                    "state events processing: finished",
+                ));
+                loop {
+                    tokio::select! {
+                        _ = mgr.cancel_async_tasks.cancelled() => {
+                            tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+                                "state events processing: stop signal received",
+                            );
+                            break;
+                        },
+                        event = state_event_receiver.recv() => match event {
+                            None => {
+                                tracing::warn!(target: tracing_targets::COLLATION_MANAGER,
+                                    "state events channel closed: StateNodeAdapter dropped",
+                                );
+                                break;
+                            }
+                            Some(event) => match event {
+                                StateEvent::OwnBlockApplied { state, processed_upto } => {
+                                    // spawn validation cancellation
+                                    mgr.schedule_cancel_validation_sessions_until_block(state.clone());
+
+                                    // handle applied block in mempool
+                                    mgr.detect_top_processed_to_anchor_and_notify_mempool(
+                                        state,
+                                        processed_upto.get_min_externals_processed_to()?.0
+                                    )
+                                    .await?;
+                                }
+                                StateEvent::ExternalBlockApplied { mc_block_id, state, processed_upto } => {
+                                    let ctx = HandledBlockFromBcCtx {
+                                        mc_block_id,
+                                        state,
+                                        processed_upto,
+                                    };
+                                    mgr.enqueue_handle_block_from_bc(ctx).await?;
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok::<_, anyhow::Error>(())
+            }
+        });
+
+        // set of collator tasks
+        let mut collator_tasks = FuturesUnordered::new();
+
+        // set of validator tasks
+        let mut validator_tasks = FuturesUnordered::new();
+
+        tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+            "collation manager main flow: started",
+        );
+        scopeguard::defer!(tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+            "collation manager main flow: finished",
+        ););
+
+        // main flow loop
+        const BLOCKS_FROM_BC_BATCH_SIZE: usize = 100;
+        loop {
+            let mut blocks_from_bc_batch = Vec::with_capacity(BLOCKS_FROM_BC_BATCH_SIZE);
+            tokio::select! {
+                // handle stop
+                _ = self.cancel_async_tasks.cancelled() => {
+                    tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+                        "collation manager: stop signal received",
+                    );
+                    break;
+                },
+                // just process state events handling error
+                res = &mut handle_state_events_task => {
+                    res?;
+                },
+                // handle blocks from bc
+                received_count = blocks_from_bc_queue_receiver.recv_many(&mut blocks_from_bc_batch, BLOCKS_FROM_BC_BATCH_SIZE) => {
+                    if received_count == 0 {
+                        tracing::warn!(target: tracing_targets::COLLATION_MANAGER,
+                            "blocks from bc queue channel closed: CollationManager dropped",
+                        );
+                        break;
+                    }
+
+                    for task in self.handle_blocks_from_bc_batch(blocks_from_bc_batch).await? {
+                        collator_tasks.push(task);
+                    }
+                },
+                // handle collator tasks
+                Some(collator_res) = collator_tasks.next(), if !collator_tasks.is_empty() => {
+                    let (collator, res) = collator_res?;
+
+                    // store collator
+                    self.set_collator(collator)?;
+
+                    // handle result
+                    match res {
+                        // when collation was skipped
+                        CollatorResult::Skipped {
+                            prev_mc_block_id,
+                            next_block_id_short,
+                            anchor_chain_time,
+                            force_mc_block,
+                            collation_config
+                        } => {
+                            for task in self.handle_collation_skipped(prev_mc_block_id,
+                                next_block_id_short,
+                                anchor_chain_time,
+                                force_mc_block,
+                                collation_config
+                            ).await? {
+                                collator_tasks.push(task);
+                            }
+                        }
+                        // when collation was cancelled
+                        CollatorResult::Cancelled(cancel_ctx) => {
+                            let CancelledContext { prev_mc_block_id, next_block_id_short, cancel_reason } = cancel_ctx;
+                            for task in self.handle_collation_cancelled(prev_mc_block_id, next_block_id_short, cancel_reason).await? {
+                                collator_tasks.push(task);
+                            }
+                        }
+                        // when block candidate received
+                        CollatorResult::BlockCandidate { collation_result } => {
+                            let res = self.handle_collated_block_candidate(collation_result).await?;
+                            if let Some(task) = res.validator_task {
+                                validator_tasks.push(task);
+                            }
+                            for task in res.collator_tasks {
+                                collator_tasks.push(task);
+                            }
+                        }
+                    }
+                }
+                // handle validator tasks
+                Some(validation_res) = validator_tasks.next(), if !validator_tasks.is_empty() => {
+                    match validation_res {
+                        Err(e) => {
+                            tracing::error!(target: tracing_targets::COLLATION_MANAGER,
+                                "block candidate validation failed: {e:?}",
+                            );
+                        }
+                        Ok((block_id, validation_status)) => {
+                            self.handle_validated_master_block(block_id, validation_status).await?;
+                        }
+
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Tries to determine top anchor that was processed to
@@ -454,6 +523,7 @@ where
         Ok(())
     }
 
+    // TODO: move to cancel_validation_runner.rs
     #[tracing::instrument(skip_all, fields(block_id = %state.block_id().as_short_id()))]
     fn cancel_validation_sessions_until_block(&self, state: ShardStateStuff) -> Result<()> {
         let block_id = state.block_id().as_short_id();
@@ -606,7 +676,7 @@ where
         _prev_mc_block_id: BlockId,
         next_block_id_short: BlockIdShort,
         cancel_reason: CollationCancelReason,
-    ) -> Result<()> {
+    ) -> Result<Vec<CollatorJoinTask<CF::Collator>>> {
         tracing::info!(target: tracing_targets::COLLATION_MANAGER,
             ?cancel_reason,
             "start handle collation cancelled",
@@ -644,15 +714,13 @@ where
                         .get_last_collated_block_and_applied_mc_queue_range();
 
                     // run sync if have applied mc blocks
-                    self.sync_to_applied_mc_block_if_exist(
-                        last_collated_mc_block_id,
-                        applied_range,
-                    )
-                    .await?;
+                    return self
+                        .sync_to_applied_mc_block_if_exist(last_collated_mc_block_id, applied_range)
+                        .await;
                 }
             }
         }
-        Ok(())
+        Ok(vec![])
     }
 
     #[tracing::instrument(skip_all, fields(next_block_id = %next_block_id_short, ct = anchor_chain_time, ?force_mc_block))]
@@ -663,7 +731,7 @@ where
         anchor_chain_time: u64,
         force_mc_block: ForceMasterCollation,
         collation_config: Arc<CollationConfig>,
-    ) -> Result<()> {
+    ) -> Result<Vec<CollatorJoinTask<CF::Collator>>> {
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
             "will run next collation step",
         );
@@ -683,7 +751,7 @@ where
                 shard_id = %next_block_id_short.shard,
                 "collator was cancelled before",
             );
-            return Ok(());
+            return Ok(vec![]);
         }
 
         self.run_next_collation_step(
@@ -702,15 +770,15 @@ where
     }
 
     /// 1. Check if should collate master
-    /// 2. And schedule master block collation
-    /// 3. Or schedule next collation attempt in current shard
+    /// 2. And run master block collation
+    /// 3. Or run next collation attempt in current shard
     async fn run_next_collation_step(
         &self,
         prev_mc_block_id: &BlockId,
         shard_id: ShardIdent,
         trigger_shard_block_id_opt: Option<BlockId>,
         ctx: DetectNextCollationStepContext,
-    ) -> Result<()> {
+    ) -> Result<Vec<CollatorJoinTask<CF::Collator>>> {
         let next_step = Self::detect_next_collation_step(
             &mut self.collation_sync_state.lock(),
             self.active_collation_sessions
@@ -727,6 +795,8 @@ where
             "detected next collation step",
         );
 
+        let mut collator_tasks = vec![];
+
         match next_step {
             NextCollationStep::CollateMaster(next_mc_block_chain_time) => {
                 if !shard_id.is_masterchain() {
@@ -738,12 +808,15 @@ where
                     ac.state = CollatorState::Active;
                 });
 
-                self.enqueue_mc_block_collation(
-                    prev_mc_block_id.get_next_id_short(),
-                    next_mc_block_chain_time,
-                    trigger_shard_block_id_opt,
-                )
-                .await?;
+                let task = self
+                    .run_mc_block_collation(
+                        prev_mc_block_id.get_next_id_short(),
+                        next_mc_block_chain_time,
+                        trigger_shard_block_id_opt,
+                    )
+                    .await?;
+
+                collator_tasks.push(task);
             }
             NextCollationStep::WaitForMasterStatus | NextCollationStep::WaitForShardStatus => {
                 // current shard collator will wait
@@ -760,7 +833,8 @@ where
                         current_shard_should_wait = false;
                     }
                     self.set_collator_state(&shard_ident, |ac| ac.state = CollatorState::Active);
-                    self.enqueue_try_collate(&shard_ident).await?;
+                    let task = self.run_try_collate(&shard_ident).await?;
+                    collator_tasks.push(task);
                 }
                 if current_shard_should_wait {
                     self.set_collator_state(&shard_id, |ac| ac.state = CollatorState::Waiting);
@@ -768,24 +842,25 @@ where
             }
         }
 
-        Ok(())
+        Ok(collator_tasks)
     }
 
     /// Process collated block candidate
     /// 1. Save block to cache
-    /// 2. Spawn block validation
-    /// 3. Check if the master block interval elapsed (according to chain time) and schedule collation
-    /// 4. If master block then update last master block chain time
-    /// 5. Notify mempool about new master block (it may perform gc or nodes rotation)
-    /// 6. Execute master block processing routines
+    /// 2. Sync to last applied block from bc if required
+    /// 3. For shard: just try run next collation attempt
+    /// 4. For master:
+    ///     - handle applied block in mempool
+    ///     - spawn validation task
+    ///     - execute updated master state processing routines
     #[tracing::instrument(
         skip_all,
         fields(block_id = %collation_result.candidate.block.id().as_short_id()),
     )]
-    pub async fn handle_collated_block_candidate(
+    async fn handle_collated_block_candidate(
         self: &Arc<Self>,
         collation_result: BlockCollationResult,
-    ) -> Result<()> {
+    ) -> Result<HandleBlockCandidateResult<CF::Collator>> {
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
             ct = collation_result.candidate.chain_time,
             processed_to_anchor_id = collation_result.candidate.processed_to_anchor_id,
@@ -828,7 +903,7 @@ where
 
                 self.set_collator_state(&block_id.shard, |ac| ac.state = CollatorState::Waiting);
 
-                return Ok(());
+                return Ok(HandleBlockCandidateResult::empty());
             }
         };
 
@@ -1012,6 +1087,7 @@ where
         };
 
         // run sync or process just collated block
+        let mut collator_tasks = vec![];
         if should_sync_to_last_applied_mc_block {
             // NOTE: we do not need to commit current master block candidate
             //      if it is "received and collated" because it is already applied to state
@@ -1020,11 +1096,12 @@ where
 
             if block_id.is_masterchain() {
                 // run sync if have applied mc blocks
-                self.sync_to_applied_mc_block_if_exist(
-                    store_res.last_collated_mc_block_id,
-                    store_res.applied_mc_queue_range,
-                )
-                .await?;
+                collator_tasks = self
+                    .sync_to_applied_mc_block_if_exist(
+                        store_res.last_collated_mc_block_id,
+                        store_res.applied_mc_queue_range,
+                    )
+                    .await?;
             } else {
                 // cancel further collation of blocks in the current shard because we need to sync
                 tracing::info!(target: tracing_targets::COLLATION_MANAGER,
@@ -1045,13 +1122,19 @@ where
                     );
 
                     // run sync if have applied mc blocks
-                    self.sync_to_applied_mc_block_if_exist(
-                        store_res.last_collated_mc_block_id,
-                        store_res.applied_mc_queue_range,
-                    )
-                    .await?;
+                    collator_tasks = self
+                        .sync_to_applied_mc_block_if_exist(
+                            store_res.last_collated_mc_block_id,
+                            store_res.applied_mc_queue_range,
+                        )
+                        .await?;
                 }
             }
+
+            Ok(HandleBlockCandidateResult {
+                validator_task: None,
+                collator_tasks,
+            })
         } else if block_id.is_masterchain() {
             // when candidate is master
 
@@ -1066,6 +1149,7 @@ where
             }
 
             // process validation
+            let mut validator_task = None;
             if store_res.received_and_collated {
                 // NOTE: here commit will not cause on_block_accepted event
                 //      because block already exist in bc state
@@ -1074,40 +1158,29 @@ where
             } else {
                 let validator = self.validator.clone();
                 let validation_session_id = session_info.get_validation_session_id();
-                let dispatcher = self.dispatcher.clone();
-                tokio::spawn(async move {
+                validator_task = Some(JoinTask::new(async move {
                     let validation_result =
-                        validator.validate(validation_session_id, &block_id).await;
-
-                    match validation_result {
-                        Ok(status) => {
-                            _ = dispatcher
-                                .spawn_task(method_to_async_closure!(
-                                    handle_validated_master_block,
-                                    block_id,
-                                    status
-                                ))
-                                .await;
-                        }
-                        Err(e) => {
-                            tracing::error!(target: tracing_targets::COLLATION_MANAGER,
-                                "block candidate validation failed: {e:?}",
-                            );
-                        }
-                    }
-                });
+                        validator.validate(validation_session_id, &block_id).await?;
+                    Ok((block_id, validation_result))
+                }));
             }
 
             // if consensus config was not changed execute master state update processing routines right now
             if consensus_config_changed != Some(true) {
-                self.process_mc_state_update(
-                    collation_result.mc_data.unwrap(),
-                    ProcessMcStateUpdateMode::StartCollation {
-                        reset_collators: false,
-                    },
-                )
-                .await?;
+                collator_tasks = self
+                    .process_mc_state_update(
+                        collation_result.mc_data.unwrap(),
+                        ProcessMcStateUpdateMode::StartCollation {
+                            reset_collators: false,
+                        },
+                    )
+                    .await?;
             }
+
+            Ok(HandleBlockCandidateResult {
+                validator_task,
+                collator_tasks,
+            })
         } else {
             // when candidate is shard
 
@@ -1116,25 +1189,29 @@ where
                 "will run next collation step",
             );
 
-            self.run_next_collation_step(
-                &collation_result.prev_mc_block_id,
-                block_id.shard,
-                Some(block_id),
-                DetectNextCollationStepContext::new(
-                    candidate_chain_time,
-                    collation_result.force_next_mc_block,
-                    collation_result.collation_config.mc_block_min_interval_ms as _,
-                    collation_result.collation_config.mc_block_max_interval_ms as _,
-                    Some(CollatedBlockInfo::new(
-                        collation_result.prev_mc_block_id.seqno,
-                        collation_result.has_processed_externals,
-                    )),
-                ),
-            )
-            .await?;
-        }
+            collator_tasks = self
+                .run_next_collation_step(
+                    &collation_result.prev_mc_block_id,
+                    block_id.shard,
+                    Some(block_id),
+                    DetectNextCollationStepContext::new(
+                        candidate_chain_time,
+                        collation_result.force_next_mc_block,
+                        collation_result.collation_config.mc_block_min_interval_ms as _,
+                        collation_result.collation_config.mc_block_max_interval_ms as _,
+                        Some(CollatedBlockInfo::new(
+                            collation_result.prev_mc_block_id.seqno,
+                            collation_result.has_processed_externals,
+                        )),
+                    ),
+                )
+                .await?;
 
-        Ok(())
+            Ok(HandleBlockCandidateResult {
+                validator_task: None,
+                collator_tasks,
+            })
+        }
     }
 
     /// Finish active sync if it is not finished yet
@@ -1163,73 +1240,45 @@ where
         // try to finish active sync
         self.finish_active_sync_to_applied(ctx.state.block_id());
 
-        // enqueue received block from processing
+        // enqueue received block for processing
         self.blocks_from_bc_queue_sender.send(ctx).await?;
 
         Ok(())
     }
 
-    /// Process the queue of received blocks from bc
-    #[tracing::instrument(skip_all)]
-    async fn process_handle_block_from_bc_queue(
-        self: Arc<Self>,
-        mut blocks_from_bc_queue_receiver: tokio::sync::mpsc::Receiver<HandledBlockFromBcCtx>,
-        cancel_task: CancellationToken,
-    ) -> Result<()> {
-        const BATCH_SIZE: usize = 300;
-
-        tracing::info!(target: tracing_targets::COLLATION_MANAGER,
-            "started",
-        );
-
-        loop {
-            let mut batch = Vec::with_capacity(BATCH_SIZE);
-            tokio::select! {
-                received_count = blocks_from_bc_queue_receiver.recv_many(&mut batch, BATCH_SIZE) => {
-                    if received_count == 0 {
-                        tracing::info!(target: tracing_targets::COLLATION_MANAGER,
-                            "channel closed",
-                        );
-                        break;
-                    }
-
-                    // find last master block in buffer
-                    // will skip sync for all master blocks before it
-                    let mut last_mc_block_id_opt = None;
-                    for HandledBlockFromBcCtx { state, .. } in batch.iter().rev() {
-                        if state.block_id().is_masterchain() {
-                            last_mc_block_id_opt = Some(*state.block_id());
-                        }
-                    }
-
-                    for ctx in batch {
-                        let is_last_mc_block_in_batch = matches!(
-                            last_mc_block_id_opt, Some(last_mc_block_id) if ctx.state.block_id() == &last_mc_block_id
-                        );
-
-                        // handle block from bc
-                        self.handle_block_from_bc(ctx, is_last_mc_block_in_batch).await.map_err(|err| {
-                            tracing::error!(target: tracing_targets::COLLATION_MANAGER,
-                                "error handling block from bc: {err:?}",
-                            );
-                            err
-                        })?;
-                    }
-                },
-                _ = cancel_task.cancelled() => {
-                    tracing::info!(target: tracing_targets::COLLATION_MANAGER,
-                        "cancelled",
-                    );
-                    break;
-                }
+    async fn handle_blocks_from_bc_batch(
+        self: &Arc<Self>,
+        batch: Vec<HandledBlockFromBcCtx>,
+    ) -> Result<Vec<CollatorJoinTask<CF::Collator>>> {
+        // find last master block in buffer
+        // will skip sync for all master blocks before it
+        let mut last_mc_block_id_opt = None;
+        for HandledBlockFromBcCtx { state, .. } in batch.iter().rev() {
+            if state.block_id().is_masterchain() {
+                last_mc_block_id_opt = Some(*state.block_id());
             }
         }
 
-        tracing::info!(target: tracing_targets::COLLATION_MANAGER,
-            "finished",
-        );
+        let mut collator_tasks = vec![];
 
-        Ok(())
+        for ctx in batch {
+            let is_last_mc_block_in_batch = matches!(
+                last_mc_block_id_opt, Some(last_mc_block_id) if ctx.state.block_id() == &last_mc_block_id
+            );
+
+            // handle block from bc
+            collator_tasks = self
+                .handle_block_from_bc(ctx, is_last_mc_block_in_batch)
+                .await
+                .map_err(|err| {
+                    tracing::error!(target: tracing_targets::COLLATION_MANAGER,
+                        "error handling block from bc: {err:?}",
+                    );
+                    err
+                })?;
+        }
+
+        Ok(collator_tasks)
     }
 
     /// Process new block from blockchain:
@@ -1243,7 +1292,7 @@ where
         self: &Arc<Self>,
         ctx: HandledBlockFromBcCtx,
         is_last_mc_block_in_batch: bool,
-    ) -> Result<()> {
+    ) -> Result<Vec<CollatorJoinTask<CF::Collator>>> {
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
             "start processing block from bc",
         );
@@ -1269,7 +1318,7 @@ where
             )
             .await?
         else {
-            return Ok(());
+            return Ok(vec![]);
         };
 
         if store_res.block_mismatch {
@@ -1320,7 +1369,7 @@ where
         }
 
         if !block_id.is_masterchain() {
-            return Ok(());
+            return Ok(vec![]);
         }
 
         // when received block is master
@@ -1462,13 +1511,16 @@ where
             }
         };
 
+        let mut collator_tasks = vec![];
+
         if should_sync_to_last_applied_mc_block {
             // run sync if have applied mc blocks
-            self.sync_to_applied_mc_block_if_exist(
-                store_res.last_collated_mc_block_id,
-                store_res.applied_mc_queue_range,
-            )
-            .await?;
+            collator_tasks = self
+                .sync_to_applied_mc_block_if_exist(
+                    store_res.last_collated_mc_block_id,
+                    store_res.applied_mc_queue_range,
+                )
+                .await?;
         } else {
             // try to commit block if it was collated first
             if store_res.received_and_collated {
@@ -1483,53 +1535,42 @@ where
             }
         }
 
-        Ok(())
+        Ok(collator_tasks)
     }
 
     async fn sync_to_applied_mc_block_if_exist(
         self: &Arc<Self>,
         last_collated_mc_block_id: Option<BlockId>,
         applied_range: Option<(BlockSeqno, BlockSeqno)>,
-    ) -> Result<()> {
+    ) -> Result<Vec<CollatorJoinTask<CF::Collator>>> {
+        let mut collator_tasks = vec![];
+
         if let Some(applied_range) = applied_range {
             let this = self.clone();
 
-            let res = tokio::task::spawn_blocking(move || {
+            collator_tasks = tokio::task::spawn_blocking(move || {
                 this.sync_to_applied_mc_block(applied_range, last_collated_mc_block_id)
             })
             .await??;
-
-            if !res {
-                tracing::info!(target: tracing_targets::COLLATION_MANAGER,
-                    last_applied_mc_block_id = %BlockIdShort {
-                        shard: ShardIdent::MASTERCHAIN,
-                        seqno: applied_range.1,
-                    },
-                    "sync_to_applied_mc_block: unable to sync to last applied mc block, \
-                    need to receive next blocks from bc",
-                );
-            }
         } else {
             tracing::info!(target: tracing_targets::COLLATION_MANAGER,
                 "sync_to_applied_mc_block: there is no received applied mc blocks in cache, \
                 will wait for next blocks from bc",
             );
         }
-        Ok(())
+
+        Ok(collator_tasks)
     }
 
     /// Restores internals queue state,
     /// processes last applied mc state
     /// to run next blocks collation.
-    ///
-    /// Returns `false` if unable to
-    /// load diff to restore queue state
     #[tracing::instrument(skip_all, fields(applied_range = ?applied_range))]
     fn sync_to_applied_mc_block(
         &self,
         applied_range: (BlockSeqno, BlockSeqno),
         last_collated_mc_block_id: Option<BlockId>,
-    ) -> Result<bool> {
+    ) -> Result<Vec<CollatorJoinTask<CF::Collator>>> {
         tracing::info!(target: tracing_targets::COLLATION_MANAGER,
             "start sync to applied mc block",
         );
@@ -1677,7 +1718,15 @@ where
         .await_blocking()?;
 
         let Some(last_mc_state) = queue_restore_res.last_mc_state else {
-            return Ok(false);
+            tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+                last_applied_mc_block_id = %BlockIdShort {
+                    shard: ShardIdent::MASTERCHAIN,
+                    seqno: applied_range.1,
+                },
+                "sync_to_applied_mc_block: unable to sync to last applied mc block, \
+                need to receive next blocks from bc",
+            );
+            return Ok(vec![]);
         };
 
         // process latest master state: notify mempool and refresh collation session
@@ -1701,7 +1750,8 @@ where
         // because next we will start to collate new shard blocks after the sync
         self.blocks_cache.reset_top_shard_blocks_additional_info();
 
-        let mc_data = self.build_mc_data(
+        let mc_data = Self::build_mc_data(
+            &self.state_node_adapter,
             last_mc_state,
             queue_restore_res.prev_mc_state,
             queue_restore_res.prev_mc_block_id,
@@ -1723,7 +1773,8 @@ where
             },
         };
 
-        self.process_mc_state_update(mc_data.clone(), process_state_update_mode)
+        let collator_tasks = self
+            .process_mc_state_update(mc_data.clone(), process_state_update_mode)
             .await_blocking()?;
 
         // handle top processed to anchor in mempool
@@ -1745,13 +1796,13 @@ where
             metrics::gauge!("tycho_last_block_seqno", &labels).set(synced_to_block_id.seqno);
         }
 
-        Ok(true)
+        Ok(collator_tasks)
     }
 
     /// Builds `McData` from provided parts.
     /// Tries to load the previous mc state from storage when passed `None`.
     fn build_mc_data(
-        &self,
+        state_node_adapter: &Arc<dyn StateNodeAdapter>,
         last_mc_state: ShardStateStuff,
         prev_mc_state: Option<ShardStateStuff>,
         prev_mc_block_id: Option<BlockId>,
@@ -1763,10 +1814,9 @@ where
         let prev_mc_state = match (prev_mc_state, prev_mc_block_id) {
             (Some(mc_state), _) => Some(mc_state),
             (None, None) => None,
-            (None, Some(prev_mc_block_id)) if prev_mc_block_id.seqno <= self.state_node_adapter.zerostate_id().seqno => None,
+            (None, Some(prev_mc_block_id)) if prev_mc_block_id.seqno <= state_node_adapter.zerostate_id().seqno => None,
             // NOTE: Use zero epoch here since we don't need to reuse these states.
-            (None, Some(prev_mc_block_id)) => self
-                .state_node_adapter
+            (None, Some(prev_mc_block_id)) => state_node_adapter
                 .load_state(0, &prev_mc_block_id, Default::default())
                 .await_blocking()
                 .map_err(|err| {
@@ -2209,11 +2259,13 @@ where
         &self,
         mc_data: Arc<McData>,
         mode: ProcessMcStateUpdateMode,
-    ) -> Result<()> {
+    ) -> Result<Vec<CollatorJoinTask<CF::Collator>>> {
         tracing::info!(target: tracing_targets::COLLATION_MANAGER,
             ?mode,
             "will process master state update",
         );
+
+        let mut collator_tasks = vec![];
 
         if let ProcessMcStateUpdateMode::StartCollation { reset_collators } = mode {
             let block_global = mc_data.config.get_global_version()?;
@@ -2222,7 +2274,8 @@ where
                     .capabilities
                     .is_subset_of(self.config.supported_capabilities)
             {
-                self.refresh_collation_sessions(mc_data, reset_collators)
+                collator_tasks = self
+                    .refresh_collation_sessions(mc_data, reset_collators)
                     .await?;
             } else {
                 tracing::warn!(target: tracing_targets::COLLATION_MANAGER,
@@ -2235,7 +2288,7 @@ where
             }
         }
 
-        Ok(())
+        Ok(collator_tasks)
     }
 
     /// Returns top processed to anchor id if delayed state was processed
@@ -2314,7 +2367,7 @@ where
         &self,
         mc_data: Arc<McData>,
         reset_collators: bool,
-    ) -> Result<()> {
+    ) -> Result<Vec<CollatorJoinTask<CF::Collator>>> {
         tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
             "Start refresh collation sessions by mc state ({})...",
@@ -2323,10 +2376,12 @@ where
 
         let _histogram = HistogramGuard::begin("tycho_collator_refresh_collation_sessions_time");
 
+        let mut collator_tasks = vec![];
+
         // do not re-process this master block if it is lower then last processed or equal to it
         // but process a new version of block with the same seqno
         if !self.check_should_process_and_update_last_processed_mc_block(&mc_data.block_id) {
-            return Ok(());
+            return Ok(collator_tasks);
         }
 
         tracing::trace!(target: tracing_targets::COLLATION_MANAGER, "mc_data: {:?}", mc_data);
@@ -2362,7 +2417,6 @@ where
                 "Detected split/merge actions: {:?}",
                 split_merge_actions,
             );
-            // self.mq_adapter.update_shards(split_merge_actions).await?;
         }
 
         // find out the actual collation session start round from master state
@@ -2530,17 +2584,15 @@ where
 
                     match self
                         .collator_factory
-                        .start(CollatorContext {
+                        .create(CollatorContext {
                             mq_adapter: self.mq_adapter.clone(),
                             mpool_adapter: self.mpool_adapter.clone(),
                             state_node_adapter: self.state_node_adapter.clone(),
                             config: self.config.clone(),
                             collation_session: new_session_info.clone(),
-                            listener: self.dispatcher.clone(),
                             zerostate_id: *self.state_node_adapter.zerostate_id(),
                             shard_id,
-                            prev_blocks_ids,
-                            mc_data: mc_data.clone(),
+                            prev_blocks_ids: prev_blocks_ids.clone(),
                             mempool_config_override: self.mempool_config_override.clone(),
                             cancel_collation: cancel_collation_notify.clone(),
                         })
@@ -2550,15 +2602,22 @@ where
                             tracing::error!(target: tracing_targets::COLLATION_MANAGER,
                                 session_id = ?new_session_info.id(),
                                 ?err,
-                                "error starting collator"
+                                "error creating collator"
                             );
+                            // return error to stop node
+                            return Err(err);
                         }
                         Ok(collator) => {
+                            let collator = Box::new(collator);
                             entry.insert(ActiveCollator {
-                                collator: Arc::new(collator),
+                                collator: None,
                                 state: CollatorState::Active,
                                 cancel_collation: cancel_collation_notify,
                             });
+                            // init collator
+                            let init_collator_task =
+                                JoinTask::new(collator.init(prev_blocks_ids, mc_data.clone()));
+                            collator_tasks.push(init_collator_task);
                         }
                     }
                 }
@@ -2587,30 +2646,27 @@ where
 
         // update master state in existing collators and resume collation
         for (shard_id, new_session_info, prev_blocks_ids) in sessions_to_keep {
-            let collator = {
-                let Some(mut active_collator) = self.active_collators.get_mut(&shard_id) else {
-                    bail!(
+            let collator = self
+                .take_collator_and_set_state(&shard_id, |ac| ac.state = CollatorState::Active)
+                .with_context(|| {
+                    format!(
                         "Collator for shard should exist for active session {:?}",
-                        new_session_info.id(),
+                        new_session_info.id()
                     )
-                };
-                active_collator.state = CollatorState::Active;
-                active_collator.collator.clone()
-            };
-
+                })?;
             tracing::debug!(
                 target: tracing_targets::COLLATION_MANAGER,
                 "Resuming collation attempts in shard session {:?}",
                 new_session_info.id(),
             );
-            collator
-                .enqueue_resume_collation(
-                    mc_data.clone(),
-                    reset_collators,
-                    new_session_info,
-                    prev_blocks_ids,
-                )
-                .await?;
+            // resume collation
+            let resume_collation_task = JoinTask::new(collator.resume_collation(
+                mc_data.clone(),
+                reset_collators,
+                new_session_info,
+                prev_blocks_ids,
+            ));
+            collator_tasks.push(resume_collation_task);
         }
 
         if !to_finish_sessions.is_empty() {
@@ -2621,6 +2677,7 @@ where
             );
         }
 
+        // TODO: remove unnecessary operations
         // enqueue outdated sessions finish tasks
         for session_info in to_finish_sessions {
             self.collation_sessions_to_finish
@@ -2628,6 +2685,8 @@ where
             self.finish_collation_session(session_info)?;
         }
 
+        // TODO: remove unnecessary operations
+        // stop dangling collators
         if !to_stop_collators.is_empty() {
             tracing::info!(
                 target: tracing_targets::COLLATION_MANAGER,
@@ -2635,16 +2694,13 @@ where
                 DebugIter(to_stop_collators.iter().map(|(s, _)| s.id())),
             );
         }
-
-        // enqueue dangling collators stop tasks
-        for (session_info, active_collator) in to_stop_collators {
-            let collator = active_collator.collator.clone();
-            self.collators_to_stop
-                .insert(session_info.id(), active_collator);
-            collator.enqueue_stop().await?;
+        for (session_info, _active_collator) in to_stop_collators {
+            tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+                "collator stopped for session: {:?}", session_info.id(),
+            );
         }
 
-        Ok(())
+        Ok(collator_tasks)
 
         // finally we will have initialized `active_collation_sessions`
         // and `active_collators` which run async block collations processes
@@ -2663,18 +2719,53 @@ where
         Ok(())
     }
 
-    /// Remove stopped collator from cache
-    pub fn handle_collator_stopped(&self, collation_session_id: CollationSessionId) -> Result<()> {
-        tracing::info!(target: tracing_targets::COLLATION_MANAGER,
-            "handle_collator_stopped: {:?}", collation_session_id,
-        );
-        self.collators_to_stop.remove(&collation_session_id);
-        Ok(())
+    fn set_collator(&self, collator: Box<CF::Collator>) -> Result<CollatorState> {
+        match self.active_collators.get_mut(collator.shard_id()) {
+            Some(mut active_collator) => {
+                active_collator.collator = Some(collator);
+                Ok(active_collator.state)
+            }
+            None => bail!(
+                "active_collators does not contain collator state for {}",
+                collator.shard_id(),
+            ),
+        }
+    }
+
+    fn take_collator(&self, shard_id: &ShardIdent) -> Result<Box<CF::Collator>> {
+        match self.active_collators.get_mut(shard_id) {
+            Some(mut active_collator) => match active_collator.collator.take() {
+                Some(collator) => Ok(collator),
+                None => bail!("collator for {} is already extracted", shard_id),
+            },
+            None => bail!("collator for {} not started", shard_id),
+        }
+    }
+
+    fn take_collator_and_set_state<F>(
+        &self,
+        shard_id: &ShardIdent,
+        f: F,
+    ) -> Result<Box<CF::Collator>>
+    where
+        F: Fn(&mut ActiveCollator<Box<CF::Collator>>),
+    {
+        match self.active_collators.get_mut(shard_id) {
+            Some(mut active_collator) => {
+                let collator = match active_collator.collator.take() {
+                    Some(collator) => Ok(collator),
+                    None => bail!("collator for {} is already extracted", shard_id),
+                };
+                f(&mut active_collator);
+                collator
+            }
+            None => bail!("collator for {} not started", shard_id),
+        }
     }
 
     fn set_collator_state<F>(&self, shard_id: &ShardIdent, f: F) -> Option<CollatorState>
     where
-        F: Fn(&mut ActiveCollator<Arc<CF::Collator>>),
+        F: Fn(&mut ActiveCollator<Box<CF::Collator>>),
     {
         match self.active_collators.get_mut(shard_id) {
             Some(mut active_collator) => {
@@ -2800,7 +2891,7 @@ where
     ///
     /// Use this method before resuming collation after sync to avoid ambiguous situations.
     /// If any shard has collation status `WaitForMasterStatus` and sync was executed,
-    /// when master collation check was finished first then it will enqueue one more resume for shard,
+    /// when master collation check was finished first then it will run one more resume for shard,
     /// so we will have two parallel collations for shard that will cause panic further.
     fn reset_collation_sync_status(guard: &mut CollationSyncState) {
         for (_, collation_state) in guard.states.iter_mut() {
@@ -3215,23 +3306,14 @@ where
         res
     }
 
-    /// Enqueue master block collation task. Will determine top shard blocks for this collation
-    async fn enqueue_mc_block_collation(
+    /// Run master block collation task. Will determine top shard blocks for this collation
+    async fn run_mc_block_collation(
         &self,
         next_mc_block_id_short: BlockIdShort,
         next_mc_block_chain_time: u64,
         _trigger_block_id_opt: Option<BlockId>,
-    ) -> Result<()> {
-        let _histogram = HistogramGuard::begin("tycho_collator_enqueue_mc_block_collation_time");
-
-        // get masterchain collator if exists
-        let Some(mc_collator) = self
-            .active_collators
-            .get(&ShardIdent::MASTERCHAIN)
-            .map(|r| r.collator.clone())
-        else {
-            bail!("Masterchain collator is not started yet!");
-        };
+    ) -> Result<CollatorJoinTask<CF::Collator>> {
+        let _histogram = HistogramGuard::begin("tycho_collator_run_mc_block_collation_time");
 
         // TODO: How to choose top shard blocks for master block collation when they are collated async and in parallel?
         //      We know the last anchor (An) used in shard (ShA) block that causes master block collation,
@@ -3239,47 +3321,41 @@ where
         //      Or the first from previouses (An-x) that includes externals for that shard (ShB)
         //      if all next including required one ([An-x+1, An]) do not contain externals for shard (ShB).
 
+        // get top shard blocks info that were collated before next master block
         let top_shard_blocks_info = self
             .blocks_cache
             .get_top_shard_blocks_info_for_mc_block(next_mc_block_id_short)?;
 
-        mc_collator
-            .enqueue_do_collate(top_shard_blocks_info, next_mc_block_chain_time)
-            .await?;
+        // get masterchain collator if exists
+        let mc_collator = self.take_collator(&ShardIdent::MASTERCHAIN)?;
 
         tracing::info!(target: tracing_targets::COLLATION_MANAGER,
-            "Master block collation enqueued: (block_id={} ct={})",
+            "Master block collation started: (block_id={} ct={})",
             next_mc_block_id_short,
             next_mc_block_chain_time,
         );
 
-        Ok(())
+        Ok(JoinTask::new(mc_collator.do_collate(
+            top_shard_blocks_info,
+            next_mc_block_chain_time,
+        )))
     }
 
-    async fn enqueue_try_collate(&self, shard_id: &ShardIdent) -> Result<()> {
+    /// Run next shard block collation attempt
+    async fn run_try_collate(
+        &self,
+        shard_id: &ShardIdent,
+    ) -> Result<CollatorJoinTask<CF::Collator>> {
         // get collator if exists
-        let Some(collator) = self
-            .active_collators
-            .get(shard_id)
-            .map(|r| r.collator.clone())
-        else {
-            tracing::warn!(
-                target: tracing_targets::COLLATION_MANAGER,
-                "Node does not collate blocks for shard {}",
-                shard_id,
-            );
-            return Ok(());
-        };
-
-        collator.enqueue_try_collate().await?;
+        let collator = self.take_collator(shard_id)?;
 
         tracing::info!(
             target: tracing_targets::COLLATION_MANAGER,
-            "Enqueued next attempt to collate block for shard {}",
+            "Started next attempt to collate block for shard {}",
             shard_id,
         );
 
-        Ok(())
+        Ok(JoinTask::new(collator.try_collate()))
     }
 
     /// Process validated block
@@ -3534,6 +3610,20 @@ where
 
         // unable to load related shard blocks info, return None
         Ok(None)
+    }
+}
+
+struct HandleBlockCandidateResult<C: Collator> {
+    validator_task: Option<ValidatorJoinTask>,
+    collator_tasks: Vec<CollatorJoinTask<C>>,
+}
+
+impl<C: Collator> HandleBlockCandidateResult<C> {
+    fn empty() -> Self {
+        Self {
+            validator_task: None,
+            collator_tasks: vec![],
+        }
     }
 }
 

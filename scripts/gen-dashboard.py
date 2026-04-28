@@ -2583,8 +2583,8 @@ def collator_core_operations_metrics() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_do_collate_handle_block_candidate_time_high",
-            "Handle block candidate",
+            "tycho_do_collate_prepare_working_state_update_time_high",
+            "Prepare working state update",
             labels=['workchain=~"$workchain"'],
         ),
     ]
@@ -2614,8 +2614,8 @@ def collator_misc_operations_metrics() -> RowPanel:
             "Detect next collation step",
         ),
         create_heatmap_panel(
-            "tycho_collator_enqueue_mc_block_collation_time",
-            "Enqueue master block collation",
+            "tycho_collator_run_mc_block_collation_time",
+            "Run master block collation",
         ),
         create_heatmap_panel(
             "tycho_collator_handle_validated_master_block_time",
