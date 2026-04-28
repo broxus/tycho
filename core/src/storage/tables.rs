@@ -133,6 +133,10 @@ impl ColumnFamilyOptions<TableContext> for FullBlockIds {
 /// - Value: `[u8; 32] (state root hash)`
 pub struct ShardStates;
 
+impl ShardStates {
+    pub const KEY_LEN: usize = 4 + 8 + 4 + 32 + 32;
+}
+
 impl ColumnFamily for ShardStates {
     const NAME: &'static str = "shard_states";
 }
