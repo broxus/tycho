@@ -7,6 +7,8 @@ use tycho_types::models::StdAddr;
 use tycho_util::config::PartialConfig;
 use tycho_util::serde_helpers;
 
+use crate::endpoint::RpcRateLimitsConfig;
+
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize, PartialConfig)]
 #[serde(default)]
 pub struct RpcConfig {
@@ -42,6 +44,11 @@ pub struct RpcConfig {
 
     /// Subscriptions limits and buffering.
     pub subscriptions: SubscriptionsConfig,
+
+    /// Rate limits for inbound RPC requests.
+    ///
+    /// Default: enabled.
+    pub rate_limits: Option<RpcRateLimitsConfig>,
 
     #[important]
     pub storage: RpcStorageConfig,
@@ -146,6 +153,7 @@ impl Default for RpcConfig {
             max_parallel_block_downloads: 10,
             run_get_method: RunGetMethodConfig::default(),
             subscriptions: SubscriptionsConfig::default(),
+            rate_limits: Some(RpcRateLimitsConfig::default()),
             storage: RpcStorageConfig::Full {
                 gc: Some(Default::default()),
                 force_reindex: false,

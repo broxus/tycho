@@ -1,14 +1,14 @@
 use std::hash::Hash;
 use std::num::NonZeroU32;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-use crate::{FastDashMap, FastHashMap, serde_helpers};
+use crate::{FastDashMap, FastHashMap, serde_helpers, time};
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenBucketConfig {
     pub rate_per_sec: NonZeroU32,
     pub burst: NonZeroU32,
@@ -23,7 +23,7 @@ impl TokenBucketConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RateLimitConfig {
     pub rejects_before_cooldown: u8,
@@ -74,7 +74,7 @@ where
 {
     config: RateLimitConfig,
     states: FastDashMap<K, PeerState<C>>,
-    last_prune: Mutex<Instant>,
+    last_prune_ms: AtomicU64,
 }
 
 impl<K, C> RateLimiter<K, C>
@@ -87,7 +87,7 @@ where
             inner: Arc::new(RateLimiterInner {
                 config,
                 states: FastDashMap::default(),
-                last_prune: Mutex::new(Instant::now()),
+                last_prune_ms: AtomicU64::new(time::now_millis()),
             }),
         }
     }
@@ -145,14 +145,20 @@ where
     }
 
     fn maybe_prune(&self, now: Instant) {
-        let mut last_prune = self.last_prune.lock();
-        if now.duration_since(*last_prune) < self.config.prune_interval {
+        let now_ms = crate::time::now_millis();
+        let last_ms = self.last_prune_ms.load(Ordering::Relaxed);
+
+        if now_ms.saturating_sub(last_ms) < self.config.prune_interval.as_millis() as u64 {
             return;
         }
-        *last_prune = now;
-        drop(last_prune);
 
-        self.prune_expired(now);
+        if self
+            .last_prune_ms
+            .compare_exchange(last_ms, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            self.prune_expired(now);
+        }
     }
 
     fn register_rejection(

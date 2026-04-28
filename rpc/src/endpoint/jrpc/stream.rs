@@ -1,8 +1,9 @@
 use std::convert::Infallible;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::anyhow;
-use axum::extract::{FromRef, Query, State};
+use axum::extract::{ConnectInfo, FromRef, Query, Request, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
@@ -16,6 +17,7 @@ use tycho_util::serde_helpers;
 use uuid::Uuid;
 
 use super::RpcStateError;
+use crate::endpoint::rate_limits::{ActiveStreamGuard, ActiveStreamLimiter};
 use crate::state::{AccountUpdate, McTick, RegisterError, RpcState, RpcSubscriptions};
 
 #[derive(Debug, Deserialize)]
@@ -136,6 +138,8 @@ struct StreamState {
     subs: Arc<RpcSubscriptions>,
     last_dropped: u64,
     mc_rx: watch::Receiver<McTick>,
+    // Keeps stream slot occupied until the SSE connection is dropped.
+    _stream_guard: ActiveStreamGuard,
 }
 
 impl Drop for StreamState {
@@ -150,6 +154,7 @@ impl StreamState {
         rx: mpsc::Receiver<AccountUpdate>,
         subs: Arc<RpcSubscriptions>,
         mc_rx: watch::Receiver<McTick>,
+        stream_guard: ActiveStreamGuard,
     ) -> Self {
         let last_dropped = subs.dropped(uuid).unwrap_or(0);
 
@@ -159,6 +164,7 @@ impl StreamState {
             subs,
             last_dropped,
             mc_rx,
+            _stream_guard: stream_guard,
         }
     }
 
@@ -191,6 +197,7 @@ where
 pub async fn stream_route<S>(
     State(state): State<RpcState>,
     Query(params): Query<StreamParams>,
+    req: Request,
 ) -> Response
 where
     RpcState: FromRef<S>,
@@ -199,13 +206,28 @@ where
     let subs = Arc::<RpcSubscriptions>::from_ref(&state);
     let mc_rx = state.subscribe_mc_tick();
 
-    stream_route_inner(subs, mc_rx, params).await
+    let active_streams = req
+        .extensions()
+        .get::<ActiveStreamLimiter>()
+        .expect("ActiveStreamLimiter must be in extensions");
+
+    let ConnectInfo(addr) = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .expect("ConnectInfo must be in extensions");
+
+    let Some(stream_guard) = active_streams.try_acquire(addr.ip()) else {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    };
+
+    stream_route_inner(subs, mc_rx, params, stream_guard).await
 }
 
 async fn stream_route_inner(
     subs: Arc<RpcSubscriptions>,
     mc_rx: watch::Receiver<McTick>,
     params: StreamParams,
+    stream_guard: ActiveStreamGuard,
 ) -> Response {
     use axum::Json;
 
@@ -259,7 +281,7 @@ async fn stream_route_inner(
     });
 
     let main_stream = stream::unfold(
-        StreamState::new(uuid, rx, subs, mc_rx),
+        StreamState::new(uuid, rx, subs, mc_rx, stream_guard),
         |mut st| async move {
             tokio::select! {
                 maybe_update = st.rx.recv() => {
@@ -307,6 +329,7 @@ async fn stream_route_inner(
 #[cfg(test)]
 mod tests {
     use std::fmt::Debug;
+    use std::net::{IpAddr, Ipv4Addr};
     use std::str::FromStr;
     use std::time::Duration;
 
@@ -397,8 +420,18 @@ mod tests {
             utime: 0,
         });
 
-        let response =
-            stream_route_inner(subs.clone(), mc_rx, StreamParams { binary: false }).await;
+        let active_streams = ActiveStreamLimiter::default();
+        let stream_guard = active_streams
+            .try_acquire(IpAddr::V4(Ipv4Addr::LOCALHOST))
+            .expect("stream slot");
+
+        let response = stream_route_inner(
+            subs.clone(),
+            mc_rx,
+            StreamParams { binary: false },
+            stream_guard,
+        )
+        .await;
 
         let mut body = response.into_body();
         let mut buf = Vec::new();
