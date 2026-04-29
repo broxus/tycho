@@ -93,6 +93,15 @@ impl MempoolAdapterFactory for Arc<dyn MempoolAdapter> {
     }
 }
 
+impl<T> MempoolAdapterFactory for Arc<T>
+where
+    T: MempoolAdapter + 'static,
+{
+    fn create(self) -> Arc<dyn MempoolAdapter> {
+        self
+    }
+}
+
 // === Types ===
 
 pub type MempoolAnchorId = u32;
