@@ -313,7 +313,7 @@ impl CollatorStdImpl {
 
     // Initialize collator working state then run collation
     #[tracing::instrument(skip_all, fields(next_block_id = %self.next_block_info))]
-    pub async fn init_collator(
+    async fn init_collator(
         &mut self,
         prev_blocks_ids: Vec<BlockId>,
         mc_data: Arc<McData>,

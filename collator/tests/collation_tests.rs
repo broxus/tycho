@@ -9,7 +9,7 @@ use tycho_block_util::block::BlockIdRelation;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_collator::collator::CollatorStdImplFactory;
 use tycho_collator::internal_queue::types::message::EnqueuedMessage;
-use tycho_collator::manager::CollationManager;
+use tycho_collator::manager::{CollationManager, RunningCollationManager};
 use tycho_collator::mempool::{DumpedAnchor, MempoolAdapterStubImpl};
 use tycho_collator::queue_adapter::MessageQueueAdapter;
 use tycho_collator::state_node::{CollatorSyncContext, StateNodeAdapter, StateNodeAdapterStdImpl};
@@ -138,9 +138,6 @@ impl BlockProvider for CollatorBlockProvider {
     }
 }
 
-type CollationManagerHandle =
-    tycho_collator::manager::RunningCollationManager<CollatorStdImplFactory, ValidatorStub>;
-
 #[allow(unused)]
 struct DumpCollationContext {
     storage: CoreStorage,
@@ -216,7 +213,7 @@ async fn load_dump_collation_context(
 fn start_collation_manager(
     ctx: &DumpCollationContext,
     dumped_anchors: Vec<DumpedAnchor>,
-) -> CollationManagerHandle {
+) -> RunningCollationManager {
     let validator = ValidatorStub {};
 
     CollationManager::start(
@@ -295,7 +292,7 @@ async fn start_collation(
     block_id_to_handle: BlockIdShort,
 ) -> Result<(
     impl std::future::Future<Output = Result<()>>,
-    CollationManagerHandle,
+    RunningCollationManager,
     tokio::sync::mpsc::Receiver<Vec<BlockIdShort>>,
 )> {
     let (engine_stop_tx, engine_stop_rx) = tokio::sync::mpsc::channel(1);

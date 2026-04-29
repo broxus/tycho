@@ -48,8 +48,8 @@ use crate::types::processed_upto::{
     BlockSeqno, ProcessedUptoInfoExtension, ProcessedUptoInfoStuff, find_min_processed_to_by_shards,
 };
 use crate::types::{
-    BlockCollationResult, BlockIdExt, CollationSessionId, CollationSessionInfo, CollatorConfig,
-    DebugIter, DisplayAsShortId, DisplayBlockIdsIntoIter, McData, ProcessedToByPartitions,
+    BlockCollationResult, BlockIdExt, CollationSessionInfo, CollatorConfig, DebugIter,
+    DisplayAsShortId, DisplayBlockIdsIntoIter, McData, ProcessedToByPartitions,
     ShardDescriptionShort, ShardDescriptionShortExt, ShardHashesExt, TopBlockId, TopBlockIdUpdated,
 };
 use crate::utils::block::detect_top_processed_to_anchor;
@@ -73,21 +73,11 @@ pub struct RunningCollationManager {
     cancel_async_tasks: CancellationToken,
     main_flow_handle: tokio::task::JoinHandle<Result<()>>,
     state_node_adapter: Arc<dyn StateNodeAdapter>,
-    mpool_adapter: Arc<dyn MempoolAdapter>,
-    mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
 }
 
 impl RunningCollationManager {
     pub fn state_node_adapter(&self) -> &Arc<dyn StateNodeAdapter> {
         &self.state_node_adapter
-    }
-
-    pub fn mpool_adapter(&self) -> &Arc<dyn MempoolAdapter> {
-        &self.mpool_adapter
-    }
-
-    pub fn mq_adapter(&self) -> &Arc<dyn MessageQueueAdapter<EnqueuedMessage>> {
-        &self.mq_adapter
     }
 
     pub async fn wait_main_flow(&mut self) {
@@ -136,7 +126,6 @@ where
     cancel_validation_runner: Mutex<CancelValidationRunnerState>,
 
     active_collation_sessions: RwLock<FastHashMap<ShardIdent, Arc<CollationSessionInfo>>>,
-    collation_sessions_to_finish: FastDashMap<CollationSessionId, Arc<CollationSessionInfo>>,
     active_collators: FastDashMap<ShardIdent, ActiveCollator<Box<CF::Collator>>>,
 
     blocks_cache: BlocksCache,
@@ -162,7 +151,7 @@ where
     cancel_async_tasks: CancellationToken,
 }
 
-pub fn metrics_report_last_applied_block_and_anchor(
+fn metrics_report_last_applied_block_and_anchor(
     state: &ShardStateStuff,
     processed_upto: &ProcessedUptoInfo,
 ) -> Result<()> {
@@ -228,8 +217,8 @@ where
             config: Arc::new(config),
 
             state_node_adapter: state_node_adapter.clone(),
-            mpool_adapter: mpool_adapter.clone(),
-            mq_adapter: mq_adapter.clone(),
+            mpool_adapter,
+            mq_adapter,
 
             collator_factory,
 
@@ -237,7 +226,6 @@ where
             cancel_validation_runner: Default::default(),
 
             active_collation_sessions: Default::default(),
-            collation_sessions_to_finish: Default::default(),
             active_collators: Default::default(),
 
             blocks_cache,
@@ -274,8 +262,6 @@ where
             cancel_async_tasks,
             main_flow_handle,
             state_node_adapter,
-            mpool_adapter,
-            mq_adapter,
         }
     }
 
@@ -1197,7 +1183,7 @@ where
     /// Finish active sync if it is not finished yet
     /// and enqueue received block
     #[tracing::instrument(skip_all, fields(block_id = %ctx.state.block_id().as_short_id()))]
-    pub async fn enqueue_handle_block_from_bc(&self, ctx: HandledBlockFromBcCtx) -> Result<()> {
+    async fn enqueue_handle_block_from_bc(&self, ctx: HandledBlockFromBcCtx) -> Result<()> {
         // TODO: Needs to redesign the task management logic.
         //      Current implementation with strange semaphores
         //      is unclear and may be confusing.
@@ -2344,8 +2330,7 @@ where
         mc_data: Arc<McData>,
         reset_collators: bool,
     ) -> Result<Vec<CollatorJoinTask<CF::Collator>>> {
-        tracing::debug!(
-            target: tracing_targets::COLLATION_MANAGER,
+        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
             "Start refresh collation sessions by mc state ({})...",
             mc_data.block_id.as_short_id(),
         );
@@ -2371,29 +2356,8 @@ where
             new_shards_info.insert(*shard_id, vec![top_block_id]);
         }
 
-        // update shards in msgs queue
-        let active_shards_ids: Vec<_> = self
-            .active_collation_sessions
-            .read()
-            .keys()
-            .cloned()
-            .collect();
-        let new_shards_ids: Vec<&ShardIdent> = new_shards_info.keys().collect();
-        tracing::debug!(
-            target: tracing_targets::COLLATION_MANAGER,
-            "Detecting split/merge actions to move from current shards {:?} to new shards {:?}...",
-            active_shards_ids.as_slice(),
-            new_shards_ids
-        );
-
-        let split_merge_actions = calc_split_merge_actions(&active_shards_ids, new_shards_ids)?;
-        if !split_merge_actions.is_empty() {
-            tracing::info!(
-                target: tracing_targets::COLLATION_MANAGER,
-                "Detected split/merge actions: {:?}",
-                split_merge_actions,
-            );
-        }
+        // apply split/merge actions
+        self.apply_split_merge_actions(&new_shards_info)?;
 
         // find out the actual collation session start round from master state
         let current_session_seqno = mc_data.validator_info.catchain_seqno;
@@ -2441,7 +2405,8 @@ where
         let mut to_stop_collators = Vec::new();
         {
             let mut active_collation_sessions_guard = self.active_collation_sessions.write();
-            let mut missed_shards_ids: FastHashSet<_> = active_shards_ids.into_iter().collect();
+            let mut missed_shards_ids: FastHashSet<_> =
+                active_collation_sessions_guard.keys().cloned().collect();
             for (shard_id, block_ids) in new_shards_info {
                 missed_shards_ids.remove(&shard_id);
 
@@ -2645,34 +2610,19 @@ where
             collator_tasks.push(resume_collation_task);
         }
 
+        // finish outdated collation sessions
         if !to_finish_sessions.is_empty() {
-            tracing::info!(
-                target: tracing_targets::COLLATION_MANAGER,
+            tracing::info!(target: tracing_targets::COLLATION_MANAGER,
                 "Will finish outdated collation sessions: {:?}",
                 DebugIter(to_finish_sessions.iter().map(|s| s.id())),
             );
         }
 
-        // TODO: remove unnecessary operations
-        // enqueue outdated sessions finish tasks
-        for session_info in to_finish_sessions {
-            self.collation_sessions_to_finish
-                .insert(session_info.id(), session_info.clone());
-            self.finish_collation_session(session_info)?;
-        }
-
-        // TODO: remove unnecessary operations
         // stop dangling collators
         if !to_stop_collators.is_empty() {
-            tracing::info!(
-                target: tracing_targets::COLLATION_MANAGER,
+            tracing::info!(target: tracing_targets::COLLATION_MANAGER,
                 "Will stop collators for sessions that we do not serve: {:?}",
                 DebugIter(to_stop_collators.iter().map(|(s, _)| s.id())),
-            );
-        }
-        for (session_info, _active_collator) in to_stop_collators {
-            tracing::info!(target: tracing_targets::COLLATION_MANAGER,
-                "collator stopped for session: {:?}", session_info.id(),
             );
         }
 
@@ -2682,16 +2632,32 @@ where
         // and `active_collators` which run async block collations processes
     }
 
-    /// Execute collation session finalization routines
-    pub fn finish_collation_session(
+    fn apply_split_merge_actions(
         &self,
-        collation_session: Arc<CollationSessionInfo>,
+        new_shards_info: &FastHashMap<ShardIdent, Vec<BlockId>>,
     ) -> Result<()> {
-        tracing::info!(target: tracing_targets::COLLATION_MANAGER,
-            "finish_collation_session: {:?}", collation_session.id(),
+        let active_shards_ids: Vec<_> = self
+            .active_collation_sessions
+            .read()
+            .keys()
+            .cloned()
+            .collect();
+        let new_shards_ids: Vec<&ShardIdent> = new_shards_info.keys().collect();
+
+        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+            "Detecting split/merge actions to move from current shards {:?} to new shards {:?}...",
+            active_shards_ids.as_slice(),
+            new_shards_ids.as_slice(),
         );
-        self.collation_sessions_to_finish
-            .remove(&collation_session.id());
+
+        let split_merge_actions = calc_split_merge_actions(&active_shards_ids, new_shards_ids)?;
+        if !split_merge_actions.is_empty() {
+            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                "Detected split/merge actions: {:?}",
+                split_merge_actions,
+            );
+        }
+
         Ok(())
     }
 
@@ -2709,13 +2675,7 @@ where
     }
 
     fn take_collator(&self, shard_id: &ShardIdent) -> Result<Box<CF::Collator>> {
-        match self.active_collators.get_mut(shard_id) {
-            Some(mut active_collator) => match active_collator.collator.take() {
-                Some(collator) => Ok(collator),
-                None => bail!("collator for {} is already extracted", shard_id),
-            },
-            None => bail!("collator for {} not started", shard_id),
-        }
+        self.take_collator_and_set_state(shard_id, |_| {})
     }
 
     fn take_collator_and_set_state<F>(
@@ -3339,7 +3299,7 @@ where
     /// 2. Update block in cache with validation info
     /// 2. Execute processing for master or shard block
     #[tracing::instrument(skip_all, fields(block_id = %block_id.as_short_id()))]
-    pub async fn handle_validated_master_block(
+    async fn handle_validated_master_block(
         &self,
         block_id: BlockId,
         status: ValidationStatus,
@@ -3639,7 +3599,7 @@ struct DetectNextCollationStepContext {
 }
 
 impl DetectNextCollationStepContext {
-    pub fn new(
+    fn new(
         last_imported_anchor_ct: u64,
         force_mc_block: ForceMasterCollation,
         mc_block_min_interval_ms: u64,

@@ -21,12 +21,12 @@ pub enum StateEvent {
     },
 }
 
-pub struct ChannelStateEventListener {
+pub(super) struct ChannelStateEventListener {
     sender: mpsc::Sender<StateEvent>,
 }
 
 impl ChannelStateEventListener {
-    pub fn build(buffer: usize) -> (Arc<Self>, mpsc::Receiver<StateEvent>) {
+    pub(super) fn build(buffer: usize) -> (Arc<Self>, mpsc::Receiver<StateEvent>) {
         let (sender, receiver) = mpsc::channel(buffer);
 
         (Arc::new(Self { sender }), receiver)
