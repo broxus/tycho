@@ -144,9 +144,6 @@ where
     /// Queue of received blocks from bc
     blocks_from_bc_queue_sender: tokio::sync::mpsc::Sender<HandledBlockFromBcCtx>,
 
-    /// Used to sync tasks that may cause `sync_to_applied_mc_block`
-    ready_to_sync: Arc<Notify>,
-
     /// block id of last processed master state (after collation or on sync)
     last_processed_mc_block_id: Arc<Mutex<Option<BlockId>>>,
 
@@ -222,9 +219,6 @@ where
         let (blocks_from_bc_queue_sender, blocks_from_bc_queue_receiver) =
             tokio::sync::mpsc::channel::<HandledBlockFromBcCtx>(BLOCKS_FROM_BC_QUEUE_LIMIT);
 
-        let ready_to_sync = Arc::new(Notify::new());
-        ready_to_sync.notify_one();
-
         let blocks_cache = BlocksCache::new(state_node_adapter.zerostate_id());
 
         let cancel_async_tasks = CancellationToken::new();
@@ -249,8 +243,6 @@ where
             blocks_cache,
 
             blocks_from_bc_queue_sender,
-
-            ready_to_sync,
 
             last_processed_mc_block_id: Default::default(),
 
@@ -689,10 +681,6 @@ where
             | CollationCancelReason::NextAnchorNotFound(_)
             | CollationCancelReason::ExternalCancel
             | CollationCancelReason::DiffNotFoundInQueue(_) => {
-                // sync cache and collator state access
-                self.ready_to_sync.notified().await;
-                scopeguard::defer!(self.ready_to_sync.notify_one());
-
                 // mark collator as cancelled
                 self.set_collator_state(&next_block_id_short.shard, |ac| {
                     ac.state = CollatorState::Cancelled;
@@ -735,10 +723,6 @@ where
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
             "will run next collation step",
         );
-
-        // sync cache and collator state access
-        self.ready_to_sync.notified().await;
-        scopeguard::defer!(self.ready_to_sync.notify_one());
 
         // cancel collator if cancel was requested during active collation try
         let updated_collator_state = self.set_collator_state(&next_block_id_short.shard, |ac| {
@@ -878,10 +862,6 @@ where
             block_id.is_masterchain(),
             collation_result.mc_data.is_some(),
         );
-
-        // sync cache and collator state access
-        self.ready_to_sync.notified().await;
-        scopeguard::defer!(self.ready_to_sync.notify_one());
 
         // find collation session related to this block by session id
         let session_info = match self
@@ -1301,10 +1281,6 @@ where
         debug_assert!(!block_id.is_masterchain() || block_id == ctx.mc_block_id);
 
         let _histogram = HistogramGuard::begin("tycho_collator_handle_block_from_bc_time");
-
-        // sync cache and collator state access
-        self.ready_to_sync.notified().await;
-        scopeguard::defer!(self.ready_to_sync.notify_one());
 
         let processed_upto = ProcessedUptoInfoStuff::try_from(ctx.processed_upto)?;
 
@@ -3384,12 +3360,8 @@ where
             return Ok(());
         }
 
-        self.ready_to_sync.notified().await;
-
         // process valid block
         self.commit_valid_master_block(&block_id).await?;
-
-        self.ready_to_sync.notify_one();
 
         Ok(())
     }
