@@ -1,9 +1,10 @@
 use std::hash::Hash;
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use tycho_util::rate_limit::{RateLimitConfig, RateLimitPolicy, RateLimitVerdict, RateLimiter};
 
-use crate::types::{PeerId, ServiceRequest};
+use crate::types::ServiceRequest;
 
 pub enum OverlayIngressPolicyDecision<C> {
     Allow(RateLimitPolicy<C>),
@@ -34,7 +35,8 @@ struct PolicyRateLimiter<P>
 where
     P: PublicOverlayRateLimitPolicy,
 {
-    limiter: RateLimiter<PeerId, P::Class>,
+    // TODO: normalize IPv6 -> /64
+    limiter: RateLimiter<IpAddr, P::Class>,
     policy: P,
 }
 
@@ -65,11 +67,17 @@ where
     P: PublicOverlayRateLimitPolicy,
 {
     fn allow_query(&self, req: &ServiceRequest) -> bool {
-        self.check(&req.metadata.peer_id, self.policy.classify_query(req))
+        self.check(
+            req.metadata.remote_address.ip(),
+            self.policy.classify_query(req),
+        )
     }
 
     fn allow_message(&self, req: &ServiceRequest) -> bool {
-        self.check(&req.metadata.peer_id, self.policy.classify_message(req))
+        self.check(
+            req.metadata.remote_address.ip(),
+            self.policy.classify_message(req),
+        )
     }
 }
 
@@ -77,10 +85,10 @@ impl<P> PolicyRateLimiter<P>
 where
     P: PublicOverlayRateLimitPolicy,
 {
-    fn check(&self, peer_id: &PeerId, decision: OverlayIngressPolicyDecision<P::Class>) -> bool {
+    fn check(&self, ip: IpAddr, decision: OverlayIngressPolicyDecision<P::Class>) -> bool {
         match decision {
             OverlayIngressPolicyDecision::Allow(policy) => {
-                matches!(self.limiter.check(peer_id, policy), RateLimitVerdict::Allow)
+                matches!(self.limiter.check(&ip, policy), RateLimitVerdict::Allow)
             }
             OverlayIngressPolicyDecision::Bypass => true,
             OverlayIngressPolicyDecision::Drop => false,
