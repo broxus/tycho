@@ -644,6 +644,15 @@ impl CollatorStdImpl {
         let histogram =
             HistogramGuard::begin_with_labels("tycho_collator_resume_collation_time_high", &labels);
 
+        // HACK: slowdown collation resume when special flag is activated
+        if let Some(slowdown_ms) = self.config.slowdown_resume_collation_ms {
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                "HACK: slowdown collation resume on {} ms",
+                slowdown_ms,
+            );
+            tokio::time::sleep(Duration::from_millis(slowdown_ms)).await;
+        }
+
         // update collation session info to refer to a correct subset in collated block
         self.collation_session = collation_session;
 

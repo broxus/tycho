@@ -35,6 +35,7 @@ use crate::internal_queue::types::message::{EnqueuedMessage, InternalMessageValu
 use crate::internal_queue::types::router::PartitionRouter;
 use crate::internal_queue::types::stats::DiffStatistics;
 use crate::manager::blocks_cache::BlocksCache;
+use crate::manager::msgs_queue::RestoreQueueContext;
 use crate::manager::state_update_handler::GlobalCapabilitiesExt;
 use crate::manager::sync::ShouldSyncToAppliedMcBlock;
 use crate::manager::types::{
@@ -2481,15 +2482,16 @@ async fn test_queue_restore_on_sync() {
         "queue_diffs_applied_to_top_blocks: {:?}",
         queue_diffs_applied_to_top_blocks,
     );
-    let queue_restore_res = TestCollationManager::restore_queue(
-        &test_adapter.blocks_cache,
-        test_adapter.state_adapter.clone(),
-        test_adapter.mq_adapter.clone(),
-        first_applied_mc_block_key.seqno,
+    let queue_restore_res = TestCollationManager::restore_queue(RestoreQueueContext {
+        blocks_cache: &test_adapter.blocks_cache,
+        state_node_adapter: test_adapter.state_adapter.clone(),
+        mq_adapter: test_adapter.mq_adapter.clone(),
+        from_mc_block_seqno: first_applied_mc_block_key.seqno,
         min_processed_to_by_shards,
         before_tail_block_ids,
-        queue_diffs_applied_to_top_blocks.unwrap_or_default(),
-    )
+        queue_diffs_applied_to_top_blocks: queue_diffs_applied_to_top_blocks.unwrap_or_default(),
+        slowdown_restore_queue_ms: None,
+    })
     .await
     .unwrap();
 
@@ -2893,15 +2895,16 @@ async fn test_queue_restore_on_sync() {
         "queue_diffs_applied_to_top_blocks: {:?}",
         queue_diffs_applied_to_top_blocks,
     );
-    let queue_restore_res = TestCollationManager::restore_queue(
-        &test_adapter.blocks_cache,
-        test_adapter.state_adapter.clone(),
-        test_adapter.mq_adapter.clone(),
-        first_applied_mc_block_key.seqno,
+    let queue_restore_res = TestCollationManager::restore_queue(RestoreQueueContext {
+        blocks_cache: &test_adapter.blocks_cache,
+        state_node_adapter: test_adapter.state_adapter.clone(),
+        mq_adapter: test_adapter.mq_adapter.clone(),
+        from_mc_block_seqno: first_applied_mc_block_key.seqno,
         min_processed_to_by_shards,
         before_tail_block_ids,
-        queue_diffs_applied_to_top_blocks.unwrap_or_default(),
-    )
+        queue_diffs_applied_to_top_blocks: queue_diffs_applied_to_top_blocks.unwrap_or_default(),
+        slowdown_restore_queue_ms: None,
+    })
     .await
     .unwrap();
 
@@ -3221,15 +3224,16 @@ async fn test_queue_restore_on_sync() {
         "queue_diffs_applied_to_top_blocks: {:?}",
         queue_diffs_applied_to_top_blocks,
     );
-    let queue_restore_res = TestCollationManager::restore_queue(
-        &test_adapter.blocks_cache,
-        test_adapter.state_adapter.clone(),
-        test_adapter.mq_adapter.clone(),
-        first_applied_mc_block_key.seqno,
+    let queue_restore_res = TestCollationManager::restore_queue(RestoreQueueContext {
+        blocks_cache: &test_adapter.blocks_cache,
+        state_node_adapter: test_adapter.state_adapter.clone(),
+        mq_adapter: test_adapter.mq_adapter.clone(),
+        from_mc_block_seqno: first_applied_mc_block_key.seqno,
         min_processed_to_by_shards,
         before_tail_block_ids,
-        queue_diffs_applied_to_top_blocks.unwrap_or_default(),
-    )
+        queue_diffs_applied_to_top_blocks: queue_diffs_applied_to_top_blocks.unwrap_or_default(),
+        slowdown_restore_queue_ms: None,
+    })
     .await
     .unwrap();
 
@@ -3561,15 +3565,16 @@ async fn test_queue_restore_on_sync() {
         "queue_diffs_applied_to_top_blocks: {:?}",
         queue_diffs_applied_to_top_blocks,
     );
-    let queue_restore_res = TestCollationManager::restore_queue(
-        &test_adapter.blocks_cache,
-        test_adapter.state_adapter.clone(),
-        test_adapter.mq_adapter.clone(),
-        first_applied_mc_block_key.seqno,
+    let queue_restore_res = TestCollationManager::restore_queue(RestoreQueueContext {
+        blocks_cache: &test_adapter.blocks_cache,
+        state_node_adapter: test_adapter.state_adapter.clone(),
+        mq_adapter: test_adapter.mq_adapter.clone(),
+        from_mc_block_seqno: first_applied_mc_block_key.seqno,
         min_processed_to_by_shards,
         before_tail_block_ids,
-        queue_diffs_applied_to_top_blocks.unwrap_or_default(),
-    )
+        queue_diffs_applied_to_top_blocks: queue_diffs_applied_to_top_blocks.unwrap_or_default(),
+        slowdown_restore_queue_ms: None,
+    })
     .await
     .unwrap();
 
