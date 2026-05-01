@@ -27,10 +27,10 @@ use self::cancel_validation_runner::CancelValidationRunnerState;
 use self::state_event_listener::{ChannelStateEventListener, StateEvent};
 use self::types::{
     ActiveCollator, ActiveSync, BlockCacheEntry, BlockCacheEntryData, BlockCacheKey,
-    BlockCacheStoreResult, CandidateStatus, CollatedBlockInfo, CollationState, CollationStatus,
-    CollationSyncState, CollatorJoinTask, CollatorState, HandledBlockFromBcCtx,
-    ImportedAnchorEvent, McBlockSubgraph, McBlockSubgraphExtract, NextCollationStep,
-    ValidatorJoinTask,
+    BlockCacheStoreResult, BlockCacheStoreSource, CandidateStatus, CollatedBlockInfo,
+    CollationState, CollationStatus, CollationSyncState, CollatorJoinTask, CollatorState,
+    HandledBlockFromBcCtx, ImportedAnchorEvent, McBlockSubgraph, McBlockSubgraphExtract,
+    NextCollationStep, ValidatorJoinTask,
 };
 use self::utils::find_us_in_collators_set;
 use crate::collator::{
@@ -821,6 +821,52 @@ where
         Ok(collator_tasks)
     }
 
+    fn handle_block_mismatch(
+        &self,
+        block_id: &BlockId,
+        store_src: BlockCacheStoreSource,
+    ) -> Result<()> {
+        let labels = [("workchain", block_id.shard.workchain().to_string())];
+        metrics::counter!("tycho_collator_block_mismatch_count", &labels).increment(1);
+
+        match store_src {
+            BlockCacheStoreSource::Collated => {
+                self.set_collator_state(&block_id.shard, |ac| ac.state = CollatorState::Cancelled);
+            }
+            BlockCacheStoreSource::Received => {
+                // now we cannot cancel active collation directly
+                // so we mark collators to be cancelled when they finish current active collation
+                self.set_collator_state(&block_id.shard, |ac| {
+                    ac.state = match ac.state {
+                        CollatorState::Waiting | CollatorState::Cancelled => {
+                            CollatorState::Cancelled
+                        }
+                        _ => CollatorState::CancelPending,
+                    };
+                });
+            }
+        }
+
+        // when master block mismatched then should cancel shard collators as well
+        if block_id.is_masterchain() {
+            for mut ac in self
+                .active_collators
+                .iter_mut()
+                .filter(|ac| ac.key() != &block_id.shard)
+            {
+                ac.state = match ac.state {
+                    CollatorState::Waiting | CollatorState::Cancelled => CollatorState::Cancelled,
+                    _ => CollatorState::CancelPending,
+                };
+            }
+        }
+
+        let top_shards = self.blocks_cache.get_last_top_shards();
+        self.mq_adapter.clear_uncommitted_state(&top_shards)?;
+
+        Ok(())
+    }
+
     /// Process collated block candidate
     /// 1. Save block to cache
     /// 2. Sync to last applied block from bc if required
@@ -950,33 +996,7 @@ where
             )?;
 
             if store_res.block_mismatch {
-                let labels = [("workchain", block_id.shard.workchain().to_string())];
-                metrics::counter!("tycho_collator_block_mismatch_count", &labels).increment(1);
-
-                self.set_collator_state(&block_id.shard, |ac| ac.state = CollatorState::Cancelled);
-
-                // when master block mismatched then should cancel shard collators as well
-                if block_id.is_masterchain() {
-                    for mut ac in self
-                        .active_collators
-                        .iter_mut()
-                        .filter(|ac| ac.key() != &block_id.shard)
-                    {
-                        // now we cannot cancel active collation directly
-                        // so we mark collators to be cancelled when they finish current active collation
-                        ac.state = match ac.state {
-                            CollatorState::Waiting | CollatorState::Cancelled => {
-                                CollatorState::Cancelled
-                            }
-                            _ => CollatorState::CancelPending,
-                        };
-                    }
-                }
-
-                // we clear uncommitted queue diffs, including one from just collated block
-                // because it is not correct
-                let top_shards = self.blocks_cache.get_last_top_shards();
-                self.mq_adapter.clear_uncommitted_state(&top_shards)?;
+                self.handle_block_mismatch(&block_id, BlockCacheStoreSource::Collated)?;
 
                 tracing::info!(
                     target: tracing_targets::COLLATION_MANAGER,
@@ -1290,40 +1310,7 @@ where
         };
 
         if store_res.block_mismatch {
-            let labels = [("workchain", block_id.shard.workchain().to_string())];
-            metrics::counter!("tycho_collator_block_mismatch_count", &labels).increment(1);
-
-            // now we cannot cancel active collation directly
-            // so we mark collators to be cancelled when they finish current active collation
-            self.set_collator_state(&block_id.shard, |ac| {
-                ac.state = match ac.state {
-                    CollatorState::Waiting | CollatorState::Cancelled => CollatorState::Cancelled,
-                    _ => CollatorState::CancelPending,
-                };
-            });
-
-            // when master block mismatched then should cancel shard collators as well
-            if block_id.is_masterchain() {
-                for mut ac in self
-                    .active_collators
-                    .iter_mut()
-                    .filter(|ac| ac.key() != &block_id.shard)
-                {
-                    ac.state = match ac.state {
-                        CollatorState::Waiting | CollatorState::Cancelled => {
-                            CollatorState::Cancelled
-                        }
-                        _ => CollatorState::CancelPending,
-                    };
-                }
-            }
-
-            // When received blokc mismatches with collated one
-            // then we should clear uncommitted queue diffs.
-            // The queue diff from last collated master and its shard blocks
-            // are uncommitted and will be removed because they are incorrect.
-            let top_shards = self.blocks_cache.get_last_top_shards();
-            self.mq_adapter.clear_uncommitted_state(&top_shards)?;
+            self.handle_block_mismatch(&block_id, BlockCacheStoreSource::Received)?;
 
             tracing::info!(target: tracing_targets::COLLATION_MANAGER,
                 ?store_res,
