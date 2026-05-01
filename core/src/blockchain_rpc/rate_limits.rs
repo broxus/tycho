@@ -1,8 +1,9 @@
+use std::net::IpAddr;
 use std::num::NonZeroU32;
 
 use serde::{Deserialize, Serialize};
 use tycho_network::{
-    OverlayIngressPolicyDecision, PeerId, PublicOverlayRateLimitPolicy, PublicOverlayRateLimiter,
+    OverlayIngressPolicyDecision, PublicOverlayRateLimitPolicy, PublicOverlayRateLimiter,
     ServiceRequest, try_handle_prefix,
 };
 use tycho_util::FastHashSet;
@@ -15,7 +16,7 @@ use crate::proto::overlay;
 #[serde(default)]
 pub struct BlockchainRpcRateLimitsConfig {
     limiter: RateLimitConfig,
-    whitelist: Vec<PeerId>,
+    whitelist: Vec<IpAddr>,
     traffic: BlockchainRpcTrafficLimits,
 }
 
@@ -72,7 +73,7 @@ impl BlockchainRpcTrafficLimits {
 
 struct BlockchainRpcRateLimitPolicy {
     traffic: BlockchainRpcTrafficLimits,
-    whitelist: FastHashSet<PeerId>,
+    whitelist: FastHashSet<IpAddr>,
 }
 
 impl BlockchainRpcRateLimitPolicy {
@@ -91,7 +92,7 @@ impl PublicOverlayRateLimitPolicy for BlockchainRpcRateLimitPolicy {
     type Class = BlockchainRpcTrafficClass;
 
     fn classify_query(&self, req: &ServiceRequest) -> OverlayIngressPolicyDecision<Self::Class> {
-        if self.whitelist.contains(&req.metadata.peer_id) {
+        if self.whitelist.contains(&req.metadata.remote_address.ip()) {
             return OverlayIngressPolicyDecision::Bypass;
         }
 
@@ -108,7 +109,7 @@ impl PublicOverlayRateLimitPolicy for BlockchainRpcRateLimitPolicy {
     }
 
     fn classify_message(&self, req: &ServiceRequest) -> OverlayIngressPolicyDecision<Self::Class> {
-        if self.whitelist.contains(&req.metadata.peer_id) {
+        if self.whitelist.contains(&req.metadata.remote_address.ip()) {
             OverlayIngressPolicyDecision::Bypass
         } else {
             OverlayIngressPolicyDecision::Allow(
