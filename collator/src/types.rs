@@ -67,6 +67,13 @@ pub struct CollatorConfig {
     ///
     /// Default: `5` (means 32 shards).
     pub merkle_split_depth: u8,
+
+    /// Optional queue restore slowdown in milliseconds.
+    pub slowdown_restore_queue_ms: Option<u64>,
+    /// Optional collation resume slowdown in milliseconds.
+    pub slowdown_resume_collation_ms: Option<u64>,
+    /// Optional collation slowdown in milliseconds.
+    pub slowdown_do_collate_ms: Option<u64>,
 }
 
 impl Default for CollatorConfig {
@@ -80,6 +87,9 @@ impl Default for CollatorConfig {
             fast_sync: true,
             accounts_split_depth: 4,
             merkle_split_depth: 5,
+            slowdown_restore_queue_ms: None,
+            slowdown_resume_collation_ms: None,
+            slowdown_do_collate_ms: None,
         }
     }
 }

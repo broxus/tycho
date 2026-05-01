@@ -12,7 +12,7 @@ use tycho_util::metrics::HistogramGuard;
 
 use super::CollationManager;
 use super::blocks_cache::BlocksCache;
-use super::msgs_queue::QueueRestoreProcessedTo;
+use super::msgs_queue::{QueueRestoreProcessedTo, RestoreQueueContext};
 use super::state_update_handler::ProcessMcStateUpdateMode;
 use super::types::{
     ActiveSync, BlockCacheStoreResult, CollationStatus, CollationSyncState, CollatorJoinTask,
@@ -489,15 +489,17 @@ where
         }
 
         // restore queue state and return latest applied master state
-        let queue_restore_res = Self::restore_queue(
-            &self.blocks_cache,
-            self.state_node_adapter.clone(),
-            self.mq_adapter.clone(),
-            applied_range.0,
+        let queue_restore_res = Self::restore_queue(RestoreQueueContext {
+            blocks_cache: &self.blocks_cache,
+            state_node_adapter: self.state_node_adapter.clone(),
+            mq_adapter: self.mq_adapter.clone(),
+            from_mc_block_seqno: applied_range.0,
             min_processed_to_by_shards,
             before_tail_block_ids,
-            queue_diffs_applied_to_top_blocks.unwrap_or_default(),
-        )
+            queue_diffs_applied_to_top_blocks: queue_diffs_applied_to_top_blocks
+                .unwrap_or_default(),
+            slowdown_restore_queue_ms: self.config.slowdown_restore_queue_ms,
+        })
         .await_blocking()?;
 
         let Some(last_mc_state) = queue_restore_res.last_mc_state else {

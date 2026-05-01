@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
+use std::time::Duration;
 
 use ahash::HashMapExt;
 use anyhow::{Context, Result, bail};
@@ -470,17 +471,29 @@ where
         Ok(QueueDiffRequired::Required)
     }
 
-    #[tracing::instrument(skip_all, fields(from_mc_block_seqno))]
-    pub(super) async fn restore_queue(
-        blocks_cache: &BlocksCache,
-        state_node_adapter: Arc<dyn StateNodeAdapter>,
-        mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
-        from_mc_block_seqno: u32,
-        min_processed_to_by_shards: BTreeMap<ShardIdent, QueueKey>,
-        before_tail_block_ids: BTreeMap<ShardIdent, (Option<BlockId>, Vec<BlockId>)>,
-        queue_diffs_applied_to_top_blocks: FastHashMap<ShardIdent, u32>,
-    ) -> Result<RestoreQueueResult> {
+    #[tracing::instrument(skip_all, fields(from_mc_block_seqno = ctx.from_mc_block_seqno))]
+    pub(super) async fn restore_queue(ctx: RestoreQueueContext<'_>) -> Result<RestoreQueueResult> {
+        let RestoreQueueContext {
+            blocks_cache,
+            state_node_adapter,
+            mq_adapter,
+            from_mc_block_seqno,
+            min_processed_to_by_shards,
+            before_tail_block_ids,
+            queue_diffs_applied_to_top_blocks,
+            slowdown_restore_queue_ms,
+        } = ctx;
+
         let mut res = RestoreQueueResult::default();
+
+        // HACK: slowdown queue restore when special flag is activated
+        if let Some(slowdown_ms) = slowdown_restore_queue_ms {
+            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                "HACK: slowdown queue restore on {} ms",
+                slowdown_ms,
+            );
+            tokio::time::sleep(Duration::from_millis(slowdown_ms)).await;
+        }
 
         // NOTE: Queue restore is split into two adjacent ranges:
         // - First, find the first applied MC subgraph stored in cache, e.g. MB2 with top shard SB3.
@@ -807,6 +820,17 @@ where
 
         Ok(())
     }
+}
+
+pub(super) struct RestoreQueueContext<'a> {
+    pub blocks_cache: &'a BlocksCache,
+    pub state_node_adapter: Arc<dyn StateNodeAdapter>,
+    pub mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
+    pub from_mc_block_seqno: u32,
+    pub min_processed_to_by_shards: BTreeMap<ShardIdent, QueueKey>,
+    pub before_tail_block_ids: BTreeMap<ShardIdent, (Option<BlockId>, Vec<BlockId>)>,
+    pub queue_diffs_applied_to_top_blocks: FastHashMap<ShardIdent, u32>,
+    pub slowdown_restore_queue_ms: Option<u64>,
 }
 
 #[derive(Default)]

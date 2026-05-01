@@ -100,6 +100,15 @@ impl CollatorStdImpl {
         let total_collation_histogram =
             HistogramGuard::begin_with_labels("tycho_do_collate_total_time_high", &labels);
 
+        // HACK: slowdown collation when special flag is activated
+        if let Some(slowdown_ms) = self.config.slowdown_do_collate_ms {
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                "HACK: slowdown collation on {} ms",
+                slowdown_ms,
+            );
+            tokio::time::sleep(Duration::from_millis(slowdown_ms)).await;
+        }
+
         let WorkingState {
             next_block_id_short,
             mc_data,
