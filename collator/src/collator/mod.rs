@@ -51,7 +51,10 @@ mod types;
 
 pub use do_collate::{is_first_block_after_prev_master, work_units};
 pub use error::CollationCancelReason;
-pub use types::{CancelledContext, CollatorResult, ForceMasterCollation, ShardDescriptionExt};
+pub use types::{
+    CancelledContext, CollatorResult, DebugCollatorResult, ForceMasterCollation,
+    ShardDescriptionExt,
+};
 
 #[cfg(any(test, feature = "bench-helpers"))]
 mod test_utils;

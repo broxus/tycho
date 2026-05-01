@@ -206,6 +206,7 @@ pub(super) enum NextCollationFlowStep {
     Cancel(CancelledContext),
 }
 
+#[derive(Debug)]
 pub struct CancelledContext {
     pub prev_mc_block_id: BlockId,
     pub next_block_id_short: BlockIdShort,
@@ -224,6 +225,41 @@ pub enum CollatorResult {
     BlockCandidate {
         collation_result: BlockCollationResult,
     },
+}
+
+pub struct DebugCollatorResult<'a>(pub &'a CollatorResult);
+
+impl std::fmt::Debug for DebugCollatorResult<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            CollatorResult::Skipped {
+                prev_mc_block_id,
+                next_block_id_short,
+                anchor_chain_time,
+                force_mc_block,
+                collation_config,
+            } => f
+                .debug_struct("Skipped")
+                .field("prev_mc_block_id", prev_mc_block_id)
+                .field("next_block_id_short", next_block_id_short)
+                .field("anchor_chain_time", anchor_chain_time)
+                .field("force_mc_block", force_mc_block)
+                .field("collation_config", collation_config)
+                .finish(),
+            CollatorResult::Cancelled(cancel_ctx) => {
+                f.debug_tuple("Cancelled").field(cancel_ctx).finish()
+            }
+            CollatorResult::BlockCandidate { .. } => {
+                f.debug_struct("BlockCandidate").finish_non_exhaustive()
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for CollatorResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        DebugCollatorResult(self).fmt(f)
+    }
 }
 
 impl CollatorResult {

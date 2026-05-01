@@ -35,7 +35,7 @@ use self::types::{
 use self::utils::find_us_in_collators_set;
 use crate::collator::{
     CancelledContext, CollationCancelReason, Collator, CollatorContext, CollatorFactory,
-    CollatorResult, ForceMasterCollation,
+    CollatorResult, DebugCollatorResult, ForceMasterCollation,
 };
 use crate::internal_queue::types::diff::{DiffZone, QueueDiffWithMessages};
 use crate::internal_queue::types::message::EnqueuedMessage;
@@ -369,6 +369,12 @@ where
                 // handle collator tasks
                 Some(collator_res) = collator_tasks.next(), if !collator_tasks.is_empty() => {
                     let (collator, res) = collator_res?;
+
+                    tracing::trace!(target: tracing_targets::COLLATION_MANAGER,
+                        result = ?DebugCollatorResult(&res),
+                        "handle collator task result for {}",
+                        collator.shard_id(),
+                    );
 
                     // store collator
                     self.set_collator(collator)?;
