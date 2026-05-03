@@ -1,6 +1,7 @@
 use std::cmp;
 use std::sync::{Arc, Weak};
 
+use tokio::sync::mpsc;
 use tycho_crypto::ed25519::KeyPair;
 use tycho_network::PeerId;
 use tycho_util::FastDashMap;
@@ -34,6 +35,7 @@ pub struct DagRoundInner {
     anchor_stage: Option<AnchorStage>,
     locations: FastDashMap<PeerId, DagLocation>,
     threshold: Threshold,
+    triggers_tx: mpsc::UnboundedSender<WeakDagPointFuture>,
     prev: WeakDagRound,
 }
 
@@ -44,18 +46,41 @@ impl WeakDagRound {
 }
 
 impl DagRound {
-    pub fn new_bottom(round: Round, peer_schedule: &PeerSchedule, conf: &MempoolConfig) -> Self {
-        Self::new(round, peer_schedule, WeakDagRound(Weak::new()), conf)
+    pub fn new_bottom(
+        round: Round,
+        triggers_tx: &mpsc::UnboundedSender<WeakDagPointFuture>,
+        peer_schedule: &PeerSchedule,
+        conf: &MempoolConfig,
+    ) -> Self {
+        Self::new(
+            round,
+            WeakDagRound(Weak::new()),
+            triggers_tx,
+            peer_schedule,
+            conf,
+        )
     }
 
-    pub fn new_next(&self, peer_schedule: &PeerSchedule, conf: &MempoolConfig) -> Self {
-        Self::new(self.round().next(), peer_schedule, self.downgrade(), conf)
+    pub fn new_next(
+        &self,
+        triggers_tx: &mpsc::UnboundedSender<WeakDagPointFuture>,
+        peer_schedule: &PeerSchedule,
+        conf: &MempoolConfig,
+    ) -> Self {
+        Self::new(
+            self.round().next(),
+            self.downgrade(),
+            triggers_tx,
+            peer_schedule,
+            conf,
+        )
     }
 
     fn new(
         round: Round,
-        peer_schedule: &PeerSchedule,
         prev: WeakDagRound,
+        triggers_tx: &mpsc::UnboundedSender<WeakDagPointFuture>,
+        peer_schedule: &PeerSchedule,
         conf: &MempoolConfig,
     ) -> Self {
         let peers = peer_schedule.atomic().peers_for(round).clone();
@@ -76,6 +101,7 @@ impl DagRound {
             anchor_stage: AnchorStage::of(round, peer_schedule, conf),
             locations: FastDashMap::with_capacity_and_hasher(peers.len(), Default::default()),
             threshold: Threshold::new(round, peer_count, conf),
+            triggers_tx: triggers_tx.clone(),
             prev,
         }));
 
@@ -98,9 +124,12 @@ impl DagRound {
         self.0.anchor_stage.as_ref()
     }
 
-    fn leader_role(&self, peer_id: &PeerId) -> Option<AnchorStageRole> {
-        (self.0.anchor_stage.as_ref())
-            .and_then(|stage| (stage.leader == peer_id).then_some(stage.role))
+    fn trigger_channel(
+        &self,
+        peer_id: &PeerId,
+    ) -> Option<&mpsc::UnboundedSender<WeakDagPointFuture>> {
+        let AnchorStage { role, leader, .. } = self.0.anchor_stage.as_ref()?;
+        (*role == AnchorStageRole::Trigger && leader == peer_id).then_some(&self.0.triggers_tx)
     }
 
     pub fn threshold(&self) -> &Threshold {
@@ -177,9 +206,15 @@ impl DagRound {
                 .entry(*point.info().digest())
                 .and_modify(|_| is_unique = false)
                 .or_insert_with(|| {
-                    let role = self.leader_role(point.info().author());
                     DagPointFuture::new_local_valid(
-                        self, point, role, key_pair, &loc.state, downloader, store, round_ctx,
+                        self,
+                        point,
+                        key_pair,
+                        &loc.state,
+                        self.trigger_channel(point.info().author()),
+                        downloader,
+                        store,
+                        round_ctx,
                     )
                 })
                 .clone()
@@ -210,7 +245,12 @@ impl DagRound {
                 .and_modify(|first| first.resolve_download(point, Some(reason)))
                 .or_insert_with(|| {
                     DagPointFuture::new_ill_formed_broadcast(
-                        point, reason, &loc.state, store, round_ctx,
+                        point,
+                        reason,
+                        &loc.state,
+                        self.trigger_channel(point.info().author()),
+                        store,
+                        round_ctx,
                     )
                 });
         });
@@ -235,9 +275,14 @@ impl DagRound {
                 .entry(*point.info().digest())
                 .and_modify(|first| first.resolve_download(point, None))
                 .or_insert_with(|| {
-                    let role = self.leader_role(point.info().author());
                     DagPointFuture::new_broadcast(
-                        self, point, role, &loc.state, downloader, store, round_ctx,
+                        self,
+                        point,
+                        &loc.state,
+                        self.trigger_channel(point.info().author()),
+                        downloader,
+                        store,
+                        round_ctx,
                     )
                 });
         });
@@ -255,9 +300,16 @@ impl DagRound {
     ) {
         self.edit(author, |loc| {
             loc.versions.entry(*digest).or_insert_with(|| {
-                let role = self.leader_role(author);
                 DagPointFuture::new_download(
-                    self, author, digest, role, None, &loc.state, downloader, store, round_ctx,
+                    self,
+                    author,
+                    digest,
+                    None,
+                    &loc.state,
+                    self.trigger_channel(author),
+                    downloader,
+                    store,
+                    round_ctx,
                 )
             });
         });
@@ -287,14 +339,13 @@ impl DagRound {
                 .entry(*digest)
                 .and_modify(|first| first.add_depender(depender))
                 .or_insert_with(|| {
-                    let role = self.leader_role(author);
                     DagPointFuture::new_download(
                         self,
                         author,
                         digest,
-                        role,
                         Some(depender),
                         &loc.state,
+                        self.trigger_channel(author),
                         downloader,
                         store,
                         validate_ctx,
@@ -324,12 +375,11 @@ impl DagRound {
                 .entry(*point_restore.digest())
                 .and_modify(|_| is_unique = false)
                 .or_insert_with(|| {
-                    let role = self.leader_role(&point_id.author);
                     DagPointFuture::new_restore(
                         self,
                         point_restore,
-                        role,
                         &loc.state,
+                        self.trigger_channel(&point_id.author),
                         downloader,
                         store,
                         round_ctx,

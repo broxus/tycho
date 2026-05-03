@@ -6,15 +6,13 @@ use std::time::Duration;
 use futures_util::future::BoxFuture;
 use futures_util::never::Never;
 use futures_util::stream::FuturesUnordered;
-use futures_util::{FutureExt, TryStreamExt};
+use futures_util::{FutureExt, TryStreamExt, future};
 use itertools::{Either, Itertools};
 use tokio::sync::mpsc;
 use tycho_network::PeerId;
 use tycho_util::metrics::HistogramGuard;
 
-use crate::dag::{
-    DagFront, DagRound, HistoryConflict, KeyGroup, UninitVset, Verifier, VerifyError,
-};
+use crate::dag::{DagFront, HistoryConflict, KeyGroup, UninitVset, Verifier, VerifyError};
 use crate::effects::{
     AltFormat, Cancelled, Ctx, EngineCtx, RoundCtx, Task, TaskResult, TaskTracker,
 };
@@ -78,10 +76,10 @@ impl Engine {
         // (in case last broadcast is within it) without data,
         // and may shrink to its medium len (in case broadcast or consensus are further)
         // before being filled with data
-        let mut dag = DagFront::default();
-        let mut committer = dag.init(
-            DagRound::new_bottom(conf.genesis_round.prev(), &net.peer_schedule, conf),
+        let (mut dag, mut committer) = DagFront::new(
+            conf.genesis_round.prev(),
             fix_history,
+            &net.peer_schedule,
             conf,
         );
         dag.fill_to_top(
@@ -92,10 +90,10 @@ impl Engine {
         );
         let committer_run = CommitterTask::new(
             committer,
+            bind.anchors_tx.clone(),
             &net.moderator,
             &net.peer_schedule,
             &bind.top_known_anchor,
-            conf,
         );
 
         let init_task = engine_ctx.task().spawn_blocking({
@@ -171,7 +169,7 @@ impl Engine {
         tracing::info!(parent: round_ctx.span(), "current round set to dag top");
 
         let dag_bottom_round = {
-            let committer = self.committer_run.ready_mut().await?.expect("ready");
+            let committer = self.committer_run.committer().await?;
             (self.dag).fill_to_top(
                 dag_top_round,
                 Some(committer),
@@ -266,7 +264,7 @@ impl Engine {
             }
         };
 
-        let committer = self.committer_run.ready_mut().await?.expect("ready");
+        let committer = self.committer_run.committer().await?;
         (self.dag).fill_to_top(
             new_top_round,
             Some(committer),
@@ -417,11 +415,14 @@ impl Engine {
                     &round_ctx,
                 ) {
                     Ok(pause_at) => next_round.min(pause_at),
-                    Err(collator_sync) => {
-                        collator_sync.await?;
-                        let committer_update =
-                            self.committer_run.update_task(&self.anchors_tx, &round_ctx);
-                        committer_update.await?;
+                    Err(mut collator_sync) => {
+                        'sync: loop {
+                            let committer = std::pin::pin!(self.committer_run.update(&round_ctx));
+                            match future::select(committer, &mut collator_sync).await {
+                                future::Either::Left((result, _)) => result?,
+                                future::Either::Right((result, _)) => break 'sync result?,
+                            }
+                        }
                         continue;
                     }
                 };
@@ -434,7 +435,7 @@ impl Engine {
 
                 self.dag.fill_to_top(
                     dag_top_round,
-                    self.committer_run.ready_mut().await?,
+                    Some(self.committer_run.committer().await?),
                     &self.round_task.state.peer_schedule,
                     &round_ctx,
                 );
@@ -463,15 +464,11 @@ impl Engine {
                     .until_ready()
             );
 
-            loop {
-                tokio::select! {
-                    _ = self.committer_run.interval.tick() => {
-                        self.committer_run.update_task(&self.anchors_tx, &round_ctx).await?;
-                    },
-                    round_task = &mut round_task_run => {
-                        self.round_task = round_task?;
-                        break;
-                    },
+            self.round_task = 'round: loop {
+                let committer = std::pin::pin!(self.committer_run.update(&round_ctx));
+                match future::select(committer, &mut round_task_run).await {
+                    future::Either::Left((result, _)) => result?,
+                    future::Either::Right((result, _)) => break 'round result?,
                 }
             }
         }

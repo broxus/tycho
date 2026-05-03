@@ -1,45 +1,41 @@
-mod anchor_chain;
 mod back;
 mod inspector;
 
-use std::ops::RangeInclusive;
 use std::sync::atomic::Ordering;
 
+use futures_util::StreamExt;
+use futures_util::stream::FuturesUnordered;
+use tokio::sync::mpsc;
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
 use crate::dag::DagRound;
-use crate::dag::commit::anchor_chain::{AnchorChain, EnqueuedAnchor};
 use crate::dag::commit::back::DagBack;
 use crate::dag::commit::inspector::RoundInspector;
+use crate::dag::dag_point_future::WeakDagPointFuture;
 use crate::effects::{AltFmt, AltFormat, Cancelled, TaskResult};
-use crate::engine::MempoolConfig;
+use crate::engine::{EngineResult, MempoolConfig};
 use crate::intercom::StatsRanges;
-use crate::models::{AnchorData, AnchorStageRole, MempoolPeerStats, Round};
+use crate::models::{
+    AnchorData, AnchorLink, AnchorStageRole, DagPoint, MempoolPeerStats, PointInfo, Round,
+};
 use crate::moderator::JournalEvent;
 
 #[derive(thiserror::Error, Debug)]
 #[error("Committer encountered local history conflict at round {}", .0.0)]
 pub struct HistoryConflict(pub Round);
 
-// private error type
-#[derive(Debug)]
-enum SyncError {
-    TryLater,
-    HistoryConflict(Round),
-    Cancelled,
-}
-
-impl From<Cancelled> for SyncError {
-    fn from(_: Cancelled) -> Self {
-        Self::Cancelled
-    }
+struct EnqueuedAnchor {
+    pub anchor: PointInfo,
+    pub proof: PointInfo,
+    pub prev_proof_round: Round,
+    pub direct_trigger: Option<PointInfo>,
 }
 
 pub struct Committer {
+    triggers_rx: mpsc::UnboundedReceiver<WeakDagPointFuture>,
+    futures: FuturesUnordered<WeakDagPointFuture>,
     dag: DagBack,
-    // from the oldest to the current round; newer ones are in the future;
-    anchor_chain: AnchorChain,
     // some anchors won't contain full history after a gap (filled with sync),
     // so this determines least round at which fully reproducible anchor may be produced
     full_history_bottom: Round,
@@ -49,20 +45,28 @@ pub struct Committer {
     inspector: RoundInspector,
 }
 
-impl Default for Committer {
-    fn default() -> Self {
+impl Committer {
+    pub fn new(triggers_rx: mpsc::UnboundedReceiver<WeakDagPointFuture>) -> Self {
         Self {
+            triggers_rx,
+            futures: FuturesUnordered::new(),
             dag: Default::default(),
-            anchor_chain: Default::default(),
             full_history_bottom: Round::BOTTOM,
             emit_first_after_gap: None,
             first_executable: Round::BOTTOM,
             inspector: Default::default(),
         }
     }
-}
 
-impl Committer {
+    pub fn reset(&mut self) {
+        let old_dag = std::mem::take(&mut self.dag);
+        tycho_util::mem::Reclaimer::instance().drop(old_dag);
+
+        self.full_history_bottom = Round::BOTTOM;
+        self.emit_first_after_gap = None;
+        self.first_executable = Round::BOTTOM;
+    }
+
     /// `true` for a path same as mempool restart: commit offset anchors for `Deduplicator` state
     pub fn init(&mut self, bottom_round: &DagRound, is_after_gap: bool, conf: &MempoolConfig) {
         assert_eq!(
@@ -83,6 +87,19 @@ impl Committer {
             self.full_history_bottom + conf.consensus.deduplicate_rounds
         } else {
             bottom_round.round()
+        }
+    }
+
+    pub async fn next_trigger(&mut self) -> TaskResult<DagPoint> {
+        loop {
+            tokio::select! {
+                biased;
+                Some(future) = self.triggers_rx.recv() => self.futures.push(future),
+                Some(trigger_opt) = self.futures.next() => if let Some(trigger) = trigger_opt? {
+                    break Ok(trigger);
+                },
+                else => return Err(Cancelled()),
+            }
         }
     }
 
@@ -116,7 +133,6 @@ impl Committer {
     pub fn drop_upto(&mut self, new_bottom_round: Round, conf: &MempoolConfig) -> bool {
         // cannot leave dag empty
         let actual_bottom = new_bottom_round.min(self.dag.top().round());
-        self.anchor_chain.drop_upto(actual_bottom);
         let drained = (self.dag)
             .drain_upto(actual_bottom)
             .into_iter()
@@ -125,6 +141,10 @@ impl Committer {
         if !drained.is_empty() {
             tycho_util::mem::Reclaimer::instance().drop(drained);
         }
+        if (self.dag.last_committed_proof).is_some_and(|proof| proof < actual_bottom) {
+            self.dag.last_committed_proof = None;
+        }
+
         self.full_history_bottom = actual_bottom + conf.consensus.commit_history_rounds.get();
         self.emit_first_after_gap = Some(false);
         self.first_executable = self.full_history_bottom + conf.consensus.deduplicate_rounds;
@@ -165,24 +185,9 @@ impl Committer {
 
     pub fn commit(
         &mut self,
+        trigger: &DagPoint,
         conf: &MempoolConfig,
-    ) -> TaskResult<Result<Vec<AnchorData>, HistoryConflict>> {
-        // Note that it's always engine round in production, but may differ in local tests
-        let current_round = self.dag.top().round().prev();
-
-        match self.commit_up_to(current_round, conf) {
-            Ok(data) => Ok(Ok(data)),
-            Err(SyncError::TryLater) => Ok(Ok(Vec::new())),
-            Err(SyncError::HistoryConflict(round)) => Ok(Err(HistoryConflict(round))),
-            Err(SyncError::Cancelled) => Err(Cancelled()),
-        }
-    }
-
-    fn commit_up_to(
-        &mut self,
-        current_round: Round,
-        conf: &MempoolConfig,
-    ) -> Result<Vec<AnchorData>, SyncError> {
+    ) -> EngineResult<Vec<AnchorData>> {
         // The call must not take long, better try later than wait now, slowing down whole Engine.
         // Try to collect longest anchor chain in historical order, until any unready point is met:
         // * take all ready and uncommitted triggers, skipping not ready ones
@@ -195,11 +200,46 @@ impl Committer {
         // * * otherwise: breaks the chain, so that only its prefix can be committed
         // * in anchor history: cancels current commit and the latter anchor chain
 
-        self.enqueue_new_anchors(current_round)?;
+        let trigger = match trigger {
+            DagPoint::Valid(valid) => {
+                (valid.info().anchor_trigger() == &AnchorLink::ToSelf).then_some(Ok(valid))
+            }
+            DagPoint::TransInvalid(invalid) => {
+                (invalid.has_proof()).then_some(Err(HistoryConflict(invalid.info().round())))
+            }
+            not_valid => {
+                (not_valid.is_certified()).then_some(Err(HistoryConflict(not_valid.round())))
+            }
+        };
 
-        let mut committed = Vec::new();
+        let trigger = match trigger {
+            Some(Ok(valid)) => valid.info(),
+            Some(Err(HistoryConflict(round))) if round >= self.dag.bottom_round() => {
+                return Err(HistoryConflict(round).into());
+            }
+            _ => return Ok(Vec::new()),
+        };
 
-        while let Some(next) = self.anchor_chain.next() {
+        assert_eq!(
+            trigger.anchor_trigger(),
+            &AnchorLink::ToSelf,
+            "passed point is not a trigger: {:?}",
+            trigger.id().alt()
+        );
+        if trigger.round() == conf.genesis_round {
+            return Ok(Vec::new());
+        }
+
+        let current_round = self.dag.top().round().prev();
+
+        let chain_part = self.dag.anchor_chain(trigger)?;
+
+        metrics::gauge!("tycho_mempool_rounds_engine_ahead_last_trigger")
+            .set(current_round.diff_f64(trigger.round()));
+
+        let mut committed = Vec::with_capacity(chain_part.len());
+
+        for next in chain_part {
             metrics::gauge!("tycho_mempool_rounds_engine_ahead_proof_chain")
                 .set(current_round.diff_f64(next.proof.round()));
 
@@ -213,77 +253,26 @@ impl Committer {
             )
             .entered();
 
-            match self.dequeue_anchor(next, conf) {
-                Ok(data) => committed.push(data),
-                Err(SyncError::TryLater) => break,
-                Err(immediate) => return Err(immediate),
-            }
+            committed.push(self.dequeue_anchor(next, conf)?);
         }
         Ok(committed)
-    }
-
-    fn enqueue_new_anchors(&mut self, current_round: Round) -> Result<(), SyncError> {
-        // some state may have restored from db or resolved from download
-
-        // take all ready triggers, skipping not ready ones
-        let triggers = self.dag.triggers(RangeInclusive::new(
-            self.anchor_chain
-                .top_proof_round()
-                .unwrap_or_else(|| self.dag.bottom_round()),
-            current_round,
-        ))?;
-
-        if let Some(last_trigger) = triggers.back() {
-            metrics::gauge!("tycho_mempool_rounds_engine_ahead_last_trigger")
-                .set(current_round.diff_f64(last_trigger.round()));
-        }
-
-        // traverse from oldest to newest;
-        // ignore non-ready triggers as chain may be restored without them
-        // if chain is broken - take the prefix until first gap
-
-        for trigger in triggers {
-            let last_proof_round = match self.anchor_chain.top_proof_round() {
-                Some(top_proof_round) => top_proof_round,
-                None => match self.dag.last_unusable_proof_round(&trigger) {
-                    // init chain after each gap
-                    Ok(last_unusable_proof_round) => last_unusable_proof_round,
-                    Err(SyncError::TryLater) => return Ok(()), // cannot init
-                    Err(immediate) => return Err(immediate),
-                },
-            };
-            let chain_part = match self.dag.anchor_chain(last_proof_round, &trigger) {
-                Ok(chain_part) => chain_part,
-                Err(SyncError::TryLater) => break, // some dag point future is not yet resolved
-                Err(immediate) => return Err(immediate),
-            };
-            for next in chain_part {
-                if let Some(back) = self.anchor_chain.top() {
-                    assert_eq!(
-                        next.prev_proof_round,
-                        back.proof.round(),
-                        "chain part is not contiguous by rounds"
-                    );
-                }
-                self.anchor_chain.enqueue(next);
-            }
-        }
-        Ok(())
     }
 
     fn dequeue_anchor(
         &mut self,
         next: EnqueuedAnchor,
         conf: &MempoolConfig,
-    ) -> Result<AnchorData, SyncError> {
+    ) -> EngineResult<AnchorData> {
         let uncommitted =
-            match (self.dag).gather_uncommitted(self.full_history_bottom, &next.anchor, conf) {
-                Ok(uncommitted) => uncommitted,
-                Err(sync_error) => {
-                    self.anchor_chain.undo_next(next);
-                    return Err(sync_error);
-                }
-            };
+            (self.dag).gather_uncommitted(self.full_history_bottom, &next.anchor, conf)?;
+
+        assert!(
+            self.dag.last_committed_proof < Some(next.proof.round()),
+            "committed rounds must be in order: last committed proof: {:?}, next proof: {}",
+            self.dag.last_committed_proof,
+            next.proof.round().0,
+        );
+        self.dag.last_committed_proof = Some(next.proof.round());
 
         match (self.dag.get(next.proof.round())).and_then(|r| r.anchor_stage()) {
             Some(stage) if stage.role == AnchorStageRole::Proof => {
@@ -343,9 +332,8 @@ impl std::fmt::Debug for AltFmt<'_, Committer> {
         let inner = AltFormat::unpack(self);
         write!(
             f,
-            "{:?} chain {:?} full history bottom {}",
+            "{:?} full history bottom {}",
             inner.dag.alt(),
-            inner.anchor_chain.alt(),
             inner.full_history_bottom.0,
         )
     }
@@ -355,9 +343,8 @@ impl std::fmt::Display for AltFmt<'_, Committer> {
         let inner = AltFormat::unpack(self);
         write!(
             f,
-            "{} chain {} full history bottom {}",
+            "{} full history bottom {}",
             inner.dag.alt(),
-            inner.anchor_chain.alt(),
             inner.full_history_bottom.0,
         )
     }
@@ -366,19 +353,16 @@ impl std::fmt::Display for AltFmt<'_, Committer> {
 #[cfg(test)]
 mod test {
     use std::array;
-    use std::io::Write;
     use std::sync::Arc;
 
     use tycho_crypto::ed25519::{KeyPair, SecretKey};
     use tycho_network::PeerId;
-    use tycho_util::FastDashMap;
 
     use super::*;
     use crate::dag::DagFront;
-    use crate::dag::dag_location::DagLocation;
     use crate::effects::{AltFormat, Ctx, RoundCtx};
     use crate::engine::lifecycle::FixHistoryFlag;
-    use crate::models::{AnchorData, AnchorStageRole, Round};
+    use crate::models::{AnchorData, Round};
     use crate::storage::MempoolStore;
     use crate::test_utils;
 
@@ -400,8 +384,13 @@ mod test {
 
         let mut round_ctx = RoundCtx::new(&engine_ctx, conf.genesis_round);
 
-        let genesis_round = DagRound::new_bottom(conf.genesis_round, &peer_schedule, conf);
-        genesis_round
+        let (mut dag, mut committer) = DagFront::new(
+            conf.genesis_round,
+            FixHistoryFlag(false),
+            &peer_schedule,
+            conf,
+        );
+        dag.top()
             .add_local(
                 &genesis,
                 Some(local_keys.clone()),
@@ -412,16 +401,19 @@ mod test {
             .await
             .expect("cannot be closed");
 
-        let mut dag = DagFront::default();
-        let mut committer = dag.init(genesis_round, FixHistoryFlag(false), conf);
         let stats_ranges = peer_schedule.atomic().stats_ranges();
 
-        let commit = |committer: &mut Committer, up_to: Option<Round>| {
-            _commit(committer, up_to, &stats_ranges, conf)
-        };
+        let commit =
+            async |committer: &mut Committer| _commit(committer, &stats_ranges, conf).await;
 
         for round in (0..100).map(Round) {
-            // println!("{}", round.0);
+            println!(
+                "{round:?} back {}..={} front {}..={}",
+                committer.bottom_round().0,
+                committer.top_round().0,
+                dag.bottom_round().0,
+                dag.top().round().0
+            );
 
             if round <= conf.genesis_round {
                 continue;
@@ -429,9 +421,22 @@ mod test {
             round_ctx = RoundCtx::new(&engine_ctx, round);
 
             dag.fill_to_top(round, Some(&mut committer), &peer_schedule, &round_ctx);
-            if let Some(false) = committer.emit_first_after_gap {
+
+            if committer.emit_first_after_gap == Some(false) {
                 let skip_to = committer.first_executable;
-                println!("gap: next anchor with full history not earlier than {skip_to:?}");
+                assert_eq!(
+                    skip_to,
+                    committer.bottom_round()
+                        + conf.consensus.deduplicate_rounds
+                        + conf.consensus.max_consensus_lag_rounds.get(),
+                    "must define offset for collator history"
+                );
+                println!("gap @ {round:?}: next anchor with full history at least @ {skip_to:?}");
+                assert_eq!(
+                    committer.dag.last_committed_proof, None,
+                    "last proof must be empty after a gap"
+                );
+                committer.emit_first_after_gap = None; // just disarm the flag though its internal
             };
 
             // println!("front {:?}", dag.alt());
@@ -451,10 +456,10 @@ mod test {
             .await;
 
             if round.0 == 33 {
-                assert_eq!(commit(&mut committer, Some(Round(48))).len(), 9);
+                assert_eq!(commit(&mut committer).await.len(), 9);
             }
-            if round.0 == 66 {
-                assert_eq!(commit(&mut committer, Some(Round(48))).len(), 5);
+            if round.0 == 48 {
+                assert_eq!(commit(&mut committer).await.len(), 5);
             }
         }
 
@@ -469,130 +474,42 @@ mod test {
             "test config changed? should update test then"
         );
 
-        let mut r_points = vec![];
+        assert_eq!(commit(&mut committer).await.len(), 17);
 
-        for i in 50..55 {
-            r_points.push(remove_point(&mut committer.dag, Round(i), &peers[2].0));
-        }
+        assert_eq!(
+            committer.dag.last_committed_proof,
+            Some(Round(97)),
+            "last proof must be set after commit"
+        );
 
-        let r_leader = remove_leader(&mut committer.dag, Round(62));
+        // `drop_upto()` must keep `last_committed_proof` while it is in dag
 
-        let r_round = remove_round(&mut committer.dag, Round(70));
+        assert!(committer.drop_upto(Round(97), conf));
+        assert_eq!(committer.dag.last_committed_proof, Some(Round(97)));
 
-        assert_eq!(commit(&mut committer, None).len(), 1);
-
-        for pack in r_points {
-            restore_point(&mut committer.dag, pack);
-        }
-
-        assert_eq!(commit(&mut committer, None).len(), 4);
-
-        restore_point(&mut committer.dag, r_leader);
-
-        assert_eq!(commit(&mut committer, None).len(), 2);
-
-        restore_round(&mut committer.dag, r_round);
-
-        assert_eq!(commit(&mut committer, None).len(), 10);
-
-        std::io::stderr().flush().ok();
-        std::io::stdout().flush().ok();
+        assert!(committer.drop_upto(Round(98), conf));
+        assert_eq!(committer.dag.last_committed_proof, None);
     }
 
-    fn remove_round(dag: &mut DagBack, round: Round) -> (Round, FastDashMap<PeerId, DagLocation>) {
-        let in_question = dag.get(round).expect("in dag").clone();
-        let removed = in_question.locations().clone();
-        in_question.locations().clear();
-        println!("removed {round:?}");
-        (round, removed)
-    }
-
-    fn restore_round(dag: &mut DagBack, pack: (Round, FastDashMap<PeerId, DagLocation>)) {
-        let (round, removed) = pack;
-        let in_question = dag.get(round).expect("in dag").clone();
-        println!("restored {round:?}");
-        for (peer_id, loc) in removed {
-            if in_question.locations().insert(peer_id, loc).is_some() {
-                panic!("was not removed from dag: {} @ {round:?}", peer_id.alt());
-            }
-        }
-    }
-
-    fn remove_leader(dag: &mut DagBack, round: Round) -> (Round, PeerId, DagLocation) {
-        let in_question = dag.get(round).expect("in dag").clone();
-        let leader = match in_question.anchor_stage() {
-            Some(stage) => {
-                match stage.role {
-                    AnchorStageRole::Trigger => println!("removed trigger @ {round:?}"),
-                    AnchorStageRole::Proof => println!("removed proof @ {round:?}"),
-                }
-                stage.leader
-            }
-            None => panic!("no leader @ {round:?}"),
-        };
-        let (peer_id, loc) = in_question.locations().remove(&leader).expect("in dag");
-        (round, peer_id, loc)
-    }
-
-    fn remove_point(
-        dag: &mut DagBack,
-        round: Round,
-        peer_id: &PeerId,
-    ) -> (Round, PeerId, DagLocation) {
-        let in_question = dag.get(round).expect("in dag").clone();
-        match in_question.anchor_stage() {
-            Some(stage) if stage.leader == peer_id => match stage.role {
-                AnchorStageRole::Trigger => println!("removed trigger @ {round:?}"),
-                AnchorStageRole::Proof => println!("removed proof @ {round:?}"),
-            },
-            _ => println!("removed point {} @ {round:?}", peer_id.alt()),
-        };
-        let (peer_id, loc) = in_question.locations().remove(peer_id).expect("in dag");
-        (round, peer_id, loc)
-    }
-
-    fn restore_point(dag: &mut DagBack, pack: (Round, PeerId, DagLocation)) {
-        let (round, peer_id, loc) = pack;
-        let in_question = dag.get(round).expect("in dag").clone();
-        match in_question.anchor_stage() {
-            Some(stage) if stage.leader == peer_id => match stage.role {
-                AnchorStageRole::Proof => println!("restored proof {} @ {round:?}", peer_id.alt()),
-                AnchorStageRole::Trigger => {
-                    println!("restored trigger {} @ {round:?}", peer_id.alt());
-                }
-            },
-            _ => println!("restored point {} @ {round:?}", peer_id.alt()),
-        };
-
-        if in_question.locations().insert(peer_id, loc).is_some() {
-            panic!("was not removed from dag: {} @ {round:?}", peer_id.alt());
-        }
-    }
-
-    fn _commit(
+    async fn _commit(
         committer: &mut Committer,
-        up_to: Option<Round>,
         stats_ranges: &StatsRanges,
         conf: &MempoolConfig,
     ) -> Vec<AnchorData> {
-        let committed = if let Some(up_to) = up_to {
-            committer
-                .commit_up_to(up_to, conf)
-                .expect("no certified NotFound or Invalid points")
-        } else {
-            committer
-                .commit(conf)
-                .expect("cannot be cancelled")
-                .expect("history conflict cannot happen")
-        };
-        for data in &committed {
-            println!("anchor {:?}", data.anchor.id().alt());
+        let mut committed = Vec::new();
+
+        while let Ok(trigger) = committer.triggers_rx.try_recv() {
+            let trigger = trigger.await.expect("trigger").expect("strong ref");
+            let trigger_round = trigger.round();
+            let batch = committer.commit(&trigger, conf).unwrap_or_else(|err| {
+                panic!("commit on trigger @ {trigger_round:?} failed: {err}")
+            });
+            committed.extend(batch);
         }
-        if let Some(up_to) = up_to {
-            println!("committed up to {up_to:?}");
-        } else {
-            println!("committed");
-        };
+        for data in &committed {
+            println!("commit anchor @ {:?}", data.anchor.round());
+        }
+
         if let Some(last) = committed.last() {
             committer
                 .remove_committed(last.anchor.round(), stats_ranges, conf)
