@@ -1,9 +1,7 @@
 use std::mem;
-use std::time::Duration;
 
 use itertools::Itertools;
 use tokio::sync::mpsc;
-use tokio::time::Interval;
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 use tycho_util::metrics::HistogramGuard;
@@ -12,18 +10,15 @@ use crate::dag::{Committer, HistoryConflict};
 use crate::effects::{AltFormat, Cancelled, Ctx, EngineCtx, RoundCtx, Task};
 use crate::engine::lifecycle::EngineError;
 use crate::engine::round_watch::{RoundWatch, TopKnownAnchor};
-use crate::engine::{
-    ConsensusConfigExt, DAG_ROUNDS_TO_DROP, EngineResult, MempoolConfig, NodeConfig,
-};
+use crate::engine::{ConsensusConfigExt, DAG_ROUNDS_TO_DROP, EngineResult, NodeConfig};
 use crate::intercom::PeerSchedule;
 use crate::models::{
-    AnchorData, MempoolOutput, MempoolPeerStats, MempoolStatsMergeError, PointInfo, Round,
+    AnchorData, DagPoint, MempoolOutput, MempoolPeerStats, MempoolStatsMergeError, PointInfo, Round,
 };
 use crate::moderator::Moderator;
 
 pub struct CommitterTask {
     state: State,
-    pub interval: Interval,
 }
 
 enum State {
@@ -34,6 +29,7 @@ enum State {
 
 struct Inner {
     committer: Committer,
+    anchors_tx: mpsc::UnboundedSender<MempoolOutput>,
     moderator: Moderator,
     peer_schedule: PeerSchedule,
     top_known_anchor: RoundWatch<TopKnownAnchor>,
@@ -42,72 +38,58 @@ struct Inner {
 impl CommitterTask {
     pub fn new(
         committer: Committer,
+        anchors_tx: mpsc::UnboundedSender<MempoolOutput>,
         moderator: &Moderator,
         peer_schedule: &PeerSchedule,
         top_known_anchor: &RoundWatch<TopKnownAnchor>,
-        conf: &MempoolConfig,
     ) -> Self {
-        let mut interval = tokio::time::interval(Duration::from_millis(
-            conf.consensus.broadcast_retry_millis.get() as _,
-        ));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
         Self {
             state: State::Ready(Box::new(Inner {
                 committer,
+                anchors_tx,
                 moderator: moderator.clone(),
                 peer_schedule: peer_schedule.clone(),
                 top_known_anchor: top_known_anchor.clone(),
             })),
-            interval,
         }
     }
 
-    pub async fn ready_mut(&mut self) -> EngineResult<Option<&mut Committer>> {
-        if let Some(inner) = self.state.take_ready().await? {
-            self.state = State::Ready(inner);
-        };
-        Ok(match &mut self.state {
-            State::Ready(inner) => Some(&mut inner.committer),
-            _ => None,
-        })
+    pub async fn committer(&mut self) -> EngineResult<&mut Committer> {
+        Ok(&mut self.state.wait_ready().await?.committer)
     }
 
-    pub async fn update_task(
-        &mut self,
-        anchors_tx: &mpsc::UnboundedSender<MempoolOutput>,
-        round_ctx: &RoundCtx,
-    ) -> EngineResult<()> {
-        let Some(inner) = self.state.take_ready().await? else {
-            return Ok(());
+    pub async fn update(&mut self, round_ctx: &RoundCtx) -> EngineResult<()> {
+        let inner = self.state.wait_ready().await?;
+        if inner.committer.is_once_after_gap() {
+            let gap = MempoolOutput::GapUpTo(inner.committer.bottom_round().prev());
+            inner.anchors_tx.send(gap).ok();
+        }
+        let trigger = inner.committer.next_trigger().await?;
+        let inner = match mem::replace(&mut self.state, State::Uninit) {
+            State::Ready(inner) => inner,
+            _ => unreachable!(),
         };
-        let anchors_tx = anchors_tx.clone();
-        self.state = State::running(inner, anchors_tx, round_ctx);
+        self.state = State::running(inner, trigger, round_ctx);
         Ok(())
     }
 }
 
 impl State {
-    async fn take_ready(&mut self) -> EngineResult<Option<Box<Inner>>> {
-        Ok(match mem::replace(self, State::Uninit) {
+    async fn wait_ready(&mut self) -> EngineResult<&mut Inner> {
+        Ok(match self {
             State::Uninit => panic!("must be taken only once"),
-            State::Ready(inner) => Some(inner),
+            State::Ready(inner) => inner,
             State::Running(task) => {
-                if task.is_finished() {
-                    Some(task.await??)
-                } else {
-                    *self = Self::Running(task);
-                    None
+                *self = State::Ready(task.await??);
+                match self {
+                    State::Ready(inner) => inner,
+                    _ => unreachable!(),
                 }
             }
         })
     }
 
-    fn running(
-        mut inner: Box<Inner>,
-        anchors_tx: mpsc::UnboundedSender<MempoolOutput>,
-        round_ctx: &RoundCtx,
-    ) -> Self {
+    fn running(mut inner: Box<Inner>, trigger: DagPoint, round_ctx: &RoundCtx) -> Self {
         let task_ctx = round_ctx.task();
         let round_ctx = round_ctx.clone();
         let task = move || {
@@ -130,20 +112,18 @@ impl State {
                 to_reset || (min_dag_len && conflict_at < replay_since)
             };
 
-            if inner.committer.is_once_after_gap() {
-                let gap = MempoolOutput::GapUpTo(inner.committer.bottom_round().prev());
-                anchors_tx.send(gap).ok();
-            }
-
             let mut attempt = 0;
             let committed = loop {
                 attempt += 1;
-                match inner.committer.commit(round_ctx.conf())? {
+                match inner.committer.commit(&trigger, round_ctx.conf()) {
                     Ok(data) => break Some(data),
-                    Err(HistoryConflict(round)) if rounds_drop_allowed(round) => {
+                    Err(EngineError::Cancelled) => return Err(EngineError::Cancelled),
+                    Err(EngineError::HistoryConflict(HistoryConflict(round)))
+                        if rounds_drop_allowed(round) =>
+                    {
                         let dropped_ok = inner.committer.drop_upto(round.next(), round_ctx.conf());
                         assert!(inner.committer.is_once_after_gap(), "gap flag must be set");
-                        anchors_tx.send(MempoolOutput::GapUpTo(round)).ok();
+                        inner.anchors_tx.send(MempoolOutput::GapUpTo(round)).ok();
                         tracing::info!(
                             start_bottom,
                             start_dag_len,
@@ -163,7 +143,7 @@ impl State {
                             )
                         };
                     }
-                    Err(history_conflict) => {
+                    Err(EngineError::HistoryConflict(history_conflict)) => {
                         tracing::warn!(
                             err = %history_conflict,
                             start_bottom,
@@ -196,7 +176,7 @@ impl State {
                     all_stats.push(stat_map);
 
                     round_ctx.commit_metrics(&adata.anchor);
-                    anchors_tx
+                    (inner.anchors_tx)
                         .send(MempoolOutput::NextAnchor(Box::new(adata)))
                         .map_err(|_closed| Cancelled())?;
                     for event in events {

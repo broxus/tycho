@@ -1,21 +1,19 @@
 use std::collections::{BTreeMap, VecDeque};
-use std::ops::{Bound, RangeInclusive};
+use std::ops::RangeInclusive;
 use std::sync::atomic;
 use std::{array, mem};
 
 use ahash::HashMapExt;
 use futures_util::FutureExt;
-use itertools::Itertools;
 use rand::SeedableRng;
 use rand::prelude::SliceRandom;
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
-use crate::dag::DagRound;
-use crate::dag::commit::SyncError;
-use crate::dag::commit::anchor_chain::EnqueuedAnchor;
-use crate::effects::{AltFmt, AltFormat, Cancelled};
-use crate::engine::MempoolConfig;
+use crate::dag::commit::EnqueuedAnchor;
+use crate::dag::{DagRound, HistoryConflict};
+use crate::effects::{AltFmt, AltFormat};
+use crate::engine::{EngineResult, MempoolConfig};
 use crate::models::{
     AnchorLink, AnchorStageRole, Committable, DagPoint, Digest, PointInfo, Round, ValidPoint,
 };
@@ -24,6 +22,7 @@ use crate::models::{
 pub struct DagBack {
     // from the oldest to the current round and the next one - when they are set
     rounds: BTreeMap<Round, DagRound>,
+    pub last_committed_proof: Option<Round>,
 }
 
 impl DagBack {
@@ -116,129 +115,17 @@ impl DagBack {
         drained
     }
 
-    /// not yet used commit triggers in historical order;
-    /// `last_proof_round` allows to continue chain from its end
-    pub(super) fn triggers(
-        &self,
-        range: RangeInclusive<Round>,
-    ) -> Result<VecDeque<PointInfo>, SyncError> {
-        let mut triggers = VecDeque::new();
-
-        if range.is_empty() {
-            // may happen after history is invalidated, do not panic here
-            return Ok(triggers);
-        }
-        let rev_iter = self.rounds.range(range).rev();
-
-        for (_, dag_round) in rev_iter {
-            let stage = match dag_round.anchor_stage() {
-                Some(stage) if stage.role == AnchorStageRole::Trigger => stage,
-                _ => continue,
-            };
-            if stage.is_used.load(atomic::Ordering::Relaxed) {
-                break;
-            };
-            match Self::any_ready_valid_trigger(dag_round, &stage.leader) {
-                Ok(trigger) => {
-                    // iter is from newest to oldest, restore historical order
-                    triggers.push_front(trigger.info().clone());
-                }
-                Err(SyncError::TryLater) => {} // skip
-                Err(immediate) => return Err(immediate),
-            }
-        }
-        // tracing::warn!("dag length {} all_triggers: {string}", self.rounds.len());
-
-        Ok(triggers)
-    }
-
-    pub(super) fn last_unusable_proof_round(
-        &self,
-        trigger: &PointInfo,
-    ) -> Result<Round, SyncError> {
-        // anchor chain is not init yet, and exactly anchor trigger or proof is at the bottom -
-        // dag cannot contain corresponding anchor candidate
-
-        let bottom_round = self.bottom_round();
-        let mut last_proof = trigger.anchor_id(AnchorStageRole::Proof);
-
-        if last_proof.round <= bottom_round {
-            return Ok(last_proof.round);
-        };
-
-        // iter for proof->candidate->proof chain
-        let mut rev_iter = self
-            .rounds
-            .range((Bound::Unbounded, Bound::Included(last_proof.round)))
-            .rev()
-            .peekable();
-
-        while rev_iter.peek().is_some() {
-            let (_, proof_dag_round) = rev_iter.next().expect("peek in line above");
-            if proof_dag_round.round() > last_proof.round {
-                continue;
-            }
-            assert_eq!(
-                proof_dag_round.round(),
-                last_proof.round,
-                "{} is not contiguous: iter skipped proof round",
-                self.alt(),
-            );
-
-            match proof_dag_round.anchor_stage() {
-                Some(stage) if stage.role == AnchorStageRole::Proof => {
-                    assert_eq!(
-                        last_proof.author,
-                        stage.leader,
-                        "validate() is broken: anchor proof author is not leader {:?}",
-                        last_proof.alt()
-                    );
-                }
-                _ => panic!(
-                    "validate() is broken: anchor stage is not for anchor proof {:?}",
-                    last_proof.alt()
-                ),
-            }
-
-            let proof =
-                Self::chained_proof(proof_dag_round, &last_proof.author, &last_proof.digest)?;
-
-            last_proof = proof
-                .chained_anchor_proof()
-                .expect("verify() is broken: anchor proof doesn't have a chained one")
-                .to;
-
-            if last_proof.round <= bottom_round {
-                return Ok(last_proof.round);
-            };
-        }
-        unreachable!("iter exhausted, last unusable proof not found")
-    }
-
     // Some contiguous part of anchor chain in historical order; None in case of a gap
     pub(super) fn anchor_chain(
         &self,
-        last_proof_round: Round,
         trigger: &PointInfo,
-    ) -> Result<VecDeque<EnqueuedAnchor>, SyncError> {
-        assert_eq!(
-            trigger.anchor_trigger(),
-            &AnchorLink::ToSelf,
-            "passed point is not a trigger: {:?}",
-            trigger.id().alt()
-        );
-
-        if last_proof_round >= trigger.round().prev() {
-            // some trigger (point future) from a later round resolved earlier than current one,
-            // so this proof is already in chain with `direct_trigger: None`
-            // this proof can even be the last element in chain, as those next trigger and proof
-            // still wait for corresponding anchor point future to resolve
-            return Ok(VecDeque::new());
-        }
+    ) -> EngineResult<VecDeque<EnqueuedAnchor>> {
+        let bottom_round =
+            (self.last_committed_proof).map_or(self.bottom_round(), |proof| proof.next());
 
         let range = RangeInclusive::new(
             // exclude used or unusable proof (it may be out of range)
-            last_proof_round.next(),
+            bottom_round,
             // include topmost proof only
             trigger.round().prev(),
         );
@@ -261,7 +148,7 @@ impl DagBack {
             assert_eq!(
                 proof_dag_round.round(),
                 lookup_proof_id.round,
-                "{} is not contiguous: iter skipped proof round, last proof at {last_proof_round:?}",
+                "{} is not contiguous: iter skipped proof round, bottom at {bottom_round:?}",
                 self.alt(),
             );
 
@@ -278,12 +165,12 @@ impl DagBack {
                         // (new call to commit), when `anchor_chain` is emptied;
                         // during the same commit call, expect `anchor_chain` to serve its purpose
                         assert!(
-                            last_proof_round <= self.bottom_round(),
+                            bottom_round <= self.bottom_round(),
                             "limit by round range is broken: visiting already committed proof {:?}",
                             lookup_proof_id.alt()
                         );
                         // reached already committed proof, so dag is contiguous
-                        return Ok(result);
+                        break;
                     }
                 }
                 _ => panic!(
@@ -304,7 +191,7 @@ impl DagBack {
             let Some((_, anchor_dag_round)) = rev_iter.next() else {
                 assert!(
                     anchor_id.round <= self.bottom_round(), // bottom is excluded by iter bound
-                    "{} cannot retrieve anchor {:?}, last proof at {last_proof_round:?}",
+                    "{} cannot retrieve anchor {:?}, bottom at {bottom_round:?}",
                     self.alt(),
                     anchor_id.alt(),
                 );
@@ -313,7 +200,7 @@ impl DagBack {
             assert_eq!(
                 anchor_dag_round.round(),
                 anchor_id.round,
-                "{} is not contiguous: iter skipped anchor round, last proof at {last_proof_round:?}",
+                "{} is not contiguous: iter skipped anchor round, bottom at {bottom_round:?}",
                 self.alt(),
             );
 
@@ -345,12 +232,12 @@ impl DagBack {
             });
         }
 
-        let linked_to_proof_round = result.front().ok_or(SyncError::TryLater)?.prev_proof_round;
-        if linked_to_proof_round <= last_proof_round {
-            Ok(result)
-        } else {
-            Err(SyncError::TryLater)
-        }
+        assert!(
+            (result.front()).is_none_or(|i| i.prev_proof_round <= bottom_round),
+            "{} is not contiguous: chain does not link across bottom at {bottom_round:?}",
+            self.alt(),
+        );
+        Ok(result)
     }
 
     /// returns globally available points in historical order;
@@ -362,7 +249,7 @@ impl DagBack {
         full_history_bottom: Round,
         anchor: &PointInfo, // @ r+1
         conf: &MempoolConfig,
-    ) -> Result<VecDeque<Committable>, SyncError> {
+    ) -> EngineResult<VecDeque<Committable>> {
         fn extend(to: &mut FastHashMap<Digest, PeerId>, from: &FastHashMap<PeerId, Digest>) {
             if to.is_empty() {
                 to.reserve(from.len());
@@ -431,47 +318,11 @@ impl DagBack {
         Ok(uncommitted)
     }
 
-    fn any_ready_valid_trigger(
-        dag_round: &DagRound,
-        author: &PeerId,
-    ) -> Result<ValidPoint, SyncError> {
-        dag_round
-            .view(author, |loc| {
-                loc.versions
-                    .values()
-                    // better try later than wait now if some point is still downloading
-                    .filter_map(|version| version.clone().now_or_never())
-                    .map(|task_result| match task_result {
-                        Ok(dag_point) => Ok(dag_point),
-                        Err(Cancelled()) => Err(SyncError::Cancelled),
-                    })
-                    // take any suitable
-                    .filter_map_ok(move |dag_point| match dag_point {
-                        DagPoint::Valid(valid) => {
-                            { valid.info().anchor_trigger() == &AnchorLink::ToSelf }
-                                .then_some(Ok(valid))
-                        }
-                        DagPoint::TransInvalid(invalid) => (invalid.has_proof())
-                            .then_some(Err(SyncError::HistoryConflict(dag_round.round()))),
-                        not_valid if not_valid.is_certified() => {
-                            Some(Err(SyncError::HistoryConflict(dag_round.round())))
-                        }
-                        DagPoint::Invalid(_) | DagPoint::NotFound(_) | DagPoint::IllFormed(_) => {
-                            None
-                        }
-                    })
-                    .flatten()
-                    .find_or_first(|result| result.is_ok())
-            })
-            .flatten()
-            .unwrap_or(Err(SyncError::TryLater))
-    }
-
     fn chained_proof(
         dag_round: &DagRound,
         author: &PeerId,
         digest: &Digest,
-    ) -> Result<PointInfo, SyncError> {
+    ) -> EngineResult<PointInfo> {
         let proof = Self::ready_valid_point(dag_round, author, digest, "chained anchor proof")?
             .info()
             .clone();
@@ -491,18 +342,16 @@ impl DagBack {
         author: &PeerId,
         digest: &Digest,
         point_kind: &'static str,
-    ) -> Result<ValidPoint, SyncError> {
+    ) -> EngineResult<ValidPoint> {
         let dag_point = dag_round
             .view(author, |loc| loc.versions.get(digest).cloned()) // not yet created
             .flatten()
             .and_then(|p| p.now_or_never())
             .transpose()? // cancelled
-            .ok_or(SyncError::TryLater)?; // not yet resolved
+            .expect("point to commit must be resolved");
         match dag_point {
             DagPoint::Valid(valid) => Ok(valid),
-            not_valid if not_valid.is_certified() => {
-                Err(SyncError::HistoryConflict(dag_round.round()))
-            }
+            not_valid if not_valid.is_certified() => Err(HistoryConflict(dag_round.round()).into()),
             dp => {
                 panic!("{point_kind} {}: {:?}", dp.alt(), dp.id().alt())
             }
@@ -514,24 +363,22 @@ impl DagBack {
         dag_round: &DagRound,
         author: &PeerId,
         digest: &Digest,
-    ) -> Result<Committable, SyncError> {
+    ) -> EngineResult<Committable> {
         let dag_point = dag_round
             .view(author, |loc| loc.versions.get(digest).cloned()) // not yet created
             .flatten()
             .and_then(|p| p.now_or_never())
             .transpose()? // cancelled
-            .ok_or(SyncError::TryLater)?; // not yet resolved
+            .expect("point to commit must be resolved");
         match dag_point {
             DagPoint::Valid(valid) => Ok(valid.committable()),
             DagPoint::TransInvalid(invalid) => {
                 if invalid.has_proof() {
-                    return Err(SyncError::HistoryConflict(dag_round.round()));
+                    return Err(HistoryConflict(dag_round.round()).into());
                 }
                 Ok(invalid.committable())
             }
-            not_valid if not_valid.is_certified() => {
-                Err(SyncError::HistoryConflict(dag_round.round()))
-            }
+            not_valid if not_valid.is_certified() => Err(HistoryConflict(dag_round.round()).into()),
             dp @ (DagPoint::Invalid(_) | DagPoint::NotFound(_) | DagPoint::IllFormed(_)) => {
                 panic!("not committable {}: {:?}", dp.alt(), dp.id().alt())
             }
@@ -542,9 +389,13 @@ impl DagBack {
 impl AltFormat for DagBack {}
 impl std::fmt::Debug for AltFmt<'_, DagBack> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for (round, dag_round) in &AltFormat::unpack(self).rounds {
+        let inner = AltFormat::unpack(self);
+        f.write_str("{ last_committed_proof=")?;
+        write!(f, "{:?}; ", inner.last_committed_proof)?;
+        for (round, dag_round) in &inner.rounds {
             write!(f, "{}={:?} ", round.0, dag_round.alt())?;
         }
+        f.write_str(" }")?;
         Ok(())
     }
 }

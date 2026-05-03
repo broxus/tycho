@@ -22,8 +22,8 @@ use crate::engine::NodeConfig;
 use crate::intercom::{DownloadResult, Downloader};
 use crate::models::point_status::*;
 use crate::models::{
-    AnchorStageRole, Cert, CertDirectDeps, DagPoint, Digest, Point, PointId, PointInfo,
-    PointRestore, WeakCert,
+    AnchorLink, Cert, CertDirectDeps, DagPoint, Digest, Point, PointId, PointInfo, PointRestore,
+    WeakCert,
 };
 use crate::storage::MempoolStore;
 
@@ -80,9 +80,9 @@ impl DagPointFuture {
     pub fn new_local_valid(
         point_dag_round: &DagRound,
         point: &Point,
-        role: Option<AnchorStageRole>,
         key_pair: Option<Arc<KeyPair>>,
         state: &InclusionState,
+        triggers_tx: Option<&mpsc::UnboundedSender<WeakDagPointFuture>>,
         downloader: Downloader,
         store: MempoolStore,
         round_ctx: &RoundCtx,
@@ -119,7 +119,7 @@ impl DagPointFuture {
             // write as a happy path, rollback after validation if not ok
             let store_fn = {
                 let store = store.clone();
-                let mut status = Self::new_valid_status(role, &cert);
+                let mut status = Self::new_valid_status(&info, &cert);
                 status.is_first_valid = true;
                 status.is_first_resolved = true;
                 move || store.insert_point(&point, &PointStatusStored::Valid(status))
@@ -146,7 +146,7 @@ impl DagPointFuture {
                     ValidateResult::IllFormed(reason) => bail!("Ill-formed: {reason}"),
                 }
                 let (dag_point, status) =
-                    Self::acquire_validated(&state, info.clone(), role, cert, validated);
+                    Self::acquire_validated(&state, info.clone(), cert, validated);
 
                 match &status {
                     PointStatusStored::Valid(status) if status.is_first_valid => {}
@@ -220,7 +220,7 @@ impl DagPointFuture {
             Ok(dag_point)
         });
 
-        Self(DagPointFutureType::Validate {
+        Self::finish(triggers_tx, DagPointFutureType::Validate {
             task: Shared::new(task),
             cert: cert_clone,
         })
@@ -230,6 +230,7 @@ impl DagPointFuture {
         point: &Point,
         reason: &IllFormedReason,
         state: &InclusionState,
+        triggers_tx: Option<&mpsc::UnboundedSender<WeakDagPointFuture>>,
         store: &MempoolStore,
         round_ctx: &RoundCtx,
     ) -> Self {
@@ -264,17 +265,18 @@ impl DagPointFuture {
             LIMIT.spawn_blocking(ctx.task(), full_fn).await.await
         });
 
-        Self(DagPointFutureType::Validate {
+        Self::finish(triggers_tx, DagPointFutureType::Validate {
             task: Shared::new(task),
             cert: cert_clone,
         })
     }
 
+    #[allow(clippy::too_many_arguments)] // TODO arch: make args less granular
     pub fn new_broadcast(
         point_dag_round: &DagRound,
         point: &Point,
-        role: Option<AnchorStageRole>,
         state: &InclusionState,
+        triggers_tx: Option<&mpsc::UnboundedSender<WeakDagPointFuture>>,
         downloader: &Downloader,
         store: &MempoolStore,
         round_ctx: &RoundCtx,
@@ -310,7 +312,7 @@ impl DagPointFuture {
             store_task.await?;
 
             let (dag_point, status) = (validate_ctx.span())
-                .in_scope(|| Self::acquire_validated(&state, info, role, cert, validated));
+                .in_scope(|| Self::acquire_validated(&state, info, cert, validated));
 
             let store_fn = move || {
                 store.set_status(&dag_point.key(), &status, dag_point.prev_digest());
@@ -321,7 +323,7 @@ impl DagPointFuture {
             nested.await.await
         });
 
-        DagPointFuture(DagPointFutureType::Validate {
+        Self::finish(triggers_tx, DagPointFutureType::Validate {
             task: Shared::new(task),
             cert: cert_clone,
         })
@@ -332,9 +334,9 @@ impl DagPointFuture {
         point_dag_round: &DagRound,
         author: &PeerId,
         digest: &Digest,
-        role: Option<AnchorStageRole>,
         first_depender: Option<&PeerId>,
         state: &InclusionState,
+        triggers_tx: Option<&mpsc::UnboundedSender<WeakDagPointFuture>>,
         downloader: &Downloader,
         store: &MempoolStore,
         into_round_ctx: &T,
@@ -397,7 +399,7 @@ impl DagPointFuture {
                     let ctx = into_round_ctx.clone();
 
                     let (dag_point, status) = (ctx.span())
-                        .in_scope(|| Self::acquire_validated(&state, info, role, cert, validated));
+                        .in_scope(|| Self::acquire_validated(&state, info, cert, validated));
 
                     let store_fn = move || {
                         let _guard = ctx.span().enter();
@@ -474,7 +476,7 @@ impl DagPointFuture {
             }
         });
 
-        DagPointFuture(DagPointFutureType::Download {
+        Self::finish(triggers_tx, DagPointFutureType::Download {
             task: Shared::new(task),
             cert: cert_clone,
             dependers_tx,
@@ -482,11 +484,12 @@ impl DagPointFuture {
         })
     }
 
+    #[allow(clippy::too_many_arguments)] // TODO arch: make args less granular
     pub fn new_restore(
         point_dag_round: &DagRound,
         point_restore: PointRestore,
-        role: Option<AnchorStageRole>,
         state: &InclusionState,
+        triggers_tx: Option<&mpsc::UnboundedSender<WeakDagPointFuture>>,
         downloader: &Downloader,
         store: &MempoolStore,
         round_ctx: &RoundCtx,
@@ -579,9 +582,8 @@ impl DagPointFuture {
                         validate_ctx,
                     )
                     .await?;
-                    let (dag_point, status) = round_ctx.span().in_scope(|| {
-                        Self::acquire_validated(&state, verified, role, cert, validated)
-                    });
+                    let (dag_point, status) = (round_ctx.span())
+                        .in_scope(|| Self::acquire_validated(&state, verified, cert, validated));
                     let ctx = round_ctx.clone();
 
                     let store_fn = move || {
@@ -594,7 +596,7 @@ impl DagPointFuture {
                     nested.await.await
                 };
                 let lazy = Box::pin(async move { ctx.task().spawn(future).await });
-                DagPointFuture(DagPointFutureType::Restore {
+                Self::finish(triggers_tx, DagPointFutureType::Restore {
                     lazy: Shared::new(lazy),
                     cert: cert_clone,
                 })
@@ -602,7 +604,7 @@ impl DagPointFuture {
             Either::Right(dag_point) => {
                 state.resolve(&dag_point);
                 let ready = Box::pin(future::ready(Ok(dag_point)));
-                DagPointFuture(DagPointFutureType::Restore {
+                Self::finish(triggers_tx, DagPointFutureType::Restore {
                     lazy: Shared::new(ready),
                     cert: cert_clone,
                 })
@@ -613,14 +615,13 @@ impl DagPointFuture {
     fn acquire_validated(
         state: &InclusionState,
         info: PointInfo,
-        role: Option<AnchorStageRole>,
         cert: Cert,
         validated: ValidateResult,
     ) -> (DagPoint, PointStatusStored) {
         let id = info.id();
         match validated {
             ValidateResult::Valid => {
-                let mut status = Self::new_valid_status(role, &cert);
+                let mut status = Self::new_valid_status(&info, &cert);
                 state.acquire(id, &mut status);
                 (
                     DagPoint::new_valid(info, cert, &status),
@@ -628,7 +629,7 @@ impl DagPointFuture {
                 )
             }
             ValidateResult::TransInvalid(inv_dep) => {
-                let mut status = Self::new_trans_invalid_status(role, &cert, &inv_dep);
+                let mut status = Self::new_trans_invalid_status(&info, &cert, &inv_dep);
                 state.acquire(id, &mut status);
                 (
                     DagPoint::new_trans_invalid(info, cert, &status, inv_dep),
@@ -662,20 +663,16 @@ impl DagPointFuture {
         }
     }
 
-    fn new_valid_status(role: Option<AnchorStageRole>, cert: &Cert) -> PointStatusValid {
+    fn new_valid_status(info: &PointInfo, cert: &Cert) -> PointStatusValid {
         PointStatusValid {
             has_proof: cert.has_proof(),
-            anchor_flags: match role {
-                None => AnchorFlags::empty(),
-                Some(AnchorStageRole::Proof) => AnchorFlags::Proof,
-                Some(AnchorStageRole::Trigger) => AnchorFlags::Trigger,
-            },
+            anchor_flags: Self::anchor_flags(info),
             ..Default::default()
         }
     }
 
     fn new_trans_invalid_status(
-        role: Option<AnchorStageRole>,
+        info: &PointInfo,
         cert: &Cert,
         inv_dep: &InvalidDependency,
     ) -> PointStatusTransInvalid {
@@ -683,15 +680,24 @@ impl DagPointFuture {
             is_first_resolved: false,
             has_proof: cert.has_proof(),
             has_dag_round: inv_dep.reason.has_dag_round(),
-            anchor_flags: match role {
-                None => AnchorFlags::empty(),
-                Some(AnchorStageRole::Proof) => AnchorFlags::Proof,
-                Some(AnchorStageRole::Trigger) => AnchorFlags::Trigger,
-            },
+            anchor_flags: Self::anchor_flags(info),
             committed: None,
             root_cause: inv_dep.link.clone(),
             is_restored: false,
         }
+    }
+
+    fn anchor_flags(info: &PointInfo) -> AnchorFlags {
+        let mut anchor_flags = AnchorFlags::empty();
+        anchor_flags.set(
+            AnchorFlags::Proof,
+            info.anchor_proof() == &AnchorLink::ToSelf,
+        );
+        anchor_flags.set(
+            AnchorFlags::Trigger,
+            info.anchor_trigger() == &AnchorLink::ToSelf,
+        );
+        anchor_flags
     }
 
     fn gather_cert_deps(point_dag_round: &DagRound, info: &PointInfo) -> CertDirectDeps {
@@ -713,6 +719,17 @@ impl DagPointFuture {
             }
         }
         cert_deps
+    }
+
+    fn finish(
+        triggers_tx: Option<&mpsc::UnboundedSender<WeakDagPointFuture>>,
+        dpft: DagPointFutureType,
+    ) -> Self {
+        let this = Self(dpft);
+        if let Some(channel) = triggers_tx {
+            channel.send(this.downgrade()).ok();
+        }
+        this
     }
 
     pub fn add_depender(&self, depender: &PeerId) {

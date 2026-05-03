@@ -1,3 +1,6 @@
+use tokio::sync::mpsc;
+
+use crate::dag::dag_point_future::WeakDagPointFuture;
 use crate::dag::{Committer, DagHead, DagRound};
 use crate::effects::{AltFmt, AltFormat, Ctx, EngineCtx, RoundCtx};
 use crate::engine::lifecycle::FixHistoryFlag;
@@ -6,6 +9,7 @@ use crate::intercom::PeerSchedule;
 use crate::models::Round;
 
 pub struct DagFront {
+    triggers_tx: mpsc::UnboundedSender<WeakDagPointFuture>,
     // from the oldest in front to the current round and the next one in back
     rounds: Vec<DagRound>,
     // back bottom may be moved by commit
@@ -14,34 +18,26 @@ pub struct DagFront {
     has_pending_back_reset: bool,
 }
 
-impl Default for DagFront {
-    fn default() -> Self {
-        Self {
-            rounds: Vec::new(),
-            last_back_bottom: Round::BOTTOM,
-            has_pending_back_reset: false,
-        }
-    }
-}
-
 impl DagFront {
-    pub fn init(
-        &mut self,
-        dag_bottom_round: DagRound,
+    pub fn new(
+        round: Round,
         fix_history: FixHistoryFlag,
+        peer_schedule: &PeerSchedule,
         conf: &MempoolConfig,
-    ) -> Committer {
-        assert!(self.rounds.is_empty(), "DAG already initialized");
-        let mut committer = Committer::default();
+    ) -> (Self, Committer) {
+        let (triggers_tx, triggers_rx) = mpsc::unbounded_channel();
+        let dag_bottom_round = DagRound::new_bottom(round, &triggers_tx, peer_schedule, conf);
+
+        let mut committer = Committer::new(triggers_rx);
         committer.init(&dag_bottom_round, fix_history.0, conf);
-        self.last_back_bottom = dag_bottom_round.round();
-        self.rounds.push(dag_bottom_round);
-        assert_eq!(
-            self.last_back_bottom,
-            committer.bottom_round(),
-            "committer botom after init does not match"
-        );
-        committer
+
+        let this = Self {
+            triggers_tx,
+            last_back_bottom: dag_bottom_round.round(),
+            rounds: vec![dag_bottom_round],
+            has_pending_back_reset: false,
+        };
+        (this, committer)
     }
 
     pub fn head(&self, peer_schedule: &PeerSchedule) -> DagHead {
@@ -56,7 +52,7 @@ impl DagFront {
         }
     }
 
-    fn bottom_round(&self) -> Round {
+    pub(super) fn bottom_round(&self) -> Round {
         match self.rounds.first() {
             None => unreachable!("DAG cannot be empty if properly initialized"),
             Some(bottom) => bottom.round(),
@@ -91,8 +87,12 @@ impl DagFront {
             self.rounds.clear();
             let new_bottom_round =
                 (conf.genesis_round).max(new_top - conf.consensus.reset_rounds());
-            self.rounds
-                .push(DagRound::new_bottom(new_bottom_round, peer_schedule, conf));
+            self.rounds.push(DagRound::new_bottom(
+                new_bottom_round,
+                &self.triggers_tx,
+                peer_schedule,
+                conf,
+            ));
             self.has_pending_back_reset = true;
             self.last_back_bottom = new_bottom_round;
         }
@@ -100,13 +100,13 @@ impl DagFront {
         // to preserve contiguity; even if new rounds are drained, they will be passed to Back Dag
         for _ in self.top().round().next().0..=new_top.0 {
             let top = self.top();
-            self.rounds.push(top.new_next(peer_schedule, conf));
+            (self.rounds).push(top.new_next(&self.triggers_tx, peer_schedule, conf));
         }
 
         if let Some(committer) = committer {
             if self.has_pending_back_reset {
                 self.has_pending_back_reset = false;
-                *committer = Committer::default();
+                committer.reset();
                 committer.init(self.rounds.first().expect("must be init"), true, conf);
                 assert_eq!(
                     self.last_back_bottom,
