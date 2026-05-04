@@ -98,6 +98,10 @@ impl Committer {
         self.dag.len()
     }
 
+    pub fn is_after_gap(&self) -> bool {
+        self.emit_first_after_gap == Some(false)
+    }
+
     /// returns new bottom after gap if it was moved, and `None` if no gap occurred
     pub fn extend_from_ahead(&mut self, rounds: &[DagRound]) {
         self.dag.extend_from_front(rounds);

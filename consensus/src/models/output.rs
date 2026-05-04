@@ -12,6 +12,7 @@ pub struct AnchorData {
 
 pub enum MempoolOutput {
     NextAnchor(Box<AnchorData>),
+    GapUpTo(Round),
     /// just an info message: `true` when set on pause
     Paused(bool),
 }
