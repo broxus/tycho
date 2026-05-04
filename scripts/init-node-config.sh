@@ -23,7 +23,6 @@ if ! [ -f "$logger_path" ]; then
     "tycho": "info",
     "tycho_core": "debug",
     "tycho_network": "info",
-    "async_queued_dispatcher": "error",
     "collation_manager": "debug",
     "mempool_adapter": "debug",
     "state_node_adapter": "debug",
