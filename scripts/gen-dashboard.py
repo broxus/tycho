@@ -2760,7 +2760,7 @@ def mempool_rounds() -> RowPanel:
         ),
         create_gauge_panel(
             "tycho_mempool_consensus_current_round",
-            "Consensus: round determined by Broadcast Filter",
+            "Consensus round",
         ),
         create_gauge_panel(
             "tycho_mempool_rounds_consensus_ahead_top_known",
