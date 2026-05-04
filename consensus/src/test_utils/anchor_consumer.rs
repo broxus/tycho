@@ -63,6 +63,10 @@ impl AnchorConsumer {
     fn drain_anchor(&mut self, file: &mut LastAnchorFile, commit_result: MempoolOutput) {
         let adata = match commit_result {
             MempoolOutput::Paused(_) => return,
+            MempoolOutput::GapUpTo(round) => {
+                self.commit_finished.set_max(round);
+                return;
+            }
             MempoolOutput::NextAnchor(adata) => {
                 let round = adata.anchor.round().0;
                 if adata.needs_empty_cache {
@@ -93,6 +97,10 @@ impl AnchorConsumer {
     ) {
         let adata = match commit_result {
             MempoolOutput::Paused(_) => return,
+            MempoolOutput::GapUpTo(round) => {
+                self.commit_finished.set_max(round);
+                return;
+            }
             MempoolOutput::NextAnchor(adata) => {
                 let round = adata.anchor.round().0;
                 if adata.needs_empty_cache {

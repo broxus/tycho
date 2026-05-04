@@ -56,6 +56,7 @@ impl StdAnchorHandler {
     ) -> Result<Box<Shuttle>> {
         match output {
             MempoolOutput::Paused(is_paused) => self.cache.set_paused(is_paused),
+            MempoolOutput::GapUpTo(round) => self.commit_finished.set_max(round),
             MempoolOutput::NextAnchor(adata) => {
                 let anchor_round = adata.anchor.round();
                 if adata.needs_empty_cache {
