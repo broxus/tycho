@@ -179,7 +179,7 @@ impl CollectorTask {
         top_known_anchor: Round,
     ) -> Result<(), ()> {
         #[allow(clippy::match_same_arms, reason = "comments")]
-        let should_fail = match consensus_round.cmp(&self.next_round) {
+        let consensus_advanced = match consensus_round.cmp(&self.next_round) {
             // we're too late, consensus moved forward
             cmp::Ordering::Greater => true,
             // we still have a chance to finish current round
@@ -191,9 +191,10 @@ impl CollectorTask {
         let new_pause_at = {
             let pause_at =
                 top_known_anchor + self.ctx.conf().consensus.max_consensus_lag_rounds.get();
-            (self.next_round < consensus_round.min(pause_at)).then_some(pause_at.0)
+            (self.next_round < top_known_anchor).then_some(pause_at.0)
         };
 
+        let should_fail = consensus_advanced || new_pause_at.is_some();
         let level = if should_fail {
             tracing::Level::INFO
         } else {
