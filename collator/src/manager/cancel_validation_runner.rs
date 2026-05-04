@@ -27,11 +27,6 @@ where
             return;
         }
 
-        // exit if collation manager stopped
-        if self.cancel_async_tasks.is_cancelled() {
-            return;
-        }
-
         let mut guard = self.cancel_validation_runner.lock();
 
         // schedule next task if cancellation is already running
@@ -55,14 +50,6 @@ where
         mut state: ShardStateStuff,
     ) {
         loop {
-            // exit if collation manager stopped
-            if self.cancel_async_tasks.is_cancelled() {
-                let mut guard = self.cancel_validation_runner.lock();
-                guard.running = false;
-                guard.pending = None;
-                break;
-            }
-
             // execute validation cancellation
             if let Err(e) = self.cancel_validation_sessions_until_block(state) {
                 tracing::error!(

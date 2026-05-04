@@ -9,7 +9,7 @@ use tycho_block_util::block::BlockIdRelation;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_collator::collator::CollatorStdImplFactory;
 use tycho_collator::internal_queue::types::message::EnqueuedMessage;
-use tycho_collator::manager::{CollationManager, RunningCollationManager};
+use tycho_collator::manager::CollationManager;
 use tycho_collator::mempool::{DumpedAnchor, MempoolAdapterStubImpl};
 use tycho_collator::queue_adapter::MessageQueueAdapter;
 use tycho_collator::state_node::{CollatorSyncContext, StateNodeAdapter, StateNodeAdapterStdImpl};
@@ -30,6 +30,8 @@ use tycho_storage::StorageContext;
 use tycho_types::models::{BlockId, BlockIdShort, ShardIdent};
 
 mod common;
+
+type RunningCollationManager = Arc<CollationManager<CollatorStdImplFactory, ValidatorStub>>;
 
 #[derive(Clone)]
 struct ValidatorStub {}
@@ -214,9 +216,7 @@ fn start_collation_manager(
     ctx: &DumpCollationContext,
     dumped_anchors: Vec<DumpedAnchor>,
 ) -> RunningCollationManager {
-    let validator = ValidatorStub {};
-
-    CollationManager::start(
+    CollationManager::create(
         ctx.keypair.clone(),
         ctx.config.clone(),
         ctx.mq_adapter.clone(),
@@ -233,7 +233,7 @@ fn start_collation_manager(
             dumped_anchors,
         )
         .unwrap(),
-        validator,
+        ValidatorStub {},
         CollatorStdImplFactory {
             wu_tuner_event_sender: None,
         },
@@ -351,6 +351,9 @@ async fn test_collation_process_on_dump() {
         _ = block_strider => {
             tracing::info!("Block strider finished");
         },
+        _ = manager.run() => {
+            tracing::info!("Collation manager main flow finished");
+        },
         _ = tokio::signal::ctrl_c() => {
             tracing::info!("Ctrl-C received, shutting down the test");
         },
@@ -409,6 +412,9 @@ async fn test_one_shard_block_per_master_block() {
     tokio::select! {
         _ = block_strider => {
             tracing::info!("Block strider finished");
+        },
+        _ = manager.run() => {
+            tracing::info!("Collation manager main flow finished");
         },
         _ = tokio::signal::ctrl_c() => {
             tracing::info!("Ctrl-C received, shutting down the test");

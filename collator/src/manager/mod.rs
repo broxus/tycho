@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use ahash::HashMapExt;
 use anyhow::{Context, Result, anyhow, bail};
+use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
-use futures_util::{StreamExt, TryFutureExt};
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -68,48 +68,6 @@ mod utils;
 #[path = "tests/manager_tests.rs"]
 pub(super) mod tests;
 
-const BLOCKS_FROM_BC_QUEUE_LIMIT: usize = 1000;
-
-pub struct RunningCollationManager {
-    cancel_async_tasks: CancellationToken,
-    main_flow_handle: tokio::task::JoinHandle<Result<()>>,
-    state_node_adapter: Arc<dyn StateNodeAdapter>,
-}
-
-impl RunningCollationManager {
-    pub fn state_node_adapter(&self) -> &Arc<dyn StateNodeAdapter> {
-        &self.state_node_adapter
-    }
-
-    pub async fn wait_main_flow(&mut self) {
-        let handle = &mut self.main_flow_handle;
-        Self::handle_main_flow_join_result(handle.await);
-    }
-
-    pub fn handle_main_flow_join_result(join_res: Result<Result<()>, tokio::task::JoinError>) {
-        match join_res {
-            Err(e) => tracing::warn!(target: tracing_targets::COLLATION_MANAGER,
-                "collation manager main flow join error: {e:?}",
-            ),
-            Ok(Err(e)) => tracing::error!(target: tracing_targets::COLLATION_MANAGER,
-                "collation manager main flow exited with error: {e:?}",
-            ),
-            _ => tracing::info!(target: tracing_targets::COLLATION_MANAGER,
-                "collation manager main flow stopped",
-            ),
-        }
-    }
-}
-
-impl Drop for RunningCollationManager {
-    fn drop(&mut self) {
-        if !self.main_flow_handle.is_finished() {
-            self.cancel_async_tasks.cancel();
-            self.wait_main_flow().await_blocking();
-        }
-    }
-}
-
 pub struct CollationManager<CF, V>
 where
     CF: CollatorFactory,
@@ -118,6 +76,8 @@ where
     config: Arc<CollatorConfig>,
 
     state_node_adapter: Arc<dyn StateNodeAdapter>,
+    state_event_receiver: Mutex<Option<tokio::sync::mpsc::Receiver<StateEvent>>>,
+
     mpool_adapter: Arc<dyn MempoolAdapter>,
     mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
 
@@ -130,9 +90,6 @@ where
     active_collators: FastDashMap<ShardIdent, ActiveCollator<Box<CF::Collator>>>,
 
     blocks_cache: BlocksCache,
-
-    /// Queue of received blocks from bc
-    blocks_from_bc_queue_sender: tokio::sync::mpsc::Sender<HandledBlockFromBcCtx>,
 
     /// block id of last processed master state (after collation or on sync)
     last_processed_mc_block_id: Arc<Mutex<Option<BlockId>>>,
@@ -148,8 +105,6 @@ where
 
     /// `McData` which processing was delayed until block is validated.
     delayed_mc_state_update: Arc<Mutex<Option<Arc<McData>>>>,
-
-    cancel_async_tasks: CancellationToken,
 }
 
 fn metrics_report_last_applied_block_and_anchor(
@@ -181,7 +136,7 @@ where
     V: Validator,
 {
     #[allow(clippy::too_many_arguments)]
-    pub fn start<STF, MPF>(
+    pub fn create<STF, MPF>(
         keypair: Arc<KeyPair>,
         config: CollatorConfig,
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
@@ -190,7 +145,7 @@ where
         validator: V,
         collator_factory: CF,
         mempool_config_override: Option<MempoolGlobalConfig>,
-    ) -> RunningCollationManager
+    ) -> Arc<CollationManager<CF, V>>
     where
         STF: StateNodeAdapterFactory,
         MPF: MempoolAdapterFactory,
@@ -198,26 +153,24 @@ where
         tracing::info!(target: tracing_targets::COLLATION_MANAGER, "Creating collation manager...");
 
         // create state node adapter
-        let (state_event_listener, state_event_receiver) = ChannelStateEventListener::build(100);
+        const STATE_EVENTS_QUEUE_LIMIT: usize = 100;
+        let (state_event_listener, state_event_receiver) =
+            ChannelStateEventListener::build(STATE_EVENTS_QUEUE_LIMIT);
         let state_node_adapter = Arc::new(state_node_adapter_factory.create(state_event_listener));
 
-        // create mempool adapter
         let mpool_adapter = mpool_adapter_factory.create();
 
         let validator = Arc::new(validator);
 
-        let (blocks_from_bc_queue_sender, blocks_from_bc_queue_receiver) =
-            tokio::sync::mpsc::channel::<HandledBlockFromBcCtx>(BLOCKS_FROM_BC_QUEUE_LIMIT);
-
         let blocks_cache = BlocksCache::new(state_node_adapter.zerostate_id());
-
-        let cancel_async_tasks = CancellationToken::new();
 
         let collation_manager = Self {
             keypair,
             config: Arc::new(config),
 
-            state_node_adapter: state_node_adapter.clone(),
+            state_node_adapter,
+            state_event_receiver: Mutex::new(Some(state_event_receiver)),
+
             mpool_adapter,
             mq_adapter,
 
@@ -231,8 +184,6 @@ where
 
             blocks_cache,
 
-            blocks_from_bc_queue_sender,
-
             last_processed_mc_block_id: Default::default(),
 
             collation_sync_state: Default::default(),
@@ -242,36 +193,30 @@ where
             mempool_config_override,
 
             delayed_mc_state_update: Arc::new(Mutex::new(None)),
-
-            cancel_async_tasks: cancel_async_tasks.clone(),
         };
-        let collation_manager = Arc::new(collation_manager);
-
-        // run main flow
-        let main_flow_handle = tokio::spawn(
-            collation_manager
-                .run(state_event_receiver, blocks_from_bc_queue_receiver)
-                .map_err(|e| {
-                    tracing::error!(target: tracing_targets::COLLATION_MANAGER, "main flow error: {e:?}");
-                    e
-                }),
-        );
 
         tracing::info!(target: tracing_targets::COLLATION_MANAGER, "Collation manager created");
 
-        RunningCollationManager {
-            cancel_async_tasks,
-            main_flow_handle,
-            state_node_adapter,
-        }
+        Arc::new(collation_manager)
+    }
+
+    pub fn state_node_adapter(&self) -> &Arc<dyn StateNodeAdapter> {
+        &self.state_node_adapter
     }
 
     /// Run main flow
-    async fn run(
-        self: Arc<Self>,
-        mut state_event_receiver: tokio::sync::mpsc::Receiver<StateEvent>,
-        mut blocks_from_bc_queue_receiver: tokio::sync::mpsc::Receiver<HandledBlockFromBcCtx>,
-    ) -> Result<()> {
+    pub async fn run(self: &Arc<Self>) -> Result<()> {
+        // take state events receiver
+        let mut state_event_receiver =
+            self.state_event_receiver.lock().take().context(
+                "state_event_receiver already extracted, not allowed to call `run` again",
+            )?;
+
+        // create incoming blocks queue
+        const BLOCKS_FROM_BC_QUEUE_LIMIT: usize = 1000;
+        let (blocks_from_bc_queue_sender, mut blocks_from_bc_queue_receiver) =
+            tokio::sync::mpsc::channel::<HandledBlockFromBcCtx>(BLOCKS_FROM_BC_QUEUE_LIMIT);
+
         // spawn parallel task to handle block applied events
         let mut handle_state_events_task = JoinTask::new({
             let mgr = self.clone();
@@ -284,12 +229,6 @@ where
                 ));
                 loop {
                     tokio::select! {
-                        _ = mgr.cancel_async_tasks.cancelled() => {
-                            tracing::info!(target: tracing_targets::COLLATION_MANAGER,
-                                "state events processing: stop signal received",
-                            );
-                            break;
-                        },
                         event = state_event_receiver.recv() => match event {
                             None => {
                                 tracing::warn!(target: tracing_targets::COLLATION_MANAGER,
@@ -315,7 +254,7 @@ where
                                         state,
                                         processed_upto,
                                     };
-                                    mgr.enqueue_handle_block_from_bc(ctx).await?;
+                                    mgr.enqueue_handle_block_from_bc(ctx, &blocks_from_bc_queue_sender).await?;
                                 }
                             }
                         }
@@ -343,13 +282,6 @@ where
         loop {
             let mut blocks_from_bc_batch = Vec::with_capacity(BLOCKS_FROM_BC_BATCH_SIZE);
             tokio::select! {
-                // handle stop
-                _ = self.cancel_async_tasks.cancelled() => {
-                    tracing::info!(target: tracing_targets::COLLATION_MANAGER,
-                        "collation manager: stop signal received",
-                    );
-                    break;
-                },
                 // just process state events handling error
                 res = &mut handle_state_events_task => {
                     res?;
@@ -1205,7 +1137,11 @@ where
     /// Finish active sync if it is not finished yet
     /// and enqueue received block
     #[tracing::instrument(skip_all, fields(block_id = %ctx.state.block_id().as_short_id()))]
-    async fn enqueue_handle_block_from_bc(&self, ctx: HandledBlockFromBcCtx) -> Result<()> {
+    async fn enqueue_handle_block_from_bc(
+        &self,
+        ctx: HandledBlockFromBcCtx,
+        blocks_from_bc_queue_sender: &tokio::sync::mpsc::Sender<HandledBlockFromBcCtx>,
+    ) -> Result<()> {
         // TODO: Needs to redesign the task management logic.
         //      Current implementation with strange semaphores
         //      is unclear and may be confusing.
@@ -1229,7 +1165,7 @@ where
         self.finish_active_sync_to_applied(ctx.state.block_id());
 
         // enqueue received block for processing
-        self.blocks_from_bc_queue_sender.send(ctx).await?;
+        blocks_from_bc_queue_sender.send(ctx).await?;
 
         Ok(())
     }

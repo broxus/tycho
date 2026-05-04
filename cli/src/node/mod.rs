@@ -240,7 +240,7 @@ impl Node {
             Some(NodeSyncState::Blocks) => CollatorSyncContext::Historical,
         };
 
-        let mut collation_manager = CollationManager::start(
+        let collation_manager = CollationManager::create(
             base.keypair.clone(),
             self.collator_config.clone(),
             Arc::new(message_queue_adapter),
@@ -259,10 +259,10 @@ impl Node {
             },
             self.mempool_config_override.clone(),
         );
-        let collator = CollatorStateSubscriber {
+        let collator_subcriber = CollatorStateSubscriber {
             adapter: collation_manager.state_node_adapter().clone(),
         };
-        collator
+        collator_subcriber
             .adapter
             .handle_state(mc_state.block_id(), &mc_state)
             .await?;
@@ -337,10 +337,10 @@ impl Node {
             blockchain_block_provider.with_fallback(archive_block_provider.clone());
 
         let block_strider = base.build_strider(
-            collator
+            collator_subcriber
                 .new_sync_point(CollatorSyncContext::Historical)
                 .chain(archive_block_provider)
-                .chain(collator.new_sync_point(CollatorSyncContext::Recent))
+                .chain(collator_subcriber.new_sync_point(CollatorSyncContext::Recent))
                 .chain((
                     blockchain_block_provider,
                     storage_block_provider,
@@ -349,7 +349,7 @@ impl Node {
             (
                 ShardStateApplier::new(
                     base.core_storage.clone(),
-                    (collator, rpc_state_subscriber, control_server),
+                    (collator_subcriber, rpc_state_subscriber, control_server),
                 ),
                 rpc_block_subscriber,
                 base.validator_resolver().clone(),
@@ -364,8 +364,9 @@ impl Node {
                 res?;
                 tracing::info!("block strider finished");
             },
-            _ = collation_manager.wait_main_flow() => {
+            res = collation_manager.run() => {
                 tracing::info!("block strider cancelled");
+                res.context("collation manager main flow failed")?;
             }
         }
 
