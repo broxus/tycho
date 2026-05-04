@@ -39,8 +39,8 @@ impl Default for RpcTrafficLimits {
     fn default() -> Self {
         Self {
             requests: TokenBucketConfig::new(
-                NonZeroU32::new(5).unwrap(),
-                NonZeroU32::new(5).unwrap(),
+                NonZeroU32::new(10).unwrap(),
+                NonZeroU32::new(10).unwrap(),
             ),
             streams: TokenBucketConfig::new(
                 NonZeroU32::new(1).unwrap(),
