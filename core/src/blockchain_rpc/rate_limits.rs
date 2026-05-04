@@ -41,8 +41,8 @@ impl Default for BlockchainRpcTrafficLimits {
     fn default() -> Self {
         Self {
             light_queries: TokenBucketConfig::new(
-                NonZeroU32::new(10).unwrap(),
-                NonZeroU32::new(10).unwrap(),
+                NonZeroU32::new(15).unwrap(),
+                NonZeroU32::new(15).unwrap(),
             ),
             heavy_queries: TokenBucketConfig::new(
                 NonZeroU32::new(5).unwrap(),
@@ -82,7 +82,11 @@ impl BlockchainRpcRateLimitPolicy {
             overlay::Ping::TL_ID
             | rpc::GetArchiveInfo::TL_ID
             | rpc::GetPersistentShardStateInfo::TL_ID
-            | rpc::GetPersistentQueueStateInfo::TL_ID => BlockchainRpcTrafficClass::LightQuery,
+            | rpc::GetPersistentQueueStateInfo::TL_ID
+            | rpc::GetArchiveChunk::TL_ID
+            | rpc::GetBlockDataChunk::TL_ID
+            | rpc::GetPersistentQueueStateChunk::TL_ID
+            | rpc::GetPersistentShardStateChunk::TL_ID => BlockchainRpcTrafficClass::LightQuery,
             _ => BlockchainRpcTrafficClass::HeavyQuery,
         }
     }
