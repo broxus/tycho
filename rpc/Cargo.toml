@@ -43,6 +43,7 @@ tycho-core = { workspace = true }
 tycho-storage = { workspace = true }
 tycho-util = { workspace = true }
 tycho-rpc-subscriptions = { workspace = true }
+log = "0.4.29"
 
 [dev-dependencies]
 tycho-network = { workspace = true }

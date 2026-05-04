@@ -1,3 +1,4 @@
+use std::fmt::Debug;
 use std::hash::Hash;
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -80,7 +81,7 @@ where
 impl<K, C> RateLimiter<K, C>
 where
     K: Clone + Eq + Hash + Send + Sync + 'static,
-    C: Copy + Eq + Hash + Send + Sync + 'static,
+    C: Debug + Copy + Eq + Hash + Send + Sync + 'static,
 {
     pub fn new(config: RateLimitConfig) -> Self {
         Self {
@@ -100,7 +101,7 @@ where
 impl<K, C> RateLimiterInner<K, C>
 where
     K: Clone + Eq + Hash + Send + Sync + 'static,
-    C: Copy + Eq + Hash + Send + Sync + 'static,
+    C: Debug + Copy + Eq + Hash + Send + Sync + 'static,
 {
     fn check(&self, key: &K, policy: RateLimitPolicy<C>) -> RateLimitVerdict {
         let now = Instant::now();

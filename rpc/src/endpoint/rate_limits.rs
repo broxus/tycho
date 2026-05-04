@@ -136,6 +136,9 @@ pub async fn rate_limit(
 
     match limiter.check(ip, class) {
         RateLimitVerdict::Allow => next.run(req).await,
-        RateLimitVerdict::Reject => StatusCode::TOO_MANY_REQUESTS.into_response(),
+        RateLimitVerdict::Reject => {
+            tracing::warn!(?ip, ?class, "RPC rate limit reached");
+            StatusCode::TOO_MANY_REQUESTS.into_response()
+        }
     }
 }

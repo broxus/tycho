@@ -1,3 +1,4 @@
+use std::fmt::Debug;
 use std::hash::Hash;
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -13,7 +14,7 @@ pub enum OverlayIngressPolicyDecision<C> {
 }
 
 pub trait PublicOverlayRateLimitPolicy: Send + Sync + 'static {
-    type Class: Copy + Eq + Hash + Send + Sync + 'static;
+    type Class: Debug + Copy + Eq + Hash + Send + Sync + 'static;
 
     fn classify_query(&self, req: &ServiceRequest) -> OverlayIngressPolicyDecision<Self::Class>;
 
@@ -88,7 +89,11 @@ where
     fn check(&self, ip: IpAddr, decision: OverlayIngressPolicyDecision<P::Class>) -> bool {
         match decision {
             OverlayIngressPolicyDecision::Allow(policy) => {
-                matches!(self.limiter.check(&ip, policy), RateLimitVerdict::Allow)
+                let allow = matches!(self.limiter.check(&ip, policy), RateLimitVerdict::Allow);
+                if !allow {
+                    tracing::warn!(?ip, class = ?policy.class, "RPC rate limit reached");
+                }
+                allow
             }
             OverlayIngressPolicyDecision::Bypass => true,
             OverlayIngressPolicyDecision::Drop => false,

@@ -4369,6 +4369,7 @@ dependencies = [
  "futures-util",
  "http-body-util",
  "humantime",
+ "log",
  "metrics",
  "moka",
  "parking_lot",
