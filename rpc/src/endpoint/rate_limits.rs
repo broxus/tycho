@@ -3,7 +3,7 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use axum::extract::{ConnectInfo, Request};
-use axum::http::{Method, StatusCode};
+use axum::http::{Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
@@ -136,6 +136,15 @@ pub async fn rate_limit(
 
     match limiter.check(ip, class) {
         RateLimitVerdict::Allow => next.run(req).await,
-        RateLimitVerdict::Reject => StatusCode::TOO_MANY_REQUESTS.into_response(),
+        RateLimitVerdict::Reject { retry_after } => {
+            // Round up to whole seconds.
+            let retry_after = retry_after.as_millis().div_ceil(1_000).max(1);
+
+            (StatusCode::TOO_MANY_REQUESTS, [(
+                header::RETRY_AFTER,
+                retry_after.to_string(),
+            )])
+                .into_response()
+        }
     }
 }
