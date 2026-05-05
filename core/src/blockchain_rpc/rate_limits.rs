@@ -41,12 +41,12 @@ impl Default for BlockchainRpcTrafficLimits {
     fn default() -> Self {
         Self {
             light_queries: TokenBucketConfig::new(
-                NonZeroU32::new(15).unwrap(),
-                NonZeroU32::new(15).unwrap(),
+                NonZeroU32::new(20).unwrap(),
+                NonZeroU32::new(20).unwrap(),
             ),
             heavy_queries: TokenBucketConfig::new(
-                NonZeroU32::new(5).unwrap(),
-                NonZeroU32::new(5).unwrap(),
+                NonZeroU32::new(10).unwrap(),
+                NonZeroU32::new(10).unwrap(),
             ),
             broadcasts: TokenBucketConfig::new(
                 NonZeroU32::new(5).unwrap(),
