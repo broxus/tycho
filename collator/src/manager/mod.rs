@@ -627,7 +627,13 @@ where
 
                     // run sync if have applied mc blocks
                     return self
-                        .sync_to_applied_mc_block_if_exist(last_collated_mc_block_id, applied_range)
+                        .sync_to_applied_mc_block_if_exist(
+                            last_collated_mc_block_id,
+                            applied_range,
+                            ProcessMcStateUpdateMode::StartCollation {
+                                reset_collators: true,
+                            },
+                        )
                         .await;
                 }
             }
@@ -1025,6 +1031,9 @@ where
                     .sync_to_applied_mc_block_if_exist(
                         store_res.last_collated_mc_block_id,
                         store_res.applied_mc_queue_range,
+                        ProcessMcStateUpdateMode::StartCollation {
+                            reset_collators: true,
+                        },
                     )
                     .await?;
             } else {
@@ -1048,6 +1057,9 @@ where
                         .sync_to_applied_mc_block_if_exist(
                             store_res.last_collated_mc_block_id,
                             store_res.applied_mc_queue_range,
+                            ProcessMcStateUpdateMode::StartCollation {
+                                reset_collators: true,
+                            },
                         )
                         .await?;
                 }
@@ -1200,8 +1212,10 @@ where
                 last_mc_block_id_opt, Some(last_mc_block_id) if ctx.state.block_id() == &last_mc_block_id
             );
 
+            let shard_id = ctx.state.block_id().shard;
+
             // handle block from bc
-            collator_tasks = self
+            let tasks = self
                 .handle_block_from_bc(ctx, is_last_mc_block_in_batch)
                 .await
                 .map_err(|err| {
@@ -1210,6 +1224,24 @@ where
                     );
                     err
                 })?;
+            // TODO: `refresh_collations_sessions` should return only `init` or `resume` tasks,
+            //      which can be awaited here, and `try_collate` should be called from the main flow
+            // check invariants
+            if !is_last_mc_block_in_batch {
+                assert!(
+                    tasks.is_empty(),
+                    "only last master block should run collator tasks",
+                );
+            }
+            if !shard_id.is_masterchain() {
+                assert!(
+                    tasks.is_empty(),
+                    "should not run collator tasks on shard block processing",
+                );
+            }
+            if !tasks.is_empty() {
+                collator_tasks = tasks;
+            }
         }
 
         Ok(collator_tasks)
@@ -1402,11 +1434,20 @@ where
         let mut collator_tasks = vec![];
 
         if should_sync_to_last_applied_mc_block {
+            // should only refresh collation sessions when sync on key block
+            let process_state_update_mode = if is_last_mc_block_in_batch {
+                ProcessMcStateUpdateMode::StartCollation {
+                    reset_collators: true,
+                }
+            } else {
+                ProcessMcStateUpdateMode::RefreshSessionsOnly
+            };
             // run sync if have applied mc blocks
             collator_tasks = self
                 .sync_to_applied_mc_block_if_exist(
                     store_res.last_collated_mc_block_id,
                     store_res.applied_mc_queue_range,
+                    process_state_update_mode,
                 )
                 .await?;
         } else {
@@ -1430,6 +1471,7 @@ where
         self: &Arc<Self>,
         last_collated_mc_block_id: Option<BlockId>,
         applied_range: Option<(BlockSeqno, BlockSeqno)>,
+        process_state_update_mode: ProcessMcStateUpdateMode,
     ) -> Result<Vec<CollatorJoinTask<CF::Collator>>> {
         let mut collator_tasks = vec![];
 
@@ -1437,7 +1479,11 @@ where
             let this = self.clone();
 
             collator_tasks = tokio::task::spawn_blocking(move || {
-                this.sync_to_applied_mc_block(applied_range, last_collated_mc_block_id)
+                this.sync_to_applied_mc_block(
+                    applied_range,
+                    last_collated_mc_block_id,
+                    process_state_update_mode,
+                )
             })
             .await??;
         } else {
@@ -1458,6 +1504,7 @@ where
         &self,
         applied_range: (BlockSeqno, BlockSeqno),
         last_collated_mc_block_id: Option<BlockId>,
+        process_state_update_mode: ProcessMcStateUpdateMode,
     ) -> Result<Vec<CollatorJoinTask<CF::Collator>>> {
         tracing::info!(target: tracing_targets::COLLATION_MANAGER,
             "start sync to applied mc block",
@@ -1654,11 +1701,10 @@ where
             .await_blocking()?;
 
         // when sync cancelled we do not exist sync but skip collation
-        let process_state_update_mode = match cancelled.is_cancelled() {
-            true => ProcessMcStateUpdateMode::SkipCollation,
-            false => ProcessMcStateUpdateMode::StartCollation {
-                reset_collators: true,
-            },
+        let process_state_update_mode = if cancelled.is_cancelled() {
+            ProcessMcStateUpdateMode::SkipProcess
+        } else {
+            process_state_update_mode
         };
 
         let collator_tasks = self
@@ -2155,16 +2201,14 @@ where
 
         let mut collator_tasks = vec![];
 
-        if let ProcessMcStateUpdateMode::StartCollation { reset_collators } = mode {
+        if !matches!(mode, ProcessMcStateUpdateMode::SkipProcess) {
             let block_global = mc_data.config.get_global_version()?;
             if self.config.supported_block_version >= block_global.version
                 && block_global
                     .capabilities
                     .is_subset_of(self.config.supported_capabilities)
             {
-                collator_tasks = self
-                    .refresh_collation_sessions(mc_data, reset_collators)
-                    .await?;
+                collator_tasks = self.refresh_collation_sessions(mc_data, mode).await?;
             } else {
                 tracing::warn!(target: tracing_targets::COLLATION_MANAGER,
                     collator_supported_block_version = self.config.supported_block_version,
@@ -2255,7 +2299,7 @@ where
     async fn refresh_collation_sessions(
         &self,
         mc_data: Arc<McData>,
-        reset_collators: bool,
+        mode: ProcessMcStateUpdateMode,
     ) -> Result<Vec<CollatorJoinTask<CF::Collator>>> {
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
             "Start refresh collation sessions by mc state ({})...",
@@ -2477,15 +2521,24 @@ where
                         }
                         Ok(collator) => {
                             let collator = Box::new(collator);
+
+                            // init collator
+                            let collator =
+                                if let ProcessMcStateUpdateMode::StartCollation { .. } = mode {
+                                    let init_collator_task = JoinTask::new(
+                                        collator.init(prev_blocks_ids, mc_data.clone()),
+                                    );
+                                    collator_tasks.push(init_collator_task);
+                                    None
+                                } else {
+                                    Some(collator)
+                                };
+
                             entry.insert(ActiveCollator {
-                                collator: None,
+                                collator,
                                 state: CollatorState::Active,
                                 cancel_collation: cancel_collation_notify,
                             });
-                            // init collator
-                            let init_collator_task =
-                                JoinTask::new(collator.init(prev_blocks_ids, mc_data.clone()));
-                            collator_tasks.push(init_collator_task);
                         }
                     }
                 }
@@ -2514,27 +2567,32 @@ where
 
         // update master state in existing collators and resume collation
         for (shard_id, new_session_info, prev_blocks_ids) in sessions_to_keep {
-            let collator = self
-                .take_collator_and_set_state(&shard_id, |ac| ac.state = CollatorState::Active)
-                .with_context(|| {
-                    format!(
-                        "Collator for shard should exist for active session {:?}",
-                        new_session_info.id()
-                    )
-                })?;
-            tracing::debug!(
-                target: tracing_targets::COLLATION_MANAGER,
-                "Resuming collation attempts in shard session {:?}",
-                new_session_info.id(),
-            );
-            // resume collation
-            let resume_collation_task = JoinTask::new(collator.resume_collation(
-                mc_data.clone(),
-                reset_collators,
-                new_session_info,
-                prev_blocks_ids,
-            ));
-            collator_tasks.push(resume_collation_task);
+            if let ProcessMcStateUpdateMode::StartCollation { reset_collators } = mode {
+                let collator = self
+                    .take_collator_and_set_state(&shard_id, |ac| ac.state = CollatorState::Active)
+                    .with_context(|| {
+                        format!(
+                            "Collator for shard should exist for active session {:?}",
+                            new_session_info.id()
+                        )
+                    })?;
+                tracing::debug!(
+                    target: tracing_targets::COLLATION_MANAGER,
+                    "Resuming collation attempts in shard session {:?}",
+                    new_session_info.id(),
+                );
+                // resume collation
+                let resume_collation_task = JoinTask::new(collator.resume_collation(
+                    mc_data.clone(),
+                    reset_collators,
+                    new_session_info,
+                    prev_blocks_ids,
+                ));
+                collator_tasks.push(resume_collation_task);
+            } else {
+                // just reset collator state
+                self.set_collator_state(&shard_id, |ac| ac.state = CollatorState::Waiting);
+            }
         }
 
         // finish outdated collation sessions
@@ -3442,7 +3500,8 @@ impl<C: Collator> HandleBlockCandidateResult<C> {
 #[derive(Debug)]
 enum ProcessMcStateUpdateMode {
     StartCollation { reset_collators: bool },
-    SkipCollation,
+    RefreshSessionsOnly,
+    SkipProcess,
 }
 
 #[derive(Default)]
