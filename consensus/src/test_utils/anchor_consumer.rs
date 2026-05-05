@@ -64,14 +64,12 @@ impl AnchorConsumer {
         let adata = match commit_result {
             MempoolOutput::Paused(_) => return,
             MempoolOutput::GapUpTo(round) => {
+                tracing::warn!("gap in anchor chain, first to commit: {round:?}");
                 self.commit_finished.set_max(round);
                 return;
             }
             MempoolOutput::NextAnchor(adata) => {
                 let round = adata.anchor.round().0;
-                if adata.needs_empty_cache {
-                    tracing::warn!("gap in anchor chain, first to commit: {round}");
-                }
                 let prev_committed = self.commit_finished.get().0;
                 assert!(
                     prev_committed <= round || !adata.is_executable,
@@ -86,6 +84,7 @@ impl AnchorConsumer {
         metrics::gauge!("tycho_mempool_last_anchor_round").set(round);
 
         tycho_util::mem::Reclaimer::instance().drop(adata);
+        self.top_known_anchor.set_max_raw(round);
         file.update(round).expect("update last anchor file");
     }
 
@@ -98,14 +97,13 @@ impl AnchorConsumer {
         let adata = match commit_result {
             MempoolOutput::Paused(_) => return,
             MempoolOutput::GapUpTo(round) => {
+                tracing::warn!("gap in anchor chain, first to commit: {round:?}");
                 self.commit_finished.set_max(round);
+                self.anchors.retain(|key, _| *key > round);
                 return;
             }
             MempoolOutput::NextAnchor(adata) => {
                 let round = adata.anchor.round().0;
-                if adata.needs_empty_cache {
-                    tracing::warn!("gap in anchor chain, first to commit: {round}");
-                }
                 let prev_committed = self.commit_finished.get().0;
                 assert!(
                     prev_committed <= round || !adata.is_executable,

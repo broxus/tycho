@@ -116,6 +116,7 @@ fn make_network(
 
     let merged_conf = default_test_config();
     let dht_config = DhtConfig {
+        max_k: cli.nodes.get(),
         local_info_announce_period: Duration::from_secs(1),
         local_info_announce_period_max_jitter: Duration::from_secs(1),
         routing_table_refresh_period: Duration::from_secs(1),

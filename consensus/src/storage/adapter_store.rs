@@ -16,7 +16,7 @@ use crate::engine::{ConsensusConfigExt, DAG_ROUNDS_TO_DROP, MempoolConfig};
 use crate::models::point_status::{
     AnchorFlags, CommitHistoryPart, PointStatusCommittable, PointStatusStore,
 };
-use crate::models::{AnchorData, Point, PointInfo, PointKey, PointRestore, Round};
+use crate::models::{AnchorData, MempoolOutput, Point, PointInfo, PointKey, PointRestore, Round};
 use crate::storage::MempoolDb;
 
 #[derive(Clone)]
@@ -198,7 +198,7 @@ impl MempoolAdapterStore {
         &self,
         top_processed_to_anchor: u32,
         conf: &MempoolConfig,
-    ) -> Result<Vec<AnchorData>> {
+    ) -> Result<Vec<MempoolOutput>> {
         let top_known_anchor = Round(top_processed_to_anchor);
 
         let bottom_round = (conf.genesis_round).max(
@@ -206,7 +206,7 @@ impl MempoolAdapterStore {
             top_known_anchor - (conf.consensus.replay_anchor_rounds() - DAG_ROUNDS_TO_DROP),
         );
 
-        let mut anchors = self
+        let anchors = self
             .load_history_since(bottom_round, conf)
             .context("load history")?;
 
@@ -215,13 +215,16 @@ impl MempoolAdapterStore {
             "anchors must be restored in order"
         );
 
+        let mut output = Vec::with_capacity(anchors.len() + 5);
         let mut last_visited = None;
         let mut first_executable = Some(top_known_anchor);
 
-        for adata in &mut anchors {
+        for mut adata in anchors {
             let has_gap = last_visited.is_some() && last_visited != adata.prev_anchor;
             if has_gap {
-                anyhow::ensure!(adata.prev_anchor.is_some(), "don't expect genesis");
+                let prev_anchor = *adata.prev_anchor.as_ref().expect("don't expect genesis");
+                output.push(MempoolOutput::GapUpTo(prev_anchor));
+
                 let adata_bottom = (adata.history.first())
                     .context("anchor history must include the anchor itself")?
                     .round();
@@ -235,7 +238,6 @@ impl MempoolAdapterStore {
                 first_executable = Some(
                     top_known_anchor.max(full_history_bottom + conf.consensus.deduplicate_rounds),
                 );
-                adata.needs_empty_cache = true; // for any one, either executable or not
             };
             if let Some(first_to_execute) = first_executable {
                 if adata.anchor.round() < first_to_execute {
@@ -249,9 +251,11 @@ impl MempoolAdapterStore {
                 adata.is_executable = true;
             }
             last_visited = Some(adata.anchor.round());
+
+            output.push(MempoolOutput::NextAnchor(Box::new(adata)));
         }
 
-        Ok(anchors)
+        Ok(output)
     }
 
     fn load_history_since(
@@ -319,8 +323,7 @@ impl MempoolAdapterStore {
                     .filter(|r| *r > conf.genesis_round)
                     .map(|r| r.prev()),
                 history: keyed_vec.into_iter().map(|(_, info)| info).collect(),
-                is_executable: false,     // define later
-                needs_empty_cache: false, // define later
+                is_executable: false, // define later
             });
         }
         Ok(result)

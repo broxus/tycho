@@ -83,7 +83,6 @@ impl Shuttle {
                 target: tracing_targets::MEMPOOL_ADAPTER,
                 id = anchor_id,
                 is_executable = committed.is_executable,
-                needs_empty_cache = committed.needs_empty_cache,
                 time = chain_time,
                 externals_unique = unique_messages_len,
                 externals_skipped = total_messages - unique_messages_len,

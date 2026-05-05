@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use tycho_consensus::prelude::{
-    MempoolAdapterStore, MempoolConfigBuilder, MempoolDb, MempoolNodeConfig,
+    MempoolAdapterStore, MempoolConfigBuilder, MempoolDb, MempoolNodeConfig, MempoolOutput,
 };
 use tycho_network::PeerId;
 use tycho_storage::StorageContext;
@@ -93,20 +93,25 @@ impl DumpAnchors {
 
         let mut results = Vec::new();
 
-        for adata in outputs {
-            if adata.needs_empty_cache {
-                shuttle.parser = Parser::new(conf.consensus.deduplicate_rounds);
-                tracing::info!(
-                    target: tracing_targets::MEMPOOL_ADAPTER,
-                    is_executable = adata.is_executable,
-                    "deduplication state dropped",
-                );
-            };
-            let (output, dirty) = shuttle.handle(Box::new(adata)).await?;
-            if let Some(anchor) = output {
-                results.push(anchor);
-            };
-            shuttle = dirty.clean().await?;
+        for output in outputs {
+            match output {
+                MempoolOutput::Paused(_) => {}
+                MempoolOutput::GapUpTo(round) => {
+                    shuttle.parser = Parser::new(conf.consensus.deduplicate_rounds);
+                    tracing::info!(
+                        target: tracing_targets::MEMPOOL_ADAPTER,
+                        up_to_round = round.0,
+                        "deduplication state dropped after gap",
+                    );
+                }
+                MempoolOutput::NextAnchor(adata) => {
+                    let (output, dirty) = shuttle.handle(adata).await?;
+                    if let Some(anchor) = output {
+                        results.push(anchor);
+                    };
+                    shuttle = dirty.clean().await?;
+                }
+            }
         }
 
         Ok(results)

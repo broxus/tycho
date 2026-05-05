@@ -98,8 +98,13 @@ impl Committer {
         self.dag.len()
     }
 
-    pub fn is_after_gap(&self) -> bool {
-        self.emit_first_after_gap == Some(false)
+    pub fn is_once_after_gap(&mut self) -> bool {
+        if self.emit_first_after_gap == Some(false) {
+            self.emit_first_after_gap = Some(true);
+            true
+        } else {
+            false
+        }
     }
 
     /// returns new bottom after gap if it was moved, and `None` if no gap occurred
@@ -309,19 +314,15 @@ impl Committer {
             .collect::<Vec<_>>();
 
         let is_executable = next.anchor.round() >= self.first_executable;
-        let (is_first_executable, needs_empty_cache) =
-            match (is_executable, self.emit_first_after_gap) {
-                (false, Some(false)) => {
-                    self.emit_first_after_gap = Some(true);
-                    (false, true)
-                }
-                (true, Some(cache_reset_signalled)) => {
-                    // if first after gap is executable, then there was no non-executable stage
-                    self.emit_first_after_gap = None;
-                    (true, !cache_reset_signalled)
-                }
-                _ => (false, false),
-            };
+
+        let is_first_executable = match self.emit_first_after_gap {
+            Some(false) => panic!("gap flag was not consumed before commit"),
+            Some(true) if is_executable => {
+                self.emit_first_after_gap = None;
+                true
+            }
+            _ => false,
+        };
 
         Ok(AnchorData {
             // both first executable anchor and one right after genesis
@@ -332,7 +333,6 @@ impl Committer {
             proof_key: next.proof.key(),
             history: committed,
             is_executable,
-            needs_empty_cache,
         })
     }
 }
