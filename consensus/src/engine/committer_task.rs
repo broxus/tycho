@@ -130,7 +130,7 @@ impl State {
                 to_reset || (min_dag_len && conflict_at < replay_since)
             };
 
-            if inner.committer.is_after_gap() {
+            if inner.committer.is_once_after_gap() {
                 let gap = MempoolOutput::GapUpTo(inner.committer.bottom_round().prev());
                 anchors_tx.send(gap).ok();
             }
@@ -142,6 +142,7 @@ impl State {
                     Ok(data) => break Some(data),
                     Err(HistoryConflict(round)) if rounds_drop_allowed(round) => {
                         let dropped_ok = inner.committer.drop_upto(round.next(), round_ctx.conf());
+                        assert!(inner.committer.is_once_after_gap(), "gap flag must be set");
                         anchors_tx.send(MempoolOutput::GapUpTo(round)).ok();
                         tracing::info!(
                             start_bottom,

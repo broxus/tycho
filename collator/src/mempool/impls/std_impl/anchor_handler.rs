@@ -56,17 +56,17 @@ impl StdAnchorHandler {
     ) -> Result<Box<Shuttle>> {
         match output {
             MempoolOutput::Paused(is_paused) => self.cache.set_paused(is_paused),
-            MempoolOutput::GapUpTo(round) => self.commit_finished.set_max(round),
+            MempoolOutput::GapUpTo(round) => {
+                shuttle.parser = Parser::new(self.deduplicate_rounds);
+                tracing::info!(
+                    target: tracing_targets::MEMPOOL_ADAPTER,
+                    up_to_round = round.0,
+                    "deduplication state dropped after gap",
+                );
+                self.commit_finished.set_max(round);
+            }
             MempoolOutput::NextAnchor(adata) => {
                 let anchor_round = adata.anchor.round();
-                if adata.needs_empty_cache {
-                    shuttle.parser = Parser::new(self.deduplicate_rounds);
-                    tracing::info!(
-                        target: tracing_targets::MEMPOOL_ADAPTER,
-                        is_executable = adata.is_executable,
-                        "deduplication state dropped",
-                    );
-                };
                 let (output, dirty) = shuttle.handle(adata).await?;
                 if let Some(anchor) = output {
                     self.cache.push(Arc::new(anchor))?;

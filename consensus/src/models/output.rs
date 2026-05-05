@@ -7,7 +7,6 @@ pub struct AnchorData {
     pub prev_anchor: Option<Round>,
     pub history: Vec<PointInfo>,
     pub is_executable: bool,
-    pub needs_empty_cache: bool,
 }
 
 pub enum MempoolOutput {

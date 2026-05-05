@@ -191,7 +191,7 @@ impl CollectorTask {
         let new_pause_at = {
             let pause_at =
                 top_known_anchor + self.ctx.conf().consensus.max_consensus_lag_rounds.get();
-            (self.next_round < top_known_anchor).then_some(pause_at.0)
+            (self.current_dag_round.round() <= top_known_anchor).then_some(pause_at.0)
         };
 
         let should_fail = consensus_advanced || new_pause_at.is_some();
