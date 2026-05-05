@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::task::{Context, Poll};
 
+use futures_util::task::AtomicWaker;
 use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
 #[must_use = "futures do nothing unless you `.await` or poll them"]
@@ -32,7 +33,10 @@ impl<Fut: Future> Shared<Fut> {
         let inner = Arc::new(Inner {
             state: AtomicUsize::new(POLLING),
             future_or_output: UnsafeCell::new(FutureOrOutput::Future(future)),
-            semaphore,
+            notify: DropNotify {
+                semaphore,
+                weak_waiter: AtomicWaker::new(),
+            },
         });
 
         Self {
@@ -92,14 +96,14 @@ where
                 fut
             } else {
                 // Avoid allocations completely if we can grab a permit immediately
-                match Arc::clone(&inner.semaphore).try_acquire_owned() {
+                match Arc::clone(&inner.notify.semaphore).try_acquire_owned() {
                     Ok(permit) => break 'permit permit,
                     Err(TryAcquireError::NoPermits) => {}
                     // NOTE: We don't expect the semaphore to be closed
                     Err(TryAcquireError::Closed) => unreachable!(),
                 }
 
-                let next_fut = Arc::clone(&inner.semaphore).acquire_owned();
+                let next_fut = Arc::clone(&inner.notify.semaphore).acquire_owned();
                 this_permit_fut.get_or_insert(Box::pin(next_fut))
             };
 
@@ -239,9 +243,33 @@ where
 
         let poll_result = poll_impl(&mut strong_inner, permit_fut, permit, cx);
 
+        // Semaphore waiters are woken by permit release or semaphore close.
+        // The extra slot is only for a weak permit holder waiting on the inner future.
+        if permit.is_some()
+            && let Some(inner) = weak_inner.upgrade()
+        {
+            if poll_result.is_pending() {
+                inner.notify.weak_waiter.register(cx.waker());
+            } else {
+                inner.notify.weak_waiter.take();
+            }
+        }
+
         *inner = strong_inner.is_some().then_some(weak_inner);
 
         poll_result.map(Some)
+    }
+}
+
+impl<Fut: Future> Drop for WeakShared<Fut> {
+    fn drop(&mut self) {
+        if self.permit.is_some()
+            && let Some(inner) = self.inner.as_ref().and_then(Weak::upgrade)
+        {
+            // Drop the stale waker for this weak future. The owned permit is dropped
+            // after this method returns and wakes the next semaphore waiter, if any.
+            inner.notify.weak_waiter.take();
+        }
     }
 }
 
@@ -267,7 +295,20 @@ impl<Fut: Future> WeakSharedHandle<Fut> {
 struct Inner<Fut: Future> {
     state: AtomicUsize,
     future_or_output: UnsafeCell<FutureOrOutput<Fut>>,
+    notify: DropNotify,
+}
+
+struct DropNotify {
     semaphore: Arc<Semaphore>,
+    /// Wakes the pending `WeakShared` that holds the semaphore permit.
+    weak_waiter: AtomicWaker,
+}
+
+impl Drop for DropNotify {
+    fn drop(&mut self) {
+        self.semaphore.close();
+        self.weak_waiter.wake();
+    }
 }
 
 impl<Fut> Inner<Fut>
@@ -319,7 +360,10 @@ mod tests {
     //! Addresses the original `Shared` futures issue:
     //! <https://github.com/rust-lang/futures-rs/issues/2706/>
 
-    use futures_util::FutureExt;
+    use std::sync::Arc;
+    use std::task::Waker;
+
+    use futures_util::{FutureExt, future};
 
     use super::*;
 
@@ -367,5 +411,117 @@ mod tests {
         });
         x1.await.ok();
         x2.await.ok();
+    }
+
+    #[tokio::test]
+    async fn last_strong_drop_resolves_several_weak() {
+        let strong = Shared::new(future::pending::<()>());
+
+        // holds a permit, waits on the inner future
+        let weak_1 = tokio::spawn(strong.weak_future().expect("weak future"));
+        tokio::task::yield_now().await; // poll spawned task
+
+        // waits a permit from semaphore
+        let weak_2 = tokio::spawn(strong.weak_future().expect("weak future"));
+        tokio::task::yield_now().await;
+
+        // drop should wake both permit holder and waiter
+        drop(strong);
+
+        let duration = std::time::Duration::from_millis(10);
+
+        assert_eq!(
+            tokio::time::timeout(duration, weak_1)
+                .await
+                .expect("timeout: permit holder did not resolve")
+                .expect("JoinHandle should not panic"),
+            None,
+        );
+        assert_eq!(
+            tokio::time::timeout(duration, weak_2)
+                .await
+                .expect("timeout: permit waiter did not resolve")
+                .expect("JoinHandle should not panic"),
+            None,
+        );
+    }
+
+    #[test]
+    fn last_strong_drop_resolves_weak() {
+        let strong = Shared::new(future::pending::<()>());
+
+        let mut weak = Box::pin(strong.weak_future().expect("weak future"));
+        let wake = Arc::<count_wake::CountWake>::default();
+        let waker = Waker::from(wake.clone());
+        let mut cx = Context::from_waker(&waker);
+
+        assert_eq!(weak.as_mut().poll(&mut cx), Poll::Pending);
+        assert_eq!(wake.count(), 0);
+
+        // dropping the last strong Shared must resolve pending WeakShared
+        drop(strong);
+        assert_eq!(wake.count(), 1);
+        assert_eq!(weak.as_mut().poll(&mut cx), Poll::Ready(None));
+    }
+
+    #[test]
+    fn weak_drops() {
+        let strong = Shared::new(future::pending::<()>());
+
+        let mut holder = Box::pin(strong.weak_future().expect("weak future"));
+        let holder_wake = Arc::<count_wake::CountWake>::default();
+        let holder_waker = Waker::from(holder_wake.clone());
+        let mut holder_cx = Context::from_waker(&holder_waker);
+
+        assert_eq!(holder.as_mut().poll(&mut holder_cx), Poll::Pending);
+        assert_eq!(holder_wake.count(), 0);
+
+        let mut waiter = Box::pin(strong.weak_future().expect("weak future"));
+        let waiter_wake = Arc::<count_wake::CountWake>::default();
+        let waiter_waker = Waker::from(waiter_wake.clone());
+        let mut waiter_cx = Context::from_waker(&waiter_waker);
+
+        assert_eq!(waiter.as_mut().poll(&mut waiter_cx), Poll::Pending);
+        assert_eq!(waiter_wake.count(), 0);
+
+        drop(holder);
+
+        // Dropping the permit holder must not wake its own stale waker, but the
+        // permit release must wake the next weak future parked in the semaphore.
+        assert_eq!(holder_wake.count(), 0);
+        assert_eq!(waiter_wake.count(), 1);
+
+        assert_eq!(waiter.as_mut().poll(&mut waiter_cx), Poll::Pending);
+
+        drop(strong);
+
+        assert_eq!(holder_wake.count(), 0);
+        assert_eq!(waiter_wake.count(), 2);
+        assert_eq!(waiter.as_mut().poll(&mut waiter_cx), Poll::Ready(None));
+    }
+
+    mod count_wake {
+        use std::task::Wake;
+
+        use super::*;
+
+        #[derive(Default)]
+        pub struct CountWake(AtomicUsize);
+
+        impl Wake for CountWake {
+            fn wake(self: Arc<Self>) {
+                self.wake_by_ref();
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        impl CountWake {
+            pub fn count(&self) -> usize {
+                self.0.load(Ordering::SeqCst)
+            }
+        }
     }
 }
