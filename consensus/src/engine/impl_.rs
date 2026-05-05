@@ -82,12 +82,8 @@ impl Engine {
             &net.peer_schedule,
             conf,
         );
-        dag.fill_to_top(
-            conf.genesis_round,
-            Some(&mut committer),
-            &net.peer_schedule,
-            &round_ctx,
-        );
+        dag.fill_to_top(conf.genesis_round, &net.peer_schedule, &round_ctx);
+        dag.sync_back(&mut committer, &round_ctx);
         let committer_run = CommitterTask::new(
             committer,
             bind.anchors_tx.clone(),
@@ -169,17 +165,18 @@ impl Engine {
         tracing::info!(parent: round_ctx.span(), "current round set to dag top");
 
         let dag_bottom_round = {
-            let committer = self.committer_run.committer().await?;
             (self.dag).fill_to_top(
                 dag_top_round,
-                Some(committer),
                 &self.round_task.state.peer_schedule,
                 &round_ctx,
             );
+            let committer = self.committer_run.committer().await?;
+            self.dag.sync_back(committer, &round_ctx);
             committer.drop_upto(
                 (top_known_anchor - conf.consensus.replay_anchor_rounds()).max(conf.genesis_round),
                 conf,
             );
+            self.dag.sync_back(committer, &round_ctx);
             committer.first_executable = top_known_anchor;
             committer.bottom_round()
         };
@@ -264,13 +261,12 @@ impl Engine {
             }
         };
 
-        let committer = self.committer_run.committer().await?;
         (self.dag).fill_to_top(
             new_top_round,
-            Some(committer),
             &self.round_task.state.peer_schedule,
             &round_ctx,
         );
+        (self.dag).sync_back(self.committer_run.committer().await?, &round_ctx);
 
         self.round_task.state.consensus_round.set_max(new_top_round);
 
@@ -416,6 +412,7 @@ impl Engine {
                 ) {
                     Ok(pause_at) => next_round.min(pause_at),
                     Err(mut collator_sync) => {
+                        (self.dag).sync_back(self.committer_run.committer().await?, &round_ctx);
                         'sync: loop {
                             let committer = std::pin::pin!(self.committer_run.update(&round_ctx));
                             match future::select(committer, &mut collator_sync).await {
@@ -435,7 +432,6 @@ impl Engine {
 
                 self.dag.fill_to_top(
                     dag_top_round,
-                    Some(self.committer_run.committer().await?),
                     &self.round_task.state.peer_schedule,
                     &round_ctx,
                 );
@@ -463,6 +459,8 @@ impl Engine {
                     .run(start_replay_bcasts.take().flatten(), &head, &round_ctx)
                     .until_ready()
             );
+
+            (self.dag).sync_back(self.committer_run.committer().await?, &round_ctx);
 
             self.round_task = 'round: loop {
                 let committer = std::pin::pin!(self.committer_run.update(&round_ctx));

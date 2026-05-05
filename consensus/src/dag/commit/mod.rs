@@ -213,7 +213,7 @@ impl Committer {
         };
 
         let trigger = match trigger {
-            Some(Ok(valid)) => valid.info(),
+            Some(Ok(valid)) if valid.info().round() >= self.dag.bottom_round() => valid.info(),
             Some(Err(HistoryConflict(round))) if round >= self.dag.bottom_round() => {
                 return Err(HistoryConflict(round).into());
             }
@@ -420,7 +420,8 @@ mod test {
             }
             round_ctx = RoundCtx::new(&engine_ctx, round);
 
-            dag.fill_to_top(round, Some(&mut committer), &peer_schedule, &round_ctx);
+            dag.fill_to_top(round, &peer_schedule, &round_ctx);
+            dag.sync_back(&mut committer, &round_ctx);
 
             if committer.emit_first_after_gap == Some(false) {
                 let skip_to = committer.first_executable;

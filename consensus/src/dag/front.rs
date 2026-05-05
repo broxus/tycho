@@ -14,8 +14,6 @@ pub struct DagFront {
     rounds: Vec<DagRound>,
     // back bottom may be moved by commit
     last_back_bottom: Round,
-    // keep until committer is resolved
-    has_pending_back_reset: bool,
 }
 
 impl DagFront {
@@ -35,7 +33,6 @@ impl DagFront {
             triggers_tx,
             last_back_bottom: dag_bottom_round.round(),
             rounds: vec![dag_bottom_round],
-            has_pending_back_reset: false,
         };
         (this, committer)
     }
@@ -65,36 +62,34 @@ impl DagFront {
     pub fn fill_to_top(
         &mut self,
         new_top: Round,
-        committer: Option<&mut Committer>,
         peer_schedule: &PeerSchedule,
         round_ctx: &RoundCtx,
     ) {
         let _span = round_ctx.span().enter();
         let conf = round_ctx.conf();
 
-        if let Some(ref committer) = committer {
-            // update if we can; if None - use old value;
-            // in a rare case committer may have finished its sync, but front decided to have a gap
-            if !self.has_pending_back_reset {
-                self.last_back_bottom = committer.bottom_round();
-            }
-        }
-
         peer_schedule.apply_scheduled(new_top);
 
-        if new_top > self.last_back_bottom + conf.consensus.max_total_rounds() {
-            // should drop validation tasks and restart them with new bottom to free memory
-            self.rounds.clear();
-            let new_bottom_round =
+        if new_top >= self.last_back_bottom + conf.consensus.max_total_rounds() {
+            // should drop some validation tasks and reset front length
+            self.last_back_bottom =
                 (conf.genesis_round).max(new_top - conf.consensus.reset_rounds());
-            self.rounds.push(DagRound::new_bottom(
-                new_bottom_round,
-                &self.triggers_tx,
-                peer_schedule,
-                conf,
-            ));
-            self.has_pending_back_reset = true;
-            self.last_back_bottom = new_bottom_round;
+
+            // at `==` the new front bottom is old top - still an overlap
+            if new_top <= self.top().round() + conf.consensus.reset_rounds() {
+                // new dag contains old top after shrink to `reset_rounds` length
+                let drained = self.drain_upto(self.last_back_bottom);
+                tycho_util::mem::Reclaimer::instance().drop(drained);
+            } else {
+                // new and old dags don't intersect: just replace the old with a new one
+                self.rounds.clear();
+                self.rounds.push(DagRound::new_bottom(
+                    self.last_back_bottom,
+                    &self.triggers_tx,
+                    peer_schedule,
+                    conf,
+                ));
+            }
         }
 
         // to preserve contiguity; even if new rounds are drained, they will be passed to Back Dag
@@ -102,23 +97,51 @@ impl DagFront {
             let top = self.top();
             (self.rounds).push(top.new_next(&self.triggers_tx, peer_schedule, conf));
         }
+        EngineCtx::meter_dag_len((new_top - self.last_back_bottom.0).0 as usize);
+    }
 
-        if let Some(committer) = committer {
-            if self.has_pending_back_reset {
-                self.has_pending_back_reset = false;
-                committer.reset();
-                committer.init(self.rounds.first().expect("must be init"), true, conf);
-                assert_eq!(
-                    self.last_back_bottom,
-                    committer.bottom_round(),
-                    "committer botom after init does not match"
-                );
-            }
-            committer
-                .extend_from_ahead(&self.drain_upto(new_top - conf.consensus.min_front_rounds()));
-            committer.extend_from_ahead(&self.rounds);
-            EngineCtx::meter_dag_len(committer.dag_len());
+    /// keeps [`DagFront`] and [`Committer`] in sync, while both advance independently:
+    /// generally [`DagFront`] advances the top and [`Committer`] advances the bottom.
+    /// But also [`DagFront`] may move too far jumping over a gap and advance its bottom too:
+    /// then front will keep "pending back reset" until back becomes available to sync
+    pub fn sync_back(&mut self, committer: &mut Committer, round_ctx: &RoundCtx) {
+        if committer.top_round() == self.top().round() {
+            self.last_back_bottom = committer.bottom_round(); // now front is in sync with back too
+            return;
         }
+
+        let _span = round_ctx.span().enter();
+        let conf = round_ctx.conf();
+
+        // gap was not fixed by front stretching
+        let is_unrecoverable_gap = committer.top_round() < self.bottom_round();
+
+        // x2 affordable length: node could not commit because of poor network conditions
+        // so that every existing anchor trigger is not resolved (even no `HistoryConflict`).
+        // Every point that references a trigger is `NotFound` and the whole mem usage is low.
+        // Such condition is noticeable in metrics by huge max dag length.
+        // Note we could validate each point for `anchor_trigger()` but that extends happy flow.
+        let is_pathologic = committer.dag_len() > 2 * conf.consensus.max_total_rounds() as usize;
+
+        if is_unrecoverable_gap | is_pathologic {
+            committer.reset();
+
+            committer.init(self.rounds.first().expect("must be init"), true, conf);
+            assert_eq!(
+                self.bottom_round(),
+                committer.bottom_round(),
+                "committer botom after init does not match"
+            );
+        }
+
+        // committer shinks only by committing, so no manual round drop here;
+        committer.extend_from_ahead(
+            &self.drain_upto(self.top().round() - conf.consensus.min_front_rounds()),
+        );
+        committer.extend_from_ahead(&self.rounds);
+        self.last_back_bottom = committer.bottom_round();
+
+        EngineCtx::meter_dag_len(committer.dag_len());
     }
 
     fn drain_upto(&mut self, new_bottom_round: Round) -> Vec<DagRound> {
@@ -148,16 +171,7 @@ impl std::fmt::Debug for AltFmt<'_, DagFront> {
         for dag_round in &inner.rounds {
             write!(f, "{:?}; ", dag_round.alt())?;
         }
-        write!(
-            f,
-            "back bottom {}{}",
-            inner.last_back_bottom.0,
-            if inner.has_pending_back_reset {
-                " reset pending"
-            } else {
-                ""
-            }
-        )?;
+        write!(f, "back bottom {}", inner.last_back_bottom.0)?;
         Ok(())
     }
 }
@@ -166,16 +180,11 @@ impl std::fmt::Display for AltFmt<'_, DagFront> {
         let this = &AltFormat::unpack(self);
         write!(
             f,
-            "DagFront len {} [{}..{}] back bottom {}{}",
+            "DagFront len {} [{}..{}] back bottom {}",
             this.rounds.len(),
             this.bottom_round().0,
             this.top().round().0,
             this.last_back_bottom.0,
-            if this.has_pending_back_reset {
-                " reset pending"
-            } else {
-                ""
-            }
         )
     }
 }
