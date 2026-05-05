@@ -46,10 +46,10 @@ impl Default for RateLimitConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RateLimitVerdict {
     Allow,
-    Reject,
+    Reject { retry_after: Duration },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -118,8 +118,12 @@ where
             entry.last_seen = now;
         }
 
-        if entry.cooldown_until.is_some_and(|until| now < until) {
-            return RateLimitVerdict::Reject;
+        if let Some(until) = entry.cooldown_until
+            && now < until
+        {
+            return RateLimitVerdict::Reject {
+                retry_after: until - now,
+            };
         }
 
         let bucket = entry
@@ -127,13 +131,20 @@ where
             .entry(policy.class)
             .or_insert_with(|| TokenBucket::new(now, policy.bucket));
 
-        if !bucket.try_take(now) {
-            return Self::register_rejection(&self.config, now, &mut entry);
-        }
+        let BucketResult::TryLater { after } = bucket.try_claim(now) else {
+            entry.rejects = 0;
+            return RateLimitVerdict::Allow;
+        };
 
-        entry.rejects = 0;
+        Self::register_rejection(&self.config, now, &mut entry);
 
-        RateLimitVerdict::Allow
+        // Prefer cooldown wait time.
+        let retry_after = match entry.cooldown_until {
+            Some(until) if now < until => until - now,
+            _ => after - now,
+        };
+
+        RateLimitVerdict::Reject { retry_after }
     }
 
     fn prune_expired(&self, now: Instant) {
@@ -161,11 +172,7 @@ where
         }
     }
 
-    fn register_rejection(
-        config: &RateLimitConfig,
-        now: Instant,
-        state: &mut PeerState<C>,
-    ) -> RateLimitVerdict {
+    fn register_rejection(config: &RateLimitConfig, now: Instant, state: &mut PeerState<C>) {
         state.last_seen = now;
         state.rejects = state.rejects.saturating_add(1);
 
@@ -173,8 +180,6 @@ where
             state.rejects = 0;
             state.cooldown_until = Some(now + config.cooldown);
         }
-
-        RateLimitVerdict::Reject
     }
 }
 
@@ -202,6 +207,11 @@ where
     }
 }
 
+enum BucketResult {
+    Ok,
+    TryLater { after: Instant },
+}
+
 struct TokenBucket {
     rate_per_sec: f64,
     burst: f64,
@@ -220,13 +230,17 @@ impl TokenBucket {
         }
     }
 
-    fn try_take(&mut self, now: Instant) -> bool {
+    fn try_claim(&mut self, now: Instant) -> BucketResult {
         self.refill(now);
         if self.available >= 1.0 {
             self.available -= 1.0;
-            true
+            BucketResult::Ok
         } else {
-            false
+            let time_to_refill =
+                Duration::from_secs_f64((1.0 - self.available) / self.rate_per_sec);
+            BucketResult::TryLater {
+                after: now + time_to_refill,
+            }
         }
     }
 
