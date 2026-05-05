@@ -344,6 +344,7 @@ impl CollatorStdImpl {
             .try_import_init_anchors(&mut working_state, anchors_proc_info_opt, &genesis_info)
             .await?
         {
+            self.delayed_working_state.delay(working_state);
             return Ok(CollatorResult::Cancelled(cancel_ctx));
         }
 
@@ -701,6 +702,7 @@ impl CollatorStdImpl {
                 .try_import_init_anchors(&mut working_state, anchors_proc_info_opt, &genesis_info)
                 .await?
             {
+                self.delayed_working_state.delay(working_state);
                 return Ok(CollatorResult::Cancelled(cancel_ctx));
             }
 
