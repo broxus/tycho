@@ -359,7 +359,9 @@ where
                             );
                         }
                         Ok((block_id, validation_status)) => {
-                            self.handle_validated_master_block(block_id, validation_status).await?;
+                            for task in self.handle_validated_master_block(block_id, validation_status).await? {
+                                collator_tasks.push(task);
+                            }
                         }
 
                     }
@@ -1063,6 +1065,7 @@ where
                 let mut delayed_mc_state_update = self.delayed_mc_state_update.lock();
                 *delayed_mc_state_update = collation_result.mc_data.clone();
             } else {
+                // TODO: join notify and `process_mc_state_update` into one method
                 // otherwise we can notify state update to mempool right now
                 self.notify_mc_state_update_to_mempool(collation_result.mc_data.clone().unwrap())
                     .await?;
@@ -1074,7 +1077,7 @@ where
                 // NOTE: here commit will not cause on_block_accepted event
                 //      because block already exist in bc state
 
-                self.commit_valid_master_block(&block_id).await?;
+                collator_tasks = self.commit_valid_master_block(&block_id).await?;
             } else {
                 let validator = self.validator.clone();
                 let validation_session_id = session_info.get_validation_session_id();
@@ -1087,6 +1090,13 @@ where
 
             // if consensus config was not changed execute master state update processing routines right now
             if consensus_config_changed != Some(true) {
+                // TODO: should simplify `if` branches to not check the `consensus_config_changed` in various places
+                // check invariant
+                assert!(
+                    collator_tasks.is_empty(),
+                    "when consensus config not changed the `commit_valid_master_block` should not run collator tasks"
+                );
+
                 collator_tasks = self
                     .process_mc_state_update(
                         collation_result.mc_data.unwrap(),
@@ -1409,7 +1419,7 @@ where
                 //      sent to sync, and removed from cache, because validation task
                 //      could be finished after `store_received()` but before this point.
 
-                self.commit_valid_master_block(&block_id).await?;
+                collator_tasks = self.commit_valid_master_block(&block_id).await?;
             }
         }
 
@@ -2173,7 +2183,7 @@ where
     async fn notify_to_mempool_and_process_delayed_mc_state_update(
         &self,
         block_id: &BlockId,
-    ) -> Result<Option<MempoolAnchorId>> {
+    ) -> Result<Option<(MempoolAnchorId, Vec<CollatorJoinTask<CF::Collator>>)>> {
         let mut delayed_mc_data = None;
         {
             let mut guard = self.delayed_mc_state_update.lock();
@@ -2192,15 +2202,16 @@ where
         if let Some(mc_data) = delayed_mc_data {
             self.notify_mc_state_update_to_mempool(mc_data.clone())
                 .await?;
-            self.process_mc_state_update(
-                mc_data.clone(),
-                ProcessMcStateUpdateMode::StartCollation {
-                    reset_collators: false,
-                },
-            )
-            .await?;
+            let collator_tasks = self
+                .process_mc_state_update(
+                    mc_data.clone(),
+                    ProcessMcStateUpdateMode::StartCollation {
+                        reset_collators: false,
+                    },
+                )
+                .await?;
 
-            Ok(Some(mc_data.top_processed_to_anchor))
+            Ok(Some((mc_data.top_processed_to_anchor, collator_tasks)))
         } else {
             Ok(None)
         }
@@ -3168,7 +3179,7 @@ where
         &self,
         block_id: BlockId,
         status: ValidationStatus,
-    ) -> Result<()> {
+    ) -> Result<Vec<CollatorJoinTask<CF::Collator>>> {
         tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
             is_complete = matches!(&status, ValidationStatus::Complete(_)),
@@ -3182,13 +3193,13 @@ where
             .blocks_cache
             .store_master_block_validation_result(&block_id, status);
         if !updated {
-            return Ok(());
+            return Ok(vec![]);
         }
 
         // process valid block
-        self.commit_valid_master_block(&block_id).await?;
+        let collator_tasks = self.commit_valid_master_block(&block_id).await?;
 
-        Ok(())
+        Ok(collator_tasks)
     }
 
     /// Try to commit validated and valid master block
@@ -3200,7 +3211,10 @@ where
     /// 5. Clean up from cache
     /// 6. Process delayed master state update if exists
     /// 7. Notify top processed anchor to mempool if block commited by received from bc
-    async fn commit_valid_master_block(&self, mc_block_id: &BlockId) -> Result<()> {
+    async fn commit_valid_master_block(
+        &self,
+        mc_block_id: &BlockId,
+    ) -> Result<Vec<CollatorJoinTask<CF::Collator>>> {
         tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
             "Start to commit validated and valid master block ({})...",
@@ -3211,9 +3225,10 @@ where
         scopeguard::defer!(self.blocks_cache.gc_prev_blocks());
 
         // we can process delayed master state update now
-        let mut top_processed_to_anchor_to_notify = self
+        let (mut top_processed_to_anchor_to_notify, collator_tasks) = self
             .notify_to_mempool_and_process_delayed_mc_state_update(mc_block_id)
-            .await?;
+            .await?
+            .unzip();
 
         let histogram = HistogramGuard::begin("tycho_collator_commit_valid_master_block_time");
         let histogram_extract =
@@ -3310,7 +3325,7 @@ where
             .await?;
         }
 
-        Ok(())
+        Ok(collator_tasks.unwrap_or_default())
     }
 
     fn send_block_to_sync(&self, data: BlockCacheEntryData) -> Result<()> {
