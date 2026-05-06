@@ -348,10 +348,12 @@ async fn test_collation_process_on_dump() {
     }
 
     tokio::select! {
-        _ = block_strider => {
+        res = block_strider => {
+            res.unwrap();
             tracing::info!("Block strider finished");
         },
-        _ = manager.run() => {
+        res = manager.run() => {
+            res.unwrap();
             tracing::info!("Collation manager main flow finished");
         },
         _ = tokio::signal::ctrl_c() => {
@@ -410,10 +412,12 @@ async fn test_one_shard_block_per_master_block() {
     }
 
     tokio::select! {
-        _ = block_strider => {
+        res = block_strider => {
+            res.unwrap();
             tracing::info!("Block strider finished");
         },
-        _ = manager.run() => {
+        res = manager.run() => {
+            res.unwrap();
             tracing::info!("Collation manager main flow finished");
         },
         _ = tokio::signal::ctrl_c() => {
