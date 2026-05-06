@@ -39,6 +39,13 @@ pub(super) enum CollatorState {
     CancelPending,
 }
 
+impl CollatorState {
+    /// When in `Active` or `Waiting` state
+    pub fn is_ready(&self) -> bool {
+        matches!(self, Self::Active | Self::Waiting)
+    }
+}
+
 pub(super) struct ActiveCollator<C> {
     pub collator: Option<C>,
     pub state: CollatorState,
