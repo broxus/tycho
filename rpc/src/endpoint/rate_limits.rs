@@ -15,8 +15,8 @@ use tycho_util::rate_limit::{
 #[derive(Debug, Default, Eq, PartialEq, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RpcRateLimitsConfig {
-    limiter: RateLimitConfig,
-    traffic: RpcTrafficLimits,
+    pub limiter: RateLimitConfig,
+    pub traffic: RpcTrafficLimits,
 }
 
 impl From<RpcRateLimitsConfig> for RpcRateLimiter {
@@ -31,8 +31,8 @@ impl From<RpcRateLimitsConfig> for RpcRateLimiter {
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RpcTrafficLimits {
-    requests: TokenBucketConfig,
-    streams: TokenBucketConfig,
+    pub requests: TokenBucketConfig,
+    pub streams: TokenBucketConfig,
 }
 
 impl Default for RpcTrafficLimits {

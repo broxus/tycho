@@ -67,11 +67,7 @@ where
     inner: Arc<RateLimiterInner<K, C>>,
 }
 
-struct RateLimiterInner<K, C>
-where
-    K: Clone + Eq + Hash + Send + Sync + 'static,
-    C: Copy + Eq + Hash + Send + Sync + 'static,
-{
+struct RateLimiterInner<K, C> {
     config: RateLimitConfig,
     states: FastDashMap<K, PeerState<C>>,
     last_prune_ms: AtomicU64,
@@ -183,10 +179,7 @@ where
     }
 }
 
-struct PeerState<C>
-where
-    C: Copy + Eq + Hash + Send + Sync + 'static,
-{
+struct PeerState<C> {
     buckets: FastHashMap<C, TokenBucket>,
     rejects: u8,
     cooldown_until: Option<Instant>,
@@ -213,40 +206,54 @@ enum BucketResult {
 }
 
 struct TokenBucket {
-    rate_per_sec: f64,
-    burst: f64,
-    available: f64,
+    refill_per_sec: u64,
+    capacity: u64,
+    available: u64,
     last_refill: Instant,
 }
 
 impl TokenBucket {
+    const TOKEN: u64 = 1_000_000;
+    const MILLIS_PER_SEC: u128 = 1_000;
+
     fn new(now: Instant, config: TokenBucketConfig) -> Self {
-        let burst = config.burst.get() as f64;
+        let capacity = config.burst.get() as u64 * Self::TOKEN;
         Self {
-            rate_per_sec: config.rate_per_sec.get() as f64,
-            burst,
-            available: burst,
+            refill_per_sec: config.rate_per_sec.get() as u64 * Self::TOKEN,
+            capacity,
+            available: capacity,
             last_refill: now,
         }
     }
 
     fn try_claim(&mut self, now: Instant) -> BucketResult {
         self.refill(now);
-        if self.available >= 1.0 {
-            self.available -= 1.0;
+
+        if let Some(available) = self.available.checked_sub(Self::TOKEN) {
+            self.available = available;
             BucketResult::Ok
         } else {
-            let time_to_refill =
-                Duration::from_secs_f64((1.0 - self.available) / self.rate_per_sec);
+            let deficit = Self::TOKEN - self.available;
+
+            let wait_ms = (deficit as u128 * Self::MILLIS_PER_SEC)
+                .div_ceil(self.refill_per_sec as u128)
+                .min(u64::MAX as u128) as u64;
+
             BucketResult::TryLater {
-                after: now + time_to_refill,
+                after: now + Duration::from_millis(wait_ms),
             }
         }
     }
 
     fn refill(&mut self, now: Instant) {
-        let elapsed = now.duration_since(self.last_refill).as_secs_f64();
-        self.last_refill = now;
-        self.available = (self.available + elapsed * self.rate_per_sec).min(self.burst);
+        let elapsed = now.duration_since(self.last_refill).as_millis();
+
+        let refill = (self.refill_per_sec as u128 * elapsed / Self::MILLIS_PER_SEC)
+            .min(u64::MAX as u128) as u64;
+
+        if refill > 0 {
+            self.last_refill = now;
+            self.available = self.available.saturating_add(refill).min(self.capacity);
+        }
     }
 }

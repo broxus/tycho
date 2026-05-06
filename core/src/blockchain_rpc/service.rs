@@ -67,7 +67,7 @@ pub struct BlockchainRpcServiceConfig {
 
     /// Rate limits for inbound blockchain-rpc traffic.
     ///
-    /// Default: disabled.
+    /// Default: enabled.
     pub rate_limits: Option<BlockchainRpcRateLimitsConfig>,
 
     /// S3 proxy configuration.

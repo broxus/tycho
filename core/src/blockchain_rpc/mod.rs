@@ -9,6 +9,7 @@ pub use self::client::{
 #[cfg(feature = "s3")]
 pub use self::providers::S3RpcDataProvider;
 pub use self::providers::{IntoRpcDataProvider, StorageRpcDataProvider};
+pub use self::rate_limits::{BlockchainRpcRateLimitsConfig, BlockchainRpcTrafficLimits};
 #[cfg(feature = "s3")]
 pub use self::service::S3ProxyConfig;
 pub use self::service::{

@@ -70,8 +70,8 @@ impl PublicOverlayBuilder {
         self
     }
 
-    pub fn with_rate_limiter(mut self, rate_limiter: PublicOverlayRateLimiter) -> Self {
-        self.rate_limiter = Some(rate_limiter);
+    pub fn with_rate_limiter(mut self, rate_limiter: Option<PublicOverlayRateLimiter>) -> Self {
+        self.rate_limiter = rate_limiter;
         self
     }
 
