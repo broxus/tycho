@@ -718,19 +718,16 @@ where
                     self.set_collator_state(&shard_id, |ac| ac.state = CollatorState::Waiting);
                 }
 
-                self.set_collator_state(&ShardIdent::MASTERCHAIN, |ac| {
-                    ac.state = CollatorState::Active;
-                });
-
-                let task = self
+                if let Some(task) = self
                     .run_mc_block_collation(
                         prev_mc_block_id.get_next_id_short(),
                         next_mc_block_chain_time,
                         trigger_shard_block_id_opt,
                     )
-                    .await?;
-
-                collator_tasks.push(task);
+                    .await?
+                {
+                    collator_tasks.push(task);
+                }
             }
             NextCollationStep::WaitForMasterStatus | NextCollationStep::WaitForShardStatus => {
                 // current shard collator will wait
@@ -746,9 +743,9 @@ where
                     if shard_ident == shard_id {
                         current_shard_should_wait = false;
                     }
-                    self.set_collator_state(&shard_ident, |ac| ac.state = CollatorState::Active);
-                    let task = self.run_try_collate(&shard_ident).await?;
-                    collator_tasks.push(task);
+                    if let Some(task) = self.run_try_collate(&shard_ident).await? {
+                        collator_tasks.push(task);
+                    }
                 }
                 if current_shard_should_wait {
                     self.set_collator_state(&shard_id, |ac| ac.state = CollatorState::Waiting);
@@ -2569,13 +2566,18 @@ where
         for (shard_id, new_session_info, prev_blocks_ids) in sessions_to_keep {
             if let ProcessMcStateUpdateMode::StartCollation { reset_collators } = mode {
                 let collator = self
-                    .take_collator_and_set_state(&shard_id, |ac| ac.state = CollatorState::Active)
+                    .take_collator_and_set_state_if(
+                        &shard_id,
+                        |_| true,
+                        |ac| ac.state = CollatorState::Active,
+                    )
                     .with_context(|| {
                         format!(
                             "Collator for shard should exist for active session {:?}",
                             new_session_info.id()
                         )
-                    })?;
+                    })?
+                    .context("an empty check should pass")?;
                 tracing::debug!(
                     target: tracing_targets::COLLATION_MANAGER,
                     "Resuming collation attempts in shard session {:?}",
@@ -3182,8 +3184,24 @@ where
         next_mc_block_id_short: BlockIdShort,
         next_mc_block_chain_time: u64,
         _trigger_block_id_opt: Option<BlockId>,
-    ) -> Result<CollatorJoinTask<CF::Collator>> {
+    ) -> Result<Option<CollatorJoinTask<CF::Collator>>> {
         let _histogram = HistogramGuard::begin("tycho_collator_run_mc_block_collation_time");
+
+        // get masterchain collator if exists
+        let mc_collator = self.take_collator_and_set_state_if(
+            &ShardIdent::MASTERCHAIN,
+            |ac| ac.state.is_ready(),
+            |ac| ac.state = CollatorState::Active,
+        )?;
+
+        let Some(mc_collator) = mc_collator else {
+            tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+                "Master collator is not ready: (block_id={} ct={})",
+                next_mc_block_id_short,
+                next_mc_block_chain_time,
+            );
+            return Ok(None);
+        };
 
         // TODO: How to choose top shard blocks for master block collation when they are collated async and in parallel?
         //      We know the last anchor (An) used in shard (ShA) block that causes master block collation,
@@ -3196,8 +3214,8 @@ where
             .blocks_cache
             .get_top_shard_blocks_info_for_mc_block(next_mc_block_id_short)?;
 
-        // get masterchain collator if exists
-        let mc_collator = self.take_collator(&ShardIdent::MASTERCHAIN)?;
+        let task =
+            JoinTask::new(mc_collator.do_collate(top_shard_blocks_info, next_mc_block_chain_time));
 
         tracing::info!(target: tracing_targets::COLLATION_MANAGER,
             "Master block collation started: (block_id={} ct={})",
@@ -3205,27 +3223,37 @@ where
             next_mc_block_chain_time,
         );
 
-        Ok(JoinTask::new(mc_collator.do_collate(
-            top_shard_blocks_info,
-            next_mc_block_chain_time,
-        )))
+        Ok(Some(task))
     }
 
     /// Run next shard block collation attempt
     async fn run_try_collate(
         &self,
         shard_id: &ShardIdent,
-    ) -> Result<CollatorJoinTask<CF::Collator>> {
+    ) -> Result<Option<CollatorJoinTask<CF::Collator>>> {
         // get collator if exists
-        let collator = self.take_collator(shard_id)?;
+        let collator = self.take_collator_and_set_state_if(
+            shard_id,
+            |ac| ac.state.is_ready(),
+            |ac| ac.state = CollatorState::Active,
+        )?;
 
-        tracing::info!(
-            target: tracing_targets::COLLATION_MANAGER,
+        let Some(collator) = collator else {
+            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                "Collator is not ready for shard {}",
+                shard_id,
+            );
+            return Ok(None);
+        };
+
+        let task = JoinTask::new(collator.try_collate());
+
+        tracing::info!(target: tracing_targets::COLLATION_MANAGER,
             "Started next attempt to collate block for shard {}",
             shard_id,
         );
 
-        Ok(JoinTask::new(collator.try_collate()))
+        Ok(Some(task))
     }
 
     /// Process validated block

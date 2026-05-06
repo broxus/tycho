@@ -23,26 +23,29 @@ where
         }
     }
 
-    pub(super) fn take_collator(&self, shard_id: &ShardIdent) -> Result<Box<CF::Collator>> {
-        self.take_collator_and_set_state(shard_id, |_| {})
-    }
-
-    pub(super) fn take_collator_and_set_state<F>(
+    pub(super) fn take_collator_and_set_state_if<Check, SetState>(
         &self,
         shard_id: &ShardIdent,
-        f: F,
-    ) -> Result<Box<CF::Collator>>
+        check: Check,
+        set_state: SetState,
+    ) -> Result<Option<Box<CF::Collator>>>
     where
-        F: Fn(&mut ActiveCollator<Box<CF::Collator>>),
+        Check: FnOnce(&ActiveCollator<Box<CF::Collator>>) -> bool,
+        SetState: FnOnce(&mut ActiveCollator<Box<CF::Collator>>),
     {
         match self.active_collators.get_mut(shard_id) {
             Some(mut active_collator) => {
+                if !check(&active_collator) {
+                    return Ok(None);
+                }
+
                 let collator = match active_collator.collator.take() {
                     Some(collator) => Ok(collator),
                     None => bail!("collator for {} is already extracted", shard_id),
                 };
-                f(&mut active_collator);
-                collator
+
+                set_state(&mut active_collator);
+                Some(collator).transpose()
             }
             None => bail!("collator for {} not started", shard_id),
         }
