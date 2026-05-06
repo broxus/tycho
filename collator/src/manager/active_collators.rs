@@ -75,9 +75,10 @@ where
 
     pub(super) fn request_cancel_collations(&self) -> bool {
         let mut has_active = false;
-        for active_collator in self.active_collators.iter().filter(|ac| {
+        for mut active_collator in self.active_collators.iter_mut().filter(|ac| {
             ac.state == CollatorState::Active || ac.state == CollatorState::CancelPending
         }) {
+            active_collator.state = CollatorState::CancelPending;
             active_collator.cancel_collation.notify_one();
             has_active = true;
         }
