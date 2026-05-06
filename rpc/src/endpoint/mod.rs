@@ -16,7 +16,7 @@ use crate::util::mime::{APPLICATION_JSON, APPLICATION_PROTOBUF, get_mime_type};
 
 pub mod jrpc;
 pub mod proto;
-mod rate_limits;
+pub mod rate_limits;
 
 pub struct RpcEndpointBuilder<C = ()> {
     common: RpcEndpointBuilderCommon,

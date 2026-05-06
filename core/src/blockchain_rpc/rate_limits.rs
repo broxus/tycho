@@ -15,9 +15,9 @@ use crate::proto::overlay;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BlockchainRpcRateLimitsConfig {
-    limiter: RateLimitConfig,
-    whitelist: Vec<IpAddr>,
-    traffic: BlockchainRpcTrafficLimits,
+    pub limiter: RateLimitConfig,
+    pub whitelist: Vec<IpAddr>,
+    pub traffic: BlockchainRpcTrafficLimits,
 }
 
 impl From<BlockchainRpcRateLimitsConfig> for PublicOverlayRateLimiter {
@@ -32,9 +32,9 @@ impl From<BlockchainRpcRateLimitsConfig> for PublicOverlayRateLimiter {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BlockchainRpcTrafficLimits {
-    light_queries: TokenBucketConfig,
-    heavy_queries: TokenBucketConfig,
-    broadcasts: TokenBucketConfig,
+    pub light_queries: TokenBucketConfig,
+    pub heavy_queries: TokenBucketConfig,
+    pub broadcasts: TokenBucketConfig,
 }
 
 impl Default for BlockchainRpcTrafficLimits {
@@ -84,9 +84,7 @@ impl BlockchainRpcRateLimitPolicy {
             | rpc::GetPersistentShardStateInfo::TL_ID
             | rpc::GetPersistentQueueStateInfo::TL_ID
             | rpc::GetArchiveChunk::TL_ID
-            | rpc::GetBlockDataChunk::TL_ID
-            | rpc::GetPersistentQueueStateChunk::TL_ID
-            | rpc::GetPersistentShardStateChunk::TL_ID => BlockchainRpcTrafficClass::LightQuery,
+            | rpc::GetBlockDataChunk::TL_ID => BlockchainRpcTrafficClass::LightQuery,
             _ => BlockchainRpcTrafficClass::HeavyQuery,
         }
     }

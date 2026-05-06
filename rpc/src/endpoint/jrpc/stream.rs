@@ -3,7 +3,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::anyhow;
-use axum::extract::{ConnectInfo, FromRef, Query, Request, State};
+use axum::Extension;
+use axum::extract::{ConnectInfo, FromRef, Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
@@ -197,7 +198,8 @@ where
 pub async fn stream_route<S>(
     State(state): State<RpcState>,
     Query(params): Query<StreamParams>,
-    req: Request,
+    Extension(active_streams): Extension<ActiveStreamLimiter>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Response
 where
     RpcState: FromRef<S>,
@@ -205,16 +207,6 @@ where
 {
     let subs = Arc::<RpcSubscriptions>::from_ref(&state);
     let mc_rx = state.subscribe_mc_tick();
-
-    let active_streams = req
-        .extensions()
-        .get::<ActiveStreamLimiter>()
-        .expect("ActiveStreamLimiter must be in extensions");
-
-    let ConnectInfo(addr) = req
-        .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .expect("ConnectInfo must be in extensions");
 
     let Some(stream_guard) = active_streams.try_acquire(addr.ip()) else {
         return StatusCode::TOO_MANY_REQUESTS.into_response();

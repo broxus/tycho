@@ -35,7 +35,6 @@ struct PolicyRateLimiter<P>
 where
     P: PublicOverlayRateLimitPolicy,
 {
-    // TODO: normalize IPv6 -> /64
     limiter: RateLimiter<IpAddr, P::Class>,
     policy: P,
 }
