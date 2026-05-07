@@ -47,7 +47,7 @@ pub struct RpcConfig {
 
     /// Rate limits for inbound RPC requests.
     ///
-    /// Default: enabled.
+    /// Default: disabled.
     pub rate_limits: Option<RpcRateLimitsConfig>,
 
     #[important]
@@ -153,7 +153,7 @@ impl Default for RpcConfig {
             max_parallel_block_downloads: 10,
             run_get_method: RunGetMethodConfig::default(),
             subscriptions: SubscriptionsConfig::default(),
-            rate_limits: Some(RpcRateLimitsConfig::default()),
+            rate_limits: None,
             storage: RpcStorageConfig::Full {
                 gc: Some(Default::default()),
                 force_reindex: false,
