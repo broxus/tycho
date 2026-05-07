@@ -379,6 +379,8 @@ impl BlocksCache {
     }
 
     /// Store received from bc block in a cache
+    ///
+    /// Returns `None` when received block is not newer then existed
     #[tracing::instrument(skip_all)]
     pub async fn store_received(
         &self,
@@ -405,6 +407,8 @@ impl BlocksCache {
         let last_known_synced = 'sync: {
             if block_id.is_masterchain() {
                 let mut masters_guard = self.inner.masters.lock();
+
+                // do not store if received block is not newer than existed
                 if let Some(last_known_synced) =
                     masters_guard.check_refresh_last_known_synced(block_id.seqno)
                 {
@@ -430,6 +434,7 @@ impl BlocksCache {
 
                 let res = {
                     let mut g = self.inner.shards.entry(block_id.shard).or_default();
+                    // do not store if received block is not newer than existed
                     if let Some(last_known_synced) =
                         g.check_refresh_last_known_synced(block_id.seqno)
                     {

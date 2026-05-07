@@ -210,11 +210,6 @@ pub(super) enum CandidateStatus {
     Synced,
 }
 
-pub(super) enum BlockCacheStoreSource {
-    Collated,
-    Received,
-}
-
 #[expect(clippy::large_enum_variant)]
 pub(super) enum BlockCacheEntryData {
     Collated {

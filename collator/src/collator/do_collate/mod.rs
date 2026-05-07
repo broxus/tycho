@@ -314,7 +314,7 @@ impl CollatorStdImpl {
             _ = async move {
                 collation_cancelled.await;
                 tracing::info!(target: tracing_targets::COLLATOR,
-                    "collation was cancelled by manager on do_collate",
+                    "collation cancel requested on do_collate",
                 );
                 collation_is_cancelled.cancel();
                 std::future::pending::<()>().await;
@@ -334,6 +334,10 @@ impl CollatorStdImpl {
             final_result,
         } = match do_collate_res {
             Err(CollatorError::Cancelled(reason)) => {
+                tracing::info!(target: tracing_targets::COLLATOR,
+                    "collation was cancelled on do_collate",
+                );
+
                 // cancel collation
                 return Ok(CollatorResult::cancelled(
                     mc_block_id,
