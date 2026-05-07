@@ -168,6 +168,7 @@ impl Default for RpcConfig {
 pub struct SubscriptionsConfig {
     pub max_clients: u32,
     pub max_addrs: u32,
+    pub max_streams_per_addr: u32,
     /// Pending updates buffered per client; clamped to at least 1.
     pub queue_depth: usize,
 }
@@ -177,6 +178,7 @@ impl Default for SubscriptionsConfig {
         Self {
             max_clients: 1_000_000,
             max_addrs: 1_000_000,
+            max_streams_per_addr: 5,
             queue_depth: 5,
         }
     }

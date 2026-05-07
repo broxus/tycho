@@ -58,10 +58,15 @@ impl RpcEndpointBuilder<()> {
     pub async fn bind(self, state: RpcState) -> Result<RpcEndpoint> {
         let listener = state.bind_socket().await?;
         let rate_limiter = state.config().rate_limits.clone().map(Into::into);
+        let active_streams = rate_limits::ActiveStreamLimiter::new(
+            state.config().subscriptions.max_streams_per_addr,
+        );
+
         Ok(RpcEndpoint::from_parts(
             listener,
             self.common.build(),
             rate_limiter,
+            active_streams,
             state,
         ))
     }
@@ -93,11 +98,15 @@ where
 
         let listener = rpc_state.bind_socket().await?;
         let rate_limiter = rpc_state.config().rate_limits.clone().map(Into::into);
+        let active_streams = rate_limits::ActiveStreamLimiter::new(
+            rpc_state.config().subscriptions.max_streams_per_addr,
+        );
 
         Ok(RpcEndpoint::from_parts(
             listener,
             self.common.build::<S>().merge(self.custom_routes),
             rate_limiter,
+            active_streams,
             state,
         ))
     }
@@ -162,6 +171,7 @@ impl RpcEndpoint {
         listener: TcpListener,
         router: axum::Router<S>,
         rate_limiter: Option<rate_limits::RpcRateLimiter>,
+        active_streams: rate_limits::ActiveStreamLimiter,
         state: S,
     ) -> Self
     where
@@ -191,9 +201,6 @@ impl RpcEndpoint {
             )),
             None => router,
         };
-
-        // Limits concurrent SSE streams per IP
-        let active_streams = rate_limits::ActiveStreamLimiter::default();
 
         let router = router
             .layer(Extension(active_streams))

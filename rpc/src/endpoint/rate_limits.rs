@@ -7,7 +7,7 @@ use axum::http::{Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
-use tycho_util::FastDashSet;
+use tycho_util::FastDashMap;
 use tycho_util::rate_limit::{
     RateLimitConfig, RateLimitPolicy, RateLimitVerdict, RateLimiter, TokenBucketConfig,
 };
@@ -43,8 +43,8 @@ impl Default for RpcTrafficLimits {
                 NonZeroU32::new(10).unwrap(),
             ),
             streams: TokenBucketConfig::new(
-                NonZeroU32::new(1).unwrap(),
-                NonZeroU32::new(1).unwrap(),
+                NonZeroU32::new(5).unwrap(),
+                NonZeroU32::new(5).unwrap(),
             ),
         }
     }
@@ -81,33 +81,54 @@ impl RpcRateLimiter {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ActiveStreamLimiter {
-    active: Arc<FastDashSet<IpAddr>>,
+    active: Arc<FastDashMap<IpAddr, u32>>,
+    max_streams_per_addr: NonZeroU32,
 }
 
 impl ActiveStreamLimiter {
+    pub fn new(max_streams_per_addr: u32) -> Self {
+        Self {
+            active: Arc::new(FastDashMap::default()),
+            max_streams_per_addr: NonZeroU32::new(max_streams_per_addr).unwrap(),
+        }
+    }
+
     pub fn try_acquire(&self, ip: IpAddr) -> Option<ActiveStreamGuard> {
-        self.active
-            .insert(ip)
-            .then(|| ActiveStreamGuard::new(ip, self.active.clone()))
+        let mut entry = self.active.entry(ip).or_default();
+
+        if *entry >= self.max_streams_per_addr.get() {
+            return None;
+        }
+
+        *entry += 1;
+
+        Some(ActiveStreamGuard::new(ip, self.clone()))
+    }
+
+    fn release(&self, ip: IpAddr) {
+        self.active.remove_if_mut(&ip, |_, count| {
+            *count = count.saturating_sub(1);
+            *count == 0
+        });
     }
 }
 
 pub struct ActiveStreamGuard {
     ip: IpAddr,
-    active: Arc<FastDashSet<IpAddr>>,
+    active: ActiveStreamLimiter,
 }
 
 impl ActiveStreamGuard {
-    fn new(ip: IpAddr, active: Arc<FastDashSet<IpAddr>>) -> Self {
+    fn new(ip: IpAddr, active: ActiveStreamLimiter) -> Self {
         Self { ip, active }
     }
 }
 
 impl Drop for ActiveStreamGuard {
     fn drop(&mut self) {
-        self.active.remove(&self.ip);
+        self.active.release(self.ip);
     }
 }
 
