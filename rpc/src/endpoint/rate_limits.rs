@@ -7,16 +7,17 @@ use axum::http::{Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
-use tycho_util::FastDashMap;
 use tycho_util::rate_limit::{
     RateLimitConfig, RateLimitPolicy, RateLimitVerdict, RateLimiter, TokenBucketConfig,
 };
+use tycho_util::{FastDashMap, FastHashSet};
 
 #[derive(Debug, Default, Eq, PartialEq, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RpcRateLimitsConfig {
     pub limiter: RateLimitConfig,
     pub traffic: RpcTrafficLimits,
+    pub whitelist: Vec<IpAddr>,
 }
 
 impl From<RpcRateLimitsConfig> for RpcRateLimiter {
@@ -24,6 +25,7 @@ impl From<RpcRateLimitsConfig> for RpcRateLimiter {
         RpcRateLimiter {
             limiter: RateLimiter::new(config.limiter),
             traffic: config.traffic,
+            whitelist: config.whitelist.into_iter().collect(),
         }
     }
 }
@@ -65,10 +67,15 @@ impl RpcTrafficLimits {
 pub struct RpcRateLimiter {
     limiter: RateLimiter<IpAddr, RpcTrafficClass>,
     traffic: RpcTrafficLimits,
+    whitelist: FastHashSet<IpAddr>,
 }
 
 impl RpcRateLimiter {
     fn check(&self, ip: IpAddr, class: RpcTrafficClass) -> RateLimitVerdict {
+        if self.whitelist.contains(&ip) {
+            return RateLimitVerdict::Allow;
+        }
+
         self.limiter.check(&ip, self.traffic.policy(class))
     }
 
@@ -85,17 +92,23 @@ impl RpcRateLimiter {
 pub struct ActiveStreamLimiter {
     active: Arc<FastDashMap<IpAddr, u32>>,
     max_streams_per_addr: NonZeroU32,
+    whitelist: Arc<FastHashSet<IpAddr>>,
 }
 
 impl ActiveStreamLimiter {
-    pub fn new(max_streams_per_addr: u32) -> Self {
+    pub fn new(max_streams_per_addr: u32, whitelist: Vec<IpAddr>) -> Self {
         Self {
             active: Arc::new(FastDashMap::default()),
             max_streams_per_addr: NonZeroU32::new(max_streams_per_addr).unwrap(),
+            whitelist: Arc::new(whitelist.into_iter().collect()),
         }
     }
 
     pub fn try_acquire(&self, ip: IpAddr) -> Option<ActiveStreamGuard> {
+        if self.whitelist.contains(&ip) {
+            return Some(ActiveStreamGuard::whitelisted());
+        }
+
         let mut entry = self.active.entry(ip).or_default();
 
         if *entry >= self.max_streams_per_addr.get() {
@@ -115,20 +128,29 @@ impl ActiveStreamLimiter {
     }
 }
 
-pub struct ActiveStreamGuard {
-    ip: IpAddr,
-    active: ActiveStreamLimiter,
+pub enum ActiveStreamGuard {
+    Counted {
+        ip: IpAddr,
+        active: ActiveStreamLimiter,
+    },
+    Whitelisted,
 }
 
 impl ActiveStreamGuard {
     fn new(ip: IpAddr, active: ActiveStreamLimiter) -> Self {
-        Self { ip, active }
+        Self::Counted { ip, active }
+    }
+
+    fn whitelisted() -> Self {
+        Self::Whitelisted
     }
 }
 
 impl Drop for ActiveStreamGuard {
     fn drop(&mut self) {
-        self.active.release(self.ip);
+        if let Self::Counted { ip, active } = self {
+            active.release(*ip);
+        }
     }
 }
 
