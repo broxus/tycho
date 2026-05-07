@@ -412,7 +412,7 @@ mod tests {
             utime: 0,
         });
 
-        let active_streams = ActiveStreamLimiter::new(1);
+        let active_streams = ActiveStreamLimiter::new(1, vec![]);
         let stream_guard = active_streams
             .try_acquire(IpAddr::V4(Ipv4Addr::LOCALHOST))
             .expect("stream slot");

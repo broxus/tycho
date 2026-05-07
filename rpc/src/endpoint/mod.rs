@@ -57,9 +57,12 @@ impl RpcEndpointBuilder<()> {
 
     pub async fn bind(self, state: RpcState) -> Result<RpcEndpoint> {
         let listener = state.bind_socket().await?;
-        let rate_limiter = state.config().rate_limits.clone().map(Into::into);
+
+        let rl_config = &state.config().rate_limits;
+        let rate_limiter = rl_config.clone().map(Into::into);
         let active_streams = rate_limits::ActiveStreamLimiter::new(
             state.config().subscriptions.max_streams_per_addr,
+            rl_config.clone().map(|c| c.whitelist).unwrap_or_default(),
         );
 
         Ok(RpcEndpoint::from_parts(
@@ -97,9 +100,12 @@ where
         let rpc_state = RpcState::from_ref(&state);
 
         let listener = rpc_state.bind_socket().await?;
-        let rate_limiter = rpc_state.config().rate_limits.clone().map(Into::into);
+
+        let rl_config = &rpc_state.config().rate_limits;
+        let rate_limiter = rl_config.clone().map(Into::into);
         let active_streams = rate_limits::ActiveStreamLimiter::new(
             rpc_state.config().subscriptions.max_streams_per_addr,
+            rl_config.clone().map(|c| c.whitelist).unwrap_or_default(),
         );
 
         Ok(RpcEndpoint::from_parts(
