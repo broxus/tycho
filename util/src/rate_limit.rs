@@ -59,11 +59,7 @@ pub struct RateLimitPolicy<C> {
 }
 
 #[derive(Clone)]
-pub struct RateLimiter<K, C>
-where
-    K: Clone + Eq + Hash + Send + Sync + 'static,
-    C: Copy + Eq + Hash + Send + Sync + 'static,
-{
+pub struct RateLimiter<K, C> {
     inner: Arc<RateLimiterInner<K, C>>,
 }
 
@@ -200,6 +196,7 @@ where
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
 enum BucketResult {
     Ok,
     TryLater { after: Instant },
@@ -255,5 +252,114 @@ impl TokenBucket {
             self.last_refill = now;
             self.available = self.available.saturating_add(refill).min(self.capacity);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+    enum Class {
+        A,
+        B,
+    }
+
+    fn bucket_config(rate_per_sec: u32, burst: u32) -> TokenBucketConfig {
+        TokenBucketConfig::new(
+            NonZeroU32::new(rate_per_sec).unwrap(),
+            NonZeroU32::new(burst).unwrap(),
+        )
+    }
+
+    fn policy(class: Class) -> RateLimitPolicy<Class> {
+        RateLimitPolicy {
+            class,
+            bucket: bucket_config(1, 1),
+        }
+    }
+
+    fn rate_limiter() -> RateLimiter<u32, Class> {
+        RateLimiter::new(RateLimitConfig {
+            rejects_before_cooldown: 2,
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn token_bucket_burst_and_refills() {
+        let now = Instant::now();
+
+        let mut bucket = TokenBucket::new(now, bucket_config(10, 2));
+
+        // 10 req/s = refill every 100ms
+        let delay = Duration::from_millis(100);
+
+        // Spend burst capacity
+        assert_eq!(bucket.try_claim(now), BucketResult::Ok);
+        assert_eq!(bucket.try_claim(now), BucketResult::Ok);
+
+        assert_eq!(bucket.try_claim(now), BucketResult::TryLater {
+            after: now + delay,
+        });
+
+        // Wait for refilling tokens
+        assert_eq!(bucket.try_claim(now + delay), BucketResult::Ok);
+    }
+
+    #[test]
+    fn rate_limiter_cooldown() {
+        let limiter = rate_limiter();
+
+        let key = 1;
+
+        // Spend burst capacity
+        assert_eq!(
+            limiter.check(&key, policy(Class::A)),
+            RateLimitVerdict::Allow
+        );
+
+        // Spend rejects limit
+        assert!(matches!(
+            limiter.check(&key, policy(Class::A)),
+            RateLimitVerdict::Reject { retry_after }
+                if retry_after <= Duration::from_secs(1)
+        ));
+
+        // Check cooldown
+        assert!(matches!(
+            limiter.check(&key, policy(Class::A)),
+            RateLimitVerdict::Reject { retry_after }
+                if retry_after > Duration::from_secs(29)
+        ));
+    }
+
+    #[test]
+    fn rate_limiter_keep_buckets_per_class() {
+        let limiter = rate_limiter();
+
+        let key = 1;
+
+        // Spend burst for A
+        assert_eq!(
+            limiter.check(&key, policy(Class::A)),
+            RateLimitVerdict::Allow
+        );
+
+        // Spend burst for B
+        assert_eq!(
+            limiter.check(&key, policy(Class::B)),
+            RateLimitVerdict::Allow
+        );
+
+        assert!(matches!(
+            limiter.check(&key, policy(Class::A)),
+            RateLimitVerdict::Reject { .. },
+        ));
+
+        assert!(matches!(
+            limiter.check(&key, policy(Class::B)),
+            RateLimitVerdict::Reject { .. },
+        ));
     }
 }
