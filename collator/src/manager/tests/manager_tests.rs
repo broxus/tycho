@@ -24,7 +24,7 @@ use tycho_types::models::{
 };
 use tycho_util::{FastDashMap, FastHashMap, FastHashSet};
 
-use super::{BlockCacheStoreResult, BlockSeqno, CollationManager, DetectNextCollationStepContext};
+use super::{BlockSeqno, CollationManager, DetectNextCollationStepContext};
 use crate::collator::{
     CollatorStdImplFactory, ForceMasterCollation, ShardDescriptionExt as _, TestInternalMessage,
     TestMessageFactory,
@@ -34,7 +34,7 @@ use crate::internal_queue::types::message::{EnqueuedMessage, InternalMessageValu
 use crate::internal_queue::types::router::PartitionRouter;
 use crate::internal_queue::types::stats::DiffStatistics;
 use crate::manager::blocks_cache::BlocksCache;
-use crate::manager::types::{CollationSyncState, NextCollationStep};
+use crate::manager::types::{BlockCacheStoreResult, CollationSyncState, NextCollationStep};
 use crate::manager::{
     CollatedBlockInfo, CollationStatus, GlobalCapabilitiesExt, McBlockSubgraphExtract,
 };

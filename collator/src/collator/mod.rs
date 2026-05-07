@@ -116,7 +116,9 @@ where
 
 #[async_trait]
 pub trait Collator: Send + Sync + 'static {
+    fn next_block_id_short(&self) -> &BlockIdShort;
     fn shard_id(&self) -> &ShardIdent;
+
     /// Init collator and try to collate next block
     async fn init(
         self: Box<Self>,
@@ -194,6 +196,10 @@ pub struct CollatorStdImpl {
 
 #[async_trait]
 impl Collator for CollatorStdImpl {
+    fn next_block_id_short(&self) -> &BlockIdShort {
+        &self.next_block_info
+    }
+
     fn shard_id(&self) -> &ShardIdent {
         &self.shard_id
     }
@@ -344,6 +350,10 @@ impl CollatorStdImpl {
             .try_import_init_anchors(&mut working_state, anchors_proc_info_opt, &genesis_info)
             .await?
         {
+            tracing::info!(target: tracing_targets::COLLATOR,
+                "collation was cancelled by manager on init_collator",
+            );
+
             self.delayed_working_state.delay(working_state);
             return Ok(CollatorResult::Cancelled(cancel_ctx));
         }
@@ -557,7 +567,7 @@ impl CollatorStdImpl {
             res = import_fut => res,
             _ = cancel_collation.notified() => {
                 tracing::info!(target: tracing_targets::COLLATOR,
-                    "collation was cancelled by manager",
+                    "collation was cancelled by manager on try_import_init_anchors",
                 );
                 let labels = [("workchain", self.shard_id.workchain().to_string())];
                 metrics::counter!("tycho_collator_anchor_import_cancelled_count", &labels[..]).increment(1);
@@ -605,7 +615,7 @@ impl CollatorStdImpl {
         Ok(NextCollationFlowStep::Continue)
     }
 
-    #[tracing::instrument("resume_collation", skip_all, fields(next_block_id = %self.next_block_info))]
+    #[tracing::instrument(name = "resume_collation", skip_all, fields(next_block_id = %self.next_block_info))]
     async fn resume_collation_impl(
         &mut self,
         mc_data: Arc<McData>,
@@ -702,6 +712,10 @@ impl CollatorStdImpl {
                 .try_import_init_anchors(&mut working_state, anchors_proc_info_opt, &genesis_info)
                 .await?
             {
+                tracing::info!(target: tracing_targets::COLLATOR,
+                    "collation was cancelled by manager on resume_collation",
+                );
+
                 self.delayed_working_state.delay(working_state);
                 return Ok(CollatorResult::Cancelled(cancel_ctx));
             }

@@ -23,6 +23,27 @@ where
         }
     }
 
+    pub(super) fn set_collator_and_state<SetState>(
+        &self,
+        collator: Box<CF::Collator>,
+        set_state: SetState,
+    ) -> Result<CollatorState>
+    where
+        SetState: FnOnce(&mut ActiveCollator<Box<CF::Collator>>),
+    {
+        match self.active_collators.get_mut(collator.shard_id()) {
+            Some(mut active_collator) => {
+                active_collator.collator = Some(collator);
+                set_state(&mut active_collator);
+                Ok(active_collator.state)
+            }
+            None => bail!(
+                "active_collators does not contain collator state for {}",
+                collator.shard_id(),
+            ),
+        }
+    }
+
     pub(super) fn take_collator_and_set_state_if<Check, SetState>(
         &self,
         shard_id: &ShardIdent,
@@ -51,29 +72,25 @@ where
         }
     }
 
-    pub(super) fn set_collator_state<F>(&self, shard_id: &ShardIdent, f: F) -> Option<CollatorState>
+    pub(super) fn set_collator_state<SetState>(
+        &self,
+        shard_id: &ShardIdent,
+        set_state: SetState,
+    ) -> Option<CollatorState>
     where
-        F: Fn(&mut ActiveCollator<Box<CF::Collator>>),
+        SetState: FnOnce(&mut ActiveCollator<Box<CF::Collator>>),
     {
         match self.active_collators.get_mut(shard_id) {
             Some(mut active_collator) => {
-                f(&mut active_collator);
+                set_state(&mut active_collator);
                 Some(active_collator.state)
             }
             None => None,
         }
     }
 
-    pub(super) fn set_collators_state<Filter, F>(&self, mut filter: Filter, f: F)
-    where
-        Filter: FnMut(&ShardIdent, &ActiveCollator<Box<CF::Collator>>) -> bool,
-        F: Fn(&mut ActiveCollator<Box<CF::Collator>>),
-    {
-        for mut active_collator in self.active_collators.iter_mut() {
-            if filter(active_collator.key(), active_collator.value()) {
-                f(&mut active_collator);
-            }
-        }
+    pub(super) fn get_collator_state(&self, shard_id: &ShardIdent) -> Option<CollatorState> {
+        self.active_collators.get(shard_id).map(|ac| ac.state)
     }
 
     pub(super) fn request_cancel_collations(&self) -> bool {
@@ -88,7 +105,7 @@ where
         has_active
     }
 
-    pub(super) fn has_active_collator(&self) -> bool {
+    pub(super) fn has_active_collations(&self) -> bool {
         self.active_collators
             .iter()
             .any(|ac| ac.state == CollatorState::Active || ac.state == CollatorState::CancelPending)
