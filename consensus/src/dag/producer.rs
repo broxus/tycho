@@ -69,23 +69,19 @@ impl Producer {
         let includes = Self::includes(finished_round);
         let witness = Self::witness(finished_round, &local_id, last_own_point);
 
-        let anchor_proof = Self::link(
-            &local_id,
-            current_round,
-            &includes,
-            &witness,
-            proven_vertex.is_some(),
-            AnchorStageRole::Proof,
-        );
-        let anchor_trigger = Self::link(
-            &local_id,
-            current_round,
-            &includes,
-            &witness,
-            proven_vertex.is_some()
-                && last_own_point.is_some_and(|prev| prev.includes.contains_key(&local_id)),
-            AnchorStageRole::Trigger,
-        );
+        let anchor_proof = if proven_vertex.is_some()
+            && (current_round.proof_stage()).is_some_and(|ps| ps.leader == local_id)
+        {
+            AnchorLink::ToSelf
+        } else {
+            Self::link(current_round, &includes, &witness, AnchorStageRole::Proof)
+        };
+
+        let anchor_trigger = if anchor_proof == AnchorLink::Direct(Through::Includes(local_id)) {
+            AnchorLink::ToSelf
+        } else {
+            Self::link(current_round, &includes, &witness, AnchorStageRole::Trigger)
+        };
         let chained_anchor_proof =
             Self::chained_anchor_proof(current_round, &includes, &witness, &anchor_proof);
 
@@ -192,22 +188,11 @@ impl Producer {
     }
 
     fn link(
-        local_id: &PeerId,
         current_round: &DagRound,
         includes: &[PointInfo],
         witness: &[PointInfo],
-        has_candidate: bool,
         link_field: AnchorStageRole,
     ) -> AnchorLink {
-        match current_round.anchor_stage() {
-            Some(stage)
-                if stage.role == link_field && stage.leader == local_id && has_candidate =>
-            {
-                return AnchorLink::ToSelf;
-            }
-            _ => {}
-        }
-
         let incl_info = includes
             .iter()
             .max_by_key(|point| point.anchor_round(link_field))

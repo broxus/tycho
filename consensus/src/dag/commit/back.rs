@@ -14,9 +14,7 @@ use crate::dag::commit::EnqueuedAnchor;
 use crate::dag::{DagRound, HistoryConflict};
 use crate::effects::{AltFmt, AltFormat};
 use crate::engine::{EngineResult, MempoolConfig};
-use crate::models::{
-    AnchorLink, AnchorStageRole, Committable, DagPoint, Digest, PointInfo, Round, ValidPoint,
-};
+use crate::models::{AnchorLink, Committable, DagPoint, Digest, PointInfo, Round, ValidPoint};
 
 #[derive(Default)]
 pub struct DagBack {
@@ -152,31 +150,30 @@ impl DagBack {
                 self.alt(),
             );
 
-            match proof_dag_round.anchor_stage() {
-                Some(stage) if stage.role == AnchorStageRole::Proof => {
-                    assert_eq!(
-                        lookup_proof_id.author,
-                        stage.leader,
-                        "validate() is broken: anchor proof author is not leader {:?}",
+            if let Some(proof_stage) = proof_dag_round.proof_stage() {
+                assert_eq!(
+                    lookup_proof_id.author,
+                    proof_stage.leader,
+                    "validate() is broken: anchor proof author is not leader {:?}",
+                    lookup_proof_id.alt()
+                );
+                if proof_stage.is_used.load(atomic::Ordering::Relaxed) {
+                    // this branch must be visited only with engine round change
+                    // (new call to commit), when `anchor_chain` is emptied;
+                    // during the same commit call, expect `anchor_chain` to serve its purpose
+                    assert!(
+                        bottom_round <= self.bottom_round(),
+                        "limit by round range is broken: visiting already committed proof {:?}",
                         lookup_proof_id.alt()
                     );
-                    if stage.is_used.load(atomic::Ordering::Relaxed) {
-                        // this branch must be visited only with engine round change
-                        // (new call to commit), when `anchor_chain` is emptied;
-                        // during the same commit call, expect `anchor_chain` to serve its purpose
-                        assert!(
-                            bottom_round <= self.bottom_round(),
-                            "limit by round range is broken: visiting already committed proof {:?}",
-                            lookup_proof_id.alt()
-                        );
-                        // reached already committed proof, so dag is contiguous
-                        break;
-                    }
+                    // reached already committed proof, so dag is contiguous
+                    break;
                 }
-                _ => panic!(
+            } else {
+                panic!(
                     "validate() is broken: anchor stage is not for anchor proof {:?}",
                     lookup_proof_id.alt()
-                ),
+                )
             }
             let proof = Self::chained_proof(
                 proof_dag_round,

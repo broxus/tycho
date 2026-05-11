@@ -173,6 +173,7 @@ impl JournalEvent {
             | InvalidReason::MustHaveSkippedRound(point_id)
             | InvalidReason::DependencyTimeTooFarInFuture(point_id)
             | InvalidReason::NewerAnchorInDependency((_, point_id))
+            | InvalidReason::AnchorLink((_, point_id))
             | InvalidReason::AnchorLinkBadPath((_, point_id))
             | InvalidReason::ChainedProofBadPath(point_id)
             | InvalidReason::NewerProofToChainInDependency(point_id)

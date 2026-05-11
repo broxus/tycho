@@ -82,7 +82,7 @@ impl DagPointFuture {
         point: &Point,
         key_pair: Option<Arc<KeyPair>>,
         state: &InclusionState,
-        triggers_tx: Option<&mpsc::UnboundedSender<WeakDagPointFuture>>,
+        triggers_tx: &mpsc::UnboundedSender<WeakDagPointFuture>,
         downloader: Downloader,
         store: MempoolStore,
         round_ctx: &RoundCtx,
@@ -91,9 +91,12 @@ impl DagPointFuture {
         let info = point.info().clone();
         let point = point.clone();
         let state = state.clone();
+        let triggers_tx = triggers_tx.clone();
         let validate_ctx = ValidateCtx::new(round_ctx, &info);
         let cert = Cert::default();
         let cert_clone = cert.clone();
+
+        let (self_weak_tx, self_weak_rx) = oneshot::channel();
 
         let task = round_ctx.task().spawn(async move {
             let peer_schedule = downloader.peer_schedule();
@@ -217,10 +220,10 @@ impl DagPointFuture {
 
             scopeguard::ScopeGuard::into_inner(abort_guard);
 
-            Ok(dag_point)
+            Self::ok(self_weak_rx, &triggers_tx, dag_point).await
         });
 
-        Self::finish(triggers_tx, DagPointFutureType::Validate {
+        Self::finish(self_weak_tx, DagPointFutureType::Validate {
             task: Shared::new(task),
             cert: cert_clone,
         })
@@ -230,18 +233,21 @@ impl DagPointFuture {
         point: &Point,
         reason: &IllFormedReason,
         state: &InclusionState,
-        triggers_tx: Option<&mpsc::UnboundedSender<WeakDagPointFuture>>,
+        triggers_tx: &mpsc::UnboundedSender<WeakDagPointFuture>,
         store: &MempoolStore,
         round_ctx: &RoundCtx,
     ) -> Self {
         let point = point.clone();
         let reason = reason.clone();
         let state = state.clone();
+        let triggers_tx = triggers_tx.clone();
         let store = store.clone();
         let task_ctx = round_ctx.task();
         let round_ctx = round_ctx.clone();
         let cert = Cert::default();
         let cert_clone = cert.clone();
+
+        let (self_weak_tx, self_weak_rx) = oneshot::channel();
 
         let task = task_ctx.spawn(async move {
             let ctx = round_ctx.clone();
@@ -262,10 +268,11 @@ impl DagPointFuture {
                 state.resolve(&dag_point);
                 dag_point
             };
-            LIMIT.spawn_blocking(ctx.task(), full_fn).await.await
+            let dag_point = LIMIT.spawn_blocking(ctx.task(), full_fn).await.await?;
+            Self::ok(self_weak_rx, &triggers_tx, dag_point).await
         });
 
-        Self::finish(triggers_tx, DagPointFutureType::Validate {
+        Self::finish(self_weak_tx, DagPointFutureType::Validate {
             task: Shared::new(task),
             cert: cert_clone,
         })
@@ -276,7 +283,7 @@ impl DagPointFuture {
         point_dag_round: &DagRound,
         point: &Point,
         state: &InclusionState,
-        triggers_tx: Option<&mpsc::UnboundedSender<WeakDagPointFuture>>,
+        triggers_tx: &mpsc::UnboundedSender<WeakDagPointFuture>,
         downloader: &Downloader,
         store: &MempoolStore,
         round_ctx: &RoundCtx,
@@ -285,11 +292,14 @@ impl DagPointFuture {
         let info = point.info().clone();
         let point = point.clone();
         let state = state.clone();
+        let triggers_tx = triggers_tx.clone();
         let downloader = downloader.clone();
         let store = store.clone();
         let validate_ctx = ValidateCtx::new(round_ctx, &info);
         let cert = Cert::default();
         let cert_clone = cert.clone();
+
+        let (self_weak_tx, self_weak_rx) = oneshot::channel();
 
         let task = round_ctx.task().spawn(async move {
             let store_fn = {
@@ -320,10 +330,10 @@ impl DagPointFuture {
                 dag_point
             };
             let nested = LIMIT.spawn_blocking(validate_ctx.task(), store_fn);
-            nested.await.await
+            Self::ok(self_weak_rx, &triggers_tx, nested.await.await?).await
         });
 
-        Self::finish(triggers_tx, DagPointFutureType::Validate {
+        Self::finish(self_weak_tx, DagPointFutureType::Validate {
             task: Shared::new(task),
             cert: cert_clone,
         })
@@ -336,7 +346,7 @@ impl DagPointFuture {
         digest: &Digest,
         first_depender: Option<&PeerId>,
         state: &InclusionState,
-        triggers_tx: Option<&mpsc::UnboundedSender<WeakDagPointFuture>>,
+        triggers_tx: &mpsc::UnboundedSender<WeakDagPointFuture>,
         downloader: &Downloader,
         store: &MempoolStore,
         into_round_ctx: &T,
@@ -351,8 +361,9 @@ impl DagPointFuture {
             digest: *digest,
         };
         let point_dag_round = point_dag_round.downgrade();
-        let downloader = downloader.clone();
         let state = state.clone();
+        let triggers_tx = triggers_tx.clone();
+        let downloader = downloader.clone();
         let store = store.clone();
         let task_ctx = into_round_ctx.task();
         let into_round_ctx = into_round_ctx.clone();
@@ -365,6 +376,8 @@ impl DagPointFuture {
         let (broadcast_tx, broadcast_rx) = oneshot::channel();
         let cert = Cert::default();
         let cert_clone = cert.clone();
+
+        let (self_weak_tx, self_weak_rx) = oneshot::channel();
 
         let task = task_ctx.spawn(async move {
             let download_ctx = DownloadCtx::new(&into_round_ctx, &point_id);
@@ -408,7 +421,7 @@ impl DagPointFuture {
                         dag_point
                     };
                     let nested = LIMIT.spawn_blocking(into_round_ctx.task(), store_fn);
-                    nested.await.await
+                    Self::ok(self_weak_rx, &triggers_tx, nested.await.await?).await
                 }
                 DownloadResult::IllFormed(point, VerifyError::IllFormed(reason)) => {
                     let mut status = PointStatusIllFormed {
@@ -427,7 +440,7 @@ impl DagPointFuture {
                         dag_point
                     };
                     let nested = LIMIT.spawn_blocking(into_round_ctx.task(), store_fn);
-                    nested.await.await
+                    Self::ok(self_weak_rx, &triggers_tx, nested.await.await?).await
                 }
                 DownloadResult::IllFormed(point, VerifyError::Fail(UninitVset(_))) => {
                     let store_status = PointStatusFound {
@@ -451,7 +464,7 @@ impl DagPointFuture {
                         dag_point
                     };
                     let nested = LIMIT.spawn_blocking(into_round_ctx.task(), store_fn);
-                    nested.await.await
+                    Self::ok(self_weak_rx, &triggers_tx, nested.await.await?).await
                 }
                 DownloadResult::NotFound => {
                     let mut status = PointStatusNotFound {
@@ -471,12 +484,12 @@ impl DagPointFuture {
                         dag_point
                     };
                     let nested = LIMIT.spawn_blocking(into_round_ctx.task(), store_fn);
-                    nested.await.await
+                    Self::ok(self_weak_rx, &triggers_tx, nested.await.await?).await
                 }
             }
         });
 
-        Self::finish(triggers_tx, DagPointFutureType::Download {
+        Self::finish(self_weak_tx, DagPointFutureType::Download {
             task: Shared::new(task),
             cert: cert_clone,
             dependers_tx,
@@ -489,7 +502,7 @@ impl DagPointFuture {
         point_dag_round: &DagRound,
         point_restore: PointRestore,
         state: &InclusionState,
-        triggers_tx: Option<&mpsc::UnboundedSender<WeakDagPointFuture>>,
+        triggers_tx: &mpsc::UnboundedSender<WeakDagPointFuture>,
         downloader: &Downloader,
         store: &MempoolStore,
         round_ctx: &RoundCtx,
@@ -565,11 +578,14 @@ impl DagPointFuture {
             Either::Left(verified) => {
                 let point_dag_round = point_dag_round.downgrade();
                 let state = state.clone();
+                let triggers_tx = triggers_tx.clone();
                 let downloader = downloader.clone();
                 let store = store.clone();
                 let round_ctx = round_ctx.clone();
                 let ctx = round_ctx.clone();
                 let cert = cert_clone.clone();
+
+                let (self_weak_tx, self_weak_rx) = oneshot::channel();
 
                 let future = async move {
                     let validate_ctx = ValidateCtx::new(&round_ctx, &verified);
@@ -582,6 +598,7 @@ impl DagPointFuture {
                         validate_ctx,
                     )
                     .await?;
+
                     let (dag_point, status) = (round_ctx.span())
                         .in_scope(|| Self::acquire_validated(&state, verified, cert, validated));
                     let ctx = round_ctx.clone();
@@ -593,21 +610,26 @@ impl DagPointFuture {
                         dag_point
                     };
                     let nested = LIMIT.spawn_blocking(round_ctx.task(), store_fn);
-                    nested.await.await
+                    Self::ok(self_weak_rx, &triggers_tx, nested.await.await?).await
                 };
                 let lazy = Box::pin(async move { ctx.task().spawn(future).await });
-                Self::finish(triggers_tx, DagPointFutureType::Restore {
+                Self::finish(self_weak_tx, DagPointFutureType::Restore {
                     lazy: Shared::new(lazy),
                     cert: cert_clone,
                 })
             }
             Either::Right(dag_point) => {
                 state.resolve(&dag_point);
+                let is_ok_to_send = super::commit::filter(&dag_point).is_some();
                 let ready = Box::pin(future::ready(Ok(dag_point)));
-                Self::finish(triggers_tx, DagPointFutureType::Restore {
+                let this = Self(DagPointFutureType::Restore {
                     lazy: Shared::new(ready),
                     cert: cert_clone,
-                })
+                });
+                if is_ok_to_send {
+                    triggers_tx.send(this.downgrade()).ok();
+                }
+                this
             }
         }
     }
@@ -721,14 +743,22 @@ impl DagPointFuture {
         cert_deps
     }
 
-    fn finish(
-        triggers_tx: Option<&mpsc::UnboundedSender<WeakDagPointFuture>>,
-        dpft: DagPointFutureType,
-    ) -> Self {
-        let this = Self(dpft);
-        if let Some(channel) = triggers_tx {
-            channel.send(this.downgrade()).ok();
+    async fn ok(
+        self_weak_rx: oneshot::Receiver<WeakDagPointFuture>,
+        triggers_tx: &mpsc::UnboundedSender<WeakDagPointFuture>,
+        dag_point: DagPoint,
+    ) -> TaskResult<DagPoint> {
+        if super::commit::filter(&dag_point).is_some()
+            && let Ok(self_weak) = self_weak_rx.await
+        {
+            triggers_tx.send(self_weak).ok();
         }
+        Ok(dag_point)
+    }
+
+    fn finish(channel: oneshot::Sender<WeakDagPointFuture>, dpft: DagPointFutureType) -> Self {
+        let this = Self(dpft);
+        channel.send(this.downgrade()).ok();
         this
     }
 

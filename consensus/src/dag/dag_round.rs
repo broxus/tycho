@@ -6,14 +6,14 @@ use tycho_network::PeerId;
 use tycho_util::FastDashMap;
 
 use crate::dag::IllFormedReason;
-use crate::dag::anchor_stage::AnchorStage;
+use crate::dag::anchor_stage::ProofStage;
 use crate::dag::dag_location::DagLocation;
 use crate::dag::dag_point_future::{DagPointFuture, WeakDagPointFuture};
 use crate::dag::threshold::Threshold;
 use crate::effects::{AltFmt, AltFormat, Ctx, RoundCtx, ValidateCtx};
 use crate::engine::{MempoolConfig, NodeConfig};
 use crate::intercom::{Downloader, PeerSchedule};
-use crate::models::{AnchorStageRole, Digest, PeerCount, Point, PointRestore, Round, WeakCert};
+use crate::models::{Digest, PeerCount, Point, PointRestore, Round, WeakCert};
 use crate::storage::MempoolStore;
 
 #[derive(Clone)]
@@ -31,7 +31,7 @@ pub struct DagRound(Arc<DagRoundInner>);
 pub struct DagRoundInner {
     round: Round,
     peer_count: PeerCount,
-    anchor_stage: Option<AnchorStage>,
+    proof_stage: Option<ProofStage>,
     locations: FastDashMap<PeerId, DagLocation>,
     threshold: Threshold,
     triggers_tx: mpsc::UnboundedSender<WeakDagPointFuture>,
@@ -116,7 +116,7 @@ impl DagRound {
         let this = Self(Arc::new(DagRoundInner {
             round,
             peer_count,
-            anchor_stage: AnchorStage::of(round, peer_schedule, conf),
+            proof_stage: ProofStage::of(round, peer_schedule, conf),
             locations: FastDashMap::with_capacity_and_hasher(peers.len(), Default::default()),
             threshold: Threshold::new(round, peer_count, conf),
             triggers_tx: triggers_tx.clone(),
@@ -138,16 +138,8 @@ impl DagRound {
         self.0.peer_count
     }
 
-    pub fn anchor_stage(&self) -> Option<&AnchorStage> {
-        self.0.anchor_stage.as_ref()
-    }
-
-    fn trigger_channel(
-        &self,
-        peer_id: &PeerId,
-    ) -> Option<&mpsc::UnboundedSender<WeakDagPointFuture>> {
-        let AnchorStage { role, leader, .. } = self.0.anchor_stage.as_ref()?;
-        (*role == AnchorStageRole::Trigger && leader == peer_id).then_some(&self.0.triggers_tx)
+    pub fn proof_stage(&self) -> Option<&ProofStage> {
+        self.0.proof_stage.as_ref()
     }
 
     pub fn threshold(&self) -> &Threshold {
@@ -224,7 +216,7 @@ impl DagRound {
                         point,
                         key_pair,
                         &loc.state,
-                        self.trigger_channel(point.info().author()),
+                        &self.0.triggers_tx,
                         downloader,
                         store,
                         round_ctx,
@@ -261,7 +253,7 @@ impl DagRound {
                         point,
                         reason,
                         &loc.state,
-                        self.trigger_channel(point.info().author()),
+                        &self.0.triggers_tx,
                         store,
                         round_ctx,
                     )
@@ -292,7 +284,7 @@ impl DagRound {
                         self,
                         point,
                         &loc.state,
-                        self.trigger_channel(point.info().author()),
+                        &self.0.triggers_tx,
                         downloader,
                         store,
                         round_ctx,
@@ -319,7 +311,7 @@ impl DagRound {
                     digest,
                     None,
                     &loc.state,
-                    self.trigger_channel(author),
+                    &self.0.triggers_tx,
                     downloader,
                     store,
                     round_ctx,
@@ -358,7 +350,7 @@ impl DagRound {
                         digest,
                         Some(depender),
                         &loc.state,
-                        self.trigger_channel(author),
+                        &self.0.triggers_tx,
                         downloader,
                         store,
                         validate_ctx,
@@ -392,7 +384,7 @@ impl DagRound {
                         self,
                         point_restore,
                         &loc.state,
-                        self.trigger_channel(&point_id.author),
+                        &self.0.triggers_tx,
                         downloader,
                         store,
                         round_ctx,

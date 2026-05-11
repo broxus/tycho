@@ -10,7 +10,7 @@ use tycho_crypto::ed25519::KeyPair;
 use tycho_network::{Network, OverlayId, PeerId, PrivateOverlay, Router};
 use tycho_util::FastHashMap;
 
-use crate::dag::{AnchorStage, DagRound, ValidateResult, Verifier};
+use crate::dag::{DagRound, ProofStage, ValidateResult, Verifier};
 use crate::effects::{Ctx, EngineCtx, MempoolRayon, RoundCtx, TaskTracker, ValidateCtx};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Dispatcher, Downloader, InitPeers, PeerSchedule, Responder};
@@ -113,7 +113,7 @@ pub async fn populate_points<const PEER_COUNT: usize>(
             &includes,
             max_prev_time,
             max_anchor_time,
-            dag_round.anchor_stage(),
+            dag_round.proof_stage(),
             &last_proof,
             &last_trigger,
             msg_count,
@@ -167,7 +167,7 @@ fn point<const PEER_COUNT: usize>(
     includes: &FastHashMap<PeerId, Digest>,
     max_prev_time: UnixTime,
     max_anchor_time: UnixTime,
-    anchor_stage: Option<&AnchorStage>,
+    proof_stage: Option<&ProofStage>,
     last_proof: &PointId,
     last_trigger: &PointId,
     msg_count: usize,
@@ -181,7 +181,9 @@ fn point<const PEER_COUNT: usize>(
     );
     let peer_count = PeerCount::try_from(PEER_COUNT).expect("enough peers in non-genesis round");
 
-    let evidence = match includes.get(&peers[idx].0) {
+    let author = peers[idx].0;
+
+    let evidence = match includes.get(&author) {
         Some(prev_digest) => {
             let mut evidence = FastHashMap::default();
             for i in &rand_arr::<PEER_COUNT>()[..(peer_count.majority_of_others() + 1)] {
@@ -202,26 +204,25 @@ fn point<const PEER_COUNT: usize>(
         payload.push(Bytes::from(data));
     }
 
-    let anchor_proof = point_anchor_link(
-        round,
-        peers[idx].0,
-        anchor_stage,
-        last_proof,
-        AnchorStageRole::Proof,
-    );
+    let anchor_proof = if proof_stage.is_some_and(|ps| ps.leader == author) {
+        AnchorLink::ToSelf
+    } else {
+        point_anchor_link(round, author, last_proof)
+    };
 
-    let anchor_trigger = point_anchor_link(
-        round,
-        peers[idx].0,
-        anchor_stage,
-        last_trigger,
-        AnchorStageRole::Trigger,
-    );
+    let anchor_trigger = if author == last_proof.author
+        && round.prev() == last_proof.round
+        && includes.get(&author) == Some(&last_proof.digest)
+    {
+        AnchorLink::ToSelf
+    } else {
+        point_anchor_link(round, author, last_trigger)
+    };
 
     let chained_anchor_proof = if anchor_proof == AnchorLink::ToSelf {
         ChainedAnchorProof::Chained(IndirectLink {
             to: *last_proof,
-            path: Through::Includes(peers[idx].0),
+            path: Through::Includes(author),
         })
     } else {
         ChainedAnchorProof::Inapplicable
@@ -235,7 +236,7 @@ fn point<const PEER_COUNT: usize>(
 
     Point::new(
         &peers[idx].1,
-        peers[idx].0,
+        author,
         round,
         &payload,
         PointData {
@@ -252,25 +253,14 @@ fn point<const PEER_COUNT: usize>(
     )
 }
 
-fn point_anchor_link(
-    round: Round,
-    peer: PeerId,
-    anchor_stage: Option<&AnchorStage>,
-    last_same_stage_point: &PointId,
-    role: AnchorStageRole,
-) -> AnchorLink {
-    match anchor_stage {
-        Some(stage) if stage.role == role && stage.leader == peer => AnchorLink::ToSelf,
-        _ => {
-            if last_same_stage_point.round == round.prev() {
-                AnchorLink::Direct(Through::Includes(last_same_stage_point.author))
-            } else {
-                AnchorLink::Indirect(IndirectLink {
-                    to: *last_same_stage_point,
-                    path: Through::Includes(peer),
-                })
-            }
-        }
+fn point_anchor_link(round: Round, peer: PeerId, last_same_stage_point: &PointId) -> AnchorLink {
+    if last_same_stage_point.round == round.prev() {
+        AnchorLink::Direct(Through::Includes(last_same_stage_point.author))
+    } else {
+        AnchorLink::Indirect(IndirectLink {
+            to: *last_same_stage_point,
+            path: Through::Includes(peer),
+        })
     }
 }
 
