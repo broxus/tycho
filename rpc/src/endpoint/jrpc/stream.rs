@@ -322,6 +322,7 @@ async fn stream_route_inner(
 mod tests {
     use std::fmt::Debug;
     use std::net::{IpAddr, Ipv4Addr};
+    use std::num::NonZeroU32;
     use std::str::FromStr;
     use std::time::Duration;
 
@@ -412,7 +413,7 @@ mod tests {
             utime: 0,
         });
 
-        let active_streams = ActiveStreamLimiter::new(1, vec![]);
+        let active_streams = ActiveStreamLimiter::new(NonZeroU32::new(1).unwrap(), vec![]);
         let stream_guard = active_streams
             .try_acquire(IpAddr::V4(Ipv4Addr::LOCALHOST))
             .expect("stream slot");
