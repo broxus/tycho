@@ -1,24 +1,34 @@
 use std::hash::Hash;
 use std::num::NonZeroU32;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::time::Duration;
 
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
 use crate::{FastDashMap, FastHashMap, serde_helpers, time};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TokenBucketConfig {
+pub struct TrafficLimit {
     pub rate_per_sec: NonZeroU32,
     pub burst: NonZeroU32,
 }
 
-impl TokenBucketConfig {
+impl TrafficLimit {
+    // Millisecond GCRA cannot represent intervals smaller than 1ms.
+    pub const MAX_RATE_PER_SEC: u32 = 1_000;
+
     pub const fn new(rate_per_sec: NonZeroU32, burst: NonZeroU32) -> Self {
         Self {
             rate_per_sec,
             burst,
+        }
+    }
+
+    fn normalize(&mut self) {
+        if self.rate_per_sec.get() > Self::MAX_RATE_PER_SEC {
+            self.rate_per_sec = NonZeroU32::new(Self::MAX_RATE_PER_SEC).unwrap();
         }
     }
 }
@@ -33,6 +43,28 @@ pub struct RateLimitConfig {
     pub prune_interval: Duration,
     #[serde(with = "serde_helpers::humantime")]
     pub state_ttl: Duration,
+}
+
+impl RateLimitConfig {
+    pub const MIN_REJECTS_BEFORE_COOLDOWN: u8 = 1;
+    pub const MAX_REJECTS_BEFORE_COOLDOWN: u8 = u8::MAX - 1;
+    pub const MIN_STATE_TTL: Duration = Duration::from_secs(1);
+    pub const MIN_PRUNE_INTERVAL: Duration = Duration::from_secs(1);
+
+    fn normalize(&mut self) {
+        self.rejects_before_cooldown = self.rejects_before_cooldown.clamp(
+            Self::MIN_REJECTS_BEFORE_COOLDOWN,
+            Self::MAX_REJECTS_BEFORE_COOLDOWN,
+        );
+
+        if self.prune_interval.is_zero() {
+            self.prune_interval = Self::MIN_PRUNE_INTERVAL;
+        }
+
+        if self.state_ttl.is_zero() {
+            self.state_ttl = Self::MIN_STATE_TTL;
+        }
+    }
 }
 
 impl Default for RateLimitConfig {
@@ -55,7 +87,7 @@ pub enum RateLimitVerdict {
 #[derive(Debug, Clone, Copy)]
 pub struct RateLimitPolicy<C> {
     pub class: C,
-    pub bucket: TokenBucketConfig,
+    pub limit: TrafficLimit,
 }
 
 #[derive(Clone)]
@@ -65,7 +97,7 @@ pub struct RateLimiter<K, C> {
 
 struct RateLimiterInner<K, C> {
     config: RateLimitConfig,
-    states: FastDashMap<K, PeerState<C>>,
+    states: FastDashMap<K, Arc<PeerLimiter<C>>>,
     last_prune_ms: AtomicU64,
 }
 
@@ -74,7 +106,9 @@ where
     K: Clone + Eq + Hash + Send + Sync + 'static,
     C: Copy + Eq + Hash + Send + Sync + 'static,
 {
-    pub fn new(config: RateLimitConfig) -> Self {
+    pub fn new(mut config: RateLimitConfig) -> Self {
+        config.normalize();
+
         Self {
             inner: Arc::new(RateLimiterInner {
                 config,
@@ -95,163 +129,214 @@ where
     C: Copy + Eq + Hash + Send + Sync + 'static,
 {
     fn check(&self, key: &K, policy: RateLimitPolicy<C>) -> RateLimitVerdict {
-        let now = Instant::now();
+        let now = time::now_millis();
 
         self.maybe_prune(now);
+
+        let peer = self.peer(key, now);
+        peer.check(&self.config, policy, now)
+    }
+
+    fn peer(&self, key: &K, now: u64) -> Arc<PeerLimiter<C>> {
+        let state_ttl = self.config.state_ttl.as_millis_u64();
+
+        if let Some(peer) = self.states.get(key)
+            && !peer.is_expired(now, state_ttl)
+        {
+            return peer.clone();
+        }
 
         let mut entry = self
             .states
             .entry(key.clone())
-            .or_insert_with(|| PeerState::new(now));
+            .or_insert_with(|| Arc::new(PeerLimiter::new(now)));
 
-        if now.duration_since(entry.last_seen) >= self.config.state_ttl {
-            *entry = PeerState::new(now);
-        } else {
-            entry.last_seen = now;
+        if entry.is_expired(now, state_ttl) {
+            *entry = Arc::new(PeerLimiter::new(now));
         }
 
-        if let Some(until) = entry.cooldown_until
-            && now < until
-        {
-            return RateLimitVerdict::Reject {
-                retry_after: until - now,
-            };
-        }
-
-        let bucket = entry
-            .buckets
-            .entry(policy.class)
-            .or_insert_with(|| TokenBucket::new(now, policy.bucket));
-
-        let BucketResult::TryLater { after } = bucket.try_claim(now) else {
-            entry.rejects = 0;
-            return RateLimitVerdict::Allow;
-        };
-
-        Self::register_rejection(&self.config, now, &mut entry);
-
-        // Prefer cooldown wait time.
-        let retry_after = match entry.cooldown_until {
-            Some(until) if now < until => until - now,
-            _ => after - now,
-        };
-
-        RateLimitVerdict::Reject { retry_after }
+        entry.clone()
     }
 
-    fn prune_expired(&self, now: Instant) {
-        let state_ttl = self.config.state_ttl;
-        self.states.retain(|_, state| {
-            state.cooldown_until.is_some_and(|until| until > now)
-                || now.duration_since(state.last_seen) < state_ttl
-        });
+    fn prune_expired(&self, now: u64) {
+        let state_ttl = self.config.state_ttl.as_millis_u64();
+
+        self.states
+            .retain(|_, peer| peer.in_cooldown(now) || !peer.is_expired(now, state_ttl));
     }
 
-    fn maybe_prune(&self, now: Instant) {
-        let now_ms = crate::time::now_millis();
-        let last_ms = self.last_prune_ms.load(Ordering::Relaxed);
+    fn maybe_prune(&self, now: u64) {
+        let last = self.last_prune_ms.load(Ordering::Relaxed);
 
-        if now_ms.saturating_sub(last_ms) < self.config.prune_interval.as_millis() as u64 {
+        if now.saturating_sub(last) < self.config.prune_interval.as_millis_u64() {
             return;
         }
 
         if self
             .last_prune_ms
-            .compare_exchange(last_ms, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok()
         {
             self.prune_expired(now);
         }
     }
-
-    fn register_rejection(config: &RateLimitConfig, now: Instant, state: &mut PeerState<C>) {
-        state.last_seen = now;
-        state.rejects = state.rejects.saturating_add(1);
-
-        if state.rejects >= config.rejects_before_cooldown {
-            state.rejects = 0;
-            state.cooldown_until = Some(now + config.cooldown);
-        }
-    }
 }
 
-struct PeerState<C> {
-    buckets: FastHashMap<C, TokenBucket>,
-    rejects: u8,
-    cooldown_until: Option<Instant>,
-    last_seen: Instant,
+struct PeerLimiter<C> {
+    buckets: RwLock<FastHashMap<C, Arc<AtomicBucket>>>,
+    rejects: AtomicU8,
+    cooldown_until_ms: AtomicU64,
+    last_seen_ms: AtomicU64,
 }
 
-impl<C> PeerState<C>
+impl<C> PeerLimiter<C>
 where
     C: Copy + Eq + Hash + Send + Sync + 'static,
 {
-    fn new(now: Instant) -> Self {
+    fn new(now_ms: u64) -> Self {
         Self {
-            buckets: FastHashMap::default(),
-            rejects: 0,
-            cooldown_until: None,
-            last_seen: now,
+            buckets: RwLock::new(FastHashMap::default()),
+            rejects: AtomicU8::new(0),
+            cooldown_until_ms: AtomicU64::new(0),
+            last_seen_ms: AtomicU64::new(now_ms),
         }
+    }
+
+    fn check(
+        &self,
+        config: &RateLimitConfig,
+        policy: RateLimitPolicy<C>,
+        now: u64,
+    ) -> RateLimitVerdict {
+        self.last_seen_ms.store(now, Ordering::Relaxed);
+
+        let cooldown_until = self.cooldown_until_ms.load(Ordering::Acquire);
+        if now < cooldown_until {
+            return RateLimitVerdict::Reject {
+                retry_after: Duration::from_millis(cooldown_until - now),
+            };
+        }
+
+        let bucket = self.bucket(policy.class, policy.limit);
+        let BucketResult::TryLater { after } = bucket.try_claim(now) else {
+            self.rejects.store(0, Ordering::Relaxed);
+            return RateLimitVerdict::Allow;
+        };
+
+        self.register_rejection(config, now);
+
+        // Prefer cooldown wait time.
+        let cooldown_until = self.cooldown_until_ms.load(Ordering::Acquire);
+        let retry_after = if now < cooldown_until {
+            cooldown_until - now
+        } else {
+            after.saturating_sub(now)
+        };
+
+        RateLimitVerdict::Reject {
+            retry_after: Duration::from_millis(retry_after),
+        }
+    }
+
+    fn bucket(&self, class: C, config: TrafficLimit) -> Arc<AtomicBucket> {
+        if let Some(bucket) = self.buckets.read().get(&class) {
+            return bucket.clone();
+        }
+
+        self.buckets
+            .write()
+            .entry(class)
+            .or_insert_with(|| Arc::new(AtomicBucket::new(config)))
+            .clone()
+    }
+
+    fn register_rejection(&self, config: &RateLimitConfig, now: u64) {
+        let prev_rejects = self.rejects.fetch_add(1, Ordering::AcqRel);
+        debug_assert!(prev_rejects < u8::MAX);
+
+        let rejects = prev_rejects.saturating_add(1);
+        if rejects >= config.rejects_before_cooldown {
+            self.rejects.store(0, Ordering::Release);
+            self.cooldown_until_ms.fetch_max(
+                now.saturating_add(config.cooldown.as_millis_u64()),
+                Ordering::AcqRel,
+            );
+        }
+    }
+
+    fn is_expired(&self, now: u64, state_ttl: u64) -> bool {
+        let last_seen = self.last_seen_ms.load(Ordering::Relaxed);
+        now.saturating_sub(last_seen) >= state_ttl
+    }
+
+    fn in_cooldown(&self, now: u64) -> bool {
+        now < self.cooldown_until_ms.load(Ordering::Acquire)
     }
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum BucketResult {
     Ok,
-    TryLater { after: Instant },
+    TryLater { after: u64 },
 }
 
-struct TokenBucket {
-    refill_per_sec: u64,
-    capacity: u64,
-    available: u64,
-    last_refill: Instant,
+/// GCRA bucket
+struct AtomicBucket {
+    /// Theoretical arrival time
+    tat_ms: AtomicU64,
+    /// Spacing between requests for configured rate
+    interval_ms: u64,
+    /// Burst allowance.
+    tolerance_ms: u64,
 }
 
-impl TokenBucket {
-    const TOKEN: u64 = 1_000_000;
-    const MILLIS_PER_SEC: u128 = 1_000;
+impl AtomicBucket {
+    const MILLIS_PER_SEC: u64 = 1_000;
 
-    fn new(now: Instant, config: TokenBucketConfig) -> Self {
-        let capacity = config.burst.get() as u64 * Self::TOKEN;
+    fn new(mut config: TrafficLimit) -> Self {
+        config.normalize();
+
+        let rate_per_sec = config.rate_per_sec.get() as u64;
+        let interval_ms = Self::MILLIS_PER_SEC.div_ceil(rate_per_sec).max(1);
+        let tolerance_ms = interval_ms.saturating_mul(config.burst.get().saturating_sub(1) as u64);
+
         Self {
-            refill_per_sec: config.rate_per_sec.get() as u64 * Self::TOKEN,
-            capacity,
-            available: capacity,
-            last_refill: now,
+            tat_ms: AtomicU64::new(0),
+            interval_ms,
+            tolerance_ms,
         }
     }
 
-    fn try_claim(&mut self, now: Instant) -> BucketResult {
-        self.refill(now);
+    fn try_claim(&self, now: u64) -> BucketResult {
+        let mut tat = self.tat_ms.load(Ordering::Relaxed);
 
-        if let Some(available) = self.available.checked_sub(Self::TOKEN) {
-            self.available = available;
-            BucketResult::Ok
-        } else {
-            let deficit = Self::TOKEN - self.available;
+        loop {
+            let allowed_at = tat.saturating_sub(self.tolerance_ms);
+            if now < allowed_at {
+                return BucketResult::TryLater { after: allowed_at };
+            }
 
-            let wait_ms = (deficit as u128 * Self::MILLIS_PER_SEC)
-                .div_ceil(self.refill_per_sec as u128)
-                .min(u64::MAX as u128) as u64;
-
-            BucketResult::TryLater {
-                after: now + Duration::from_millis(wait_ms),
+            let new_tat = tat.max(now).saturating_add(self.interval_ms);
+            match self.tat_ms.compare_exchange_weak(
+                tat,
+                new_tat,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return BucketResult::Ok,
+                Err(next) => tat = next,
             }
         }
     }
+}
 
-    fn refill(&mut self, now: Instant) {
-        let elapsed = now.duration_since(self.last_refill).as_millis();
+trait DurationExt {
+    fn as_millis_u64(&self) -> u64;
+}
 
-        let refill = (self.refill_per_sec as u128 * elapsed / Self::MILLIS_PER_SEC)
-            .min(u64::MAX as u128) as u64;
-
-        if refill > 0 {
-            self.last_refill = now;
-            self.available = self.available.saturating_add(refill).min(self.capacity);
-        }
+impl DurationExt for Duration {
+    fn as_millis_u64(&self) -> u64 {
+        self.as_millis().try_into().unwrap_or(u64::MAX)
     }
 }
 
@@ -265,8 +350,8 @@ mod tests {
         B,
     }
 
-    fn bucket_config(rate_per_sec: u32, burst: u32) -> TokenBucketConfig {
-        TokenBucketConfig::new(
+    fn bucket_config(rate_per_sec: u32, burst: u32) -> TrafficLimit {
+        TrafficLimit::new(
             NonZeroU32::new(rate_per_sec).unwrap(),
             NonZeroU32::new(burst).unwrap(),
         )
@@ -275,7 +360,7 @@ mod tests {
     fn policy(class: Class) -> RateLimitPolicy<Class> {
         RateLimitPolicy {
             class,
-            bucket: bucket_config(1, 1),
+            limit: bucket_config(1, 1),
         }
     }
 
@@ -287,13 +372,13 @@ mod tests {
     }
 
     #[test]
-    fn token_bucket_burst_and_refills() {
-        let now = Instant::now();
+    fn gcra_bucket_burst_and_refills() {
+        let now = time::now_millis();
 
-        let mut bucket = TokenBucket::new(now, bucket_config(10, 2));
+        let bucket = AtomicBucket::new(bucket_config(10, 2));
 
         // 10 req/s = refill every 100ms
-        let delay = Duration::from_millis(100);
+        let delay = Duration::from_millis(100).as_millis_u64();
 
         // Spend burst capacity
         assert_eq!(bucket.try_claim(now), BucketResult::Ok);

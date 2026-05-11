@@ -8,7 +8,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use tycho_util::rate_limit::{
-    RateLimitConfig, RateLimitPolicy, RateLimitVerdict, RateLimiter, TokenBucketConfig,
+    RateLimitConfig, RateLimitPolicy, RateLimitVerdict, RateLimiter, TrafficLimit,
 };
 use tycho_util::{FastDashMap, FastHashSet};
 
@@ -33,33 +33,27 @@ impl From<RpcRateLimitsConfig> for RpcRateLimiter {
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RpcTrafficLimits {
-    pub requests: TokenBucketConfig,
-    pub streams: TokenBucketConfig,
+    pub requests: TrafficLimit,
+    pub streams: TrafficLimit,
 }
 
 impl Default for RpcTrafficLimits {
     fn default() -> Self {
         Self {
-            requests: TokenBucketConfig::new(
-                NonZeroU32::new(10).unwrap(),
-                NonZeroU32::new(10).unwrap(),
-            ),
-            streams: TokenBucketConfig::new(
-                NonZeroU32::new(5).unwrap(),
-                NonZeroU32::new(5).unwrap(),
-            ),
+            requests: TrafficLimit::new(NonZeroU32::new(10).unwrap(), NonZeroU32::new(10).unwrap()),
+            streams: TrafficLimit::new(NonZeroU32::new(5).unwrap(), NonZeroU32::new(5).unwrap()),
         }
     }
 }
 
 impl RpcTrafficLimits {
     fn policy(&self, class: RpcTrafficClass) -> RateLimitPolicy<RpcTrafficClass> {
-        let bucket = match class {
+        let limit = match class {
             RpcTrafficClass::Request => self.requests,
             RpcTrafficClass::Stream => self.streams,
         };
 
-        RateLimitPolicy { class, bucket }
+        RateLimitPolicy { class, limit }
     }
 }
 
@@ -96,10 +90,10 @@ pub struct ActiveStreamLimiter {
 }
 
 impl ActiveStreamLimiter {
-    pub fn new(max_streams_per_addr: u32, whitelist: Vec<IpAddr>) -> Self {
+    pub fn new(max_streams_per_addr: NonZeroU32, whitelist: Vec<IpAddr>) -> Self {
         Self {
             active: Arc::new(FastDashMap::default()),
-            max_streams_per_addr: NonZeroU32::new(max_streams_per_addr).unwrap(),
+            max_streams_per_addr,
             whitelist: Arc::new(whitelist.into_iter().collect()),
         }
     }

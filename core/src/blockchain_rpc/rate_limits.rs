@@ -7,7 +7,7 @@ use tycho_network::{
     ServiceRequest, try_handle_prefix,
 };
 use tycho_util::FastHashSet;
-use tycho_util::rate_limit::{RateLimitConfig, RateLimitPolicy, TokenBucketConfig};
+use tycho_util::rate_limit::{RateLimitConfig, RateLimitPolicy, TrafficLimit};
 
 use crate::proto::blockchain::rpc;
 use crate::proto::overlay;
@@ -32,25 +32,25 @@ impl From<BlockchainRpcRateLimitsConfig> for PublicOverlayRateLimiter {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BlockchainRpcTrafficLimits {
-    pub light_queries: TokenBucketConfig,
-    pub heavy_queries: TokenBucketConfig,
-    pub broadcasts: TokenBucketConfig,
+    pub light_queries: TrafficLimit,
+    pub heavy_queries: TrafficLimit,
+    pub broadcasts: TrafficLimit,
 }
 
 impl Default for BlockchainRpcTrafficLimits {
     fn default() -> Self {
         Self {
-            light_queries: TokenBucketConfig::new(
+            light_queries: TrafficLimit::new(
                 NonZeroU32::new(20).unwrap(),
                 NonZeroU32::new(20).unwrap(),
             ),
-            heavy_queries: TokenBucketConfig::new(
+            heavy_queries: TrafficLimit::new(
                 NonZeroU32::new(10).unwrap(),
                 NonZeroU32::new(10).unwrap(),
             ),
-            broadcasts: TokenBucketConfig::new(
-                NonZeroU32::new(5).unwrap(),
-                NonZeroU32::new(5).unwrap(),
+            broadcasts: TrafficLimit::new(
+                NonZeroU32::new(20).unwrap(),
+                NonZeroU32::new(20).unwrap(),
             ),
         }
     }
@@ -61,13 +61,13 @@ impl BlockchainRpcTrafficLimits {
         &self,
         class: BlockchainRpcTrafficClass,
     ) -> RateLimitPolicy<BlockchainRpcTrafficClass> {
-        let bucket = match class {
+        let limit = match class {
             BlockchainRpcTrafficClass::LightQuery => self.light_queries,
             BlockchainRpcTrafficClass::HeavyQuery => self.heavy_queries,
             BlockchainRpcTrafficClass::Broadcast => self.broadcasts,
         };
 
-        RateLimitPolicy { class, bucket }
+        RateLimitPolicy { class, limit }
     }
 }
 
