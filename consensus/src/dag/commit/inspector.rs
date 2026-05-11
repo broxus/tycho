@@ -101,7 +101,7 @@ impl RoundInspector {
 
     pub fn inspect(&mut self, r_0: &DagRound, emit_stats: bool) -> TaskResult<()> {
         let leader_used = r_0
-            .anchor_stage()
+            .proof_stage()
             .map(|a| (a.leader, a.is_used.load(atomic::Ordering::Relaxed)));
 
         // map has full peer set for this round, but maybe with empty value

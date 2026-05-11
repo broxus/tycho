@@ -9,7 +9,7 @@ use tycho_network::PeerId;
 use tycho_types::models::ConsensusConfig;
 use tycho_util::metrics::HistogramGuard;
 
-use crate::dag::AnchorStage;
+use crate::dag::ProofStage;
 use crate::engine::MempoolConfig;
 use crate::models::point::proto_utils::{PointBodyWrite, PointRawRead, PointRead, PointWrite};
 use crate::models::point::{Digest, PointData, Signature};
@@ -147,7 +147,7 @@ impl Point {
 
     pub fn from_bytes(serialized: Vec<u8>) -> Result<Self, TlError> {
         const ROUND_RANGE: std::ops::Range<Round> = {
-            let min = AnchorStage::align_genesis(0);
+            let min = ProofStage::align_genesis(0);
             let max = Round(u32::MAX - min.0);
             min..max
         };

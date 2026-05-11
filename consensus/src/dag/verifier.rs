@@ -8,7 +8,7 @@ use tycho_util::metrics::HistogramGuard;
 
 use crate::dag::dag_location::DagLocation;
 use crate::dag::dag_point_future::WeakDagPointFuture;
-use crate::dag::{AnchorStage, DagRound, WeakDagRound};
+use crate::dag::{DagRound, ProofStage, WeakDagRound};
 use crate::effects::{AltFormat, Ctx, TaskResult, ValidateCtx};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
@@ -79,8 +79,6 @@ pub enum IllFormedReason {
     // Errors below are thrown from `validate()` because they require DagRound
     #[error("self link")]
     SelfLink,
-    #[error("anchor link to {0:?}")]
-    AnchorLink(AnchorStageRole),
 }
 
 #[derive(thiserror::Error, Debug, Clone)]
@@ -105,6 +103,8 @@ pub enum InvalidReason {
     DependencyTimeTooFarInFuture(PointId),
     #[error("newer anchor {:?} in dependency {:?}", .0.0, .0.1.alt())]
     NewerAnchorInDependency((AnchorStageRole, PointId)),
+    #[error("anchor link doesn't point to {0:?}")]
+    AnchorLink((AnchorStageRole, PointId)),
     #[error("anchor {:?} link leads to other destination through {:?}", .0.0, .0.1.alt())]
     AnchorLinkBadPath((AnchorStageRole, PointId)),
     #[error("chained proof link leads to other destination through {:?}", .0.alt())]
@@ -288,60 +288,27 @@ impl Verifier {
         peer_schedule: &PeerSchedule,
         conf: &MempoolConfig,
     ) -> Option<IllFormedReason> {
-        // existence of proofs in leader points is a part of point's well-formedness check
-        let is_self_link_ok = match point_round
-            .ok_or_else(|| AnchorStage::of(info.round(), peer_schedule, conf))
+        let is_leader = point_round
+            .ok_or_else(|| ProofStage::of(info.round(), peer_schedule, conf))
             .as_ref()
-            .map_or_else(|fallback| fallback.as_ref(), |round| round.anchor_stage())
-        {
-            Some(stage) if stage.leader == info.author() => {
-                // either Proof directly points on candidate
-                if stage.role == AnchorStageRole::Proof
-                    // or Trigger points on Proof
-                    || info.anchor_round(AnchorStageRole::Proof) == info.round().prev()
-                {
-                    // must link to own point if it did not skip rounds
-                    info.prev_digest().is_some()
-                        == (info.anchor_link(stage.role) == &AnchorLink::ToSelf)
-                } else {
-                    // skipped either candidate of Proof, but may have prev point
-                    info.anchor_link(stage.role) != &AnchorLink::ToSelf
-                }
-            }
-            // others must not pretend to be leaders
-            Some(_) | None => {
-                info.anchor_proof() != &AnchorLink::ToSelf
-                    && info.anchor_trigger() != &AnchorLink::ToSelf
-            }
+            .map_or_else(|fallback| fallback.as_ref(), |round| round.proof_stage())
+            .is_some_and(|proof_stage| proof_stage.leader == info.author());
+        // Proof authority remains round-scheduled; trigger authority is content-based.
+        let is_self_link_ok = if is_leader {
+            // must link to own point if it did not skip rounds
+            info.prev_digest().is_some() == (info.anchor_proof() == &AnchorLink::ToSelf)
+        } else {
+            // trigger has previous point as proof
+            let is_direct_trigger = matches!(
+                info.anchor_proof(),
+                AnchorLink::Direct(Through::Includes(author)) if author == info.author()
+            );
+            info.anchor_proof() != &AnchorLink::ToSelf
+                && (is_direct_trigger == (info.anchor_trigger() == &AnchorLink::ToSelf))
         };
-        if !is_self_link_ok {
-            return Some(IllFormedReason::SelfLink);
-        }
-
-        for link_field in [AnchorStageRole::Proof, AnchorStageRole::Trigger] {
-            let linked_id = info.anchor_id(link_field);
-
-            if linked_id.round == conf.genesis_round {
-                // notice that point is required to link to the freshest leader point
-                // among all its (in)direct dependencies, which is checked later
-                continue;
-            }
-            let is_ok = match point_round.and_then(|dr| dr.scan(linked_id.round)) {
-                Some(linked_round) => linked_round.anchor_stage().is_some_and(|stage| {
-                    stage.role == link_field && stage.leader == linked_id.author
-                }),
-                None => {
-                    AnchorStage::of(linked_id.round, peer_schedule, conf).is_some_and(|stage| {
-                        stage.role == link_field && stage.leader == linked_id.author
-                    })
-                }
-            };
-            if !is_ok {
-                // link does not match round's leader, prescribed by AnchorStage
-                return Some(IllFormedReason::AnchorLink(link_field));
-            }
-        }
-        None
+        // `ToSelf` introduces proof and trigger ids;
+        // `validate()` recursively checks that later points inherit them through (in)direct links
+        (!is_self_link_ok).then_some(IllFormedReason::SelfLink)
     }
 
     fn other_versions(
@@ -516,6 +483,15 @@ impl Verifier {
                     let tuple = (anchor_role, dep_id);
                     invalid_reason = Some(InvalidReason::NewerAnchorInDependency(tuple));
                 }
+            }
+
+            if dep_id == anchor_proof_id && dep.anchor_proof() != &AnchorLink::ToSelf {
+                let tuple = (AnchorStageRole::Proof, dep_id);
+                invalid_reason = Some(InvalidReason::AnchorLink(tuple));
+            }
+            if dep_id == anchor_trigger_id && dep.anchor_trigger() != &AnchorLink::ToSelf {
+                let tuple = (AnchorStageRole::Trigger, dep_id);
+                invalid_reason = Some(InvalidReason::AnchorLink(tuple));
             }
 
             if dep_id == anchor_trigger_through

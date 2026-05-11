@@ -17,7 +17,7 @@ use crate::effects::{AltFmt, AltFormat, Cancelled, TaskResult};
 use crate::engine::{EngineResult, MempoolConfig};
 use crate::intercom::StatsRanges;
 use crate::models::{
-    AnchorData, AnchorLink, AnchorStageRole, DagPoint, MempoolPeerStats, PointInfo, Round,
+    AnchorData, AnchorLink, DagPoint, MempoolPeerStats, PointInfo, Round, ValidPoint,
 };
 use crate::moderator::JournalEvent;
 
@@ -200,19 +200,7 @@ impl Committer {
         // * * otherwise: breaks the chain, so that only its prefix can be committed
         // * in anchor history: cancels current commit and the latter anchor chain
 
-        let trigger = match trigger {
-            DagPoint::Valid(valid) => {
-                (valid.info().anchor_trigger() == &AnchorLink::ToSelf).then_some(Ok(valid))
-            }
-            DagPoint::TransInvalid(invalid) => {
-                (invalid.has_proof()).then_some(Err(HistoryConflict(invalid.info().round())))
-            }
-            not_valid => {
-                (not_valid.is_certified()).then_some(Err(HistoryConflict(not_valid.round())))
-            }
-        };
-
-        let trigger = match trigger {
+        let trigger = match filter(trigger) {
             Some(Ok(valid)) if valid.info().round() >= self.dag.bottom_round() => valid.info(),
             Some(Err(HistoryConflict(round))) if round >= self.dag.bottom_round() => {
                 return Err(HistoryConflict(round).into());
@@ -274,23 +262,14 @@ impl Committer {
         );
         self.dag.last_committed_proof = Some(next.proof.round());
 
-        match (self.dag.get(next.proof.round())).and_then(|r| r.anchor_stage()) {
-            Some(stage) if stage.role == AnchorStageRole::Proof => {
-                stage.is_used.store(true, Ordering::Relaxed);
+        match (self.dag.get(next.proof.round())).and_then(|r| r.proof_stage()) {
+            Some(proof_stage) => {
+                proof_stage.is_used.store(true, Ordering::Relaxed);
+                if next.direct_trigger.is_some() {
+                    (proof_stage.has_direct_trigger).store(true, Ordering::Relaxed);
+                }
             }
-            _ => panic!("expected AnchorStage::Proof"),
-        };
-
-        // Note a proof may be marked as used while it is fired by a future tigger, which
-        //   may be left unmarked at the current run until upcoming points become ready
-        match (next.direct_trigger.as_ref())
-            .map(|tr| self.dag.get(tr.round()).and_then(|r| r.anchor_stage()))
-        {
-            Some(Some(stage)) if stage.role == AnchorStageRole::Trigger => {
-                stage.is_used.store(true, Ordering::Relaxed);
-            }
-            Some(_) => panic!("expected AnchorStage::Trigger"),
-            None => {} // anchor triplet without direct trigger (not ready/valid/exists)
+            _ => panic!("expected anchor proof stage"),
         };
 
         // Note every iteration marks committed points before next uncommitted are gathered
@@ -323,6 +302,18 @@ impl Committer {
             history: committed,
             is_executable,
         })
+    }
+}
+
+pub(super) fn filter(trigger: &DagPoint) -> Option<Result<&ValidPoint, HistoryConflict>> {
+    match trigger {
+        DagPoint::Valid(valid) => {
+            (valid.info().anchor_trigger() == &AnchorLink::ToSelf).then_some(Ok(valid))
+        }
+        DagPoint::TransInvalid(invalid) => {
+            (invalid.has_proof()).then_some(Err(HistoryConflict(invalid.info().round())))
+        }
+        not_valid => (not_valid.is_certified()).then_some(Err(HistoryConflict(not_valid.round()))),
     }
 }
 

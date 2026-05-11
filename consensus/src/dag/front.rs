@@ -123,7 +123,7 @@ impl DagFront {
         // Also, a node that isn't a broadcast receiver may operate by syncing blocks only.
         let is_pathologic = committer.dag_len() > 2 * conf.consensus.max_total_rounds() as usize;
 
-        if is_unrecoverable_gap | is_pathologic {
+        if is_unrecoverable_gap || is_pathologic {
             committer.reset();
 
             committer.init(self.rounds.first().expect("must be init"), true, conf);
