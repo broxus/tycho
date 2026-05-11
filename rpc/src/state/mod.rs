@@ -23,6 +23,7 @@ use tycho_rpc_subscriptions::SubscriberManagerConfig;
 use tycho_types::models::*;
 use tycho_types::prelude::*;
 use tycho_util::FastHashMap;
+use tycho_util::mem::Reclaimer;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::time::now_sec;
 
@@ -1041,6 +1042,8 @@ impl Inner {
             },
         };
 
+        let mut to_drop = Vec::new();
+
         if shard.is_masterchain() {
             // Fill config.
             if let Some(config) = load_blockchain_config(state) {
@@ -1048,11 +1051,13 @@ impl Inner {
             }
 
             // Update accounts cache.
-            *self.mc_accounts.write() = Some(cached);
+            let old = self.mc_accounts.write().replace(cached);
+            to_drop.extend(old);
         } else {
             let mut cache = self.sc_accounts.write();
 
-            cache.insert(shard, cached);
+            let old = cache.insert(shard, cached);
+            to_drop.extend(old);
             if block_info.after_merge || block_info.after_split {
                 tracing::debug!("clearing shard states cache after shards merge/split");
 
@@ -1072,7 +1077,8 @@ impl Inner {
 
                         // Remove parent shard state
                         if cache.contains_key(&shard) && cache.contains_key(&opposite) {
-                            cache.remove(&parent);
+                            let old = cache.remove(&parent);
+                            to_drop.extend(old);
                         }
                     }
 
@@ -1088,11 +1094,18 @@ impl Inner {
                             .ok_or(tycho_types::error::Error::InvalidData)?;
 
                         // Find and remove all parent shards
-                        cache.remove(&left);
-                        cache.remove(&right);
+                        let old = cache.remove(&left);
+                        to_drop.extend(old);
+
+                        let old = cache.remove(&right);
+                        to_drop.extend(old);
                     }
                 }
             }
+        }
+
+        if !to_drop.is_empty() {
+            Reclaimer::instance().drop(to_drop);
         }
 
         Ok(())
