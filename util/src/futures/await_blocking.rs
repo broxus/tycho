@@ -1,3 +1,5 @@
+use tracing::Instrument;
+
 pub trait AwaitBlocking: IntoFuture {
     /// Blocks the current thread polling the future to completion.
     ///
@@ -7,6 +9,6 @@ pub trait AwaitBlocking: IntoFuture {
 
 impl<T: IntoFuture> AwaitBlocking for T {
     fn await_blocking(self) -> <Self as IntoFuture>::Output {
-        futures_executor::block_on(self.into_future())
+        futures_executor::block_on(self.into_future().instrument(tracing::Span::current()))
     }
 }

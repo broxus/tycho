@@ -529,8 +529,8 @@ impl<T: std::fmt::Display> std::fmt::Debug for DebugDisplay<T> {
     }
 }
 
-pub struct DebugDisplayOpt<T>(pub Option<T>);
-impl<T: std::fmt::Display> std::fmt::Debug for DebugDisplayOpt<T> {
+pub struct DebugDisplayOpt<'a, T>(pub &'a Option<T>);
+impl<'a, T: std::fmt::Display> std::fmt::Debug for DebugDisplayOpt<'a, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Debug::fmt(&self.0.as_ref().map(DebugDisplay), f)
     }

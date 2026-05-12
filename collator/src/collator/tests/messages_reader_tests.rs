@@ -826,7 +826,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[tracing::instrument("test_collate", skip_all, fields(block_id = %BlockIdShort { shard: self.shard_id, seqno: self.block_seqno + 1 }))]
+    #[tracing::instrument(name = "test_collate", skip_all, fields(block_id = %BlockIdShort { shard: self.shard_id, seqno: self.block_seqno + 1 }))]
     fn test_collate_block_and_check_refill<F>(
         &mut self,
         block_tx_limit: usize,
