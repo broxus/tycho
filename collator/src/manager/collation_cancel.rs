@@ -67,23 +67,26 @@ impl CollationCancelHandle {
 }
 
 impl CollationCancelHandle {
-    #[tracing::instrument(name = "collation_cancel", skip_all, fields(action_after = %DisplayActionAfterCancel(&action), collator_tasks_count = collator_tasks.len()))]
+    #[tracing::instrument(name = "collation_cancel", skip_all, fields(collator_tasks_count = collator_tasks.len()))]
     pub(super) async fn start_or_update<CF: CollatorFactory, V: Validator>(
         &mut self,
         collation_manager: &Arc<CollationManager<CF, V>>,
-        action: ActionAfterCancel,
+        action: Option<ActionAfterCancel>,
         collator_tasks: &mut FuturesUnordered<CollatorJoinTask<CF::Collator>>,
     ) -> Result<Vec<CollatorJoinTask<CF::Collator>>> {
         // if current action exists,
         // previous cancel task is not finished or cancel result is not handled,
         // so we can update action
         if self.action_after.is_some() {
-            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-                old_action_after = ?self.action_after.as_ref().map(DisplayActionAfterCancel),
-                "collation cancel task already exists, action updated",
-            );
+            if let Some(action) = action {
+                tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                    old_action_after = ?self.action_after.as_ref().map(DisplayActionAfterCancel),
+                    new_action_after = %DisplayActionAfterCancel(&action),
+                    "collation cancel task already exists, action updated",
+                );
 
-            self.action_after = Some(action);
+                self.action_after = Some(action);
+            }
 
             // if no new running collation tasks,
             // we can exit and let to handle previous cancel task result with updated action
@@ -91,16 +94,22 @@ impl CollationCancelHandle {
                 return Ok(vec![]);
             }
         } else {
-            // no current action
+            // no current action, no running cancel task
             assert!(
                 self.task_wrapper.is_empty(),
                 "cancel task should be already drained here"
             );
 
+            let Some(action) = action else {
+                // will not cancel if action after sync was not provided
+                return Ok(vec![]);
+            };
+
             // if no new running collation tasks,
             // then just handle action after cancel
             if collator_tasks.is_empty() {
                 tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                    action_after = %DisplayActionAfterCancel(&action),
                     "no collator tasks, will handle action right now",
                 );
 
@@ -174,6 +183,17 @@ impl CollationCancelHandle {
         self.task_wrapper.is_empty()
     }
 
+    pub(super) fn running_and_will_sync_after(&self) -> bool {
+        !self.is_empty()
+            && matches!(
+                self.action_after,
+                Some(ActionAfterCancel::SyncToAppliedMcBlock {
+                    applied_range: Some(_),
+                    ..
+                })
+            )
+    }
+
     pub(super) async fn wait(&mut self) -> Option<Result<ActionAfterCancel>> {
         let res = self.task_wrapper.next().await;
         res.map(|cancel_res| {
@@ -191,6 +211,29 @@ where
     CF: CollatorFactory,
     V: Validator,
 {
+    pub(super) async fn handle_new_collator_tasks_and_cancel_request(
+        self: &Arc<Self>,
+        collation_cancel_task: &mut CollationCancelHandle,
+        collator_tasks_handle: &mut FuturesUnordered<CollatorJoinTask<CF::Collator>>,
+        new_collator_tasks: Vec<CollatorJoinTask<CF::Collator>>,
+        cancel_action: Option<ActionAfterCancel>,
+    ) -> Result<()> {
+        // collect new collator tasks
+        for task in new_collator_tasks {
+            collator_tasks_handle.push(task);
+        }
+
+        // run collation cancel task if requested
+        for task in collation_cancel_task
+            .start_or_update(self, cancel_action, collator_tasks_handle)
+            .await?
+        {
+            collator_tasks_handle.push(task);
+        }
+
+        Ok(())
+    }
+
     pub(super) async fn handle_collation_cancel_action(
         self: &Arc<Self>,
         action: ActionAfterCancel,
