@@ -298,16 +298,12 @@ where
                     }
 
                     let res = self.handle_blocks_from_bc_batch(blocks_from_bc_batch).await?;
-                    for task in res.collator_tasks {
-                        collator_tasks.push(task);
-                    }
-
-                    // run collation cancel task if requested
-                    if let Some(action) = res.cancel_action {
-                        for task in collation_cancel_task.start_or_update(self, action, &mut collator_tasks).await? {
-                            collator_tasks.push(task);
-                        }
-                    }
+                    self.handle_new_collator_tasks_and_cancel_request(
+                        &mut collation_cancel_task,
+                        &mut collator_tasks,
+                        res.collator_tasks,
+                        res.cancel_action,
+                    ).await?;
                 },
                 // handle collator tasks
                 Some(collator_res) = collator_tasks.next(), if !collator_tasks.is_empty() => {
@@ -315,16 +311,12 @@ where
                     if let Some(task) = res.validator_task {
                         validator_tasks.push(task);
                     }
-                    for task in res.collator_tasks {
-                        collator_tasks.push(task);
-                    }
-
-                    // run collation cancel task if requested
-                    if let Some(action) = res.cancel_action {
-                        for task in collation_cancel_task.start_or_update(self, action, &mut collator_tasks).await? {
-                            collator_tasks.push(task);
-                        }
-                    }
+                    self.handle_new_collator_tasks_and_cancel_request(
+                        &mut collation_cancel_task,
+                        &mut collator_tasks,
+                        res.collator_tasks,
+                        res.cancel_action,
+                    ).await?;
                 }
                 // handle collation cancel task
                 Some(res) = collation_cancel_task.wait(), if !collation_cancel_task.is_empty() => {
@@ -342,9 +334,17 @@ where
                             );
                         }
                         Ok((block_id, validation_status)) => {
-                            for task in self.handle_validated_master_block(block_id, validation_status).await? {
-                                collator_tasks.push(task);
-                            }
+                            let new_collator_tasks = self.handle_validated_master_block(
+                                block_id,
+                                validation_status,
+                                collation_cancel_task.running_and_will_sync_after(),
+                            ).await?;
+                            self.handle_new_collator_tasks_and_cancel_request(
+                                &mut collation_cancel_task,
+                                &mut collator_tasks,
+                                new_collator_tasks,
+                                None,
+                            ).await?;
                         }
 
                     }
@@ -969,7 +969,7 @@ where
                 // NOTE: here commit will not cause on_block_accepted event
                 //      because block already exist in bc state
 
-                collator_tasks = self.commit_valid_master_block(&block_id).await?;
+                collator_tasks = self.commit_valid_master_block(&block_id, false).await?;
             } else {
                 let validator = self.validator.clone();
                 let validation_session_id = session_info.get_validation_session_id();
@@ -1328,7 +1328,7 @@ where
                 // NOTE: here commit will not cause on_block_accepted event
                 //      because block already exist in bc state
 
-                collator_tasks = self.commit_valid_master_block(&block_id).await?;
+                collator_tasks = self.commit_valid_master_block(&block_id, false).await?;
             }
         }
 
@@ -2103,6 +2103,7 @@ where
     async fn notify_to_mempool_and_process_delayed_mc_state_update(
         &self,
         block_id: &BlockId,
+        skip_process_delayed_mc_state_update: bool,
     ) -> Result<Option<(MempoolAnchorId, Vec<CollatorJoinTask<CF::Collator>>)>> {
         let mut delayed_mc_data = None;
         {
@@ -2122,14 +2123,20 @@ where
         if let Some(mc_data) = delayed_mc_data {
             self.notify_mc_state_update_to_mempool(mc_data.clone())
                 .await?;
-            let collator_tasks = self
-                .process_mc_state_update(
-                    mc_data.clone(),
-                    ProcessMcStateUpdateMode::StartCollation {
-                        reset_collators: false,
-                    },
-                )
-                .await?;
+
+            // validation may finish when collation cancel task is running,
+            // so we should not run new collation tasks
+            let mut collator_tasks = vec![];
+            if !skip_process_delayed_mc_state_update {
+                collator_tasks = self
+                    .process_mc_state_update(
+                        mc_data.clone(),
+                        ProcessMcStateUpdateMode::StartCollation {
+                            reset_collators: false,
+                        },
+                    )
+                    .await?;
+            }
 
             Ok(Some((mc_data.top_processed_to_anchor, collator_tasks)))
         } else {
@@ -2185,6 +2192,10 @@ where
         let _histogram = HistogramGuard::begin("tycho_collator_refresh_collation_sessions_time");
 
         let mut collator_tasks = vec![];
+
+        // NOTE: in case of processing delayed state update
+        //      after the validation of key block with consensus config changed
+        //      we may try to process the state that is older then already processed from bc
 
         // do not re-process this master block if it is lower then last processed or equal to it
         // but process a new version of block with the same seqno
@@ -3148,6 +3159,7 @@ where
         &self,
         block_id: BlockId,
         status: ValidationStatus,
+        skip_process_delayed_mc_state_update: bool,
     ) -> Result<Vec<CollatorJoinTask<CF::Collator>>> {
         tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
@@ -3166,7 +3178,9 @@ where
         }
 
         // process valid block
-        let collator_tasks = self.commit_valid_master_block(&block_id).await?;
+        let collator_tasks = self
+            .commit_valid_master_block(&block_id, skip_process_delayed_mc_state_update)
+            .await?;
 
         Ok(collator_tasks)
     }
@@ -3183,6 +3197,7 @@ where
     async fn commit_valid_master_block(
         &self,
         mc_block_id: &BlockId,
+        skip_process_delayed_mc_state_update: bool,
     ) -> Result<Vec<CollatorJoinTask<CF::Collator>>> {
         tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
@@ -3195,7 +3210,10 @@ where
 
         // we can process delayed master state update now
         let (mut top_processed_to_anchor_to_notify, collator_tasks) = self
-            .notify_to_mempool_and_process_delayed_mc_state_update(mc_block_id)
+            .notify_to_mempool_and_process_delayed_mc_state_update(
+                mc_block_id,
+                skip_process_delayed_mc_state_update,
+            )
             .await?
             .unzip();
 
