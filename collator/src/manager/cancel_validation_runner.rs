@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use anyhow::Result;
+use tracing::Instrument;
 use tycho_block_util::state::ShardStateStuff;
 
 use super::CollationManager;
@@ -40,9 +42,12 @@ where
         drop(guard);
 
         let mgr = self.clone();
-        tokio::spawn(async move {
-            mgr.run_cancel_validation_sessions_until_block(state).await;
-        });
+        tokio::spawn(
+            async move {
+                mgr.run_cancel_validation_sessions_until_block(state).await;
+            }
+            .instrument(tracing::Span::current()),
+        );
     }
 
     async fn run_cancel_validation_sessions_until_block(
@@ -77,5 +82,19 @@ where
                 None => break,
             }
         }
+    }
+
+    #[tracing::instrument(skip_all, fields(block_id = %state.block_id().as_short_id()))]
+    fn cancel_validation_sessions_until_block(&self, state: ShardStateStuff) -> Result<()> {
+        let block_id = state.block_id().as_short_id();
+
+        let session_id = self
+            .active_collation_sessions
+            .read()
+            .get(&block_id.shard)
+            .map(|session_info| session_info.get_validation_session_id());
+
+        self.validator.cancel_validation(&block_id, session_id)?;
+        Ok(())
     }
 }
