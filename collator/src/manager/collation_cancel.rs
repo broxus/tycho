@@ -7,7 +7,7 @@ use tracing::Instrument;
 use tycho_types::models::{BlockId, BlockIdShort};
 use tycho_util::futures::JoinTask;
 
-use crate::collator::{Collator, CollatorFactory, DebugCollatorResult};
+use crate::collator::{Collator, CollatorFactory, CollatorResult, DebugCollatorResult};
 use crate::manager::types::CollatorJoinTask;
 use crate::manager::{CollationManager, CollatorState, ProcessMcStateUpdateMode};
 use crate::tracing_targets;
@@ -148,6 +148,11 @@ impl CollationCancelHandle {
                         "cancelled collator task result for {}",
                         collator.shard_id(),
                     );
+
+                    // clear uncomitted queue state on block candidate
+                    if matches!(res, CollatorResult::BlockCandidate { .. }) {
+                        collation_manager.clear_uncommitted_queue_state()?;
+                    }
 
                     // store collator with `Cancelled` state
                     collation_manager.set_collator_and_state(collator, |ac| {
