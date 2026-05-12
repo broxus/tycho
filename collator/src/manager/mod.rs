@@ -725,10 +725,25 @@ where
 
         // should drop uncommitted queue state on block mismatch
         // because created messages are incorrect
-        let top_shards = self.blocks_cache.get_last_top_shards();
-        self.mq_adapter.clear_uncommitted_state(&top_shards)?;
+        self.clear_uncommitted_queue_state()?;
 
         Ok(())
+    }
+
+    fn clear_uncommitted_queue_state(&self) -> Result<()> {
+        Self::clear_uncommitted_queue_state_impl(&self.blocks_cache, &self.mq_adapter)
+    }
+
+    fn clear_uncommitted_queue_state_impl(
+        blocks_cache: &BlocksCache,
+        mq_adapter: &Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
+    ) -> Result<()> {
+        tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+            "clear uncommitted queue state",
+        );
+
+        let top_shards = blocks_cache.get_last_top_shards();
+        mq_adapter.clear_uncommitted_state(&top_shards)
     }
 
     /// Process collated block candidate
@@ -1425,8 +1440,7 @@ where
                 // and applied mc block is MC100. But mempool will not contain all old externals used to collate
                 // the previous version of SC701. So the new diff will mismatch the old one and node will panic.
                 // So we need to remove all uncommitted queue diffs because we have new mismatched externals queue.
-                let top_shards = self.blocks_cache.get_last_top_shards();
-                self.mq_adapter.clear_uncommitted_state(&top_shards)?;
+                self.clear_uncommitted_queue_state()?;
             }
         }
 
@@ -1987,8 +2001,7 @@ where
                 // when we run sync by any reason we should drop uncommitted queue updates
                 // after restoring the required state
                 // to avoid panics if next block was already collated before an it is incorrect
-                let top_shards = blocks_cache.get_last_top_shards();
-                mq_adapter.clear_uncommitted_state(&top_shards)?;
+                Self::clear_uncommitted_queue_state_impl(blocks_cache, &mq_adapter)?;
 
                 res.last_mc_state = Some(last_mc_state);
                 res.prev_mc_state = prev_mc_state;
