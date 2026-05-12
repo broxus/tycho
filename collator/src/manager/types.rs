@@ -158,7 +158,7 @@ impl Debug for BlockCacheStoreResult {
             .field("block_mismatch", &self.block_mismatch)
             .field(
                 "last_collated_mc_block_id",
-                &DebugDisplayOpt(self.last_collated_mc_block_id),
+                &DebugDisplayOpt(&self.last_collated_mc_block_id),
             )
             .field("applied_mc_queue_range", &self.applied_mc_queue_range)
             .finish()

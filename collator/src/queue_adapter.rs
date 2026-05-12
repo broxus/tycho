@@ -330,7 +330,7 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         let elapsed = start_time.elapsed();
         tracing::info!(target: tracing_targets::MQ_ADAPTER,
             elapsed = %humantime::format_duration(elapsed),
-            block_id = ?DebugDisplayOpt(block_id),
+            block_id = ?DebugDisplayOpt(&block_id),
             "get_last_committed_mc_block_id completed"
         );
         Ok(block_id)

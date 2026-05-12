@@ -48,8 +48,8 @@ use crate::types::processed_upto::{
     BlockSeqno, ProcessedUptoInfoExtension, ProcessedUptoInfoStuff, find_min_processed_to_by_shards,
 };
 use crate::types::{
-    BlockCollationResult, BlockIdExt, CollationSessionInfo, CollatorConfig, DebugIter,
-    DisplayAsShortId, DisplayBlockIdsIntoIter, McData, ProcessedToByPartitions,
+    BlockCollationResult, BlockIdExt, CollationSessionInfo, CollatorConfig, DebugDisplayOpt,
+    DebugIter, DisplayAsShortId, DisplayBlockIdsIntoIter, McData, ProcessedToByPartitions,
     ShardDescriptionShort, ShardDescriptionShortExt, ShardHashesExt, TopBlockId, TopBlockIdUpdated,
 };
 use crate::utils::block::detect_top_processed_to_anchor;
@@ -1735,8 +1735,8 @@ where
         let last_synced_to_mc_block_id = self.get_last_synced_to_mc_block_id();
 
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-            ?last_synced_to_mc_block_id,
-            ?last_collated_mc_block_id,
+            last_synced_to_mc_block_id = ?DebugDisplayOpt(&last_synced_to_mc_block_id),
+            last_collated_mc_block_id = ?DebugDisplayOpt(&last_collated_mc_block_id),,
         );
 
         match (last_synced_to_mc_block_id, last_collated_mc_block_id) {
