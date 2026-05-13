@@ -19,6 +19,7 @@ type CollationCancelResult = Result<()>;
 
 #[derive(Debug)]
 pub(super) enum ActionAfterCancel {
+    Noop,
     SyncToAppliedMcBlock {
         trigger_block_id_short: BlockIdShort,
         last_collated_mc_block_id: Option<BlockId>,
@@ -43,6 +44,7 @@ impl std::fmt::Display for DisplayActionAfterCancel<'_> {
                 .field("applied_range", &applied_range)
                 .field("process_state_update_mode", &process_state_update_mode)
                 .finish(),
+            ActionAfterCancel::Noop => "Noop".fmt(f),
         }
     }
 }
@@ -78,7 +80,9 @@ impl CollationCancelHandle {
         // previous cancel task is not finished or cancel result is not handled,
         // so we can update action
         if self.action_after.is_some() {
-            if let Some(action) = action {
+            if let Some(action) = action
+                && matches!(action, ActionAfterCancel::SyncToAppliedMcBlock { .. })
+            {
                 tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
                     old_action_after = ?self.action_after.as_ref().map(DisplayActionAfterCancel),
                     new_action_after = %DisplayActionAfterCancel(&action),
@@ -111,6 +115,13 @@ impl CollationCancelHandle {
                 tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
                     action_after = %DisplayActionAfterCancel(&action),
                     "no collator tasks, will handle action right now",
+                );
+
+                // mark every collator `Cancelled`
+                // next sync will resume collation
+                collation_manager.set_collators_state(
+                    |_, ac| ac.state != CollatorState::Cancelled,
+                    |ac| ac.state = CollatorState::Cancelled,
                 );
 
                 return collation_manager
@@ -168,6 +179,13 @@ impl CollationCancelHandle {
                         ac.state = CollatorState::Cancelled;
                     })?;
                 }
+
+                // mark every collator `Cancelled`
+                // next sync will resume collation
+                collation_manager.set_collators_state(
+                    |_, ac| ac.state != CollatorState::Cancelled,
+                    |ac| ac.state = CollatorState::Cancelled,
+                );
 
                 Ok::<_, anyhow::Error>(())
             }
@@ -252,6 +270,10 @@ where
                     process_state_update_mode,
                 )
                 .await
+            }
+            ActionAfterCancel::Noop => {
+                // do nothing
+                Ok(vec![])
             }
         }
     }

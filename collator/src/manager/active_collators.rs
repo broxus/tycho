@@ -89,6 +89,18 @@ where
         }
     }
 
+    pub(super) fn set_collators_state<Filter, F>(&self, mut filter: Filter, f: F)
+    where
+        Filter: FnMut(&ShardIdent, &ActiveCollator<Box<CF::Collator>>) -> bool,
+        F: Fn(&mut ActiveCollator<Box<CF::Collator>>),
+    {
+        for mut active_collator in self.active_collators.iter_mut() {
+            if filter(active_collator.key(), active_collator.value()) {
+                f(&mut active_collator);
+            }
+        }
+    }
+
     pub(super) fn get_collator_state(&self, shard_id: &ShardIdent) -> Option<CollatorState> {
         self.active_collators.get(shard_id).map(|ac| ac.state)
     }

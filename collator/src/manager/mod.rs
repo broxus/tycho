@@ -949,6 +949,14 @@ where
                     },
                 }),
             })
+        } else if store_res.block_mismatch {
+            // only cancel all active collations
+            // when block mismatched and newer already received
+            Ok(HandleCollatorTaskResult {
+                validator_task: None,
+                collator_tasks: vec![],
+                cancel_action: Some(ActionAfterCancel::Noop),
+            })
         } else if block_id.is_masterchain() {
             // when candidate is master
 
@@ -1188,9 +1196,18 @@ where
             );
         }
 
-        // there is no any possible action with a shard block
+        // we cannot sync to applied shard block
         if !block_id.is_masterchain() {
-            return Ok(HandleBlockFromBcResult::empty());
+            if store_res.block_mismatch {
+                // should cancel all active collations when block mismatched
+                return Ok(HandleBlockFromBcResult {
+                    collator_tasks: vec![],
+                    cancel_action: Some(ActionAfterCancel::Noop),
+                });
+            } else {
+                // just do nothing otherwise
+                return Ok(HandleBlockFromBcResult::empty());
+            }
         }
 
         // check if received is a key block
@@ -1221,6 +1238,11 @@ where
                     );
                     break 'check_should_sync false;
                 }
+            }
+
+            // should sync if collated block mismatched
+            if store_res.block_mismatch {
+                break 'check_should_sync true;
             }
 
             // check if should sync
@@ -1302,7 +1324,6 @@ where
         };
 
         // run sync or commit block
-        let mut collator_tasks = vec![];
         if should_sync_to_last_applied_mc_block {
             // should only refresh collation sessions when sync on key block
             let process_state_update_mode = if is_last_mc_block_in_batch {
@@ -1313,16 +1334,25 @@ where
                 ProcessMcStateUpdateMode::RefreshSessionsOnly
             };
             // will cancel active collations and then run sync
-            return Ok(HandleBlockFromBcResult {
-                collator_tasks,
+            Ok(HandleBlockFromBcResult {
+                collator_tasks: vec![],
                 cancel_action: Some(ActionAfterCancel::SyncToAppliedMcBlock {
                     trigger_block_id_short: block_id.as_short_id(),
                     last_collated_mc_block_id: store_res.last_collated_mc_block_id,
                     applied_range: store_res.applied_mc_queue_range,
                     process_state_update_mode,
                 }),
-            });
+            })
+        } else if store_res.block_mismatch {
+            // only cancel all active collations
+            // when block mismatched and should not sync by any reason
+            Ok(HandleBlockFromBcResult {
+                collator_tasks: vec![],
+                cancel_action: Some(ActionAfterCancel::Noop),
+            })
         } else {
+            let mut collator_tasks = vec![];
+
             // try to commit block if it was collated first
             if store_res.received_and_collated {
                 // NOTE: here commit will not cause on_block_accepted event
@@ -1330,12 +1360,12 @@ where
 
                 collator_tasks = self.commit_valid_master_block(&block_id, false).await?;
             }
-        }
 
-        Ok(HandleBlockFromBcResult {
-            collator_tasks,
-            cancel_action: None,
-        })
+            Ok(HandleBlockFromBcResult {
+                collator_tasks,
+                cancel_action: None,
+            })
+        }
     }
 
     #[tracing::instrument(name = "sync_to_applied_mc_block", skip_all, fields(trigger_block_id = %trigger_block_id_short, applied_range = ?applied_range))]
