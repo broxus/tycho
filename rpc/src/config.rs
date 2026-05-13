@@ -3,6 +3,7 @@ use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use axum_client_ip::ClientIpSource;
 use serde::{Deserialize, Serialize};
 use tycho_types::models::StdAddr;
 use tycho_util::config::PartialConfig;
@@ -45,6 +46,9 @@ pub struct RpcConfig {
 
     /// Subscriptions limits and buffering.
     pub subscriptions: SubscriptionsConfig,
+
+    /// Source for resolving the real client IP
+    pub real_ip_source: ClientIpSource,
 
     /// Rate limits for inbound RPC requests.
     ///
@@ -154,6 +158,7 @@ impl Default for RpcConfig {
             max_parallel_block_downloads: 10,
             run_get_method: RunGetMethodConfig::default(),
             subscriptions: SubscriptionsConfig::default(),
+            real_ip_source: ClientIpSource::ConnectInfo,
             rate_limits: None,
             storage: RpcStorageConfig::Full {
                 gc: Some(Default::default()),
