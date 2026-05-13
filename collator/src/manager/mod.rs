@@ -28,9 +28,10 @@ use self::collation_cancel::{ActionAfterCancel, CollationCancelHandle};
 use self::state_event_listener::{ChannelStateEventListener, StateEvent};
 use self::types::{
     ActiveCollator, ActiveSync, BlockCacheEntry, BlockCacheEntryData, BlockCacheKey,
-    CandidateStatus, CollatedBlockInfo, CollationState, CollationStatus, CollationSyncState,
-    CollatorJoinTask, CollatorState, HandledBlockFromBcCtx, ImportedAnchorEvent, McBlockSubgraph,
-    McBlockSubgraphExtract, NextCollationStep, ValidatorJoinTask,
+    BlockCacheStoreResult, CandidateStatus, CollatedBlockInfo, CollationState, CollationStatus,
+    CollationSyncState, CollatorJoinTask, CollatorState, HandledBlockFromBcCtx,
+    ImportedAnchorEvent, McBlockSubgraph, McBlockSubgraphExtract, NextCollationStep,
+    ValidatorJoinTask,
 };
 use self::utils::find_us_in_collators_set;
 use crate::collator::{
@@ -927,62 +928,17 @@ where
         };
 
         // check if should sync to last applied mc block
-        let should_sync_to_last_applied_mc_block = 'check_should_sync: {
-            // do not sync to last applied mc block if newer already received
-            if self.has_newer_received_mc_block(store_res.applied_mc_queue_range) {
-                break 'check_should_sync false;
-            }
-
-            // should sync if collated block mismatched
-            if store_res.block_mismatch {
-                break 'check_should_sync true;
-            }
-
-            // check if should sync when we have applied blocks
-            if let Some((_, applied_range_end)) = store_res.applied_mc_queue_range {
-                // we can sync only when we have any applied block ahead
-                if let Some(last_collated_mc_block_id) = store_res.last_collated_mc_block_id {
-                    let applied_range_end_delta =
-                        applied_range_end.saturating_sub(last_collated_mc_block_id.seqno);
-                    if applied_range_end_delta < self.config.min_mc_block_delta_from_bc_to_sync {
-                        // should collate next own mc block because last applied is not far ahead
-                        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-                            "check_should_sync: should collate next own mc block: \
-                            last applied ({}) ahead last collated ({}) on {} < {}",
-                            applied_range_end, last_collated_mc_block_id.seqno,
-                            applied_range_end_delta, self.config.min_mc_block_delta_from_bc_to_sync,
-                        );
-                        false
-                    } else {
-                        // should sync to last applied mc block from bc because it is far ahead
-                        tracing::info!(target: tracing_targets::COLLATION_MANAGER,
-                            "check_should_sync: should sync to last applied mc block from bc: \
-                            last applied ({}) ahead last collated ({}) on {} >= {}",
-                            applied_range_end, last_collated_mc_block_id.seqno,
-                            applied_range_end_delta, self.config.min_mc_block_delta_from_bc_to_sync,
-                        );
-                        true
-                    }
-                } else {
-                    // should sync to last applied mc block from bc when last collated not exist
-                    tracing::info!(target: tracing_targets::COLLATION_MANAGER,
-                        "check_should_sync: should sync to last applied mc block from bc: \
-                        last applied ({}) and last collated not exist",
-                        applied_range_end,
-                    );
-                    true
-                }
-            } else {
-                // should collate next own mc block because no applied ahead
-                tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-                    "check_should_sync: should collate next own mc block after because nothing applied ahead",
-                );
-                false
-            }
-        };
+        let should_sync_to_last_applied_mc_block = self.check_should_sync_to_last_applied_mc_block(
+            &store_res,
+            store_res.last_collated_mc_block_id,
+            self.config.min_mc_block_delta_from_bc_to_sync,
+            collation_result
+                .mc_data
+                .as_ref()
+                .map(|mc_data| mc_data.prev_key_block_seqno == mc_data.block_id.seqno),
+        );
 
         // run sync or process just collated block
-        let mut collator_tasks = vec![];
         if should_sync_to_last_applied_mc_block {
             // before sync will cancel any active collations
             Ok(HandleTaskResult::with_cancel(
@@ -1015,6 +971,7 @@ where
 
             // process validation
             let mut validator_task = None;
+            let mut collator_tasks = vec![];
             if store_res.received_and_collated {
                 // NOTE: here commit will not cause on_block_accepted event
                 //      because block already exist in bc state
@@ -1058,7 +1015,7 @@ where
                 "will run next collation step",
             );
 
-            collator_tasks = self
+            let collator_tasks = self
                 .run_next_collation_step(
                     &collation_result.prev_mc_block_id,
                     block_id.shard,
@@ -1249,99 +1206,22 @@ where
         self.schedule_cancel_validation_sessions_until_block(ctx.state.clone());
 
         // check if should sync to last applied mc block right now
-        let should_sync_to_last_applied_mc_block = 'check_should_sync: {
-            // sync only to the last master block from batch or to a key block
-            if !is_last_mc_block_in_batch && !is_key_block {
-                break 'check_should_sync false;
-            }
-
-            // do not sync to last applied mc block if newer already received
-            if self.has_newer_received_mc_block(store_res.applied_mc_queue_range) {
-                break 'check_should_sync false;
-            }
-
-            // should sync if collated block mismatched
-            if store_res.block_mismatch {
-                break 'check_should_sync true;
-            }
-
-            // check if should sync
-            if let Some(top_mc_block_id_for_next_collation) =
-                self.get_top_mc_block_id_for_next_collation(store_res.last_collated_mc_block_id)
-            {
-                // we can sync only when we have any applied block ahead
-                if let Some((_, applied_range_end)) = store_res.applied_mc_queue_range {
-                    // check if should sync according to master block delta
-                    let should_sync = {
-                        let applied_range_end_delta = applied_range_end
-                            .saturating_sub(top_mc_block_id_for_next_collation.seqno);
-
-                        // we should sync to every key block if node is not in current vset
-                        let required_min_mc_block_delta = if is_key_block
-                            && !self.active_collators.contains_key(&ShardIdent::MASTERCHAIN)
-                        {
-                            1
-                        } else {
-                            self.config.min_mc_block_delta_from_bc_to_sync
-                        };
-
-                        if applied_range_end_delta < required_min_mc_block_delta {
-                            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-                                last_synced_to_mc_block_id = ?self.get_last_synced_to_mc_block_id().map(|id| id.as_short_id().to_string()),
-                                last_collated_mc_block_id = ?store_res.last_collated_mc_block_id.map(|id| id.as_short_id().to_string()),
-                                last_processed_mc_block_id = ?self.get_last_processed_mc_block_id().map(|id| id.as_short_id().to_string()),
-                                received_is_key_block = is_key_block,
-                                "check_should_sync: should wait for next collated own mc block: \
-                                last applied ({}) ahead of top for collation ({}) on {} < {}",
-                                applied_range_end, top_mc_block_id_for_next_collation.seqno,
-                                applied_range_end_delta, required_min_mc_block_delta,
-                            );
-                            false
-                        } else {
-                            tracing::info!(target: tracing_targets::COLLATION_MANAGER,
-                                last_synced_to_mc_block_id = ?self.get_last_synced_to_mc_block_id().map(|id| id.as_short_id().to_string()),
-                                last_collated_mc_block_id = ?store_res.last_collated_mc_block_id.map(|id| id.as_short_id().to_string()),
-                                last_processed_mc_block_id = ?self.get_last_processed_mc_block_id().map(|id| id.as_short_id().to_string()),
-                                received_is_key_block = is_key_block,
-                                "check_should_sync: should sync to last applied mc block from bc: \
-                                last applied ({}) ahead of top for collation ({}) on {} >= {}",
-                                applied_range_end, top_mc_block_id_for_next_collation.seqno,
-                                applied_range_end_delta, required_min_mc_block_delta,
-                            );
-                            true
-                        }
-                    };
-
-                    if should_sync {
-                        tracing::info!(target: tracing_targets::COLLATION_MANAGER,
-                            last_synced_to_mc_block_id = ?self.get_last_synced_to_mc_block_id().map(|id| id.as_short_id().to_string()),
-                            last_collated_mc_block_id = ?store_res.last_collated_mc_block_id.map(|id| id.as_short_id().to_string()),
-                            last_processed_mc_block_id = ?self.get_last_processed_mc_block_id().map(|id| id.as_short_id().to_string()),
-                            received_is_key_block = is_key_block,
-                            has_active_collations = self.has_active_collations(),
-                            "check_should_sync: will request sync to last applied mc block",
-                        );
-                    }
-
-                    should_sync
-                } else {
-                    // should collate next own mc block because no applied ahead
-                    tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-                        last_synced_to_mc_block_id = ?self.get_last_synced_to_mc_block_id().map(|id| id.as_short_id().to_string()),
-                        last_collated_mc_block_id = ?store_res.last_collated_mc_block_id.map(|id| id.as_short_id().to_string()),
-                        last_processed_mc_block_id = ?self.get_last_processed_mc_block_id().map(|id| id.as_short_id().to_string()),
-                        "check_should_sync: should collate next own mc block after because nothing applied ahead",
-                    );
-                    false
-                }
+        let top_mc_block_id_for_next_collation =
+            self.get_top_mc_block_id_for_next_collation(store_res.last_collated_mc_block_id);
+        // we should sync to every key block if node is not in current vset
+        let required_min_mc_block_delta =
+            if is_key_block && !self.active_collators.contains_key(&ShardIdent::MASTERCHAIN) {
+                1
             } else {
-                tracing::info!(target: tracing_targets::COLLATION_MANAGER,
-                    received_is_key_block = is_key_block,
-                    "should sync to last applied mc block when no last collated or prev sync to",
-                );
-                true
-            }
-        };
+                self.config.min_mc_block_delta_from_bc_to_sync
+            };
+        let should_sync_to_last_applied_mc_block = (is_last_mc_block_in_batch || is_key_block)
+            && self.check_should_sync_to_last_applied_mc_block(
+                &store_res,
+                top_mc_block_id_for_next_collation,
+                required_min_mc_block_delta,
+                Some(is_key_block),
+            );
 
         // run sync or commit block
         if should_sync_to_last_applied_mc_block {
@@ -1378,6 +1258,93 @@ where
             }
 
             Ok(HandleTaskResult::with_tasks(None, collator_tasks))
+        }
+    }
+
+    fn check_should_sync_to_last_applied_mc_block(
+        &self,
+        store_res: &BlockCacheStoreResult,
+        top_mc_block_id_for_next_collation: Option<BlockId>,
+        required_min_mc_block_delta: BlockSeqno,
+        is_key_block: Option<bool>,
+    ) -> bool {
+        // do not sync to last applied mc block if newer already received
+        if self.has_newer_received_mc_block(store_res.applied_mc_queue_range) {
+            return false;
+        }
+
+        // should sync if collated block mismatched
+        if store_res.block_mismatch {
+            return true;
+        }
+
+        let has_active_collations = self.has_active_collations();
+        let last_synced_to_mc_block_id = self
+            .get_last_synced_to_mc_block_id()
+            .map(|id| id.as_short_id().to_string());
+        let last_collated_mc_block_id = store_res
+            .last_collated_mc_block_id
+            .map(|id| id.as_short_id().to_string());
+        let last_processed_mc_block_id = self
+            .get_last_processed_mc_block_id()
+            .map(|id| id.as_short_id().to_string());
+
+        if let Some(top_mc_block_id_for_next_collation) = top_mc_block_id_for_next_collation {
+            // we can sync only when we have any applied block ahead
+            if let Some((_, applied_range_end)) = store_res.applied_mc_queue_range {
+                // check if should sync according to master block delta
+                let applied_range_end_delta =
+                    applied_range_end.saturating_sub(top_mc_block_id_for_next_collation.seqno);
+
+                if applied_range_end_delta < required_min_mc_block_delta {
+                    tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                        last_synced_to_mc_block_id = ?last_synced_to_mc_block_id,
+                        last_collated_mc_block_id = ?last_collated_mc_block_id,
+                        last_processed_mc_block_id = ?last_processed_mc_block_id,
+                        has_active_collations,
+                        is_key_block = ?is_key_block,
+                        "check_should_sync: should wait for next collated own mc block: \
+                        last applied ({}) ahead of top for collation ({}) on {} < {}",
+                        applied_range_end, top_mc_block_id_for_next_collation.seqno,
+                        applied_range_end_delta, required_min_mc_block_delta,
+                    );
+                    false
+                } else {
+                    tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+                        last_synced_to_mc_block_id = ?last_synced_to_mc_block_id,
+                        last_collated_mc_block_id = ?last_collated_mc_block_id,
+                        last_processed_mc_block_id = ?last_processed_mc_block_id,
+                        has_active_collations,
+                        is_key_block = ?is_key_block,
+                        "check_should_sync: should sync to last applied mc block from bc: \
+                        last applied ({}) ahead of top for collation ({}) on {} >= {}",
+                        applied_range_end, top_mc_block_id_for_next_collation.seqno,
+                        applied_range_end_delta, required_min_mc_block_delta,
+                    );
+                    true
+                }
+            } else {
+                // should collate next own mc block because no applied ahead
+                tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                    last_synced_to_mc_block_id = ?last_synced_to_mc_block_id,
+                    last_collated_mc_block_id = ?last_collated_mc_block_id,
+                    last_processed_mc_block_id = ?last_processed_mc_block_id,
+                    has_active_collations,
+                    is_key_block = ?is_key_block,
+                    "check_should_sync: should collate next own mc block after because nothing applied ahead",
+                );
+                false
+            }
+        } else {
+            tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+                last_synced_to_mc_block_id = ?last_synced_to_mc_block_id,
+                last_collated_mc_block_id = ?last_collated_mc_block_id,
+                last_processed_mc_block_id = ?last_processed_mc_block_id,
+                has_active_collations,
+                is_key_block = ?is_key_block,
+                "check_should_sync: should sync to last applied mc block when no last collated or prev sync to",
+            );
+            true
         }
     }
 
