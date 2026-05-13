@@ -647,17 +647,19 @@ where
                         .blocks_cache
                         .get_last_collated_block_and_applied_mc_queue_range();
 
-                    // run sync if has applied mc blocks
-                    return self
-                        .sync_to_applied_mc_block_if_exist(
-                            next_block_id_short,
-                            last_collated_mc_block_id,
-                            applied_range,
-                            ProcessMcStateUpdateMode::StartCollation {
-                                reset_collators: true,
-                            },
-                        )
-                        .await;
+                    // run sync if has applied mc blocks and has not newer received
+                    if !self.has_newer_received_mc_block(applied_range) {
+                        return self
+                            .sync_to_applied_mc_block_if_exist(
+                                next_block_id_short,
+                                last_collated_mc_block_id,
+                                applied_range,
+                                ProcessMcStateUpdateMode::StartCollation {
+                                    reset_collators: true,
+                                },
+                            )
+                            .await;
+                    }
                 }
             }
         }
@@ -927,20 +929,8 @@ where
         // check if should sync to last applied mc block
         let should_sync_to_last_applied_mc_block = 'check_should_sync: {
             // do not sync to last applied mc block if newer already received
-            if let Some((_, applied_range_end)) = store_res.applied_mc_queue_range {
-                let last_received_mc_block_seqno = self.get_last_received_mc_block_seqno();
-                if matches!(
-                    last_received_mc_block_seqno,
-                    Some(last_received_seqno) if last_received_seqno.saturating_sub(applied_range_end) > 1
-                ) {
-                    tracing::info!(target: tracing_targets::COLLATION_MANAGER,
-                        last_received_mc_block_seqno,
-                        applied_range_end,
-                        "check_should_sync: should not sync to last applied mc block \
-                        because a newer one already received",
-                    );
-                    break 'check_should_sync false;
-                }
+            if self.has_newer_received_mc_block(store_res.applied_mc_queue_range) {
+                break 'check_should_sync false;
             }
 
             // should sync if collated block mismatched
@@ -1266,20 +1256,8 @@ where
             }
 
             // do not sync to last applied mc block if newer already received
-            if let Some((_, applied_range_end)) = store_res.applied_mc_queue_range {
-                let last_received_mc_block_seqno = self.get_last_received_mc_block_seqno();
-                if matches!(
-                    last_received_mc_block_seqno,
-                    Some(last_received_seqno) if last_received_seqno.saturating_sub(applied_range_end) > 1
-                ) {
-                    tracing::info!(target: tracing_targets::COLLATION_MANAGER,
-                        last_received_mc_block_seqno,
-                        received_is_key_block = is_key_block,
-                        "check_should_sync: should not sync to last applied mc block \
-                        because a newer one already received",
-                    );
-                    break 'check_should_sync false;
-                }
+            if self.has_newer_received_mc_block(store_res.applied_mc_queue_range) {
+                break 'check_should_sync false;
             }
 
             // should sync if collated block mismatched
@@ -2644,6 +2622,26 @@ where
     fn get_last_received_mc_block_seqno(&self) -> Option<BlockSeqno> {
         let guard = self.collation_sync_state.lock();
         guard.last_received_mc_block_seqno
+    }
+
+    fn has_newer_received_mc_block(&self, applied_range: Option<(u32, u32)>) -> bool {
+        if let Some((_, applied_range_end)) = applied_range {
+            let last_received_mc_block_seqno = self.get_last_received_mc_block_seqno();
+            if matches!(
+                last_received_mc_block_seqno,
+                Some(last_received_seqno) if last_received_seqno.saturating_sub(applied_range_end) > 1
+            ) {
+                tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+                    last_received_mc_block_seqno,
+                    applied_range_end,
+                    "check_should_sync: should not sync to last applied mc block \
+                    because a newer one already received",
+                );
+
+                return true;
+            }
+        }
+        false
     }
 
     fn update_last_synced_to_mc_block_id(&self, mc_block_id: BlockId) {
