@@ -1,10 +1,9 @@
 use std::convert::Infallible;
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::anyhow;
 use axum::Extension;
-use axum::extract::{ConnectInfo, FromRef, Query, State};
+use axum::extract::{FromRef, Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};

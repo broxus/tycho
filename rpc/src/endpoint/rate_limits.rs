@@ -1,8 +1,8 @@
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
-use axum::extract::{ConnectInfo, Request};
+use axum::extract::Request;
 use axum::http::{Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -12,6 +12,8 @@ use tycho_util::rate_limit::{
     RateLimitConfig, RateLimitPolicy, RateLimitVerdict, RateLimiter, TrafficLimit,
 };
 use tycho_util::{FastDashMap, FastHashSet};
+
+use crate::util::ip::normalize_ip;
 
 #[derive(Debug, Default, Eq, PartialEq, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -26,7 +28,7 @@ impl From<RpcRateLimitsConfig> for RpcRateLimiter {
         RpcRateLimiter {
             limiter: RateLimiter::new(config.limiter),
             traffic: config.traffic,
-            whitelist: config.whitelist.into_iter().collect(),
+            whitelist: config.whitelist.into_iter().map(normalize_ip).collect(),
         }
     }
 }
@@ -67,6 +69,7 @@ pub struct RpcRateLimiter {
 
 impl RpcRateLimiter {
     fn check(&self, ip: IpAddr, class: RpcTrafficClass) -> RateLimitVerdict {
+        let ip = normalize_ip(ip);
         if self.whitelist.contains(&ip) {
             return RateLimitVerdict::Allow;
         }
@@ -95,11 +98,12 @@ impl ActiveStreamLimiter {
         Self {
             active: Arc::new(FastDashMap::default()),
             max_streams_per_addr,
-            whitelist: Arc::new(whitelist.into_iter().collect()),
+            whitelist: Arc::new(whitelist.into_iter().map(normalize_ip).collect()),
         }
     }
 
     pub fn try_acquire(&self, ip: IpAddr) -> Option<ActiveStreamGuard> {
+        let ip = normalize_ip(ip);
         if self.whitelist.contains(&ip) {
             return Some(ActiveStreamGuard::whitelisted());
         }

@@ -24,6 +24,7 @@ mod state;
 
 pub mod util {
     pub mod error_codes;
+    pub mod ip;
     pub mod jrpc_extractor;
     pub mod mime;
     pub mod serde_helpers;
