@@ -29,7 +29,7 @@ use crate::collator::do_collate::finalize::vset_update_start::{
     KbNextSessionStart, KbNextSessionUpdate,
 };
 use crate::collator::do_collate::work_units::FinalizeWu;
-use crate::collator::error::{CollationCancelReason, CollatorError};
+use crate::collator::error::{CollationAbortReason, CollatorError};
 use crate::collator::execution_manager::MessagesExecutor;
 use crate::collator::max_anchors_processing_lag_rounds;
 use crate::collator::messages_reader::{FinalizedMessagesReader, MessagesReader};
@@ -127,7 +127,7 @@ impl Phase<FinalizeState> {
                         "finalize_messages_reader: cannot get diff with stats from queue for block {}",
                         top_block_id.as_short_id(),
                     );
-                    CollatorError::Cancelled(CollationCancelReason::DiffNotFoundInQueue(
+                    CollatorError::Aborted(CollationAbortReason::DiffNotFoundInQueue(
                         top_block_id.as_short_id(),
                     ))
                 })?;

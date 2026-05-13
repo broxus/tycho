@@ -9,7 +9,7 @@ use super::finalize::FinalizeState;
 use super::phase::{Phase, PhaseState};
 use super::work_units::PrepareMsgGroupsWu;
 use crate::collator::do_collate::work_units::ExecuteWu;
-use crate::collator::error::{CollationCancelReason, CollatorError};
+use crate::collator::error::CollatorError;
 use crate::collator::messages_reader::{
     GetNextMessageGroupMode, MessagesReader, MessagesReaderMetrics,
 };
@@ -119,9 +119,7 @@ impl<'a, 'b> Phase<ExecuteState<'a, 'b>> {
 
             // exit collation if cancelled
             if self.state.collation_is_cancelled.check() {
-                return Err(CollatorError::Cancelled(
-                    CollationCancelReason::ExternalCancel,
-                ));
+                return Err(CollatorError::Cancelled);
             }
 
             let timer = std::time::Instant::now();

@@ -6,7 +6,6 @@ use tycho_types::models::GlobalCapability;
 use super::execute::ExecuteState;
 use super::execution_wrapper::ExecutorWrapper;
 use super::phase::{Phase, PhaseState};
-use crate::collator::CollationCancelReason;
 use crate::collator::anchors_cache::AnchorsCacheTransaction;
 use crate::collator::do_collate::phase::ActualState;
 use crate::collator::error::CollatorError;
@@ -176,9 +175,7 @@ impl<'a, 'b> Phase<PrepareState<'a, 'b>> {
 
             // exit collation if cancelled
             if collation_is_cancelled_debounce.check() {
-                return Err(CollatorError::Cancelled(
-                    CollationCancelReason::ExternalCancel,
-                ));
+                return Err(CollatorError::Cancelled);
             }
         }
 
