@@ -6,6 +6,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, RequestExt, middleware};
+use axum_client_ip::ClientIpSource;
 use tokio::net::TcpListener;
 
 pub use self::jrpc::JrpcEndpointCache;
@@ -59,6 +60,7 @@ impl RpcEndpointBuilder<()> {
         let listener = state.bind_socket().await?;
 
         let rl_config = &state.config().rate_limits;
+        let ip_source = state.config().real_ip_source.clone();
         let rate_limiter = rl_config.clone().map(Into::into);
         let active_streams = rate_limits::ActiveStreamLimiter::new(
             state.config().subscriptions.max_streams_per_addr,
@@ -68,6 +70,7 @@ impl RpcEndpointBuilder<()> {
         Ok(RpcEndpoint::from_parts(
             listener,
             self.common.build(),
+            ip_source,
             rate_limiter,
             active_streams,
             state,
@@ -102,6 +105,7 @@ where
         let listener = rpc_state.bind_socket().await?;
 
         let rl_config = &rpc_state.config().rate_limits;
+        let ip_source = rpc_state.config().real_ip_source.clone();
         let rate_limiter = rl_config.clone().map(Into::into);
         let active_streams = rate_limits::ActiveStreamLimiter::new(
             rpc_state.config().subscriptions.max_streams_per_addr,
@@ -111,6 +115,7 @@ where
         Ok(RpcEndpoint::from_parts(
             listener,
             self.common.build::<S>().merge(self.custom_routes),
+            ip_source,
             rate_limiter,
             active_streams,
             state,
@@ -176,6 +181,7 @@ impl RpcEndpoint {
     pub fn from_parts<S>(
         listener: TcpListener,
         router: axum::Router<S>,
+        ip_source: ClientIpSource,
         rate_limiter: Option<rate_limits::RpcRateLimiter>,
         active_streams: rate_limits::ActiveStreamLimiter,
         state: S,
@@ -209,6 +215,7 @@ impl RpcEndpoint {
         };
 
         let router = router
+            .layer(Extension(ip_source))
             .layer(Extension(active_streams))
             .layer(service)
             .with_state(state);

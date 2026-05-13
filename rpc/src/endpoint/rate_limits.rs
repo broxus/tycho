@@ -6,7 +6,7 @@ use axum::extract::Request;
 use axum::http::{Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum_client_ip::CfConnectingIp;
+use axum_client_ip::ClientIp;
 use serde::{Deserialize, Serialize};
 use tycho_util::rate_limit::{
     RateLimitConfig, RateLimitPolicy, RateLimitVerdict, RateLimiter, TrafficLimit,
@@ -161,7 +161,7 @@ enum RpcTrafficClass {
 
 pub async fn rate_limit(
     axum::extract::State(limiter): axum::extract::State<RpcRateLimiter>,
-    CfConnectingIp(ip): CfConnectingIp,
+    ClientIp(ip): ClientIp,
     req: Request,
     next: Next,
 ) -> Response {

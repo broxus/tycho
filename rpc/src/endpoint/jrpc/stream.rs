@@ -8,7 +8,7 @@ use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum_client_ip::CfConnectingIp;
+use axum_client_ip::ClientIp;
 use futures_util::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -198,7 +198,7 @@ where
 pub async fn stream_route<S>(
     State(state): State<RpcState>,
     Query(params): Query<StreamParams>,
-    CfConnectingIp(ip): CfConnectingIp,
+    ClientIp(ip): ClientIp,
     Extension(active_streams): Extension<ActiveStreamLimiter>,
 ) -> Response
 where
