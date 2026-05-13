@@ -178,9 +178,9 @@ impl Node {
             .await
             .context("failed to load mc zerostate on run")?;
 
-        {
-            let config = mc_state.config_params()?;
-            let current_validator_set = config.get_current_validator_set()?;
+        let blockchain_config = mc_state.config_params()?;
+        let validator_session_id = {
+            let current_validator_set = blockchain_config.get_current_validator_set()?;
             base.validator_resolver()
                 .update_validator_set(&current_validator_set);
             let v_set_len = current_validator_set.list.len();
@@ -188,7 +188,9 @@ impl Node {
                 is_single_node == (v_set_len == 1),
                 "cannot start with v_set_len={v_set_len} and single_node={is_single_node}"
             );
-        }
+
+            tycho_slasher_traits::ValidationSessionId::from(mc_state.state_extra()?)
+        };
 
         // Create mempool adapter
         let mempool_adapter = self.rpc_mempool_adapter.inner.clone();
@@ -225,13 +227,15 @@ impl Node {
         let top_shards = mc_state.get_top_shards()?;
         message_queue_adapter.clear_uncommitted_state(&top_shards)?;
 
-        // NOTE: Stub
         let slasher = tycho_slasher::Slasher::new(
             base.keypair.clone(),
             tycho_slasher::StubSlasherContract,
             base.blockchain_rpc_client.clone(),
             &base.storage_context,
             self.slasher_config,
+            mc_state.as_ref().global_id,
+            blockchain_config,
+            validator_session_id,
         )
         .context("failed to create slasher")?;
 
