@@ -560,7 +560,7 @@ where
     async fn handle_collator_task(
         self: &Arc<Self>,
         collator_task_res: Result<(Box<CF::Collator>, CollatorResult)>,
-    ) -> Result<HandleCollatorTaskResult<CF::Collator>> {
+    ) -> Result<HandleTaskResult<CF::Collator>> {
         let (collator, res) = collator_task_res?;
 
         tracing::trace!(target: tracing_targets::COLLATION_MANAGER,
@@ -588,11 +588,7 @@ where
                         collation_config,
                     )
                     .await?;
-                Ok(HandleCollatorTaskResult {
-                    validator_task: None,
-                    collator_tasks,
-                    cancel_action: None,
-                })
+                Ok(HandleTaskResult::with_tasks(None, collator_tasks))
             }
             CollatorResult::Cancelled(cancel_ctx) => {
                 bail!(
@@ -761,7 +757,7 @@ where
     async fn handle_collated_block_candidate(
         self: &Arc<Self>,
         collation_result: BlockCollationResult,
-    ) -> Result<HandleCollatorTaskResult<CF::Collator>> {
+    ) -> Result<HandleTaskResult<CF::Collator>> {
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
             ct = collation_result.candidate.chain_time,
             processed_to_anchor_id = collation_result.candidate.processed_to_anchor_id,
@@ -800,7 +796,7 @@ where
 
                 self.set_collator_state(&block_id.shard, |ac| ac.state = CollatorState::Waiting);
 
-                return Ok(HandleCollatorTaskResult::empty());
+                return Ok(HandleTaskResult::empty());
             }
         };
 
@@ -937,26 +933,20 @@ where
         let mut collator_tasks = vec![];
         if should_sync_to_last_applied_mc_block {
             // before sync will cancel any active collations
-            Ok(HandleCollatorTaskResult {
-                validator_task: None,
-                collator_tasks: vec![],
-                cancel_action: Some(ActionAfterCancel::SyncToAppliedMcBlock {
+            Ok(HandleTaskResult::with_cancel(
+                ActionAfterCancel::SyncToAppliedMcBlock {
                     trigger_block_id_short: block_id.as_short_id(),
                     last_collated_mc_block_id: store_res.last_collated_mc_block_id,
                     applied_range: store_res.applied_mc_queue_range,
                     process_state_update_mode: ProcessMcStateUpdateMode::StartCollation {
                         reset_collators: true,
                     },
-                }),
-            })
+                },
+            ))
         } else if store_res.block_mismatch {
             // only cancel all active collations
             // when block mismatched and newer already received
-            Ok(HandleCollatorTaskResult {
-                validator_task: None,
-                collator_tasks: vec![],
-                cancel_action: Some(ActionAfterCancel::Noop),
-            })
+            Ok(HandleTaskResult::with_cancel(ActionAfterCancel::Noop))
         } else if block_id.is_masterchain() {
             // when candidate is master
 
@@ -1007,11 +997,7 @@ where
                     .await?;
             }
 
-            Ok(HandleCollatorTaskResult {
-                validator_task,
-                collator_tasks,
-                cancel_action: None,
-            })
+            Ok(HandleTaskResult::with_tasks(validator_task, collator_tasks))
         } else {
             // when candidate is shard
 
@@ -1038,11 +1024,7 @@ where
                 )
                 .await?;
 
-            Ok(HandleCollatorTaskResult {
-                validator_task: None,
-                collator_tasks,
-                cancel_action: None,
-            })
+            Ok(HandleTaskResult::with_tasks(None, collator_tasks))
         }
     }
 
@@ -1085,7 +1067,7 @@ where
     async fn handle_blocks_from_bc_batch(
         self: &Arc<Self>,
         batch: Vec<HandledBlockFromBcCtx>,
-    ) -> Result<HandleBlockFromBcResult<CF::Collator>> {
+    ) -> Result<HandleTaskResult<CF::Collator>> {
         // find last master block in buffer
         // will skip sync for all master blocks before it
         let mut last_mc_block_id_opt = None;
@@ -1140,7 +1122,8 @@ where
             }
         }
 
-        Ok(HandleBlockFromBcResult {
+        Ok(HandleTaskResult {
+            validator_task: None,
             collator_tasks,
             cancel_action,
         })
@@ -1157,7 +1140,7 @@ where
         self: &Arc<Self>,
         ctx: HandledBlockFromBcCtx,
         is_last_mc_block_in_batch: bool,
-    ) -> Result<HandleBlockFromBcResult<CF::Collator>> {
+    ) -> Result<HandleTaskResult<CF::Collator>> {
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
             "start processing block from bc",
         );
@@ -1179,7 +1162,7 @@ where
         else {
             // received block was not stored
             // because it is not newer than existed
-            return Ok(HandleBlockFromBcResult::empty());
+            return Ok(HandleTaskResult::empty());
         };
 
         if store_res.block_mismatch {
@@ -1200,13 +1183,10 @@ where
         if !block_id.is_masterchain() {
             if store_res.block_mismatch {
                 // should cancel all active collations when block mismatched
-                return Ok(HandleBlockFromBcResult {
-                    collator_tasks: vec![],
-                    cancel_action: Some(ActionAfterCancel::Noop),
-                });
+                return Ok(HandleTaskResult::with_cancel(ActionAfterCancel::Noop));
             } else {
                 // just do nothing otherwise
-                return Ok(HandleBlockFromBcResult::empty());
+                return Ok(HandleTaskResult::empty());
             }
         }
 
@@ -1334,22 +1314,18 @@ where
                 ProcessMcStateUpdateMode::RefreshSessionsOnly
             };
             // will cancel active collations and then run sync
-            Ok(HandleBlockFromBcResult {
-                collator_tasks: vec![],
-                cancel_action: Some(ActionAfterCancel::SyncToAppliedMcBlock {
+            Ok(HandleTaskResult::with_cancel(
+                ActionAfterCancel::SyncToAppliedMcBlock {
                     trigger_block_id_short: block_id.as_short_id(),
                     last_collated_mc_block_id: store_res.last_collated_mc_block_id,
                     applied_range: store_res.applied_mc_queue_range,
                     process_state_update_mode,
-                }),
-            })
+                },
+            ))
         } else if store_res.block_mismatch {
             // only cancel all active collations
             // when block mismatched and should not sync by any reason
-            Ok(HandleBlockFromBcResult {
-                collator_tasks: vec![],
-                cancel_action: Some(ActionAfterCancel::Noop),
-            })
+            Ok(HandleTaskResult::with_cancel(ActionAfterCancel::Noop))
         } else {
             let mut collator_tasks = vec![];
 
@@ -1361,10 +1337,7 @@ where
                 collator_tasks = self.commit_valid_master_block(&block_id, false).await?;
             }
 
-            Ok(HandleBlockFromBcResult {
-                collator_tasks,
-                cancel_action: None,
-            })
+            Ok(HandleTaskResult::with_tasks(None, collator_tasks))
         }
     }
 
@@ -3442,13 +3415,13 @@ where
     }
 }
 
-struct HandleCollatorTaskResult<C: Collator> {
+struct HandleTaskResult<C: Collator> {
     validator_task: Option<ValidatorJoinTask>,
     collator_tasks: Vec<CollatorJoinTask<C>>,
     cancel_action: Option<ActionAfterCancel>,
 }
 
-impl<C: Collator> HandleCollatorTaskResult<C> {
+impl<C: Collator> HandleTaskResult<C> {
     fn empty() -> Self {
         Self {
             validator_task: None,
@@ -3456,18 +3429,23 @@ impl<C: Collator> HandleCollatorTaskResult<C> {
             cancel_action: None,
         }
     }
-}
 
-struct HandleBlockFromBcResult<C: Collator> {
-    collator_tasks: Vec<CollatorJoinTask<C>>,
-    cancel_action: Option<ActionAfterCancel>,
-}
-
-impl<C: Collator> HandleBlockFromBcResult<C> {
-    fn empty() -> Self {
+    fn with_tasks(
+        validator_task: Option<ValidatorJoinTask>,
+        collator_tasks: Vec<CollatorJoinTask<C>>,
+    ) -> Self {
         Self {
-            collator_tasks: vec![],
+            validator_task,
+            collator_tasks,
             cancel_action: None,
+        }
+    }
+
+    fn with_cancel(cancel_action: ActionAfterCancel) -> Self {
+        Self {
+            validator_task: None,
+            collator_tasks: vec![],
+            cancel_action: Some(cancel_action),
         }
     }
 }
