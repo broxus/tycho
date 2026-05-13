@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use indexmap::IndexMap;
-use tycho_types::models::{BlockId, IndexedValidatorDescription};
+use tycho_types::models::{BlockId, IndexedValidatorDescription, McStateExtra};
 use tycho_util::FastHasherState;
 
 // TODO: Decide how to be with this collator-defined type
@@ -11,6 +11,32 @@ use tycho_util::FastHasherState;
 pub struct ValidationSessionId {
     pub catchain_seqno: u32,
     pub vset_switch_round: u32,
+}
+
+impl From<&McStateExtra> for ValidationSessionId {
+    fn from(value: &McStateExtra) -> Self {
+        let catchain_seqno = value.validator_info.catchain_seqno;
+        let vset_switch_round = value.consensus_info.vset_switch_round;
+        ValidationSessionId {
+            vset_switch_round,
+            catchain_seqno,
+        }
+    }
+}
+
+impl Ord for ValidationSessionId {
+    #[inline]
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (self.catchain_seqno, self.vset_switch_round)
+            .cmp(&(other.catchain_seqno, other.vset_switch_round))
+    }
+}
+
+impl PartialOrd for ValidationSessionId {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 // TEMP
@@ -22,23 +48,6 @@ impl From<(u32, u32)> for ValidationSessionId {
             catchain_seqno: value.0,
             vset_switch_round: value.1,
         }
-    }
-}
-
-// TEMP
-impl Ord for ValidationSessionId {
-    #[inline]
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        (self.catchain_seqno, self.vset_switch_round)
-            .cmp(&(other.catchain_seqno, other.vset_switch_round))
-    }
-}
-
-// TEMP
-impl PartialOrd for ValidationSessionId {
-    #[inline]
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
     }
 }
 

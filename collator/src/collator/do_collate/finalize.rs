@@ -1639,7 +1639,7 @@ mod vset_update_start {
             else {
                 anyhow::bail!(
                     "Error calculating subset of validators for next session \
-                         (shard_id = {}, catchain_seqno = {catchain_seqno})",
+                    (shard_id = {}, catchain_seqno = {catchain_seqno})",
                     ShardIdent::MASTERCHAIN,
                 );
             };

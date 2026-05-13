@@ -4152,6 +4152,7 @@ dependencies = [
  "tycho-network",
  "tycho-rpc",
  "tycho-slasher",
+ "tycho-slasher-traits",
  "tycho-storage",
  "tycho-types",
  "tycho-util",
