@@ -12,7 +12,6 @@ use tycho_types::models::{
 use tycho_util::FastDashMap;
 
 pub use self::stub_contract::StubSlasherContract;
-use crate::tracing_targets;
 use crate::util::BitSet;
 
 mod stub_contract;
@@ -75,7 +74,7 @@ impl ContractSubscription {
         &self,
         msg_hash: &HashBytes,
         expire_at: u32,
-    ) -> Result<oneshot::Receiver<MessageDeliveryStatus>> {
+    ) -> Result<oneshot::Receiver<MessageDelivered>> {
         use dashmap::mapref::entry::Entry;
 
         let (tx, rx) = oneshot::channel();
@@ -99,48 +98,33 @@ impl ContractSubscription {
         let msg_hash = in_msg.repr_hash();
 
         if let Some((_, pending)) = self.pending_messages.remove(msg_hash) {
-            pending
-                .tx
-                .send(MessageDeliveryStatus::Sent { tx_hash: *tx_hash })
-                .ok();
+            pending.tx.send(MessageDelivered { tx_hash: *tx_hash }).ok();
             return Ok(true);
         }
         Ok(false)
     }
 
     pub fn cleanup_expired_messages(&self, now_sec: u32) {
-        let expired = self
-            .pending_messages
-            .iter()
-            .filter_map(|entry| (entry.expire_at < now_sec).then_some(*entry.key()))
-            .collect::<Vec<_>>();
-
-        let dropped = expired.len();
-        for msg_hash in expired {
-            if let Some((_, pending)) = self.pending_messages.remove(&msg_hash) {
-                pending.tx.send(MessageDeliveryStatus::Expired).ok();
-            }
-        }
-
+        let mut dropped = 0usize;
+        self.pending_messages.retain(|_, msg| {
+            let retain = msg.expire_at >= now_sec;
+            dropped += !retain as usize;
+            retain
+        });
         if dropped > 0 {
-            tracing::warn!(
-                target: tracing_targets::SLASHER,
-                dropped,
-                "dropped pending messages"
-            );
+            tracing::warn!(dropped, "dropped pending messages");
         }
     }
 }
 
 struct PendingMessage {
     expire_at: u32,
-    tx: oneshot::Sender<MessageDeliveryStatus>,
+    tx: oneshot::Sender<MessageDelivered>,
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum MessageDeliveryStatus {
-    Sent { tx_hash: HashBytes },
-    Expired,
+pub struct MessageDelivered {
+    pub tx_hash: HashBytes,
 }
 
 // TODO: Add mempool batches or votes here
