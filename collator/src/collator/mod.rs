@@ -24,8 +24,8 @@ use self::error::CollatorError;
 use self::messages_reader::state::ReaderState;
 use self::messages_reader::{MessagesReader, MessagesReaderContext};
 use self::types::{
-    BlockSerializerCache, CollatorStats, MsgsExecutionParamsStuff, NextCollationFlowStep, PrevData,
-    WorkingState,
+    AbortedContext, BlockSerializerCache, CollatorStats, MsgsExecutionParamsStuff,
+    NextCollationFlowStep, PrevData, WorkingState,
 };
 use crate::internal_queue::types::message::EnqueuedMessage;
 use crate::mempool::{GetAnchorResult, MempoolAdapter, MempoolAnchorId};
@@ -50,7 +50,7 @@ mod statistics;
 mod types;
 
 pub use do_collate::{is_first_block_after_prev_master, work_units};
-pub use error::CollationCancelReason;
+pub use error::CollationAbortReason;
 pub use types::{
     CancelledContext, CollatorResult, DebugCollatorResult, ForceMasterCollation,
     ShardDescriptionExt,
@@ -346,16 +346,27 @@ impl CollatorStdImpl {
         } = self.handle_mempool_genesis(&mut working_state).await?;
 
         // try import init anchors
-        if let NextCollationFlowStep::Cancel(cancel_ctx) = self
+        let try_import_res = self
             .try_import_init_anchors(&mut working_state, anchors_proc_info_opt, &genesis_info)
-            .await?
-        {
-            tracing::info!(target: tracing_targets::COLLATOR,
-                "collation was cancelled by manager on init_collator",
-            );
+            .await?;
+        match try_import_res {
+            NextCollationFlowStep::Cancel(cancel_ctx) => {
+                tracing::info!(target: tracing_targets::COLLATOR,
+                    "collation was cancelled by manager on init_collator",
+                );
 
-            self.delayed_working_state.delay(working_state);
-            return Ok(CollatorResult::Cancelled(cancel_ctx));
+                self.delayed_working_state.delay(working_state);
+                return Ok(CollatorResult::Cancelled(cancel_ctx));
+            }
+            NextCollationFlowStep::Abort(abort_ctx) => {
+                tracing::info!(target: tracing_targets::COLLATOR,
+                    "collation was aborted on init_collator",
+                );
+
+                self.delayed_working_state.delay(working_state);
+                return Ok(CollatorResult::Aborted(abort_ctx));
+            }
+            NextCollationFlowStep::Continue => {}
         }
 
         self.timer = std::time::Instant::now();
@@ -493,8 +504,8 @@ impl CollatorStdImpl {
             // if last processed_to anchor is before the start round for master,
             // then cancel collation because we need to receive more blocks from bc
             else if self.shard_id.is_masterchain() {
-                return Err(CollatorError::Cancelled(
-                    CollationCancelReason::AnchorNotFound(anchors_proc_info.processed_to_anchor_id),
+                return Err(CollatorError::Aborted(
+                    CollationAbortReason::AnchorNotFound(anchors_proc_info.processed_to_anchor_id),
                 ));
             }
             // last processed_to anchor in shard can be before last processed in master
@@ -571,7 +582,7 @@ impl CollatorStdImpl {
                 );
                 let labels = [("workchain", self.shard_id.workchain().to_string())];
                 metrics::counter!("tycho_collator_anchor_import_cancelled_count", &labels[..]).increment(1);
-                Err(CollatorError::Cancelled(CollationCancelReason::ExternalCancel))
+                Err(CollatorError::Cancelled)
             }
         };
 
@@ -579,11 +590,17 @@ impl CollatorStdImpl {
             anchors_info,
             mut anchors_count_above_last_imported_in_current_shard,
         } = match import_res {
-            Err(CollatorError::Cancelled(cancel_reason)) => {
+            Err(CollatorError::Cancelled) => {
                 return Ok(NextCollationFlowStep::Cancel(CancelledContext {
                     prev_mc_block_id: working_state.mc_data.block_id,
                     next_block_id_short: working_state.next_block_id_short,
-                    cancel_reason,
+                }));
+            }
+            Err(CollatorError::Aborted(reason)) => {
+                return Ok(NextCollationFlowStep::Abort(AbortedContext {
+                    prev_mc_block_id: working_state.mc_data.block_id,
+                    next_block_id_short: working_state.next_block_id_short,
+                    reason,
                 }));
             }
             res => res?,
@@ -708,16 +725,27 @@ impl CollatorStdImpl {
             genesis_was_updated = genesis_updated;
 
             // try import init anchors
-            if let NextCollationFlowStep::Cancel(cancel_ctx) = self
+            let try_import_res = self
                 .try_import_init_anchors(&mut working_state, anchors_proc_info_opt, &genesis_info)
-                .await?
-            {
-                tracing::info!(target: tracing_targets::COLLATOR,
-                    "collation was cancelled by manager on resume_collation",
-                );
+                .await?;
+            match try_import_res {
+                NextCollationFlowStep::Cancel(cancel_ctx) => {
+                    tracing::info!(target: tracing_targets::COLLATOR,
+                        "collation was cancelled by manager on resume_collation",
+                    );
 
-                self.delayed_working_state.delay(working_state);
-                return Ok(CollatorResult::Cancelled(cancel_ctx));
+                    self.delayed_working_state.delay(working_state);
+                    return Ok(CollatorResult::Cancelled(cancel_ctx));
+                }
+                NextCollationFlowStep::Abort(abort_ctx) => {
+                    tracing::info!(target: tracing_targets::COLLATOR,
+                        "collation was aborted on resume_collation",
+                    );
+
+                    self.delayed_working_state.delay(working_state);
+                    return Ok(CollatorResult::Aborted(abort_ctx));
+                }
+                NextCollationFlowStep::Continue => {}
             }
 
             working_state
@@ -1251,8 +1279,8 @@ impl CollatorStdImpl {
                     .get_anchor_by_id(processed_to_anchor_id)
                     .await?
                 else {
-                    return Err(CollatorError::Cancelled(
-                        CollationCancelReason::AnchorNotFound(processed_to_anchor_id),
+                    return Err(CollatorError::Aborted(
+                        CollationAbortReason::AnchorNotFound(processed_to_anchor_id),
                     ));
                 };
                 prev_anchor_id = anchor.id;
@@ -1304,8 +1332,8 @@ impl CollatorStdImpl {
             let GetAnchorResult::Exist(anchor) =
                 mpool_adapter.get_next_anchor(prev_anchor_id).await?
             else {
-                return Err(CollatorError::Cancelled(
-                    CollationCancelReason::NextAnchorNotFound(prev_anchor_id),
+                return Err(CollatorError::Aborted(
+                    CollationAbortReason::NextAnchorNotFound(prev_anchor_id),
                 ));
             };
             prev_anchor_id = anchor.id;
@@ -1491,7 +1519,6 @@ impl CollatorStdImpl {
                         let res = CollatorResult::cancelled(
                             working_state.mc_data.block_id,
                             working_state.next_block_id_short,
-                            CollationCancelReason::ExternalCancel,
                         );
                         self.delayed_working_state.delay(working_state);
 
@@ -1677,7 +1704,6 @@ impl CollatorStdImpl {
                 let res = CollatorResult::cancelled(
                     working_state.mc_data.block_id,
                     working_state.next_block_id_short,
-                    CollationCancelReason::ExternalCancel,
                 );
                 self.delayed_working_state.delay(working_state);
 
@@ -1700,10 +1726,10 @@ impl CollatorStdImpl {
                         "next anchor not exist, cancel collation attempts",
                     );
 
-                    let res = CollatorResult::cancelled(
+                    let res = CollatorResult::aborted(
                         working_state.mc_data.block_id,
                         working_state.next_block_id_short,
-                        CollationCancelReason::NextAnchorNotFound(prev_anchor_id),
+                        CollationAbortReason::NextAnchorNotFound(prev_anchor_id),
                     );
                     self.delayed_working_state.delay(working_state);
 
@@ -1958,7 +1984,6 @@ impl CollatorStdImpl {
                             let res = CollatorResult::cancelled(
                                     working_state.mc_data.block_id,
                                     working_state.next_block_id_short,
-                                    CollationCancelReason::ExternalCancel,
                                 );
                             self.delayed_working_state.delay(working_state);
 
@@ -1982,10 +2007,10 @@ impl CollatorStdImpl {
                                     "next anchor not exist, cancel collation attempts",
                                 );
 
-                                let res = CollatorResult::cancelled(
+                                let res = CollatorResult::aborted(
                                     working_state.mc_data.block_id,
                                     working_state.next_block_id_short,
-                                    CollationCancelReason::NextAnchorNotFound(prev_anchor_id),
+                                    CollationAbortReason::NextAnchorNotFound(prev_anchor_id),
                                 );
                                 self.delayed_working_state.delay(working_state);
 

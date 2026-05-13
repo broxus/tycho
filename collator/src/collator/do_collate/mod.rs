@@ -25,7 +25,7 @@ use self::phase::{ActualState, Phase};
 use self::prepare::PrepareState;
 use self::work_units::{DoCollateWu, WuEvent, WuEventData};
 use crate::collator::anchors_cache::AnchorsCacheTransaction;
-use crate::collator::error::{CollationCancelReason, CollatorError};
+use crate::collator::error::CollatorError;
 use crate::collator::messages_reader::state::ReaderState;
 use crate::collator::types::{
     AnchorsCache, BlockCollationData, BlockCollationDataBuilder, BlockSerializerCache,
@@ -232,9 +232,7 @@ impl CollatorStdImpl {
                     .and_then(|(collation_result, pending_queue_diff_tx)| {
                         // exit collation if cancelled before writing queue diff
                         if collation_is_cancelled.check() {
-                            return Err(CollatorError::Cancelled(
-                                CollationCancelReason::ExternalCancel,
-                            ));
+                            return Err(CollatorError::Cancelled);
                         }
                         Ok((collation_result, pending_queue_diff_tx))
                     });
@@ -333,13 +331,21 @@ impl CollatorStdImpl {
             execute_result,
             final_result,
         } = match do_collate_res {
-            Err(CollatorError::Cancelled(reason)) => {
+            Err(CollatorError::Cancelled) => {
                 tracing::info!(target: tracing_targets::COLLATOR,
-                    "collation was cancelled on do_collate",
+                    "collation was cancelled by manager on do_collate",
                 );
 
                 // cancel collation
-                return Ok(CollatorResult::cancelled(
+                return Ok(CollatorResult::cancelled(mc_block_id, next_block_id_short));
+            }
+            Err(CollatorError::Aborted(reason)) => {
+                tracing::info!(target: tracing_targets::COLLATOR,
+                    "collation was aborted on do_collate",
+                );
+
+                // abort collation
+                return Ok(CollatorResult::aborted(
                     mc_block_id,
                     next_block_id_short,
                     reason,
@@ -644,9 +650,7 @@ impl CollatorStdImpl {
 
         // exit collation if cancelled
         if collation_is_cancelled.check() {
-            return Err(CollatorError::Cancelled(
-                CollationCancelReason::ExternalCancel,
-            ));
+            return Err(CollatorError::Cancelled);
         }
 
         let diff_tail_len =

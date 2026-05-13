@@ -28,7 +28,7 @@ use tycho_types::num::Tokens;
 use tycho_util::{FastHashMap, FastHashSet};
 
 use super::do_collate::work_units::PrepareMsgGroupsWu;
-use super::error::CollationCancelReason;
+use super::error::CollationAbortReason;
 use super::messages_reader::MessagesReaderMetrics;
 use crate::collator::do_collate::work_units::{DoCollateWu, ExecuteWu, FinalizeWu};
 use crate::collator::messages_reader::MetricsTimer;
@@ -204,13 +204,20 @@ impl PrevData {
 pub(super) enum NextCollationFlowStep {
     Continue,
     Cancel(CancelledContext),
+    Abort(AbortedContext),
 }
 
 #[derive(Debug)]
 pub struct CancelledContext {
     pub prev_mc_block_id: BlockId,
     pub next_block_id_short: BlockIdShort,
-    pub cancel_reason: CollationCancelReason,
+}
+
+#[derive(Debug)]
+pub struct AbortedContext {
+    pub prev_mc_block_id: BlockId,
+    pub next_block_id_short: BlockIdShort,
+    pub reason: CollationAbortReason,
 }
 
 pub enum CollatorResult {
@@ -222,6 +229,7 @@ pub enum CollatorResult {
         collation_config: Arc<CollationConfig>,
     },
     Cancelled(CancelledContext),
+    Aborted(AbortedContext),
     BlockCandidate {
         collation_result: BlockCollationResult,
     },
@@ -248,6 +256,9 @@ impl std::fmt::Debug for DebugCollatorResult<'_> {
                 .finish(),
             CollatorResult::Cancelled(cancel_ctx) => {
                 f.debug_tuple("Cancelled").field(cancel_ctx).finish()
+            }
+            CollatorResult::Aborted(abort_ctx) => {
+                f.debug_tuple("Aborted").field(abort_ctx).finish()
             }
             CollatorResult::BlockCandidate { .. } => {
                 f.debug_struct("BlockCandidate").finish_non_exhaustive()
@@ -279,15 +290,22 @@ impl CollatorResult {
         }
     }
 
-    pub fn cancelled(
-        prev_mc_block_id: BlockId,
-        next_block_id_short: BlockIdShort,
-        cancel_reason: CollationCancelReason,
-    ) -> Self {
+    pub fn cancelled(prev_mc_block_id: BlockId, next_block_id_short: BlockIdShort) -> Self {
         Self::Cancelled(CancelledContext {
             prev_mc_block_id,
             next_block_id_short,
-            cancel_reason,
+        })
+    }
+
+    pub fn aborted(
+        prev_mc_block_id: BlockId,
+        next_block_id_short: BlockIdShort,
+        reason: CollationAbortReason,
+    ) -> Self {
+        Self::Aborted(AbortedContext {
+            prev_mc_block_id,
+            next_block_id_short,
+            reason,
         })
     }
 }

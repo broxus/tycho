@@ -34,8 +34,8 @@ use self::types::{
 };
 use self::utils::find_us_in_collators_set;
 use crate::collator::{
-    Collator, CollatorContext, CollatorFactory, CollatorResult, DebugCollatorResult,
-    ForceMasterCollation,
+    CollationAbortReason, Collator, CollatorContext, CollatorFactory, CollatorResult,
+    DebugCollatorResult, ForceMasterCollation,
 };
 use crate::internal_queue::types::diff::{DiffZone, QueueDiffWithMessages};
 use crate::internal_queue::types::message::EnqueuedMessage;
@@ -590,6 +590,16 @@ where
                     .await?;
                 Ok(HandleTaskResult::with_tasks(None, collator_tasks))
             }
+            CollatorResult::Aborted(abort_ctx) => {
+                let collator_tasks = self
+                    .handle_collation_aborted(
+                        abort_ctx.prev_mc_block_id,
+                        abort_ctx.next_block_id_short,
+                        abort_ctx.reason,
+                    )
+                    .await?;
+                Ok(HandleTaskResult::with_tasks(None, collator_tasks))
+            }
             CollatorResult::Cancelled(cancel_ctx) => {
                 bail!(
                     "should not process `CollatorResult::Cancelled` in the main flow. cancel_ctx={:?}",
@@ -600,6 +610,58 @@ where
                 self.handle_collated_block_candidate(collation_result).await
             }
         }
+    }
+
+    #[tracing::instrument(skip_all, fields(next_block_id = %next_block_id_short))]
+    async fn handle_collation_aborted(
+        self: &Arc<Self>,
+        _prev_mc_block_id: BlockId,
+        next_block_id_short: BlockIdShort,
+        reason: CollationAbortReason,
+    ) -> Result<Vec<CollatorJoinTask<CF::Collator>>> {
+        tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+            ?reason,
+            "start handle collation aborted",
+        );
+
+        // NOTE: when collation aborted it guarantees
+        //      that uncommitted queue diff was not saved
+        match reason {
+            CollationAbortReason::AnchorNotFound(_)
+            | CollationAbortReason::NextAnchorNotFound(_)
+            | CollationAbortReason::DiffNotFoundInQueue(_) => {
+                // mark collator as cancelled
+                self.set_collator_state(&next_block_id_short.shard, |ac| {
+                    ac.state = CollatorState::Cancelled;
+                });
+
+                // run sync if there are no active collations
+                if !self.has_active_collations() {
+                    tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+                        "no active collations in shards and masterchain, \
+                        will run sync to last applied mc block",
+                    );
+
+                    // get info about applied mc blocks in cache
+                    let (last_collated_mc_block_id, applied_range) = self
+                        .blocks_cache
+                        .get_last_collated_block_and_applied_mc_queue_range();
+
+                    // run sync if has applied mc blocks
+                    return self
+                        .sync_to_applied_mc_block_if_exist(
+                            next_block_id_short,
+                            last_collated_mc_block_id,
+                            applied_range,
+                            ProcessMcStateUpdateMode::StartCollation {
+                                reset_collators: true,
+                            },
+                        )
+                        .await;
+                }
+            }
+        }
+        Ok(vec![])
     }
 
     #[tracing::instrument(skip_all, fields(next_block_id = %next_block_id_short, ct = anchor_chain_time, ?force_mc_block))]

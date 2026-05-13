@@ -3,17 +3,18 @@ use tycho_types::models::BlockIdShort;
 use crate::mempool::MempoolAnchorId;
 
 #[derive(Debug)]
-pub enum CollationCancelReason {
+pub enum CollationAbortReason {
     AnchorNotFound(MempoolAnchorId),
     NextAnchorNotFound(MempoolAnchorId),
-    ExternalCancel,
     DiffNotFoundInQueue(BlockIdShort),
 }
 
 #[derive(thiserror::Error, Debug)]
 pub enum CollatorError {
-    #[error("Cancelled(reason: {0:?})")]
-    Cancelled(CollationCancelReason),
+    #[error("Aborted(reason: {0:?})")]
+    Aborted(CollationAbortReason),
+    #[error("Cancelled externally")]
+    Cancelled,
     #[error(transparent)]
     Anyhow(#[from] anyhow::Error),
 }
