@@ -6,6 +6,7 @@ use axum::extract::{ConnectInfo, Request};
 use axum::http::{Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use axum_client_ip::CfConnectingIp;
 use serde::{Deserialize, Serialize};
 use tycho_util::rate_limit::{
     RateLimitConfig, RateLimitPolicy, RateLimitVerdict, RateLimiter, TrafficLimit,
@@ -156,17 +157,10 @@ enum RpcTrafficClass {
 
 pub async fn rate_limit(
     axum::extract::State(limiter): axum::extract::State<RpcRateLimiter>,
+    CfConnectingIp(ip): CfConnectingIp,
     req: Request,
     next: Next,
 ) -> Response {
-    let Some(ip) = req
-        .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|ConnectInfo(addr)| addr.ip())
-    else {
-        return next.run(req).await;
-    };
-
     let Some(class) = RpcRateLimiter::classify_request(&req) else {
         return next.run(req).await;
     };

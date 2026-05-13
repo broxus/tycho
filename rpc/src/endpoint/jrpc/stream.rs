@@ -9,6 +9,7 @@ use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use axum_client_ip::CfConnectingIp;
 use futures_util::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -198,8 +199,8 @@ where
 pub async fn stream_route<S>(
     State(state): State<RpcState>,
     Query(params): Query<StreamParams>,
+    CfConnectingIp(ip): CfConnectingIp,
     Extension(active_streams): Extension<ActiveStreamLimiter>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Response
 where
     RpcState: FromRef<S>,
@@ -208,7 +209,7 @@ where
     let subs = Arc::<RpcSubscriptions>::from_ref(&state);
     let mc_rx = state.subscribe_mc_tick();
 
-    let Some(stream_guard) = active_streams.try_acquire(addr.ip()) else {
+    let Some(stream_guard) = active_streams.try_acquire(ip) else {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     };
 
