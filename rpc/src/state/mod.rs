@@ -21,6 +21,7 @@ use tycho_core::global_config::ZerostateId;
 use tycho_core::storage::{CoreStorage, KeyBlocksDirection};
 use tycho_executor::{Executor, ExecutorInspector, ExecutorParams, ParsedConfig, TxError};
 use tycho_rpc_subscriptions::SubscriberManagerConfig;
+use tycho_types::cell::Lazy;
 use tycho_types::models::*;
 use tycho_types::prelude::*;
 use tycho_util::FastHashMap;
@@ -347,34 +348,38 @@ impl RpcState {
         };
 
         // Get the current account state.
-        let (shard_account, libraries, mc_ref_handle) = match self.inner.get_account_state(&dst)? {
+        let loaded = self.inner.get_account_state(&dst)?;
+
+        let (shard_account, mc_ref_handle) = match &loaded {
             LoadedAccountState::Found {
                 state,
                 mc_ref_handle,
                 ..
-            } => {
-                let libraries = if dst.is_masterchain() {
-                    self.inner
-                        .mc_accounts
-                        .read()
-                        .as_ref()
-                        .map(|c| c.libraries.clone())
-                        .unwrap_or_default()
-                } else {
-                    let cache = self.inner.sc_accounts.read();
-                    cache
-                        .iter()
-                        .find(|(shard, _)| shard.contains_account(&dst.address))
-                        .map(|(_, c)| c.libraries.clone())
-                        .unwrap_or_default()
-                };
-                (state, libraries, mc_ref_handle)
-            }
-            LoadedAccountState::NotFound { .. } => {
-                return Err(RpcStateError::bad_request(anyhow::anyhow!(
-                    "account not exist"
-                )));
-            }
+            } => (state.clone(), Some(mc_ref_handle.clone())),
+            LoadedAccountState::NotFound { .. } => (
+                ShardAccount {
+                    account: Lazy::new(&OptionalAccount::EMPTY).unwrap(),
+                    last_trans_hash: HashBytes::ZERO,
+                    last_trans_lt: 0,
+                },
+                None,
+            ),
+        };
+
+        let libraries = if dst.is_masterchain() {
+            self.inner
+                .mc_accounts
+                .read()
+                .as_ref()
+                .map(|c| c.libraries.clone())
+                .unwrap_or_default()
+        } else {
+            let cache = self.inner.sc_accounts.read();
+            cache
+                .iter()
+                .find(|(shard, _)| shard.contains_account(&dst.address))
+                .map(|(_, c)| c.libraries.clone())
+                .unwrap_or_default()
         };
 
         let mc_info = self.inner.mc_info.read().clone();
