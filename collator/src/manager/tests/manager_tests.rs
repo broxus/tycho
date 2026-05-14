@@ -34,10 +34,11 @@ use crate::internal_queue::types::message::{EnqueuedMessage, InternalMessageValu
 use crate::internal_queue::types::router::PartitionRouter;
 use crate::internal_queue::types::stats::DiffStatistics;
 use crate::manager::blocks_cache::BlocksCache;
-use crate::manager::types::{BlockCacheStoreResult, CollationSyncState, NextCollationStep};
-use crate::manager::{
-    CollatedBlockInfo, CollationStatus, GlobalCapabilitiesExt, McBlockSubgraphExtract,
+use crate::manager::state_update_handler::GlobalCapabilitiesExt;
+use crate::manager::types::{
+    BlockCacheStoreResult, CollationSyncState, McBlockSubgraphExtract, NextCollationStep,
 };
+use crate::manager::{CollatedBlockInfo, CollationStatus};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::{CollatorSyncContext, InitiatedStoreState, StateNodeAdapter};
 use crate::test_utils::{create_test_queue_adapter, try_init_test_tracing};
