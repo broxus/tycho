@@ -136,6 +136,7 @@ impl MempoolConfigBuilder {
         hasher.update(&(genesis_info.genesis_millis as u128).to_be_bytes());
         hasher.update(&(consensus.clock_skew_millis.get() as u128).to_be_bytes());
         hasher.update(&(consensus.payload_batch_bytes.get() as u128).to_be_bytes());
+        hasher.update(&(consensus._unused as u128).to_be_bytes());
         hasher.update(&(consensus.commit_history_rounds.get() as u128).to_be_bytes());
         hasher.update(&(consensus.deduplicate_rounds as u128).to_be_bytes());
         hasher.update(&(consensus.max_consensus_lag_rounds.get() as u128).to_be_bytes());

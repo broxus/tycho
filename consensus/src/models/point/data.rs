@@ -6,7 +6,8 @@ use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
 use super::link::*;
-use crate::models::point::proto_utils::{digests_map, signatures_map};
+use crate::engine::MempoolConfig;
+use crate::models::point::proto_utils::{digests_map, signatures_map, u8_as_u32};
 use crate::models::point::{Digest, Round, UnixTime, proto_utils};
 use crate::models::{PeerCount, PointId, Signature};
 
@@ -36,11 +37,11 @@ pub struct PointData {
     pub anchor_time: UnixTime,
 }
 
-/// | property \ role   | regular      | proof      | trigger      | genesis      |
-/// |-------------------|--------------|------------|--------------|--------------|
-/// | anchor proof      | (in)direct   | self       | prev point   | self         |
-/// | anchor trigger    | (in)direct   | (in)direct | self         | self         |
-/// | chained an. proof | inapplicable | -3+ rounds | inapplicable | inapplicable |
+/// | property \ role   | regular      | proof      | trigger      | sticky     | genesis      |
+/// |-------------------|--------------|------------|--------------|------------|--------------|
+/// | anchor proof      | (in)direct   | self       | prev point   | self       | self         |
+/// | anchor trigger    | (in)direct   | (in)direct | self         | self       | self         |
+/// | chained an. proof | inapplicable | -3+ rounds | inapplicable | prev point | inapplicable |
 #[derive(Clone, Debug, TlRead, TlWrite, Serialize)]
 #[cfg_attr(test, derive(PartialEq))]
 #[tl(boxed, scheme = "proto.tl")]
@@ -59,8 +60,16 @@ pub enum PointRole {
         /// same as for Regular point
         anchor_trigger: AnchorLink,
     },
+    /// the last trigger in sticky chain; the single one if no sticky anchors
     #[tl(id = "consensus.pointRole.trigger")]
     AnchorTrigger,
+    /// both a proof and a trigger, may reside between Proof and Trigger;
+    /// may be the last in chain if prematurely torn by a leader fault (skipped round, gone off)
+    #[tl(id = "consensus.pointRole.sticky")]
+    Sticky {
+        #[tl(with = "u8_as_u32")]
+        seq_no: u8,
+    },
     #[tl(id = "consensus.pointRole.genesis")]
     Genesis,
 }
@@ -79,7 +88,7 @@ impl PointRole {
                 AnchorLink::Direct(through) => Some(AnyLink::Direct(*through)),
                 AnchorLink::Indirect(link) => Some(AnyLink::Indirect(link)),
             },
-            Self::AnchorProof { .. } | Self::Genesis => Some(AnyLink::ToSelf),
+            Self::AnchorProof { .. } | Self::Sticky { .. } | Self::Genesis => Some(AnyLink::ToSelf),
             Self::AnchorTrigger => None,
         }
     }
@@ -92,7 +101,7 @@ impl PointRole {
                     AnchorLink::Indirect(link) => AnyLink::Indirect(link),
                 }
             }
-            Self::AnchorTrigger | Self::Genesis => AnyLink::ToSelf,
+            Self::AnchorTrigger | Self::Sticky { .. } | Self::Genesis => AnyLink::ToSelf,
         }
     }
 
@@ -102,13 +111,14 @@ impl PointRole {
                 ChainedProofLink::Inapplicable
             }
             Self::AnchorProof { anchor_proof, .. } => ChainedProofLink::Indirect(anchor_proof),
+            Self::Sticky { seq_no } => ChainedProofLink::PrevPoint { chained: *seq_no },
         }
     }
 
     fn requires_prev_point(&self) -> bool {
         match self {
             Self::Regular { .. } | Self::Genesis => false,
-            Self::AnchorProof { .. } | Self::AnchorTrigger => true,
+            Self::AnchorProof { .. } | Self::AnchorTrigger | Self::Sticky { .. } => true,
         }
     }
 }
@@ -162,18 +172,27 @@ impl PointData {
         is_leader: bool,
         has_prev_point: bool,
         round: Round,
+        conf: &MempoolConfig,
     ) -> bool {
+        let is_proof_far_enough = |proof_round: Round| {
+            let rounds_to_proof = (round - proof_round.0).0;
+            if conf.consensus._unused == 0 {
+                rounds_to_proof > 2
+            } else {
+                rounds_to_proof > 3
+            }
+        };
         match &self.role {
             PointRole::Regular { .. } => !{
                 is_leader
                     && has_prev_point // optional for Regular and encoded for AnchorProof
-                    && (self.anchor_round(AnchorStageRole::Proof, round) < round.prev().prev())
+                    && is_proof_far_enough(self.anchor_round(AnchorStageRole::Proof, round))
             },
             PointRole::AnchorProof { anchor_proof, .. } => {
-                is_leader && (anchor_proof.to.round < round.prev().prev())
+                is_leader && is_proof_far_enough(anchor_proof.to.round)
             }
             // role encodes links
-            PointRole::AnchorTrigger | PointRole::Genesis => true,
+            PointRole::AnchorTrigger | PointRole::Sticky { .. } | PointRole::Genesis => true,
         }
     }
 
@@ -202,6 +221,11 @@ impl PointData {
 
         match &self.role.chained_anchor_proof() {
             ChainedProofLink::Inapplicable => {}
+            ChainedProofLink::PrevPoint { .. } => {
+                if !has_prev_point {
+                    return Err(StructureIssue::ChainedProof(PointMap::Includes));
+                }
+            }
             ChainedProofLink::Indirect(indirect) => {
                 if indirect.to.round >= round.prev().prev() {
                     return Err(StructureIssue::TooCloseChainedProof(indirect.to.round));

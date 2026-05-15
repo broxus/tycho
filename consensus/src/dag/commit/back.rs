@@ -117,8 +117,7 @@ impl DagBack {
         &self,
         trigger: &PointInfo,
     ) -> EngineResult<VecDeque<EnqueuedAnchor>> {
-        let bottom_round =
-            (self.last_committed_proof).map_or(self.bottom_round(), |proof| proof.next());
+        let bottom_round = (self.last_committed_proof).map_or(self.bottom_round(), |proof| proof);
 
         let range = RangeInclusive::new(
             // exclude used or unusable proof (it may be out of range)
@@ -176,7 +175,7 @@ impl DagBack {
                 panic!("validate() is broken: anchor proof doesn't have a prev point");
             };
 
-            let Some((_, anchor_dag_round)) = rev_iter.next() else {
+            let Some((_, anchor_dag_round)) = rev_iter.peek() else {
                 assert!(
                     anchor_id.round <= self.bottom_round(), // bottom is excluded by iter bound
                     "{} cannot retrieve anchor {:?}, bottom at {bottom_round:?}",

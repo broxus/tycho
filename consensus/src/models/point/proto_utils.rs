@@ -168,3 +168,27 @@ mod hash_map {
         Ok(items)
     }
 }
+
+pub mod u8_as_u32 {
+    use tl_proto::TlError;
+
+    use super::*;
+
+    pub fn size_hint(_: &u8) -> usize {
+        4
+    }
+
+    pub fn write<P>(short: &u8, packet: &mut P)
+    where
+        P: TlPacket,
+    {
+        packet.write_u32(*short as u32);
+    }
+
+    pub fn read(data: &mut &[u8]) -> TlResult<u8> {
+        match u8::try_from(u32::read_from(data)?) {
+            Ok(short) => Ok(short),
+            Err(_) => Err(TlError::InvalidData),
+        }
+    }
+}

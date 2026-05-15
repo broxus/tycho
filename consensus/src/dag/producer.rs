@@ -14,6 +14,7 @@ pub struct LastOwnPoint {
     pub digest: Digest,
     pub evidence: FastHashMap<PeerId, Signature>,
     pub includes: FastHashMap<PeerId, Digest>,
+    pub sticky_anchors: Option<u8>,
     pub round: Round,
     pub signers: PeerCount,
 }
@@ -103,23 +104,43 @@ impl Producer {
             Self::link(current_round, &includes, &witness, AnchorStageRole::Trigger);
 
         let role = if proven_vertex.is_some() {
+            let last_own_point = last_own_point.as_ref().expect("guarded by `proven_vertex`");
             let is_leader = current_leader.is_some_and(|leader| leader == local_id);
             let is_trigger = matches!(&anchor_proof,
                 AnchorLink::Direct(Through::Includes(author))
                 if author == local_id
             );
-            let is_proof_far_enough = matches!(&anchor_proof,
-                AnchorLink::Indirect(link)
-                if link.to.round < current_round.prev().prev()
-            );
+            let is_proof_far_enough = match &anchor_proof {
+                AnchorLink::Indirect(link) => {
+                    let rounds_to_proof = (current_round - link.to.round.0).0;
+                    if conf.consensus._unused == 0 {
+                        rounds_to_proof > 2
+                    } else {
+                        rounds_to_proof > 3
+                    }
+                }
+                AnchorLink::Direct(_) => false,
+            };
 
-            if is_trigger {
-                PointRole::AnchorTrigger
+            if let Some(sticky_anchors) = last_own_point.sticky_anchors {
+                if sticky_anchors.saturating_add(1) < conf.consensus._unused {
+                    PointRole::Sticky {
+                        seq_no: sticky_anchors + 1,
+                    }
+                } else {
+                    PointRole::AnchorTrigger
+                }
+            } else if is_trigger {
+                if last_own_point.sticky_anchors.is_none() && 0 < conf.consensus._unused {
+                    PointRole::Sticky { seq_no: 0 }
+                } else {
+                    PointRole::AnchorTrigger
+                }
             } else if is_leader && is_proof_far_enough {
                 PointRole::AnchorProof {
                     anchor_proof: match anchor_proof {
                         AnchorLink::Indirect(link) => link,
-                        AnchorLink::Direct(_) => unreachable!("guarded by ref match"),
+                        AnchorLink::Direct(_) => unreachable!("guarded by bool check"),
                     },
                     anchor_trigger,
                 }

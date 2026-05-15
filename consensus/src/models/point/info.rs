@@ -6,6 +6,7 @@ use tl_proto::{TlRead, TlWrite};
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
+use crate::engine::MempoolConfig;
 use crate::models::{
     AnchorStageRole, AnyLink, ChainedProofLink, Digest, EvidenceSigError, IndirectLink, PointData,
     PointKey, PointRole, Round, Signature, StructureIssue, Through, UnixTime,
@@ -161,8 +162,8 @@ impl PointInfo {
         if is_ok { Ok(()) } else { Err(EvidenceSigError) }
     }
 
-    pub fn is_proof_link_ok(&self, is_leader: bool) -> bool {
-        (self.0.data).is_proof_link_ok(is_leader, self.prev_digest().is_some(), self.round())
+    pub fn is_proof_link_ok(&self, is_leader: bool, conf: &MempoolConfig) -> bool {
+        (self.0.data).is_proof_link_ok(is_leader, self.prev_digest().is_some(), self.round(), conf)
     }
 
     pub fn check_structure(&self, is_genesis: bool) -> Result<(), StructureIssue> {
@@ -200,14 +201,22 @@ impl PointInfo {
 
     pub fn indirect_anchor_proof(&self) -> Option<&IndirectLink> {
         match self.0.data.role.chained_anchor_proof() {
-            ChainedProofLink::Inapplicable => None,
+            ChainedProofLink::Inapplicable | ChainedProofLink::PrevPoint { .. } => None,
             ChainedProofLink::Indirect(link) => Some(link),
+        }
+    }
+
+    pub fn sticky_anchors(&self) -> Option<u8> {
+        match self.0.data.role.chained_anchor_proof() {
+            ChainedProofLink::Inapplicable | ChainedProofLink::Indirect(_) => None,
+            ChainedProofLink::PrevPoint { chained } => Some(chained),
         }
     }
 
     pub fn chained_anchor_proof_to_round(&self) -> Option<Round> {
         match &self.0.data.role.chained_anchor_proof() {
             ChainedProofLink::Inapplicable => None,
+            ChainedProofLink::PrevPoint { .. } => Some(self.round().prev()),
             ChainedProofLink::Indirect(link) => Some(link.to.round),
         }
     }
@@ -215,6 +224,9 @@ impl PointInfo {
     pub fn chained_anchor_proof_to(&self) -> Option<PointId> {
         match &self.0.data.role.chained_anchor_proof() {
             ChainedProofLink::Inapplicable => None,
+            ChainedProofLink::PrevPoint { .. } => {
+                Some((self.prev_id()).expect("Coding error: usage of ill-formed point"))
+            }
             ChainedProofLink::Indirect(link) => Some(link.to),
         }
     }
@@ -222,6 +234,12 @@ impl PointInfo {
     pub fn chained_anchor_proof_to_through(&self) -> Option<(PointId, Option<PointId>)> {
         match &self.0.data.role.chained_anchor_proof() {
             ChainedProofLink::Inapplicable => None,
+            ChainedProofLink::PrevPoint { .. } => {
+                let prev_id = self
+                    .prev_id()
+                    .expect("Coding error: usage of ill-formed point");
+                Some((prev_id, None))
+            }
             ChainedProofLink::Indirect(link) => {
                 let through = self
                     .through_id(&link.path)
