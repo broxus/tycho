@@ -36,6 +36,7 @@ use crate::internal_queue::types::router::PartitionRouter;
 use crate::internal_queue::types::stats::DiffStatistics;
 use crate::manager::blocks_cache::BlocksCache;
 use crate::manager::state_update_handler::GlobalCapabilitiesExt;
+use crate::manager::sync::ShouldSyncToAppliedMcBlock;
 use crate::manager::types::{
     BlockCacheStoreResult, CollationSyncState, McBlockSubgraphExtract, NextCollationStep,
 };
@@ -1929,12 +1930,14 @@ async fn test_should_not_sync_without_applied_range_after_known_sync() {
         manager.get_top_mc_block_id_for_next_collation(store_res.last_collated_mc_block_id);
 
     assert_eq!(top_mc_block_id_for_next_collation, Some(mc_block_id));
-    assert!(!manager.check_should_sync_to_last_applied_mc_block(
-        &store_res,
-        top_mc_block_id_for_next_collation,
-        1,
-        None,
-    ));
+    assert!(
+        manager.check_should_sync_to_last_applied_mc_block(
+            &store_res,
+            top_mc_block_id_for_next_collation,
+            1,
+            None,
+        ) != ShouldSyncToAppliedMcBlock::Yes
+    );
 }
 
 #[tokio::test]
@@ -3655,6 +3658,237 @@ impl Validator for NoopValidator {
     }
 }
 
+type CleanupTestCollationManager = CollationManager<CollatorStdImplFactory, NoopValidator>;
+
+#[tokio::test]
+async fn test_cache_gc_on_skipped_sync() {
+    try_init_test_tracing(tracing_subscriber::filter::LevelFilter::TRACE);
+
+    let (mq_adapter, _tmp_dir) = create_test_queue_adapter::<EnqueuedMessage>()
+        .await
+        .unwrap();
+    let msgs_factory =
+        TestMessageFactory::new(BTreeMap::new(), |info, cell| EnqueuedMessage { info, cell });
+    let state_adapter = Arc::new(TestStateNodeAdapter::default());
+    let blocks_cache = BlocksCache::new(&Default::default());
+
+    let shard = ShardIdent::new_full(0);
+    let mut transfers_wallets = BTreeMap::<u8, IntAddr>::new();
+    for i in 100..110 {
+        transfers_wallets.insert(i, IntAddr::Std(StdAddr::new(0, HashBytes([i; 32]))));
+    }
+    for i in 110..120 {
+        transfers_wallets.insert(i, IntAddr::Std(StdAddr::new(-1, HashBytes([i; 32]))));
+    }
+
+    let mut test_adapter = TestAdapter {
+        state_adapter,
+        mq_adapter,
+        msgs_factory,
+        blocks_cache,
+        account_lt: 0,
+        transfers_wallets,
+        processed_to_stuff: TestProcessedToStuff::new(shard),
+        last_sc_block_id: BlockId {
+            shard,
+            seqno: 0,
+            root_hash: HashBytes::default(),
+            file_hash: HashBytes::default(),
+        },
+        last_mc_block_id: BlockId {
+            shard: ShardIdent::MASTERCHAIN,
+            seqno: 0,
+            root_hash: HashBytes::default(),
+            file_hash: HashBytes::default(),
+        },
+        last_sc_blocks: BTreeMap::new(),
+        last_mc_blocks: BTreeMap::new(),
+    };
+
+    let generated_block_info = test_adapter.gen_shard_block(
+        shard,
+        1,
+        (test_adapter.last_sc_block_id, 0),
+        (test_adapter.last_mc_block_id, 0),
+        10,
+    );
+    let StoreBlockResult {
+        block_stuff: last_sc_block_stuff,
+        ..
+    } = test_adapter.store_as_candidate(generated_block_info);
+
+    test_adapter
+        .processed_to_stuff
+        .set_processed_to(shard, test_adapter.last_sc_blocks.get(&1).unwrap());
+
+    let generated_block_info = test_adapter.gen_shard_block(
+        shard,
+        2,
+        last_sc_block_stuff.prev_block_info(),
+        (test_adapter.last_mc_block_id, 0),
+        10,
+    );
+    let StoreBlockResult {
+        block_stuff: last_sc_block_stuff,
+        ..
+    } = test_adapter.store_as_candidate(generated_block_info);
+
+    let generated_block_info = test_adapter.gen_shard_block(
+        shard,
+        3,
+        last_sc_block_stuff.prev_block_info(),
+        (test_adapter.last_mc_block_id, 0),
+        10,
+    );
+    let StoreBlockResult {
+        block_stuff: last_sc_block_stuff,
+        ..
+    } = test_adapter.store_as_candidate(generated_block_info);
+
+    test_adapter.processed_to_stuff.set_processed_to(
+        ShardIdent::MASTERCHAIN,
+        test_adapter.last_sc_blocks.get(&3).unwrap(),
+    );
+
+    let generated_block_info = test_adapter.gen_master_block(
+        1,
+        (test_adapter.last_mc_block_id, 0),
+        &last_sc_block_stuff.data,
+        true,
+        false,
+        5,
+    );
+    let mc_block_id_1 = *generated_block_info.block_stuff.id();
+    let master1_queue_diff = generated_block_info.queue_diff_stuff.clone();
+    let master1_queue_diff_with_msgs = generated_block_info.queue_diff_with_msgs.clone();
+    let master1_statistics = DiffStatistics::from_diff(
+        &master1_queue_diff_with_msgs,
+        mc_block_id_1.shard,
+        master1_queue_diff.diff().min_message,
+        master1_queue_diff.diff().max_message,
+    );
+    test_adapter
+        .mq_adapter
+        .apply_diff(
+            master1_queue_diff_with_msgs,
+            mc_block_id_1.as_short_id(),
+            master1_queue_diff.diff_hash(),
+            master1_statistics,
+            Some(DiffZone::Both),
+        )
+        .unwrap();
+    let StoreBlockResult {
+        block_stuff: last_mc_block_stuff,
+        ..
+    } = test_adapter
+        .store_as_received(&mc_block_id_1, generated_block_info)
+        .await;
+
+    let generated_block_info = test_adapter.gen_shard_block(
+        shard,
+        4,
+        last_sc_block_stuff.prev_block_info(),
+        last_mc_block_stuff.prev_block_info(),
+        10,
+    );
+    let StoreBlockResult {
+        block_stuff: last_sc_block_stuff,
+        ..
+    } = test_adapter.store_as_candidate(generated_block_info);
+
+    let generated_block_info = test_adapter.gen_master_block(
+        2,
+        last_mc_block_stuff.prev_block_info(),
+        &last_sc_block_stuff.data,
+        true,
+        false,
+        5,
+    );
+    let mc_block_id_2 = *generated_block_info.block_stuff.id();
+    let StoreBlockResult {
+        block_stuff: _last_mc_block_stuff,
+        ..
+    } = test_adapter
+        .store_as_received(&mc_block_id_2, generated_block_info)
+        .await;
+
+    let TestAdapter {
+        state_adapter,
+        mq_adapter,
+        msgs_factory: _,
+        blocks_cache,
+        account_lt: _,
+        transfers_wallets: _,
+        processed_to_stuff: _,
+        last_sc_block_id: _,
+        last_mc_block_id: _,
+        last_sc_blocks: _last_sc_blocks,
+        last_mc_blocks,
+    } = test_adapter;
+    let mempool_adapter = MempoolAdapterStubImpl::with_stub_externals(Some(0));
+    let keypair = Arc::new(KeyPair::from(&SecretKey::from_bytes([7; 32])));
+    let config = crate::types::CollatorConfig {
+        fast_sync: false,
+        ..Default::default()
+    };
+
+    let mut manager = CleanupTestCollationManager::create(
+        keypair,
+        config,
+        mq_adapter,
+        TestStateNodeAdapterFactory::new(state_adapter),
+        mempool_adapter,
+        NoopValidator,
+        CollatorStdImplFactory {
+            wu_tuner_event_sender: None,
+        },
+        None,
+    );
+    Arc::get_mut(&mut manager)
+        .expect("manager should be uniquely owned")
+        .blocks_cache = blocks_cache;
+
+    let last_received_mc_block_id = BlockId {
+        shard: ShardIdent::MASTERCHAIN,
+        seqno: 4,
+        root_hash: HashBytes::default(),
+        file_hash: HashBytes::default(),
+    };
+    manager.update_last_received_mc_block_seqno(&last_received_mc_block_id);
+
+    let (last_collated_mc_block_id, applied_mc_queue_range) = manager
+        .blocks_cache
+        .get_last_collated_block_and_applied_mc_queue_range();
+    let store_res = BlockCacheStoreResult {
+        received_and_collated: false,
+        block_mismatch: false,
+        last_collated_mc_block_id,
+        applied_mc_queue_range,
+    };
+
+    assert!(matches!(
+        manager.check_should_sync_to_last_applied_mc_block(&store_res, None, 3, None,),
+        ShouldSyncToAppliedMcBlock::NoBecauseNewerReceived
+    ));
+
+    let cleanup_res = manager
+        .gc_applied_blocks_with_not_required_diffs(
+            store_res.last_collated_mc_block_id,
+            store_res.applied_mc_queue_range,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(cleanup_res, Some(*last_mc_blocks.get(&1).unwrap().id()));
+    assert_eq!(
+        manager
+            .blocks_cache
+            .get_last_collated_block_and_applied_mc_queue_range()
+            .1,
+        Some((2, 2))
+    );
+}
+
 trait BlockStuffExt {
     fn end_lt(&self) -> Lt;
     fn prev_block_info(&self) -> (BlockId, Lt);
@@ -4081,6 +4315,32 @@ fn create_queue_diff_with_msgs<V: InternalMessageValue>(
             .collect(),
         processed_to,
         partition_router: PartitionRouter::default(),
+    }
+}
+
+struct TestStateNodeAdapterFactory(Mutex<Option<TestStateNodeAdapter>>);
+
+impl TestStateNodeAdapterFactory {
+    fn new(state_adapter: Arc<TestStateNodeAdapter>) -> Self {
+        let state_adapter = match Arc::try_unwrap(state_adapter) {
+            Ok(state_adapter) => state_adapter,
+            _ => panic!("state adapter should be unique"),
+        };
+        Self(Mutex::new(Some(state_adapter)))
+    }
+}
+
+impl crate::state_node::StateNodeAdapterFactory for TestStateNodeAdapterFactory {
+    type Adapter = TestStateNodeAdapter;
+
+    fn create(
+        &self,
+        _listener: Arc<dyn crate::state_node::StateNodeEventListener>,
+    ) -> Self::Adapter {
+        self.0
+            .lock()
+            .take()
+            .expect("state adapter should be available")
     }
 }
 

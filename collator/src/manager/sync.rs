@@ -240,15 +240,15 @@ where
         top_mc_block_id_for_next_collation: Option<BlockId>,
         required_min_mc_block_delta: BlockSeqno,
         is_key_block: Option<bool>,
-    ) -> bool {
+    ) -> ShouldSyncToAppliedMcBlock {
         // do not sync to last applied mc block if newer already received
         if self.has_newer_received_mc_block(store_res.applied_mc_queue_range) {
-            return false;
+            return ShouldSyncToAppliedMcBlock::NoBecauseNewerReceived;
         }
 
         // should sync if collated block mismatched
         if store_res.block_mismatch {
-            return true;
+            return ShouldSyncToAppliedMcBlock::Yes;
         }
 
         let has_active_collations = self.has_active_collations();
@@ -282,7 +282,7 @@ where
                         applied_range_end, top_mc_block_id_for_next_collation.seqno,
                         applied_range_end_delta, required_min_mc_block_delta,
                     );
-                    false
+                    ShouldSyncToAppliedMcBlock::No
                 } else {
                     tracing::info!(target: tracing_targets::COLLATION_MANAGER,
                         last_synced_to_mc_block_id = ?last_synced_to_mc_block_id,
@@ -295,7 +295,7 @@ where
                         applied_range_end, top_mc_block_id_for_next_collation.seqno,
                         applied_range_end_delta, required_min_mc_block_delta,
                     );
-                    true
+                    ShouldSyncToAppliedMcBlock::Yes
                 }
             } else {
                 // should collate next own mc block because no applied ahead
@@ -307,7 +307,7 @@ where
                     is_key_block = ?is_key_block,
                     "check_should_sync: should collate next own mc block after because nothing applied ahead",
                 );
-                false
+                ShouldSyncToAppliedMcBlock::No
             }
         } else if store_res.applied_mc_queue_range.is_some() {
             tracing::info!(target: tracing_targets::COLLATION_MANAGER,
@@ -318,7 +318,7 @@ where
                 is_key_block = ?is_key_block,
                 "check_should_sync: should sync to last applied mc block when no last collated or prev sync to",
             );
-            true
+            ShouldSyncToAppliedMcBlock::Yes
         } else {
             tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
                 last_synced_to_mc_block_id = ?last_synced_to_mc_block_id,
@@ -329,7 +329,7 @@ where
                 "check_should_sync: should continue local collation when no last collated or prev sync to \
                 and nothing applied ahead",
             );
-            false
+            ShouldSyncToAppliedMcBlock::No
         }
     }
 
@@ -641,4 +641,127 @@ where
             all_shards_processed_to_by_partitions,
         )
     }
+
+    /// Returns top removed master block id during cleanup
+    pub(super) async fn gc_applied_blocks_with_not_required_diffs(
+        &self,
+        last_collated_mc_block_id: Option<BlockId>,
+        applied_range: Option<(BlockSeqno, BlockSeqno)>,
+    ) -> Result<Option<BlockId>> {
+        let Some(applied_range) = applied_range else {
+            return Ok(None);
+        };
+
+        tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+            ?applied_range,
+            "start cache cleanup after sync was skipped when newer master block received",
+        );
+
+        let last_applied_mc_block_key = BlockIdShort {
+            shard: ShardIdent::MASTERCHAIN,
+            seqno: applied_range.1,
+        };
+
+        // get internals processed_to from master and all shards
+        // for last applied master block
+        let all_shards_processed_to_by_partitions =
+            Self::get_all_shards_processed_to_by_partitions_for_mc_block(
+                &last_applied_mc_block_key,
+                &self.blocks_cache,
+                self.state_node_adapter.clone(),
+            )
+            .await?;
+
+        // find internals min processed_to
+        let min_processed_to_by_shards =
+            find_min_processed_to_by_shards(&all_shards_processed_to_by_partitions);
+
+        // if `fast_sync` is enabled then take applied to boundary from queue
+        let queue_diffs_applied_to_top_blocks = if self.config.fast_sync
+            && let Some(applied_to_mc_block_id) =
+                self.get_queue_diffs_applied_to_mc_block_id(last_collated_mc_block_id)?
+        {
+            Self::get_top_blocks_seqno(
+                &applied_to_mc_block_id,
+                &self.blocks_cache,
+                self.state_node_adapter.clone(),
+            )
+            .await?
+        } else {
+            None
+        }
+        .unwrap_or_default();
+
+        // check master blocks and their top shard blocks one by one
+        let mut top_removed_mc_block_id = None;
+
+        let init_mc_block_id = self.state_node_adapter.load_init_block_id();
+        let zerostate_mc_seqno = self.state_node_adapter.zerostate_id().seqno;
+
+        let mut from_seqno = applied_range.0;
+        loop {
+            // read front master block subgraph info from cache
+            let Some(mc_block_subgraph_view) = self
+                .blocks_cache
+                .peek_front_applied_mc_block_subgraph(from_seqno)?
+            else {
+                break;
+            };
+
+            // check if top blocks diffs required for queue restore
+            if !Self::check_top_blocks_diffs_not_required(
+                &self.mq_adapter,
+                &mc_block_subgraph_view,
+                &min_processed_to_by_shards,
+                &queue_diffs_applied_to_top_blocks,
+                init_mc_block_id,
+                zerostate_mc_seqno,
+            )
+            .await?
+            {
+                break;
+            }
+
+            // if top blocks diffs are not required for queue restore then we can remove subgraph
+            // we do not need it for sync anymore
+            let (mc_block_subgraph_extract, _) = self
+                .blocks_cache
+                .pop_front_applied_mc_block_subgraph(from_seqno)?;
+            let subgraph = match mc_block_subgraph_extract {
+                super::types::McBlockSubgraphExtract::Extracted(subgraph) => subgraph,
+                super::types::McBlockSubgraphExtract::AlreadyExtracted => {
+                    bail!("mc block subgraph extract result cannot be AlreadyExtracted")
+                }
+            };
+
+            top_removed_mc_block_id = Some(subgraph.master_block.block_id);
+
+            // update gc boundary
+            let to_blocks_keys = subgraph.master_block.get_top_blocks_keys()?;
+            self.blocks_cache.set_gc_to_boundary(&to_blocks_keys);
+
+            // update front seqno for futher checks
+            let (_, Some((new_from_seqno, _))) = self
+                .blocks_cache
+                .get_last_collated_block_and_applied_mc_queue_range()
+            else {
+                break;
+            };
+            from_seqno = new_from_seqno;
+        }
+
+        // run gc only when any block was really removed
+        if top_removed_mc_block_id.is_some() {
+            self.blocks_cache.gc_prev_blocks();
+        }
+
+        Ok(top_removed_mc_block_id)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum ShouldSyncToAppliedMcBlock {
+    Yes,
+    No,
+    NoBecauseNewerReceived,
 }

@@ -17,6 +17,7 @@ use self::cancel_validation_runner::CancelValidationRunnerState;
 use self::collation_cancel::{ActionAfterCancel, CollationCancelHandle, update_action_after};
 use self::state_event_listener::{ChannelStateEventListener, StateEvent};
 use self::state_update_handler::ProcessMcStateUpdateMode;
+use self::sync::ShouldSyncToAppliedMcBlock;
 use self::types::{
     ActiveCollator, CollatedBlockInfo, CollationState, CollationStatus, CollationSyncState,
     CollatorJoinTask, CollatorState, HandledBlockFromBcCtx, ImportedAnchorEvent, NextCollationStep,
@@ -491,8 +492,23 @@ where
                         .blocks_cache
                         .get_last_collated_block_and_applied_mc_queue_range();
 
-                    // run sync if has applied mc blocks and has not newer received
-                    if !self.has_newer_received_mc_block(applied_range) {
+                    // run sync only if has applied mc blocks and has not newer received
+                    // master block was already received
+                    if self.has_newer_received_mc_block(applied_range) {
+                        // cleanup front applied blocks from cache if their diffs not required to restore queue
+                        let cleanup_res = self
+                            .gc_applied_blocks_with_not_required_diffs(
+                                last_collated_mc_block_id,
+                                applied_range,
+                            )
+                            .await?;
+                        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                            ?cleanup_res,
+                            last_collated_mc_block_id = ?last_collated_mc_block_id,
+                            applied_range = ?applied_range,
+                            "cache cleanup after skipped sync finished",
+                        );
+                    } else {
                         return self
                             .sync_to_applied_mc_block_if_exist(
                                 next_block_id_short,
@@ -683,8 +699,30 @@ where
                 .map(|mc_data| mc_data.prev_key_block_seqno == mc_data.block_id.seqno),
         );
 
+        // cleanup front applied blocks from cache if their diffs not required to restore queue
+        if matches!(
+            should_sync_to_last_applied_mc_block,
+            ShouldSyncToAppliedMcBlock::NoBecauseNewerReceived
+        ) {
+            let cleanup_res = self
+                .gc_applied_blocks_with_not_required_diffs(
+                    store_res.last_collated_mc_block_id,
+                    store_res.applied_mc_queue_range,
+                )
+                .await?;
+            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                ?cleanup_res,
+                last_collated_mc_block_id = ?store_res.last_collated_mc_block_id,
+                applied_range = ?store_res.applied_mc_queue_range,
+                "cache cleanup after skipped sync finished",
+            );
+        }
+
         // run sync or process just collated block
-        if should_sync_to_last_applied_mc_block {
+        if matches!(
+            should_sync_to_last_applied_mc_block,
+            ShouldSyncToAppliedMcBlock::Yes
+        ) {
             // before sync will cancel any active collations
             Ok(HandleTaskResult::with_cancel(
                 ActionAfterCancel::SyncToAppliedMcBlock {
@@ -969,16 +1007,42 @@ where
             } else {
                 self.config.min_mc_block_delta_from_bc_to_sync
             };
-        let should_sync_to_last_applied_mc_block = (is_last_mc_block_in_batch || is_key_block)
-            && self.check_should_sync_to_last_applied_mc_block(
+
+        let should_sync_to_last_applied_mc_block = if is_last_mc_block_in_batch || is_key_block {
+            self.check_should_sync_to_last_applied_mc_block(
                 &store_res,
                 top_mc_block_id_for_next_collation,
                 required_min_mc_block_delta,
                 Some(is_key_block),
+            )
+        } else {
+            ShouldSyncToAppliedMcBlock::No
+        };
+
+        // cleanup front applied blocks from cache if their diffs not required to restore queue
+        if matches!(
+            should_sync_to_last_applied_mc_block,
+            ShouldSyncToAppliedMcBlock::NoBecauseNewerReceived
+        ) {
+            let cleanup_res = self
+                .gc_applied_blocks_with_not_required_diffs(
+                    store_res.last_collated_mc_block_id,
+                    store_res.applied_mc_queue_range,
+                )
+                .await?;
+            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                ?cleanup_res,
+                last_collated_mc_block_id = ?store_res.last_collated_mc_block_id,
+                applied_range = ?store_res.applied_mc_queue_range,
+                "cache cleanup after skipped sync finished",
             );
+        }
 
         // run sync or commit block
-        if should_sync_to_last_applied_mc_block {
+        if matches!(
+            should_sync_to_last_applied_mc_block,
+            ShouldSyncToAppliedMcBlock::Yes
+        ) {
             // should only refresh collation sessions when sync on key block
             let process_state_update_mode = if is_last_mc_block_in_batch {
                 ProcessMcStateUpdateMode::StartCollation {
