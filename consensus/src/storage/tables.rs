@@ -1,3 +1,4 @@
+use bytesize::ByteSize;
 use tycho_storage::kv::{
     DEFAULT_MIN_BLOB_SIZE, NamedTables, TableContext, optimize_for_point_lookup,
 };
@@ -32,6 +33,17 @@ impl ColumnFamily for Points {
 impl ColumnFamilyOptions<TableContext> for Points {
     fn options(opts: &mut Options, ctx: &mut TableContext) {
         optimize_for_point_lookup(opts, ctx);
+
+        let write_buffer_size = ByteSize::mib(64);
+        let write_buffer_count = 6u64;
+        opts.set_write_buffer_size(write_buffer_size.as_u64() as _);
+        opts.set_min_write_buffer_number_to_merge(1);
+        opts.set_max_write_buffer_number(write_buffer_count as _);
+        ctx.track_buffer_usage(
+            write_buffer_size,
+            ByteSize(write_buffer_size.as_u64() * write_buffer_count),
+        );
+
         opts.set_disable_auto_compactions(true);
 
         opts.set_enable_blob_files(true);
