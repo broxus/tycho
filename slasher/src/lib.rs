@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,6 +16,7 @@ use tycho_crypto::ed25519;
 use tycho_slasher_traits::{ValidationSessionId, ValidatorEventsListener};
 use tycho_storage::StorageContext;
 use tycho_types::boc::Boc;
+use tycho_types::cell::HashBytes;
 use tycho_types::models::{BlockchainConfig, SignatureContext, StdAddr};
 use tycho_util::config::PartialConfig;
 use tycho_util::futures::JoinTask;
@@ -102,6 +104,10 @@ impl Slasher {
         let storage =
             SlasherStorage::open(storage_context).context("failed to open slasher storage")?;
 
+        let current_vset_hash = *blockchain_config
+            .get_current_validator_set_raw()?
+            .repr_hash();
+
         let slasher_params = contract
             .find_params(blockchain_config)
             .context("failed to find slasher params")?;
@@ -122,6 +128,8 @@ impl Slasher {
         ));
         let global = blockchain_config.get_global_version()?;
 
+        // TODO: Spawn previous unsubmitted reports.
+
         Ok(Self {
             validator_events_collector: collector,
             shared: Arc::new(SlasherSharedState {
@@ -133,6 +141,7 @@ impl Slasher {
                 storage,
                 known_session_id: AtomicValidationSessionId::new(known_session_id),
                 parsed_config: ArcSwap::new(Arc::new(ParsedConfig {
+                    current_vset_hash,
                     signature_context: SignatureContext {
                         global_id,
                         capabilities: global.capabilities,
@@ -157,8 +166,19 @@ impl Slasher {
         let this = self.shared.as_ref();
         let state_extra = cx.state.state_extra()?;
 
+        let current_vset_hash = *state_extra
+            .config
+            .get_current_validator_set_raw()?
+            .repr_hash();
+
         // Apply config changes when needed.
+        let mut vset_to_complete = None;
         if state_extra.after_key_block {
+            let known_vset_hash = self.shared.parsed_config.load().current_vset_hash;
+            if current_vset_hash != known_vset_hash {
+                vset_to_complete = Some(known_vset_hash);
+            }
+
             let global = state_extra.config.get_global_version()?;
             let slasher_params = this
                 .contract
@@ -176,6 +196,7 @@ impl Slasher {
 
             // Update parsed config.
             self.shared.parsed_config.store(Arc::new(ParsedConfig {
+                current_vset_hash,
                 signature_context: SignatureContext {
                     global_id: cx.block.as_ref().global_id,
                     capabilities: global.capabilities,
@@ -201,6 +222,23 @@ impl Slasher {
             }
         }
 
+        // Sync session id.
+        let current_session_id = ValidationSessionId::from(state_extra);
+        let session_changed = current_session_id != this.known_session_id.load();
+        if session_changed {
+            // TODO: Add metrics.
+            tracing::info!(
+                old_session_id = ?this.known_session_id.load(),
+                ?current_session_id,
+                "slasher observed validation session change",
+            );
+            this.known_session_id.set(current_session_id);
+            this.storage
+                .store_vset_session(current_session_id, &current_vset_hash, mc_seqno);
+        }
+
+        // TODO: Cleanup stored vset sessions.
+
         // Prepare slasher handler context.
         let Some(slasher_params) = this.parsed_config.load().slasher_params.clone() else {
             // Slasher disabled.
@@ -210,33 +248,13 @@ impl Slasher {
             return Ok(());
         };
 
-        let current_session_id = ValidationSessionId::from(state_extra);
-        let current_vset_hash = *state_extra
-            .config
-            .get_current_validator_set_raw()?
-            .repr_hash();
-
         tracing::trace!(
             ?slasher_params,
             ?current_session_id,
             %current_vset_hash,
         );
 
-        if current_session_id != this.known_session_id.load() {
-            // TODO: Add metrics.
-            tracing::info!(
-                old_session_id = ?this.known_session_id.load(),
-                ?current_session_id,
-                "slasher observed validation session change",
-            );
-            this.known_session_id.set(current_session_id);
-        }
-        this.storage
-            .update_current_vset_epoch(current_session_id, current_vset_hash)?;
-
-        // Update subscription state.
-        subscription.cleanup_expired_messages(cx.block.load_info()?.gen_utime);
-
+        // TODO: Move into blocking.
         let extra = cx.block.load_extra()?.account_blocks.load()?;
         if let Some((_, account_block)) = extra.get(slasher_params.address)? {
             for entry in account_block.transactions.iter() {
@@ -258,7 +276,7 @@ impl Slasher {
                             let batch = &submitted.blocks_batch;
                             tracing::info!(
                                 %tx_hash,
-                                session_id = ?submitted.session_id,
+                                %current_vset_hash,
                                 validator_idx = submitted.validator_idx,
                                 batch_start_seqno = batch.start_seqno(),
                                 batch_seqno_after = batch.seqno_after(),
@@ -269,18 +287,11 @@ impl Slasher {
                                 "blocks batch submitted",
                             );
 
-                            // TODO: Move into blocking.
-                            if !this.storage.store_blocks_batch(
-                                submitted.session_id,
+                            this.storage.store_blocks_batch(
+                                &current_vset_hash,
                                 submitted.validator_idx,
                                 &submitted.blocks_batch,
-                            )? {
-                                tracing::warn!(
-                                    session_id = ?submitted.session_id,
-                                    current_vset_hash = %current_vset_hash,
-                                    "ignoring observed blocks batch without known epoch"
-                                );
-                            }
+                            )?;
                             tokio::task::yield_now().await;
                         }
                     },
@@ -293,8 +304,16 @@ impl Slasher {
             }
         }
 
+        // Update subscription state.
+        subscription.cleanup_expired_messages(cx.block.load_info()?.gen_utime);
+
         // Trigger reporting.
-        self.shared.analyze_closed_vset_epochs()?;
+        if let Some(vset_hash) = vset_to_complete
+            && let Some(last_seqno) = mc_seqno.checked_sub(1)
+        {
+            self.shared
+                .complete_vset(&vset_hash, last_seqno, &slasher_params)?;
+        }
 
         // Start session handlers.
         while let Some(session_info) = self
@@ -356,99 +375,46 @@ struct SlasherSharedState {
 }
 
 struct ParsedConfig {
+    current_vset_hash: HashBytes,
     signature_context: SignatureContext,
     slasher_params: Option<SlasherParams>,
 }
 
 impl SlasherSharedState {
-    fn analyze_closed_vset_epochs(&self) -> Result<()> {
+    fn complete_vset(
+        &self,
+        vset_hash: &HashBytes,
+        last_seqno: u32,
+        _params: &SlasherParams,
+    ) -> Result<()> {
+        // Session should containt at least this amount of blocks to do some reporting.
+        // TODO: Move into `SlasherParams`.
+        const MIN_VSET_LENGTH: u32 = 1000;
+
         let snapshot = self.storage.snapshot();
-        let closed_vset_epoches = snapshot.load_closed_vset_epochs()?;
-        if closed_vset_epoches.is_empty() {
-            tracing::warn!("closes vset epoches not found");
+
+        // Compute vset block range.
+        let session_ids = snapshot.load_vset_sessions(vset_hash)?;
+        let start_seqno = session_ids
+            .iter()
+            .map(|item| item.start_seqno)
+            .min()
+            .unwrap_or(u32::MAX);
+        let vset_len = last_seqno.saturating_sub(start_seqno);
+        if vset_len < MIN_VSET_LENGTH {
+            tracing::warn!(%vset_hash, vset_len, "too short vset");
             return Ok(());
         }
 
-        for epoch in closed_vset_epoches {
-            if snapshot.load_vset_report(epoch.start_session_id)?.is_some() {
-                continue;
-            }
+        // Build a matrix from all known block batches.
 
-            tracing::info!(
-                vset_hash = ?epoch.vset_hash,
-                start_id = ?epoch.start_session_id,
-                "analyzing closed vset epoch"
-            );
+        for item in snapshot.iter_block_batches(vset_hash) {
+            let (validator_idx, batch) = item?;
 
-            let mut session_reports = Vec::new();
-            for meta in snapshot.load_sessions_for_epoch(epoch.start_session_id)? {
-                let report = match snapshot.load_session_report(meta.session_id)? {
-                    Some(report) => report,
-                    None => {
-                        let batches =
-                            snapshot.load_observed_batches_for_session(meta.session_id)?;
-                        let report = analyzer::analyze_session(&meta, &batches);
-                        self.storage.store_session_report(&report)?;
-                        report
-                    }
-                };
-                Self::log_session_report(&report);
-                session_reports.push(report);
-            }
-
-            let report = analyzer::analyze_vset_epoch(
-                &epoch,
-                &session_reports,
-                self.config.bad_sessions_weight_threshold,
-            );
-            self.storage.store_vset_report(&report)?;
-            Self::log_vset_report(&report);
+            // todo
         }
 
         Ok(())
-    }
-
-    fn log_session_report(report: &SessionPenaltyReport) {
-        for item in &report.validators {
-            tracing::info!(
-                session_id = ?report.session_id,
-                epoch_start_session_id = ?report.epoch_start_session_id,
-                validator_idx = item.validator_idx,
-                earned_points = item.earned_points,
-                max_points = item.max_points,
-                session_weight = report.session_weight,
-                is_bad = item.is_bad,
-                "scored validator in validation session",
-            );
-        }
-    }
-
-    fn log_vset_report(report: &VsetPenaltyReport) {
-        let bad_validator_indices = report
-            .validators
-            .iter()
-            .filter(|item| item.is_bad)
-            .map(|item| item.validator_idx)
-            .collect::<Vec<_>>();
-
-        tracing::info!(
-            epoch_start_session_id = ?report.epoch_start_session_id,
-            vset_hash = %report.vset_hash,
-            bad_validator_indices = ?bad_validator_indices,
-            "finished scoring closed vset epoch",
-        );
-
-        for item in &report.validators {
-            tracing::info!(
-                epoch_start_session_id = ?report.epoch_start_session_id,
-                vset_hash = %report.vset_hash,
-                validator_idx = item.validator_idx,
-                bad_sessions_weight = item.bad_sessions_weight,
-                total_sessions_weight = item.total_sessions_weight,
-                is_bad = item.is_bad,
-                "computed final validator verdict in vset epoch",
-            );
-        }
     }
 
     #[instrument(skip_all, fields(session_id = ?info.session_id))]

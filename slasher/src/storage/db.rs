@@ -30,11 +30,8 @@ impl WithMigrations for SlasherTables {
 weedb::tables! {
     pub struct SlasherTables<TableContext> {
         pub state: tables::State,
-        pub vset_epochs: tables::VsetEpochs,
-        pub session_meta: tables::SessionMeta,
+        pub vset_sessions: tables::VsetSessions,
         pub block_batches: tables::BlockBatches,
-        pub session_reports: tables::SessionReports,
-        pub vset_reports: tables::VsetReports,
     }
 }
 
@@ -62,53 +59,34 @@ pub mod tables {
         }
     }
 
-    /// Stores validator-set epochs keyed by their start validation session.
-    pub struct VsetEpochs;
+    /// Maps validator sessions to vset.
+    ///
+    /// - Key: `session_id: (catchain_seqno u32 BE, vset_switch_round u32 BE)`
+    /// - Value: `vset_hash: 32 bytes, start_seqno: u32 LE`
+    pub struct VsetSessions;
 
-    impl VsetEpochs {
+    impl VsetSessions {
         pub const KEY_LEN: usize = 4 + 4;
+        pub const VALUE_LEN: usize = 32 + 4;
     }
 
-    impl ColumnFamily for VsetEpochs {
-        const NAME: &'static str = "vset_epochs";
+    impl ColumnFamily for VsetSessions {
+        const NAME: &'static str = "vset_sessions";
     }
 
-    impl ColumnFamilyOptions<TableContext> for VsetEpochs {
+    impl ColumnFamilyOptions<TableContext> for VsetSessions {
         fn options(opts: &mut Options, ctx: &mut TableContext) {
             default_block_based_table_factory(opts, ctx);
-
-            opts.set_optimize_filters_for_hits(true);
-            optimize_for_point_lookup(opts, ctx);
-        }
-    }
-
-    /// Stores session metadata grouped by epoch.
-    pub struct SessionMeta;
-
-    impl SessionMeta {
-        pub const KEY_LEN: usize = VsetEpochs::KEY_LEN + 4 + 4;
-    }
-
-    impl ColumnFamily for SessionMeta {
-        const NAME: &'static str = "session_meta";
-    }
-
-    impl ColumnFamilyOptions<TableContext> for SessionMeta {
-        fn options(opts: &mut Options, ctx: &mut TableContext) {
-            default_block_based_table_factory(opts, ctx);
-
-            opts.set_optimize_filters_for_hits(true);
-            optimize_for_point_lookup(opts, ctx);
         }
     }
 
     /// Block batches submitted by validators
-    /// - Key: `session_id: (catchain_seqno u32 BE, vset_switch_round u32 BE), validator_idx: u16 BE, start_block: u32 BE`
+    /// - Key: `vset_hash: 32 bytes, validator_idx: u16 BE, start_block: u32 BE`
     /// - Value: blocks batch
     pub struct BlockBatches;
 
     impl BlockBatches {
-        pub const KEY_LEN: usize = 4 + 4 + 2 + 4;
+        pub const KEY_LEN: usize = 32 + 2 + 4;
     }
 
     impl ColumnFamily for BlockBatches {
@@ -118,42 +96,6 @@ pub mod tables {
     impl ColumnFamilyOptions<TableContext> for BlockBatches {
         fn options(opts: &mut Options, ctx: &mut TableContext) {
             zstd_block_based_table_factory(opts, ctx);
-        }
-    }
-
-    /// Cached analyzer result for a single validation session.
-    pub struct SessionReports;
-
-    impl SessionReports {
-        pub const KEY_LEN: usize = 4 + 4;
-    }
-
-    impl ColumnFamily for SessionReports {
-        const NAME: &'static str = "session_reports";
-    }
-
-    impl ColumnFamilyOptions<TableContext> for SessionReports {
-        fn options(opts: &mut Options, ctx: &mut TableContext) {
-            default_block_based_table_factory(opts, ctx);
-
-            opts.set_optimize_filters_for_hits(true);
-            optimize_for_point_lookup(opts, ctx);
-        }
-    }
-
-    /// Final analyzer result for a closed validator-set epoch.
-    pub struct VsetReports;
-
-    impl ColumnFamily for VsetReports {
-        const NAME: &'static str = "vset_reports";
-    }
-
-    impl ColumnFamilyOptions<TableContext> for VsetReports {
-        fn options(opts: &mut Options, ctx: &mut TableContext) {
-            default_block_based_table_factory(opts, ctx);
-
-            opts.set_optimize_filters_for_hits(true);
-            optimize_for_point_lookup(opts, ctx);
         }
     }
 }
