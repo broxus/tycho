@@ -63,8 +63,6 @@ fun onExternalMessage(inMsg: slice) {
     val signedBody = inMsg;
     val createdAtMs = inMsg.loadUint(64);
     val expireAtSec = inMsg.loadUint(32);
-    val _catchainSeqno = inMsg.loadUint(32);
-    val _vsetSwitchRound = inMsg.loadUint(32);
     val validatorIdx = inMsg.loadUint(16);
     val batch = inMsg.loadRef();
     inMsg.assertEnd();
