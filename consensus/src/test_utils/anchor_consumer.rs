@@ -64,7 +64,7 @@ impl AnchorConsumer {
         let adata = match commit_result {
             MempoolOutput::Paused(_) => return,
             MempoolOutput::GapUpTo(round) => {
-                tracing::warn!("gap in anchor chain, first to commit: {round:?}");
+                tracing::warn!("gap in anchor chain up to: {round:?}");
                 self.commit_finished.set_max(round);
                 return;
             }
@@ -97,7 +97,7 @@ impl AnchorConsumer {
         let adata = match commit_result {
             MempoolOutput::Paused(_) => return,
             MempoolOutput::GapUpTo(round) => {
-                tracing::warn!("gap in anchor chain, first to commit: {round:?}");
+                tracing::warn!("gap in anchor chain up to: {round:?}");
                 self.commit_finished.set_max(round);
                 self.anchors.retain(|key, _| *key > round);
                 return;

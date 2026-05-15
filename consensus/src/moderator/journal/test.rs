@@ -11,7 +11,7 @@ use crate::dag::InvalidReason;
 use crate::intercom::QueryRequestTag;
 use crate::models::point_status::{PointStatusStoreRandom, PointStatusStored};
 use crate::models::{
-    AnchorLink, Cert, ChainedAnchorProof, DagPoint, Digest, Point, PointData, Round, UnixTime,
+    AnchorLink, Cert, DagPoint, Digest, Point, PointData, PointRole, Round, UnixTime,
 };
 use crate::moderator::journal::batch::batch;
 use crate::moderator::journal::item::{JournalItem, JournalItemFull};
@@ -159,9 +159,10 @@ fn gen_point() -> Point {
             includes: Default::default(),
             witness: Default::default(),
             evidence: Default::default(),
-            chained_anchor_proof: ChainedAnchorProof::Inapplicable,
-            anchor_trigger: AnchorLink::ToSelf,
-            anchor_proof: AnchorLink::ToSelf,
+            role: PointRole::Regular {
+                anchor_trigger: AnchorLink::random(),
+                anchor_proof: AnchorLink::random(),
+            },
             time: UnixTime::now(),
             anchor_time: UnixTime::now(),
         },

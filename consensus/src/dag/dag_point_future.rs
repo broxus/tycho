@@ -22,7 +22,7 @@ use crate::engine::NodeConfig;
 use crate::intercom::{DownloadResult, Downloader};
 use crate::models::point_status::*;
 use crate::models::{
-    AnchorLink, Cert, CertDirectDeps, DagPoint, Digest, Point, PointId, PointInfo, PointRestore,
+    AnyLink, Cert, CertDirectDeps, DagPoint, Digest, Point, PointId, PointInfo, PointRestore,
     WeakCert,
 };
 use crate::storage::MempoolStore;
@@ -711,13 +711,10 @@ impl DagPointFuture {
 
     fn anchor_flags(info: &PointInfo) -> AnchorFlags {
         let mut anchor_flags = AnchorFlags::empty();
-        anchor_flags.set(
-            AnchorFlags::Proof,
-            info.anchor_proof() == &AnchorLink::ToSelf,
-        );
+        anchor_flags.set(AnchorFlags::Proof, info.anchor_proof() == AnyLink::ToSelf);
         anchor_flags.set(
             AnchorFlags::Trigger,
-            info.anchor_trigger() == &AnchorLink::ToSelf,
+            info.anchor_trigger() == AnyLink::ToSelf,
         );
         anchor_flags
     }

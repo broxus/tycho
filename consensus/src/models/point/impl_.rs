@@ -15,6 +15,19 @@ use crate::models::point::proto_utils::{PointBodyWrite, PointRawRead, PointRead,
 use crate::models::point::{Digest, PointData, Signature};
 use crate::models::{PointId, PointInfo, Round};
 
+#[derive(Clone)]
+#[cfg_attr(test, derive(PartialEq))]
+pub struct Point {
+    serialized: Arc<Vec<u8>>,
+    info: PointInfo,
+}
+
+impl Debug for Point {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Point").field(&self.info).finish()
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 #[allow(clippy::enum_variant_names, reason = "intuitive")]
 pub enum PointIntegrityError {
@@ -32,49 +45,6 @@ pub enum PointIntegrityError {
 #[derive(Debug, Copy, Clone, thiserror::Error)]
 #[error("Evidence map contains bad signature")]
 pub struct EvidenceSigError;
-
-#[derive(Debug, Copy, Clone, thiserror::Error)]
-pub enum StructureIssue {
-    #[error("{0:?} map must not contain author")]
-    AuthorInMap(PointMap),
-    #[error("bad {0:?} link through {1:?} map")]
-    Link(AnchorStageRole, PointMap),
-    #[error("bad chained proof through {0:?} map")]
-    ChainedProof(PointMap),
-    #[error("anchor stage role {0:?}")]
-    SelfAnchorStage(AnchorStageRole),
-    /// `false` for "must NOT have used chained proof"
-    #[error("must{} have used chained proof", .0.then_some("").unwrap_or(" not"))]
-    ChainedProofMustUse(bool),
-    #[error("anchor time")]
-    AnchorTime,
-}
-
-#[derive(Debug, Copy, Clone)]
-pub enum PointMap {
-    Evidence, // r+0
-    Includes, // r-1
-    Witness,  // r-2
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum AnchorStageRole {
-    Trigger,
-    Proof,
-}
-
-#[derive(Clone)]
-#[cfg_attr(test, derive(PartialEq))]
-pub struct Point {
-    serialized: Arc<Vec<u8>>,
-    info: PointInfo,
-}
-
-impl Debug for Point {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("Point").field(&self.info).finish()
-    }
-}
 
 pub type ParseResult =
     Result<Result<Result<Point, (Point, EvidenceSigError)>, PointIntegrityError>, TlError>;
@@ -239,9 +209,7 @@ pub mod test_point {
     use tycho_util::FastHashMap;
 
     use super::*;
-    use crate::models::{
-        AnchorLink, ChainedAnchorProof, IndirectLink, PointId, Round, Through, UnixTime,
-    };
+    use crate::models::{AnchorLink, IndirectLink, PointId, PointRole, Round, Through, UnixTime};
 
     pub const PEERS: usize = 100;
 
@@ -310,9 +278,10 @@ pub mod test_point {
                 (PeerId(rand::random()), Digest::random())
             })),
             evidence,
-            chained_anchor_proof: ChainedAnchorProof::Chained(indirect_link(round - 8_u32)),
-            anchor_trigger: AnchorLink::Indirect(indirect_link(round - 7_u32)),
-            anchor_proof: AnchorLink::Indirect(indirect_link(round - 6_u32)),
+            role: PointRole::Regular {
+                anchor_proof: AnchorLink::Indirect(indirect_link(round - 7_u32)),
+                anchor_trigger: AnchorLink::Indirect(indirect_link(round - 6_u32)),
+            },
             time: anchor_time.next(),
             anchor_time,
         };

@@ -15,7 +15,7 @@ use crate::effects::{AltFmt, AltFormat, Cancelled, TaskResult};
 use crate::engine::{EngineResult, MempoolConfig};
 use crate::intercom::StatsRanges;
 use crate::models::{
-    AnchorData, AnchorLink, DagPoint, MempoolPeerStats, PointInfo, Round, ValidPoint,
+    AnchorData, AnyLink, DagPoint, MempoolPeerStats, PointInfo, Round, ValidPoint,
 };
 use crate::moderator::JournalEvent;
 
@@ -208,7 +208,7 @@ impl Committer {
 
         assert_eq!(
             trigger.anchor_trigger(),
-            &AnchorLink::ToSelf,
+            AnyLink::ToSelf,
             "passed point is not a trigger: {:?}",
             trigger.id().alt()
         );
@@ -304,7 +304,7 @@ impl Committer {
 pub(super) fn filter(trigger: &DagPoint) -> Option<Result<&ValidPoint, HistoryConflict>> {
     match trigger {
         DagPoint::Valid(valid) => {
-            (valid.info().anchor_trigger() == &AnchorLink::ToSelf).then_some(Ok(valid))
+            (valid.info().anchor_trigger() == AnyLink::ToSelf).then_some(Ok(valid))
         }
         DagPoint::TransInvalid(invalid) => {
             (invalid.has_proof()).then_some(Err(HistoryConflict(invalid.info().round())))
@@ -340,6 +340,7 @@ impl std::fmt::Display for AltFmt<'_, Committer> {
 #[cfg(test)]
 mod test {
     use std::array;
+    use std::num::NonZeroUsize;
     use std::sync::Arc;
 
     use tycho_crypto::ed25519::{KeyPair, SecretKey};
@@ -348,6 +349,7 @@ mod test {
     use super::*;
     use crate::dag::DagFront;
     use crate::effects::{AltFormat, Ctx, RoundCtx};
+    use crate::engine::InputBuffer;
     use crate::engine::lifecycle::FixHistoryFlag;
     use crate::models::{AnchorData, Round};
     use crate::storage::MempoolStore;
@@ -368,6 +370,8 @@ mod test {
         let (peer_schedule, stub_downloader, genesis, engine_ctx) =
             test_utils::make_engine_parts(&peers, local_keys.clone());
         let conf = engine_ctx.conf();
+
+        let input_buffer = InputBuffer::new_stub(0, NonZeroUsize::MIN, &conf.consensus);
 
         let mut round_ctx = RoundCtx::new(&engine_ctx, conf.genesis_round);
 
@@ -393,7 +397,7 @@ mod test {
         let commit =
             async |committer: &mut Committer| _commit(committer, &stats_ranges, conf).await;
 
-        for round in (0..100).map(Round) {
+        for round in (conf.genesis_round.next().0..100).map(Round) {
             println!(
                 "{round:?} back {}..={} front {}..={}",
                 committer.bottom_round().0,
@@ -402,9 +406,6 @@ mod test {
                 dag.top().round().0
             );
 
-            if round <= conf.genesis_round {
-                continue;
-            }
             round_ctx = RoundCtx::new(&engine_ctx, round);
 
             dag.fill_to_top(round, &peer_schedule, &round_ctx);
@@ -438,8 +439,7 @@ mod test {
                 &stub_downloader,
                 &stub_store,
                 &round_ctx,
-                0,
-                0,
+                &input_buffer,
             )
             .await;
 

@@ -318,8 +318,7 @@ impl MempoolAdapterStore {
                 proof_key: proof.key(),
                 anchor,
                 prev_anchor: proof
-                    .chained_anchor_proof()
-                    .map(|link| link.to.round)
+                    .chained_anchor_proof_to_round()
                     .filter(|r| *r > conf.genesis_round)
                     .map(|r| r.prev()),
                 history: keyed_vec.into_iter().map(|(_, info)| info).collect(),

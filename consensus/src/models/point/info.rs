@@ -7,8 +7,8 @@ use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
 use crate::models::{
-    AnchorLink, AnchorStageRole, ChainedAnchorProof, Digest, EvidenceSigError, IndirectLink,
-    PointData, PointId, PointKey, Round, Signature, StructureIssue, Through, UnixTime,
+    AnchorStageRole, AnyLink, ChainedProofLink, Digest, EvidenceSigError, IndirectLink, PointData,
+    PointKey, PointRole, Round, Signature, StructureIssue, Through, UnixTime,
 };
 
 #[derive(Clone, TlRead, TlWrite)]
@@ -47,6 +47,23 @@ impl Debug for PointInfo {
             .field("payload_bytes", &self.payload_bytes())
             .field("data", self.data())
             .finish()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, TlRead, TlWrite, Serialize)]
+#[tl(boxed, id = "consensus.pointId", scheme = "proto.tl")]
+pub struct PointId {
+    pub round: Round,
+    pub digest: Digest,
+    pub author: PeerId,
+}
+
+impl PointId {
+    pub const MAX_TL_BYTES: usize =
+        4 + PeerId::MAX_TL_BYTES + Round::MAX_TL_SIZE + Digest::MAX_TL_BYTES;
+
+    pub fn key(&self) -> PointKey {
+        PointKey::new(self.round, self.digest)
     }
 }
 
@@ -117,14 +134,6 @@ impl PointInfo {
         &(self.0.data).evidence
     }
 
-    pub fn anchor_trigger(&self) -> &AnchorLink {
-        &(self.0.data).anchor_trigger
-    }
-
-    pub fn anchor_proof(&self) -> &AnchorLink {
-        &(self.0.data).anchor_proof
-    }
-
     pub fn time(&self) -> UnixTime {
         (self.0.data).time
     }
@@ -152,36 +161,74 @@ impl PointInfo {
         if is_ok { Ok(()) } else { Err(EvidenceSigError) }
     }
 
-    pub fn check_genesis_except_maps(&self) -> Result<(), StructureIssue> {
-        (self.0.data).check_genesis_except_maps()
+    pub fn is_proof_link_ok(&self, is_leader: bool) -> bool {
+        (self.0.data).is_proof_link_ok(is_leader, self.prev_digest().is_some(), self.round())
     }
 
-    pub fn check_regular_structure(&self) -> Result<(), StructureIssue> {
-        (self.0.data).check_regular_structure(self.author(), self.round())
+    pub fn check_structure(&self, is_genesis: bool) -> Result<(), StructureIssue> {
+        if is_genesis {
+            if !matches!(self.0.data.role, PointRole::Genesis) {
+                return Err(StructureIssue::ExpectedGenesis(true));
+            }
+            if self.time() != self.anchor_time() {
+                return Err(StructureIssue::AnchorTime);
+            }
+            Ok(())
+        } else {
+            if matches!(self.0.data.role, PointRole::Genesis) {
+                return Err(StructureIssue::ExpectedGenesis(false));
+            }
+            (self.0.data).check_non_genesis_structure(self.author(), self.round())
+        }
     }
 
-    pub fn anchor_link(&self, link_field: AnchorStageRole) -> &AnchorLink {
-        (self.0.data).anchor_link(link_field)
+    pub fn anchor_trigger(&self) -> AnyLink<'_> {
+        self.0.data.role.anchor_trigger()
+    }
+
+    pub fn anchor_proof(&self) -> AnyLink<'_> {
+        self.0.data.role.anchor_proof(self.author())
+    }
+
+    pub fn anchor_link(&self, link_field: AnchorStageRole) -> AnyLink<'_> {
+        (self.0.data).anchor_link(link_field, self.author())
     }
 
     pub fn anchor_round(&self, link_field: AnchorStageRole) -> Round {
         (self.0.data).anchor_round(link_field, self.round())
     }
 
-    pub fn chained_anchor_proof(&self) -> Option<&IndirectLink> {
-        match &self.0.data.chained_anchor_proof {
-            ChainedAnchorProof::Inapplicable => None,
-            ChainedAnchorProof::Chained(link) => Some(link),
+    pub fn indirect_anchor_proof(&self) -> Option<&IndirectLink> {
+        match self.0.data.role.chained_anchor_proof() {
+            ChainedProofLink::Inapplicable => None,
+            ChainedProofLink::Indirect(link) => Some(link),
         }
     }
 
-    pub fn chained_proof_to_through(&self) -> Option<(PointId, PointId)> {
-        self.chained_anchor_proof().map(|link| {
-            let through = self
-                .through_id(&link.path)
-                .expect("Coding error: usage of ill-formed point");
-            (link.to, through)
-        })
+    pub fn chained_anchor_proof_to_round(&self) -> Option<Round> {
+        match &self.0.data.role.chained_anchor_proof() {
+            ChainedProofLink::Inapplicable => None,
+            ChainedProofLink::Indirect(link) => Some(link.to.round),
+        }
+    }
+
+    pub fn chained_anchor_proof_to(&self) -> Option<PointId> {
+        match &self.0.data.role.chained_anchor_proof() {
+            ChainedProofLink::Inapplicable => None,
+            ChainedProofLink::Indirect(link) => Some(link.to),
+        }
+    }
+
+    pub fn chained_anchor_proof_to_through(&self) -> Option<(PointId, Option<PointId>)> {
+        match &self.0.data.role.chained_anchor_proof() {
+            ChainedProofLink::Inapplicable => None,
+            ChainedProofLink::Indirect(link) => {
+                let through = self
+                    .through_id(&link.path)
+                    .expect("Coding error: usage of ill-formed point");
+                Some((link.to, Some(through)))
+            }
+        }
     }
 
     /// Well-formed point may return `None` if attribute belongs to another point
@@ -192,14 +239,25 @@ impl PointInfo {
     /// the final destination of an anchor link
     pub fn anchor_id(&self, link_field: AnchorStageRole) -> PointId {
         (self.0.data)
-            .anchor_id(link_field, self.round())
+            .anchor_id(link_field, self.author(), self.round())
             .unwrap_or_else(|| *self.id())
     }
 
     /// next point in path from `&self` to the anchor
     pub fn anchor_link_through(&self, link_field: AnchorStageRole) -> PointId {
         (self.0.data)
-            .anchor_link_id(link_field, self.round())
+            .anchor_link_id(link_field, self.author(), self.round())
             .unwrap_or_else(|| *self.id())
+    }
+}
+
+#[cfg(any(test, feature = "test"))]
+impl PointId {
+    pub fn random() -> Self {
+        Self {
+            author: PeerId(rand::random()),
+            round: Round(rand::random()),
+            digest: Digest::random(),
+        }
     }
 }

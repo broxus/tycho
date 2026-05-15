@@ -9,7 +9,7 @@ use tycho_types::models::{ConsensusConfig, GenesisInfo};
 
 use crate::dag::ProofLeader;
 use crate::engine::ConsensusConfigExt;
-use crate::models::{AnchorLink, ChainedAnchorProof, Point, PointData, Round, UnixTime};
+use crate::models::{Point, PointData, PointRole, Round, UnixTime};
 
 // replace with `ArcSwapOption` + copy on get() if need to change in runtime
 static NODE_CONFIG: OnceLock<MempoolNodeConfig> = OnceLock::new();
@@ -61,9 +61,7 @@ impl MempoolMergedConfig {
                 includes: Default::default(),
                 witness: Default::default(),
                 evidence: Default::default(),
-                chained_anchor_proof: ChainedAnchorProof::Inapplicable,
-                anchor_trigger: AnchorLink::ToSelf,
-                anchor_proof: AnchorLink::ToSelf,
+                role: PointRole::Genesis,
                 anchor_time: millis,
             },
             &self.conf,
