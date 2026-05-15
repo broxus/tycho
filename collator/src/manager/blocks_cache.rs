@@ -531,6 +531,99 @@ impl BlocksCache {
         }
     }
 
+    pub(super) fn peek_front_applied_mc_block_subgraph(
+        &self,
+        from_seqno: u32,
+    ) -> Result<Option<CachedMcBlockSubgraphView>> {
+        // get master blocks keys from cache
+        let keys: Vec<_> = self.inner.masters.lock().blocks.keys().copied().collect();
+
+        for key in keys {
+            // skip blocks before the from boundary
+            if key < from_seqno {
+                continue;
+            }
+
+            // build master block view
+            let (mut subgraph_view, top_shard_blocks_info) = {
+                let guard = self.inner.masters.lock();
+                let Some(mc_block_entry) = guard.blocks.get(&key) else {
+                    bail!("Block cache entry should exist ({})", key)
+                };
+
+                // get only received blocks
+                if !matches!(
+                    mc_block_entry.data,
+                    BlockCacheEntryData::Received { .. }
+                        | BlockCacheEntryData::Collated {
+                            received_after_collation: true,
+                            ..
+                        }
+                ) {
+                    continue;
+                }
+
+                let subgraph_view = CachedMcBlockSubgraphView {
+                    block_id: mc_block_entry.block_id,
+                    ref_by_mc_seqno: mc_block_entry.ref_by_mc_seqno,
+                    queue_diff: match &mc_block_entry.data {
+                        BlockCacheEntryData::Received { queue_diff, .. } => queue_diff.clone(),
+                        BlockCacheEntryData::Collated {
+                            candidate_stuff, ..
+                        } => candidate_stuff.candidate.queue_diff_aug.data.clone(),
+                    },
+                    top_shard_blocks: vec![],
+                    missing_top_shard_block: None,
+                };
+
+                let top_shard_blocks_info = mc_block_entry.top_shard_blocks_info.clone();
+
+                (subgraph_view, top_shard_blocks_info)
+            };
+
+            // try to read top shard blocks data
+            for top_shard_block in top_shard_blocks_info {
+                // skip shard blocks that included in previous master blocks
+                if !top_shard_block.updated
+                    || top_shard_block.block.ref_by_mc_seqno <= self.inner.zerostate_mc_seqno
+                {
+                    continue;
+                }
+
+                // try get shard block from cache
+                if let Some(shard_cache) =
+                    self.inner.shards.get(&top_shard_block.block.block_id.shard)
+                    && let Some(sc_block_entry) = shard_cache
+                        .blocks
+                        .get(&top_shard_block.block.block_id.seqno)
+                    && sc_block_entry.ref_by_mc_seqno == subgraph_view.block_id.seqno
+                {
+                    // get diff
+                    let queue_diff = match &sc_block_entry.data {
+                        BlockCacheEntryData::Received { queue_diff, .. } => queue_diff.clone(),
+                        BlockCacheEntryData::Collated {
+                            candidate_stuff, ..
+                        } => candidate_stuff.candidate.queue_diff_aug.data.clone(),
+                    };
+
+                    subgraph_view.top_shard_blocks.push(CachedShardBlockView {
+                        block_id: top_shard_block.block.block_id,
+                        ref_by_mc_seqno: top_shard_block.block.ref_by_mc_seqno,
+                        queue_diff,
+                    });
+                } else {
+                    subgraph_view.missing_top_shard_block =
+                        Some(top_shard_block.block.block_id.as_short_id());
+                    break;
+                }
+            }
+
+            return Ok(Some(subgraph_view));
+        }
+
+        Ok(None)
+    }
+
     pub fn pop_front_applied_mc_block_subgraph(
         &self,
         from_seqno: u32,
@@ -1114,6 +1207,20 @@ impl BlocksCacheData for ShardBlocksCacheData {
     fn on_insert_received(&mut self, _: &BlockCacheEntry) -> Result<Self::NewReceived> {
         Ok(())
     }
+}
+
+pub(super) struct CachedMcBlockSubgraphView {
+    pub block_id: BlockId,
+    pub ref_by_mc_seqno: u32,
+    pub queue_diff: QueueDiffStuff,
+    pub top_shard_blocks: Vec<CachedShardBlockView>,
+    pub missing_top_shard_block: Option<BlockCacheKey>,
+}
+
+pub(super) struct CachedShardBlockView {
+    pub block_id: BlockId,
+    pub ref_by_mc_seqno: u32,
+    pub queue_diff: QueueDiffStuff,
 }
 
 struct ReceivedBlockContext {

@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use ahash::HashMapExt;
 use anyhow::{Context, Result, bail};
-use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
+use tycho_block_util::queue::{QueueDiffStuff, QueueKey, QueuePartitionIdx};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_core::storage::LoadStateHint;
 use tycho_types::models::{BlockId, ShardIdent};
@@ -11,7 +11,7 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
 
 use super::CollationManager;
-use super::blocks_cache::BlocksCache;
+use super::blocks_cache::{BlocksCache, CachedMcBlockSubgraphView};
 use super::types::{BlockCacheEntry, BlockCacheEntryData, BlockCacheKey, McBlockSubgraphExtract};
 use crate::collator::CollatorFactory;
 use crate::internal_queue::types::diff::{DiffZone, QueueDiffWithMessages};
@@ -20,8 +20,8 @@ use crate::internal_queue::types::stats::DiffStatistics;
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::StateNodeAdapter;
 use crate::tracing_targets;
-use crate::types::processed_upto::ProcessedUptoInfoStuff;
-use crate::types::{ProcessedToByPartitions, TopBlockId, TopBlockIdUpdated};
+use crate::types::processed_upto::{BlockSeqno, ProcessedUptoInfoStuff};
+use crate::types::{ProcessedTo, ProcessedToByPartitions, TopBlockId, TopBlockIdUpdated};
 use crate::validator::Validator;
 
 impl<CF, V> CollationManager<CF, V>
@@ -112,6 +112,109 @@ where
         Ok(mc_block_id)
     }
 
+    /// Returns false when any of top block diffs is required or unable to check
+    pub(super) async fn check_top_blocks_diffs_not_required(
+        mq_adapter: &Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
+        mc_block_subgraph_view: &CachedMcBlockSubgraphView,
+        min_processed_to_by_shards: &ProcessedTo,
+        queue_diffs_applied_to_top_blocks: &FastHashMap<ShardIdent, BlockSeqno>,
+        init_mc_block_id: Option<BlockId>,
+        zerostate_mc_seqno: BlockSeqno,
+    ) -> Result<bool> {
+        // if top shard block is missing for any reason
+        // we unable to check if his diff required,
+        // so will not cleanup cache in this case
+        if let Some(missing_top_shard_block) = mc_block_subgraph_view.missing_top_shard_block {
+            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                mc_block_id = %mc_block_subgraph_view.block_id.as_short_id(),
+                %missing_top_shard_block,
+                "skip cache cleanup because top shard block is missing in cache",
+            );
+            return Ok(false);
+        }
+
+        let check_block = |block_id: BlockId,
+                           ref_by_mc_seqno: u32,
+                           queue_diff: &QueueDiffStuff|
+         -> Result<Option<bool>> {
+            if ref_by_mc_seqno <= zerostate_mc_seqno {
+                return Ok(Some(false));
+            }
+
+            if let Some(init_mc_block_id) = init_mc_block_id
+                && ref_by_mc_seqno <= init_mc_block_id.seqno
+            {
+                return Ok(Some(false));
+            }
+
+            if let Some(queue_diff_applied_to_top_block_seqno) =
+                queue_diffs_applied_to_top_blocks.get(&block_id.shard)
+                && block_id.seqno <= *queue_diff_applied_to_top_block_seqno
+            {
+                return Ok(Some(false));
+            }
+
+            let Some(min_processed_to) = min_processed_to_by_shards.get(&block_id.shard) else {
+                tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                    block_id = %block_id.as_short_id(),
+                    shard = %block_id.shard,
+                    "unable to check if diff required for queue restore \
+                    because processed_to data for the shard is incomplete",
+                );
+                return Ok(None);
+            };
+
+            if queue_diff.as_ref().max_message <= *min_processed_to {
+                return Ok(Some(false));
+            }
+
+            if mq_adapter.is_diff_exists(&block_id.as_short_id())? {
+                return Ok(Some(false));
+            }
+
+            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                block_id = %block_id.as_short_id(),
+                ref_by_mc_seqno,
+                max_message = %queue_diff.as_ref().max_message,
+                min_processed_to = %min_processed_to,
+                "top block diff is required to restore queue",
+            );
+
+            Ok(Some(true))
+        };
+
+        // check master block diff
+        if matches!(
+            check_block(
+                mc_block_subgraph_view.block_id,
+                mc_block_subgraph_view.ref_by_mc_seqno,
+                &mc_block_subgraph_view.queue_diff,
+            )?,
+            None | Some(true)
+        ) {
+            // return earlier and do not check shard blocks
+            // if master block diff is required or unable to check
+            return Ok(false);
+        }
+
+        // check if shard blocks diffs are required
+        for top_shard_block in &mc_block_subgraph_view.top_shard_blocks {
+            if matches!(
+                check_block(
+                    top_shard_block.block_id,
+                    top_shard_block.ref_by_mc_seqno,
+                    &top_shard_block.queue_diff,
+                )?,
+                None | Some(true)
+            ) {
+                // return earlier if any of shard block diff is required or unable to check
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
+    }
+
     #[tracing::instrument(skip_all, fields(from_mc_block_seqno))]
     pub(super) async fn restore_queue(
         blocks_cache: &BlocksCache,
@@ -123,6 +226,14 @@ where
         queue_diffs_applied_to_top_blocks: FastHashMap<ShardIdent, u32>,
     ) -> Result<RestoreQueueResult> {
         let mut res = RestoreQueueResult::default();
+
+        // NOTE: Queue restore is split into two adjacent ranges:
+        // - First, find the first applied MC subgraph stored in cache, e.g. MB2 with top shard SB3.
+        // - Then collect block ids immediately before that subgraph, e.g. MB1 and SB2.
+        // - Walk backwards from those before-tail blocks through storage and apply required historical diffs.
+        // - After that, pop applied MC subgraphs from cache starting from MB2 and apply required cached diffs forward.
+        // These ranges should not overlap: storage diffs restore the queue before the cached applied range,
+        // and cached diffs advance it through the applied range.
 
         // load init block (from persistent state) to check if required diff was already applied from persistent
         let init_mc_block_id = state_node_adapter.load_init_block_id();
@@ -209,6 +320,16 @@ where
                         first_required_diffs.insert(prev_block_id.shard, BlockId::default());
                         continue;
                     }
+                }
+
+                // skip already applied diff
+                if mq_adapter.is_diff_exists(&prev_block_id.as_short_id())? {
+                    tracing::trace!(target: tracing_targets::COLLATION_MANAGER,
+                        queue_diff_block_id = %prev_block_id.as_short_id(),
+                        "previous queue diff apply skipped because it is already applied",
+                    );
+                    first_required_diffs.insert(prev_block_id.shard, BlockId::default());
+                    continue;
                 }
 
                 // load diff to check if it is required
