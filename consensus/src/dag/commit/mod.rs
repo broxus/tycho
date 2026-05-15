@@ -1,8 +1,6 @@
 mod back;
 mod inspector;
 
-use std::sync::atomic::Ordering;
-
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
 use tokio::sync::mpsc;
@@ -262,13 +260,11 @@ impl Committer {
         );
         self.dag.last_committed_proof = Some(next.proof.round());
 
-        match (self.dag.get(next.proof.round())).and_then(|r| r.proof_stage()) {
-            Some(proof_stage) => {
-                proof_stage.is_used.store(true, Ordering::Relaxed);
-                if next.direct_trigger.is_some() {
-                    (proof_stage.has_direct_trigger).store(true, Ordering::Relaxed);
-                }
-            }
+        match self.dag.get(next.proof.round()) {
+            Some(dag_round) => dag_round
+                .used_anchor_proof()
+                .set(*next.anchor.author())
+                .expect("anchor proof slot already used"),
             _ => panic!("expected anchor proof stage"),
         };
 

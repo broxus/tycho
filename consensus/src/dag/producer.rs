@@ -70,7 +70,7 @@ impl Producer {
         let witness = Self::witness(finished_round, &local_id, last_own_point);
 
         let anchor_proof = if proven_vertex.is_some()
-            && (current_round.proof_stage()).is_some_and(|ps| ps.leader == local_id)
+            && (current_round.leader()).is_some_and(|leader| leader == local_id)
         {
             AnchorLink::ToSelf
         } else {

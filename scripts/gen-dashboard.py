@@ -3435,7 +3435,6 @@ def mempool_stats() -> RowPanel:
         # tycho_mempool_stats_filled_rounds trust me it's here (suppress check-metrics warn)
         counter_with_defaults("filled_rounds", "Rounds filled in stats"),
         counter_with_defaults("was_leader", "Leader role accomplished"),
-        counter_with_defaults("was_not_leader", "Leader role skipped"),
         counter_with_defaults("skipped_rounds", "Skipped rounds"),
         counter_with_defaults("valid_points", "Valid points"),
         counter_with_defaults("equivocated", "Equivocated points"),

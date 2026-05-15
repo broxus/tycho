@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::ops::RangeInclusive;
-use std::sync::atomic;
 use std::{array, mem};
 
 use ahash::HashMapExt;
@@ -150,31 +149,23 @@ impl DagBack {
                 self.alt(),
             );
 
-            if let Some(proof_stage) = proof_dag_round.proof_stage() {
+            if let Some(committed_author) = proof_dag_round.used_anchor_proof().get() {
                 assert_eq!(
                     lookup_proof_id.author,
-                    proof_stage.leader,
-                    "validate() is broken: anchor proof author is not leader {:?}",
+                    committed_author,
+                    "broken anchor chain: searched for {:?} but committed proof author is {}",
+                    lookup_proof_id.alt(),
+                    committed_author.alt(),
+                );
+                assert!(
+                    bottom_round <= proof_dag_round.round(),
+                    "limit by round range is broken: visiting already committed proof {:?}",
                     lookup_proof_id.alt()
                 );
-                if proof_stage.is_used.load(atomic::Ordering::Relaxed) {
-                    // this branch must be visited only with engine round change
-                    // (new call to commit), when `anchor_chain` is emptied;
-                    // during the same commit call, expect `anchor_chain` to serve its purpose
-                    assert!(
-                        bottom_round <= self.bottom_round(),
-                        "limit by round range is broken: visiting already committed proof {:?}",
-                        lookup_proof_id.alt()
-                    );
-                    // reached already committed proof, so dag is contiguous
-                    break;
-                }
-            } else {
-                panic!(
-                    "validate() is broken: anchor stage is not for anchor proof {:?}",
-                    lookup_proof_id.alt()
-                )
+                // reached already committed proof, so dag is contiguous
+                break;
             }
+
             let proof = Self::chained_proof(
                 proof_dag_round,
                 &lookup_proof_id.author,

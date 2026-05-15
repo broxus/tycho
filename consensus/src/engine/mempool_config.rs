@@ -7,7 +7,7 @@ use tycho_crypto::ed25519::{KeyPair, SecretKey};
 use tycho_network::{OverlayId, PeerId};
 use tycho_types::models::{ConsensusConfig, GenesisInfo};
 
-use crate::dag::ProofStage;
+use crate::dag::ProofLeader;
 use crate::engine::ConsensusConfigExt;
 use crate::models::{AnchorLink, ChainedAnchorProof, Point, PointData, Round, UnixTime};
 
@@ -122,7 +122,7 @@ impl MempoolConfigBuilder {
             .as_ref()
             .context("mempool consensus config is not known")?;
 
-        let genesis_round = ProofStage::align_genesis(genesis_info.start_round);
+        let genesis_round = ProofLeader::align_genesis(genesis_info.start_round);
 
         let mempool_config = MempoolConfig {
             consensus: consensus.clone(),
