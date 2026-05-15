@@ -64,10 +64,10 @@ pub enum IllFormedReason {
     TooLargePayload(u32),
     #[error("structure issue: {0}")]
     Structure(StructureIssue),
+    #[error("too many sticky anchors: {0}")]
+    TooManyStickyAnchors(u8),
     #[error("links anchor across genesis")]
     LinksAcrossGenesis,
-    #[error("links both anchor roles to same round")]
-    LinksSameRound,
     #[error("author is not scheduled: outdated vset or author out of vset")]
     UnknownAuthor,
     #[error("{0:?} peer map must be empty")]
@@ -89,6 +89,8 @@ pub enum InvalidReason {
     NoRoundInDag(PointMap),
     #[error("cannot validate point, dependency was dropped with its round")]
     DependencyRoundDropped,
+    #[error("point must be either a trigger or sticky after an anchor proof")]
+    NotTrigger(PointId),
     #[error("time is not greater than in prev point {:?}", .0.alt())]
     TimeNotGreaterThanInPrevPoint(PointId),
     #[error("anchor proof does not inherit time from its candidate {:?}", .0.alt())]
@@ -109,6 +111,8 @@ pub enum InvalidReason {
     AnchorLinkBadPath((AnchorStageRole, PointId)),
     #[error("chained proof link leads to other destination through {:?}", .0.alt())]
     ChainedProofBadPath(PointId),
+    #[error("bad sticky sequence after {:?}: previous {:?}, current {}", .0.0.alt(), .0.1, .0.2)]
+    BadStickySequence((PointId, Option<u8>, u8)),
     #[error("newer proof to chain in dependency {:?}", .0.alt())]
     NewerProofToChainInDependency(PointId),
     #[error("dependency ill-formed {:?}: {}", .0.0.alt(), .0.1)]
@@ -295,7 +299,8 @@ impl Verifier {
             .is_some_and(|leader| leader == info.author());
         // `ToSelf` introduces proof and trigger ids;
         // `validate()` recursively checks that later points inherit them through (in)direct links
-        (!info.is_proof_link_ok(is_leader)).then_some(IllFormedReason::BadProofLink(is_leader))
+        (!info.is_proof_link_ok(is_leader, conf))
+            .then_some(IllFormedReason::BadProofLink(is_leader))
     }
 
     fn other_versions(
@@ -514,6 +519,20 @@ impl Verifier {
                 } else if dep_id == to {
                     if dep.anchor_proof() != AnyLink::ToSelf {
                         invalid_reason = Some(InvalidReason::ChainedProofBadPath(dep_id));
+                    }
+
+                    if let Some(sticky_anchors) = info.sticky_anchors() {
+                        let mut is_sticky_sequence_ok = sticky_anchors < conf.consensus._unused;
+                        is_sticky_sequence_ok &= if let Some(prev_sticky) = dep.sticky_anchors() {
+                            prev_sticky.checked_add(1) == Some(sticky_anchors)
+                        } else {
+                            sticky_anchors == 0
+                        };
+
+                        if !is_sticky_sequence_ok {
+                            let tuple = (dep_id, dep.sticky_anchors(), sticky_anchors);
+                            invalid_reason = Some(InvalidReason::BadStickySequence(tuple));
+                        }
                     }
                 } else {
                     if dep.anchor_round(AnchorStageRole::Proof) > to.round {
@@ -842,27 +861,19 @@ impl Verifier {
 
         (info.check_structure(false)).map_err(IllFormedReason::Structure)?;
 
-        if (info.indirect_anchor_proof()).is_some_and(|link| link.to.round < conf.genesis_round) {
+        if let Some(sticky_anchors) = info.sticky_anchors()
+            && sticky_anchors >= conf.consensus._unused
+        {
+            return Err(IllFormedReason::TooManyStickyAnchors(sticky_anchors));
+        }
+
+        if info.anchor_round(AnchorStageRole::Proof) < conf.genesis_round
+            || info.anchor_round(AnchorStageRole::Trigger) < conf.genesis_round
+            || (info.chained_anchor_proof_to_round()).is_some_and(|to| to < conf.genesis_round)
+        {
             return Err(IllFormedReason::LinksAcrossGenesis);
         }
 
-        let proof_round = info.anchor_round(AnchorStageRole::Proof);
-        let trigger_round = info.anchor_round(AnchorStageRole::Trigger);
-        match (
-            proof_round.cmp(&conf.genesis_round),
-            trigger_round.cmp(&conf.genesis_round),
-        ) {
-            (cmp::Ordering::Less, _) | (_, cmp::Ordering::Less) => {
-                return Err(IllFormedReason::LinksAcrossGenesis);
-            }
-            (cmp::Ordering::Greater, cmp::Ordering::Greater) if proof_round == trigger_round => {
-                // equality is impossible due to commit waves do not start every round;
-                // anchor trigger may belong to a later round than proof and vice versa;
-                // no indirect links over genesis tombstone
-                return Err(IllFormedReason::LinksSameRound);
-            }
-            _ => {}
-        }
         Ok(())
     }
 
@@ -889,6 +900,10 @@ impl Verifier {
             proven.digest(),
             "Coding error: mismatched previous point of the same author, must have been checked before"
         );
+        if proven.anchor_proof() == AnyLink::ToSelf && info.anchor_trigger() != AnyLink::ToSelf {
+            return Some(InvalidReason::NotTrigger(*proven.id()));
+        }
+
         if info.time() <= proven.time() {
             // time must be increasing by the same author until it stops referencing previous points
             return Some(InvalidReason::TimeNotGreaterThanInPrevPoint(*proven.id()));

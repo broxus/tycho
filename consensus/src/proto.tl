@@ -66,6 +66,7 @@ consensus.pointRole.proof
     anchor_trigger:consensus.anchorLink
     = consensus.PointRole;
 consensus.pointRole.trigger                                           = consensus.PointRole;
+consensus.pointRole.sticky                 seq_no:int                 = consensus.PointRole;
 consensus.pointRole.genesis                                           = consensus.PointRole;
 
 /**

@@ -17,6 +17,7 @@ pub enum AnyLink<'a> {
 #[derive(Debug, PartialEq)]
 pub enum ChainedProofLink<'a> {
     Inapplicable,
+    PrevPoint { chained: u8 },
     Indirect(&'a IndirectLink),
 }
 

@@ -166,7 +166,8 @@ impl JournalEvent {
             // for self-diagnostics only, because this round was successfully commited
             | InvalidReason::NoRoundInDag(_) | InvalidReason::DependencyRoundDropped
             | InvalidReason::DepNotFound(_) => {},
-            InvalidReason::TimeNotGreaterThanInPrevPoint(point_id)
+            InvalidReason::NotTrigger(point_id)
+            | InvalidReason::TimeNotGreaterThanInPrevPoint(point_id)
             | InvalidReason::AnchorProofDoesntInheritAnchorTime(point_id)
             | InvalidReason::AnchorTimeNotInheritedFromProof(point_id)
             | InvalidReason::MustHaveReferencedPrevPoint(point_id)
@@ -176,6 +177,7 @@ impl JournalEvent {
             | InvalidReason::AnchorLink((_, point_id))
             | InvalidReason::AnchorLinkBadPath((_, point_id))
             | InvalidReason::ChainedProofBadPath(point_id)
+            | InvalidReason::BadStickySequence((point_id, _, _))
             | InvalidReason::NewerProofToChainInDependency(point_id)
             | InvalidReason::DepIllFormed((point_id, _)) => {
                 point_keys.push(point_id.key());

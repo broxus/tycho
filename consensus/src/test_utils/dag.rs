@@ -11,13 +11,14 @@ use tycho_util::FastHashMap;
 
 use crate::dag::{DagRound, LastOwnPoint, Producer, ValidateResult, Verifier};
 use crate::effects::{Ctx, EngineCtx, MempoolRayon, RoundCtx, TaskTracker, ValidateCtx};
-use crate::engine::{InputBuffer, MempoolConfig};
+use crate::engine::{InputBuffer, MempoolConfig, MempoolMergedConfig};
 use crate::intercom::{Dispatcher, Downloader, InitPeers, PeerSchedule, Responder};
 use crate::models::{Cert, PeerCount, Point, PointInfo, Round, Signature};
 use crate::moderator::Moderator;
 use crate::storage::MempoolStore;
 
 pub fn make_engine_parts<const PEER_COUNT: usize>(
+    merged_conf: &MempoolMergedConfig,
     peers: &[(PeerId, Arc<KeyPair>); PEER_COUNT],
     local_keys: Arc<KeyPair>,
 ) -> (PeerSchedule, Downloader, Point, EngineCtx) {
@@ -31,7 +32,6 @@ pub fn make_engine_parts<const PEER_COUNT: usize>(
 
     let task_tracker = TaskTracker::default();
 
-    let merged_conf = crate::test_utils::default_test_config();
     let conf = &merged_conf.conf;
     let genesis = merged_conf.genesis();
 
@@ -45,7 +45,7 @@ pub fn make_engine_parts<const PEER_COUNT: usize>(
     // any peer id will be ok, network is not used
     let peer_schedule = PeerSchedule::new(local_keys, private_overlay);
     let init_peers = InitPeers::new(peers.iter().map(|(id, _)| *id).collect());
-    peer_schedule.init(&merged_conf, &init_peers);
+    peer_schedule.init(merged_conf, &init_peers);
 
     let stub_downloader = Downloader::new(&dispatcher, &peer_schedule);
 
@@ -151,6 +151,7 @@ fn point<const PEER_COUNT: usize>(
     let last_own_point = prev_info.map(|info| LastOwnPoint {
         digest: *info.digest(),
         includes: info.includes().clone(),
+        sticky_anchors: info.sticky_anchors(),
         round: info.round(),
         signers: peer_count,
         evidence: {

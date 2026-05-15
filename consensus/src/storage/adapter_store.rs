@@ -288,7 +288,8 @@ impl MempoolAdapterStore {
             .filter_map(|(info, anchor_flags, committed_opt)| {
                 if anchor_flags.contains(AnchorFlags::Used | AnchorFlags::Anchor) {
                     anchors.insert(info.round(), info.clone());
-                } else if anchor_flags.contains(AnchorFlags::Used | AnchorFlags::Proof) {
+                }
+                if anchor_flags.contains(AnchorFlags::Used | AnchorFlags::Proof) {
                     proofs.insert(info.round(), info.clone());
                 }
                 committed_opt.map(|committed| (committed, info))

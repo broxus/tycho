@@ -359,6 +359,31 @@ mod test {
 
     #[tokio::test]
     async fn test_commit_with_gap() {
+        test_impl(0, Round(25), [9, 5, 17], Round(97)).await;
+
+        test_impl(1, Round(26), [8, 6, 16], Round(95)).await;
+        test_impl(2, Round(26), [12, 8, 25], Round(96)).await;
+        test_impl(3, Round(26), [12, 6, 22], Round(94)).await;
+
+        test_impl(4, Round(26), [15, 7, 28], Round(95)).await; // N mod 3 == 1
+        test_impl(5, Round(26), [17, 9, 34], Round(96)).await; // N mod 3 == 2 is optimal
+        test_impl(6, Round(26), [14, 9, 31], Round(98)).await; // N mod 3 == 0
+
+        test_impl(7, Round(26), [16, 10, 35], Round(98)).await;
+        test_impl(8, Round(26), [18, 11, 39], Round(98)).await;
+        test_impl(9, Round(26), [18, 10, 32], Round(94)).await;
+
+        test_impl(10, Round(26), [19, 11, 36], Round(95)).await;
+        test_impl(11, Round(26), [20, 12, 40], Round(96)).await;
+        test_impl(12, Round(26), [18, 10, 37], Round(94)).await;
+    }
+
+    async fn test_impl(
+        sticky_anchors: u8,
+        dag_bottom: Round,
+        committed: [usize; 3],
+        last_proof: Round,
+    ) {
         let stub_store = MempoolStore::no_read_stub();
 
         let peers: [(PeerId, Arc<KeyPair>); PEER_COUNT] = array::from_fn(|i| {
@@ -367,8 +392,11 @@ mod test {
         });
         let local_keys = &peers[0].1;
 
+        let mut merged_conf = test_utils::default_test_config();
+        merged_conf.conf.consensus._unused = sticky_anchors;
+
         let (peer_schedule, stub_downloader, genesis, engine_ctx) =
-            test_utils::make_engine_parts(&peers, local_keys.clone());
+            test_utils::make_engine_parts(&merged_conf, &peers, local_keys.clone());
         let conf = engine_ctx.conf();
 
         let input_buffer = InputBuffer::new_stub(0, NonZeroUsize::MIN, &conf.consensus);
@@ -398,13 +426,14 @@ mod test {
             async |committer: &mut Committer| _commit(committer, &stats_ranges, conf).await;
 
         for round in (conf.genesis_round.next().0..100).map(Round) {
-            println!(
-                "{round:?} back {}..={} front {}..={}",
-                committer.bottom_round().0,
-                committer.top_round().0,
-                dag.bottom_round().0,
-                dag.top().round().0
-            );
+            // println!(
+            //     "{round:?} back {}..={} front {}..={}  {:?} \n\n",
+            //     committer.bottom_round().0,
+            //     committer.top_round().0,
+            //     dag.bottom_round().0,
+            //     dag.top().round().0,
+            //     dag.top().alt()
+            // );
 
             round_ctx = RoundCtx::new(&engine_ctx, round);
 
@@ -444,10 +473,10 @@ mod test {
             .await;
 
             if round.0 == 33 {
-                assert_eq!(commit(&mut committer).await.len(), 9);
+                assert_eq!(commit(&mut committer).await.len(), committed[0]);
             }
             if round.0 == 48 {
-                assert_eq!(commit(&mut committer).await.len(), 5);
+                assert_eq!(commit(&mut committer).await.len(), committed[1]);
             }
         }
 
@@ -458,24 +487,24 @@ mod test {
 
         assert_eq!(
             committer.dag.bottom_round(),
-            Round(25),
+            dag_bottom,
             "test config changed? should update test then"
         );
 
-        assert_eq!(commit(&mut committer).await.len(), 17);
+        assert_eq!(commit(&mut committer).await.len(), committed[2]);
 
         assert_eq!(
             committer.dag.last_committed_proof,
-            Some(Round(97)),
+            Some(last_proof),
             "last proof must be set after commit"
         );
 
         // `drop_upto()` must keep `last_committed_proof` while it is in dag
 
-        assert!(committer.drop_upto(Round(97), conf));
-        assert_eq!(committer.dag.last_committed_proof, Some(Round(97)));
+        assert!(committer.drop_upto(last_proof, conf));
+        assert_eq!(committer.dag.last_committed_proof, Some(last_proof));
 
-        assert!(committer.drop_upto(Round(98), conf));
+        assert!(committer.drop_upto(last_proof.next(), conf));
         assert_eq!(committer.dag.last_committed_proof, None);
     }
 
@@ -492,10 +521,16 @@ mod test {
             let batch = committer.commit(&trigger, conf).unwrap_or_else(|err| {
                 panic!("commit on trigger @ {trigger_round:?} failed: {err}")
             });
+            // let trigger = trigger.valid().expect("cannot commit non-valid").info();
+            // for data in &batch {
+            //     println!(
+            //         "commit anchor {} @ {:?} sticky {:?}",
+            //         data.anchor.author().alt(),
+            //         data.anchor.round(),
+            //         trigger.sticky_anchors(),
+            //     );
+            // }
             committed.extend(batch);
-        }
-        for data in &committed {
-            println!("commit anchor @ {:?}", data.anchor.round());
         }
 
         if let Some(last) = committed.last() {
