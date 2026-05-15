@@ -4185,6 +4185,7 @@ dependencies = [
  "blake3",
  "bumpalo",
  "bytes",
+ "bytesize",
  "clap",
  "dashmap",
  "futures-util",
