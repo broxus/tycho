@@ -135,7 +135,6 @@ pub enum SlasherContractEvent {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct SubmitBlocksBatch {
-    pub session_id: ValidationSessionId,
     pub validator_idx: u16,
     pub blocks_batch: BlocksBatch,
 }

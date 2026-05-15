@@ -178,9 +178,9 @@ impl Node {
             .await
             .context("failed to load mc zerostate on run")?;
 
-        let blockchain_config = mc_state.config_params()?;
+        let config = mc_state.config_params()?;
         let validator_session_id = {
-            let current_validator_set = blockchain_config.get_current_validator_set()?;
+            let current_validator_set = config.get_current_validator_set()?;
             base.validator_resolver()
                 .update_validator_set(&current_validator_set);
             let v_set_len = current_validator_set.list.len();
@@ -230,7 +230,7 @@ impl Node {
             &base.storage_context,
             self.slasher_config,
             mc_state.as_ref().global_id,
-            blockchain_config,
+            config,
             validator_session_id,
         )
         .context("failed to create slasher")?;
