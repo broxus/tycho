@@ -5,9 +5,7 @@ consensus.pointData
     includes:(vector consensus.peerDigestPair)
     witness:(vector consensus.peerDigestPair)
     evidence:(vector consensus.peerSignaturePair)
-    chained_anchor_proof:consensus.chainedAnchorProof
-    anchor_trigger:consensus.anchorLink
-    anchor_proof:consensus.anchorLink
+    role:consensus.pointRole
     time:int
     anchor_time:int
     = consensus.PointData;
@@ -57,31 +55,32 @@ consensus.peerSignaturePair
     = consensus.PeerSignaturePair;
 
 /**
+* Representation of Point Role enum
+*/
+consensus.pointRole.regular
+    anchor_proof:consensus.anchorLink
+    anchor_trigger:consensus.anchorLink
+    = consensus.PointRole;
+consensus.pointRole.proof
+    anchor_proof:consensus.link.indirect
+    anchor_trigger:consensus.anchorLink
+    = consensus.PointRole;
+consensus.pointRole.trigger                                           = consensus.PointRole;
+consensus.pointRole.genesis                                           = consensus.PointRole;
+
+/**
 * Representation of Anchor Link enum
 */
-consensus.anchorLink.to_self                                            = consensus.AnchorLink;
 consensus.anchorLink.direct       x:consensus.link.through              = consensus.AnchorLink;
 consensus.anchorLink.indirect     x:consensus.link.indirect             = consensus.AnchorLink;
 
-/**
-* Representation of Anchor Proof Chain
-*/
-consensus.chainedAnchorProof.inapplicable                               = consensus.ChainedAnchorProof;
-consensus.chainedAnchorProof.chained       x:consensus.link.indirect    = consensus.ChainedAnchorProof;
+consensus.link.through.includes   x:transport.PeerId                    = consensus.link.Through;
+consensus.link.through.witness    x:transport.PeerId                    = consensus.link.Through;
 
-/**
-* Representation of Indirect Link
-*/
 consensus.link.indirect
     to:consensus.pointId
     path:consensus.link.through
     = consensus.link.Indirect;
-
-/**
-* Representation of Through enum
-*/
-consensus.link.through.includes   x:transport.PeerId                    = consensus.link.Through;
-consensus.link.through.witness    x:transport.PeerId                    = consensus.link.Through;
 
 /*
 * Representation of DownloadResponse

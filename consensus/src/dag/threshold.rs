@@ -282,7 +282,7 @@ mod test {
     use crate::dag::threshold::Threshold;
     use crate::models::point_status::PointStatusValid;
     use crate::models::{
-        AnchorLink, Cert, ChainedAnchorProof, DagPoint, PeerCount, Point, PointData, UnixTime,
+        AnchorLink, Cert, DagPoint, PeerCount, Point, PointData, PointRole, UnixTime,
     };
     use crate::test_utils::default_test_config;
 
@@ -399,9 +399,10 @@ mod test {
                 includes: Default::default(),
                 witness: Default::default(),
                 evidence: Default::default(),
-                chained_anchor_proof: ChainedAnchorProof::Inapplicable,
-                anchor_trigger: AnchorLink::ToSelf,
-                anchor_proof: AnchorLink::ToSelf,
+                role: PointRole::Regular {
+                    anchor_proof: AnchorLink::random(),
+                    anchor_trigger: AnchorLink::random(),
+                },
                 time: now + delay,
                 anchor_time: UnixTime::now(),
             },

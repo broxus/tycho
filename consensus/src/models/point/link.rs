@@ -7,11 +7,22 @@ use tycho_network::PeerId;
 use crate::effects::{AltFmt, AltFormat};
 use crate::models::{Digest, PointId, PointMap, Round};
 
+#[derive(Debug, PartialEq)]
+pub enum AnyLink<'a> {
+    ToSelf,
+    Direct(Through),
+    Indirect(&'a IndirectLink),
+}
+
+#[derive(Debug, PartialEq)]
+pub enum ChainedProofLink<'a> {
+    Inapplicable,
+    Indirect(&'a IndirectLink),
+}
+
 #[derive(Clone, Debug, PartialEq, TlRead, TlWrite, Serialize)]
 #[tl(boxed, scheme = "proto.tl")]
 pub enum AnchorLink {
-    #[tl(id = "consensus.anchorLink.to_self")]
-    ToSelf,
     #[tl(id = "consensus.anchorLink.direct")]
     Direct(Through),
     #[tl(id = "consensus.anchorLink.indirect")]
@@ -19,19 +30,6 @@ pub enum AnchorLink {
 }
 
 impl AnchorLink {
-    pub const MAX_TL_BYTES: usize = 4 + IndirectLink::MAX_TL_BYTES;
-}
-
-#[derive(Clone, Debug, PartialEq, TlRead, TlWrite, Serialize)]
-#[tl(boxed, scheme = "proto.tl")]
-pub enum ChainedAnchorProof {
-    #[tl(id = "consensus.chainedAnchorProof.inapplicable")]
-    Inapplicable,
-    #[tl(id = "consensus.chainedAnchorProof.chained")]
-    Chained(IndirectLink),
-}
-
-impl ChainedAnchorProof {
     pub const MAX_TL_BYTES: usize = 4 + IndirectLink::MAX_TL_BYTES;
 }
 
@@ -46,7 +44,7 @@ impl IndirectLink {
     pub const MAX_TL_BYTES: usize = 4 + PointId::MAX_TL_BYTES + Through::MAX_TL_BYTES;
 }
 
-#[derive(Clone, Debug, PartialEq, TlRead, TlWrite, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, TlRead, TlWrite, Serialize)]
 #[tl(boxed, scheme = "proto.tl")]
 pub enum Through {
     #[tl(id = "consensus.link.through.includes")]
@@ -97,7 +95,6 @@ impl AltFormat for AnchorLink {}
 impl Debug for AltFmt<'_, AnchorLink> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match AltFormat::unpack(self) {
-            AnchorLink::ToSelf => write!(f, "to self"),
             AnchorLink::Direct(through) => write!(f, "direct {:?}", through.alt()),
             AnchorLink::Indirect(indirect) => write!(f, "indirect {:?}", indirect.alt()),
         }
@@ -127,11 +124,9 @@ impl Debug for AltFmt<'_, Through> {
 #[cfg(any(test, feature = "test"))]
 impl AnchorLink {
     pub fn random() -> Self {
-        match rand::random_range(0..5) {
-            0 => Self::ToSelf,
-            1 | 2 => Self::Direct(Through::random()),
-            3 | 4 => Self::Indirect(IndirectLink::random()),
-            _ => unreachable!(),
+        match rand::random_bool(0.5) {
+            true => Self::Direct(Through::random()),
+            false => Self::Indirect(IndirectLink::random()),
         }
     }
 }
