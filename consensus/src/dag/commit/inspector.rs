@@ -1,5 +1,4 @@
 use std::mem;
-use std::sync::atomic;
 
 use ahash::HashMapExt;
 use futures_util::FutureExt;
@@ -100,9 +99,7 @@ impl RoundInspector {
     }
 
     pub fn inspect(&mut self, r_0: &DagRound, emit_stats: bool) -> TaskResult<()> {
-        let leader_used = r_0
-            .proof_stage()
-            .map(|a| (a.leader, a.is_used.load(atomic::Ordering::Relaxed)));
+        let leader_used = r_0.used_anchor_proof().get();
 
         // map has full peer set for this round, but maybe with empty value
         let p_0 = Self::collect_points(r_0)?;
@@ -168,14 +165,10 @@ impl RoundInspector {
                 }
             }
 
-            if let Some((leader, used)) = leader_used
+            if let Some(leader) = leader_used
                 && leader == author
             {
-                if used {
-                    author_counters.was_leader += 1;
-                } else {
-                    author_counters.was_not_leader += 1;
-                }
+                author_counters.was_leader += 1;
             }
             match (self.stats)
                 .entry(*author)

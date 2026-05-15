@@ -10,7 +10,7 @@ use tycho_crypto::ed25519::KeyPair;
 use tycho_network::{Network, OverlayId, PeerId, PrivateOverlay, Router};
 use tycho_util::FastHashMap;
 
-use crate::dag::{DagRound, ProofStage, ValidateResult, Verifier};
+use crate::dag::{DagRound, ValidateResult, Verifier};
 use crate::effects::{Ctx, EngineCtx, MempoolRayon, RoundCtx, TaskTracker, ValidateCtx};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Dispatcher, Downloader, InitPeers, PeerSchedule, Responder};
@@ -113,7 +113,7 @@ pub async fn populate_points<const PEER_COUNT: usize>(
             &includes,
             max_prev_time,
             max_anchor_time,
-            dag_round.proof_stage(),
+            dag_round.leader(),
             &last_proof,
             &last_trigger,
             msg_count,
@@ -167,7 +167,7 @@ fn point<const PEER_COUNT: usize>(
     includes: &FastHashMap<PeerId, Digest>,
     max_prev_time: UnixTime,
     max_anchor_time: UnixTime,
-    proof_stage: Option<&ProofStage>,
+    round_leader: Option<&PeerId>,
     last_proof: &PointId,
     last_trigger: &PointId,
     msg_count: usize,
@@ -204,7 +204,7 @@ fn point<const PEER_COUNT: usize>(
         payload.push(Bytes::from(data));
     }
 
-    let anchor_proof = if proof_stage.is_some_and(|ps| ps.leader == author) {
+    let anchor_proof = if round_leader.is_some_and(|leader| leader == author) {
         AnchorLink::ToSelf
     } else {
         point_anchor_link(round, author, last_proof)

@@ -1,4 +1,4 @@
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, OnceLock, Weak};
 
 use tokio::sync::mpsc;
 use tycho_crypto::ed25519::KeyPair;
@@ -6,9 +6,9 @@ use tycho_network::PeerId;
 use tycho_util::FastDashMap;
 
 use crate::dag::IllFormedReason;
-use crate::dag::anchor_stage::ProofStage;
 use crate::dag::dag_location::DagLocation;
 use crate::dag::dag_point_future::{DagPointFuture, WeakDagPointFuture};
+use crate::dag::proof_leader::ProofLeader;
 use crate::dag::threshold::Threshold;
 use crate::effects::{AltFmt, AltFormat, Ctx, RoundCtx, ValidateCtx};
 use crate::engine::{MempoolConfig, NodeConfig};
@@ -31,7 +31,8 @@ pub struct DagRound(Arc<DagRoundInner>);
 pub struct DagRoundInner {
     round: Round,
     peer_count: PeerCount,
-    proof_stage: Option<ProofStage>,
+    proof_leader: Option<PeerId>,
+    used_anchor_proof: OnceLock<PeerId>,
     locations: FastDashMap<PeerId, DagLocation>,
     threshold: Threshold,
     triggers_tx: mpsc::UnboundedSender<WeakDagPointFuture>,
@@ -95,6 +96,12 @@ impl DagRound {
                 round.0
             )
         };
+        let used_anchor_proof = OnceLock::new();
+        if round == conf.genesis_round {
+            assert_eq!(peers.len(), 1, "genesis round must have one peer");
+            let genesis_author = peers.iter().next().expect("genesis author");
+            used_anchor_proof.set(*genesis_author).ok();
+        }
 
         let prevs = match prev.upgrade() {
             None => {
@@ -116,7 +123,8 @@ impl DagRound {
         let this = Self(Arc::new(DagRoundInner {
             round,
             peer_count,
-            proof_stage: ProofStage::of(round, peer_schedule, conf),
+            proof_leader: ProofLeader::of(round, peer_schedule, conf),
+            used_anchor_proof,
             locations: FastDashMap::with_capacity_and_hasher(peers.len(), Default::default()),
             threshold: Threshold::new(round, peer_count, conf),
             triggers_tx: triggers_tx.clone(),
@@ -138,8 +146,12 @@ impl DagRound {
         self.0.peer_count
     }
 
-    pub fn proof_stage(&self) -> Option<&ProofStage> {
-        self.0.proof_stage.as_ref()
+    pub fn leader(&self) -> Option<&PeerId> {
+        self.0.proof_leader.as_ref()
+    }
+
+    pub fn used_anchor_proof(&self) -> &OnceLock<PeerId> {
+        &self.0.used_anchor_proof
     }
 
     pub fn threshold(&self) -> &Threshold {

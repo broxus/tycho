@@ -8,7 +8,7 @@ use tycho_util::metrics::HistogramGuard;
 
 use crate::dag::dag_location::DagLocation;
 use crate::dag::dag_point_future::WeakDagPointFuture;
-use crate::dag::{DagRound, ProofStage, WeakDagRound};
+use crate::dag::{DagRound, ProofLeader, WeakDagRound};
 use crate::effects::{AltFormat, Ctx, TaskResult, ValidateCtx};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
@@ -289,10 +289,10 @@ impl Verifier {
         conf: &MempoolConfig,
     ) -> Option<IllFormedReason> {
         let is_leader = point_round
-            .ok_or_else(|| ProofStage::of(info.round(), peer_schedule, conf))
+            .ok_or_else(|| ProofLeader::of(info.round(), peer_schedule, conf))
             .as_ref()
-            .map_or_else(|fallback| fallback.as_ref(), |round| round.proof_stage())
-            .is_some_and(|proof_stage| proof_stage.leader == info.author());
+            .map_or_else(|fallback| fallback.as_ref(), |round| round.leader())
+            .is_some_and(|leader| leader == info.author());
         // Proof authority remains round-scheduled; trigger authority is content-based.
         let is_self_link_ok = if is_leader {
             // must link to own point if it did not skip rounds

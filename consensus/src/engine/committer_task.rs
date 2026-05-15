@@ -279,7 +279,6 @@ impl RoundCtx {
                     .set(f64::from(counters.last_round));
                 emit_counters!("tycho_mempool_stats_", counters, &labels, [
                     was_leader,
-                    was_not_leader,
                     skipped_rounds,
                     valid_points,
                     points_proved,

@@ -1,5 +1,3 @@
-use std::sync::atomic::AtomicBool;
-
 use rand::{Rng, SeedableRng};
 use tycho_network::PeerId;
 
@@ -11,16 +9,10 @@ use crate::models::{AnchorStageRole, Round};
 pub const WAVE_ROUNDS: u32 = 3;
 
 #[derive(Debug)]
-pub struct ProofStage {
-    pub leader: PeerId,
-    // if anchor is locally committed then its proof must be marked as used
-    pub is_used: AtomicBool,
-    // trigger is not necessary used - proof may be included by the next anchor and its own trigger
-    pub has_direct_trigger: AtomicBool,
-}
+pub struct ProofLeader;
 
-impl ProofStage {
-    pub fn of(round: Round, peer_schedule: &PeerSchedule, conf: &MempoolConfig) -> Option<Self> {
+impl ProofLeader {
+    pub fn of(round: Round, peer_schedule: &PeerSchedule, conf: &MempoolConfig) -> Option<PeerId> {
         // Genesis point appears as a Proof in anchor chain during commit,
         // so it has to be at a round with Proof role
         let anchor_candidate_round =
@@ -46,12 +38,7 @@ impl ProofStage {
         if Self::role(round)? != AnchorStageRole::Proof {
             return None;
         }
-        Some(Self {
-            leader,
-            // genesis is a corner case, exclude it from commit chain with explicit "true"
-            is_used: AtomicBool::new(round == conf.genesis_round),
-            has_direct_trigger: AtomicBool::new(round == conf.genesis_round),
-        })
+        Some(leader)
     }
 
     fn role(round: Round) -> Option<AnchorStageRole> {
@@ -82,7 +69,7 @@ mod tests {
     #[test]
     pub fn test_genesis_aligned() -> Result<()> {
         for start_round in 0..10 {
-            let genesis_round = ProofStage::align_genesis(start_round).0;
+            let genesis_round = ProofLeader::align_genesis(start_round).0;
             ensure!(
                 genesis_round >= start_round,
                 "genesis round must not be less than start round after alignment, \
@@ -106,10 +93,10 @@ mod tests {
                  Verifier::verify() and to set first working v_set in PeerSchedule"
             );
 
-            let role = ProofStage::role(Round(genesis_round));
+            let role = ProofLeader::role(Round(genesis_round));
             anyhow::ensure!(
                 role == Some(AnchorStageRole::Proof),
-                "genesis must be aligned to Proof anchor stage; round={genesis_round}",
+                "genesis must be aligned to be Proof leader; round={genesis_round}",
             );
         }
         Ok(())
