@@ -21,7 +21,6 @@ use tycho_core::global_config::ZerostateId;
 use tycho_core::storage::{CoreStorage, KeyBlocksDirection};
 use tycho_executor::{Executor, ExecutorInspector, ExecutorParams, ParsedConfig, TxError};
 use tycho_rpc_subscriptions::SubscriberManagerConfig;
-use tycho_types::cell::Lazy;
 use tycho_types::models::*;
 use tycho_types::prelude::*;
 use tycho_util::FastHashMap;
@@ -348,22 +347,13 @@ impl RpcState {
         };
 
         // Get the current account state.
-        let loaded = self.inner.get_account_state(&dst)?;
-
-        let (shard_account, mc_ref_handle) = match &loaded {
-            LoadedAccountState::Found {
-                state,
-                mc_ref_handle,
-                ..
-            } => (state.clone(), Some(mc_ref_handle.clone())),
-            LoadedAccountState::NotFound { .. } => (
-                ShardAccount {
-                    account: Lazy::new(&OptionalAccount::EMPTY).unwrap(),
-                    last_trans_hash: HashBytes::ZERO,
-                    last_trans_lt: 0,
-                },
-                None,
-            ),
+        let LoadedAccountState::Found {
+            state: shard_account,
+            mc_ref_handle,
+            ..
+        } = self.inner.get_account_state(&dst)?
+        else {
+            return Ok(());
         };
 
         let libraries = if dst.is_masterchain() {
