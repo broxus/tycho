@@ -1,4 +1,5 @@
 use anyhow::{Result, bail};
+use futures_util::FutureExt;
 use tycho_types::models::ShardIdent;
 
 use crate::collator::{Collator, CollatorFactory};
@@ -66,6 +67,10 @@ where
                 };
 
                 set_state(&mut active_collator);
+
+                // drain a stale cancel permit before starting another collation attempt
+                let _ = active_collator.cancel_collation.notified().now_or_never();
+
                 Some(collator).transpose()
             }
             None => bail!("collator for {} not started", shard_id),
