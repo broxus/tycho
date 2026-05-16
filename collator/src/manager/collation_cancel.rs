@@ -137,6 +137,8 @@ impl CollationCancelHandle {
             "collation cancel task spawned",
         );
 
+        collation_manager.request_cancel_collations();
+
         // new collation tasks exist
         // we should cancel new collation tasks
         // awaiting previous cancel task before if exists
@@ -150,8 +152,6 @@ impl CollationCancelHandle {
                 while let Some(prev_task_res) = previous_task_wrapper.next().await {
                     prev_task_res?;
                 }
-
-                collation_manager.request_cancel_collations();
 
                 // await collation tasks
                 while let Some(collator_res) = collator_tasks.next().await {
