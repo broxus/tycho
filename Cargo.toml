@@ -1,5 +1,5 @@
 [workspace.package]
-version = "0.3.9"
+version = "0.3.10"
 edition = "2024"
 authors = ["Broxus Team"]
 rust-version = "1.95.0"
@@ -54,7 +54,7 @@ crc32c = "0.6"
 criterion = "0.8.0"
 crossbeam-deque = "0.8.6"
 crossbeam-queue = "0.3.12"
-dashmap = "6.1.0"
+dashmap = "6.2.1"
 dirs = "6.0.0"
 ed25519 = "2.2.3"
 ed25519-dalek = "2.2.0"
@@ -62,7 +62,10 @@ exponential-backoff = "1.2.1"
 fdlimit = "0.3.0"
 futures-executor = "0.3"
 futures-util = "0.3"
-governor = { version = "0.9", default-features = false, features = ["std", "quanta"] }
+governor = { version = "0.9", default-features = false, features = [
+    "std",
+    "quanta",
+] }
 getip = "0.2.1"
 hdrhistogram = "7.5.4"
 hex = "0.4"
@@ -87,7 +90,10 @@ proc-macro2 = "1.0"
 prost = "0.14.3"
 prost-build = "0.14.3"
 quick_cache = "0.6.21"
-quinn = { version = "0.11.9", default-features = false, features = ["runtime-tokio", "rustls"] }
+quinn = { version = "0.11.9", default-features = false, features = [
+    "runtime-tokio",
+    "rustls",
+] }
 quote = "1.0"
 object_store = "0.13"
 rand = "0.9"
@@ -130,7 +136,9 @@ tikv-jemalloc-ctl = { version = "0.6.1", features = ["stats"] }
 tl-proto = "0.5.4"
 tokio = { version = "1", default-features = false }
 tokio-stream = "0.1.18"
-tokio-util = { version = "0.7.18", default-features = false, features = ["codec"] }
+tokio-util = { version = "0.7.18", default-features = false, features = [
+    "codec",
+] }
 tower = "0.5"
 tower-http = "0.6"
 tracing = "0.1"
@@ -142,7 +150,7 @@ triomphe = "0.1.15"
 tycho-crypto = { version = "0.4", features = ["tl-proto", "serde", "rand9"] }
 tycho-executor = "0.3.6"
 tycho-types = { version = "0.3.4", features = ["tycho", "stats"] }
-tycho-vm = "0.3.5"
+tycho-vm = "0.3.6"
 uuid = "1.22.0"
 walkdir = "2.5.0"
 weedb = "0.6.0"
@@ -150,20 +158,20 @@ zstd-safe = "7.2"
 zstd-sys = "2.0"
 
 # local deps
-tycho-block-util = { path = "./block-util", version = "0.3.9" }
-tycho-build-info = { path = "./tycho-build-info", version = "0.3.9" }
-tycho-collator = { path = "./collator", version = "0.3.9" }
-tycho-consensus = { path = "./consensus", version = "0.3.9" }
-tycho-control = { path = "./control", version = "0.3.9" }
-tycho-core = { path = "./core", version = "0.3.9" }
-tycho-network = { path = "./network", version = "0.3.9" }
-tycho-rpc-subscriptions = { path = "./rpc-subscriptions", version = "0.3.9" }
-tycho-rpc = { path = "./rpc", version = "0.3.9" }
-tycho-storage = { path = "./storage", version = "0.3.9" }
-tycho-storage-traits = { path = "./storage-traits", version = "0.3.9" }
-tycho-util = { path = "./util", version = "0.3.9" }
-tycho-util-proc = { path = "./util-proc", version = "0.3.9" }
-tycho-wu-tuner = { path = "./wu-tuner", version = "0.3.9" }
+tycho-block-util = { path = "./block-util", version = "0.3.10" }
+tycho-build-info = { path = "./tycho-build-info", version = "0.3.10" }
+tycho-collator = { path = "./collator", version = "0.3.10" }
+tycho-consensus = { path = "./consensus", version = "0.3.10" }
+tycho-control = { path = "./control", version = "0.3.10" }
+tycho-core = { path = "./core", version = "0.3.10" }
+tycho-network = { path = "./network", version = "0.3.10" }
+tycho-rpc-subscriptions = { path = "./rpc-subscriptions", version = "0.3.10" }
+tycho-rpc = { path = "./rpc", version = "0.3.10" }
+tycho-storage = { path = "./storage", version = "0.3.10" }
+tycho-storage-traits = { path = "./storage-traits", version = "0.3.10" }
+tycho-util = { path = "./util", version = "0.3.10" }
+tycho-util-proc = { path = "./util-proc", version = "0.3.10" }
+tycho-wu-tuner = { path = "./wu-tuner", version = "0.3.10" }
 
 [patch.crates-io]
 # patches here
