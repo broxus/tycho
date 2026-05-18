@@ -535,138 +535,131 @@ impl BlocksCache {
         &self,
         from_seqno: u32,
     ) -> Result<Option<CachedMcBlockSubgraphView>> {
-        // get master blocks keys from cache
-        let keys: Vec<_> = self.inner.masters.lock().blocks.keys().copied().collect();
+        // build master block view
+        let (mut subgraph_view, top_shard_blocks_info) = {
+            let guard = self.inner.masters.lock();
+            let Some(mc_block_entry) = guard
+                .blocks
+                .range(from_seqno..)
+                .find(|(_, entry)| {
+                    matches!(
+                        entry.data,
+                        BlockCacheEntryData::Received { .. }
+                            | BlockCacheEntryData::Collated {
+                                received_after_collation: true,
+                                ..
+                            }
+                    )
+                })
+                .map(|(_, entry)| entry)
+            else {
+                return Ok(None);
+            };
 
-        for key in keys {
-            // skip blocks before the from boundary
-            if key < from_seqno {
+            let subgraph_view = CachedMcBlockSubgraphView {
+                block_id: mc_block_entry.block_id,
+                ref_by_mc_seqno: mc_block_entry.ref_by_mc_seqno,
+                queue_diff: match &mc_block_entry.data {
+                    BlockCacheEntryData::Received { queue_diff, .. } => queue_diff.clone(),
+                    BlockCacheEntryData::Collated {
+                        candidate_stuff, ..
+                    } => candidate_stuff.candidate.queue_diff_aug.data.clone(),
+                },
+                top_shard_blocks: vec![],
+                missing_top_shard_block: None,
+            };
+
+            let top_shard_blocks_info = mc_block_entry.top_shard_blocks_info.clone();
+
+            (subgraph_view, top_shard_blocks_info)
+        };
+
+        // try to read top shard blocks data
+        for top_shard_block in top_shard_blocks_info {
+            // skip shard blocks that included in previous master blocks
+            if !top_shard_block.updated
+                || top_shard_block.block.ref_by_mc_seqno <= self.inner.zerostate_mc_seqno
+            {
                 continue;
             }
 
-            // build master block view
-            let (mut subgraph_view, top_shard_blocks_info) = {
-                let guard = self.inner.masters.lock();
-                let Some(mc_block_entry) = guard.blocks.get(&key) else {
-                    bail!("Block cache entry should exist ({})", key)
+            // try get shard block from cache
+            if let Some(shard_cache) = self.inner.shards.get(&top_shard_block.block.block_id.shard)
+                && let Some(sc_block_entry) = shard_cache
+                    .blocks
+                    .get(&top_shard_block.block.block_id.seqno)
+                && sc_block_entry.ref_by_mc_seqno == subgraph_view.block_id.seqno
+            {
+                // get diff
+                let queue_diff = match &sc_block_entry.data {
+                    BlockCacheEntryData::Received { queue_diff, .. } => queue_diff.clone(),
+                    BlockCacheEntryData::Collated {
+                        candidate_stuff, ..
+                    } => candidate_stuff.candidate.queue_diff_aug.data.clone(),
                 };
 
-                // get only received blocks
-                if !matches!(
-                    mc_block_entry.data,
-                    BlockCacheEntryData::Received { .. }
-                        | BlockCacheEntryData::Collated {
-                            received_after_collation: true,
-                            ..
-                        }
-                ) {
-                    continue;
-                }
-
-                let subgraph_view = CachedMcBlockSubgraphView {
-                    block_id: mc_block_entry.block_id,
-                    ref_by_mc_seqno: mc_block_entry.ref_by_mc_seqno,
-                    queue_diff: match &mc_block_entry.data {
-                        BlockCacheEntryData::Received { queue_diff, .. } => queue_diff.clone(),
-                        BlockCacheEntryData::Collated {
-                            candidate_stuff, ..
-                        } => candidate_stuff.candidate.queue_diff_aug.data.clone(),
-                    },
-                    top_shard_blocks: vec![],
-                    missing_top_shard_block: None,
-                };
-
-                let top_shard_blocks_info = mc_block_entry.top_shard_blocks_info.clone();
-
-                (subgraph_view, top_shard_blocks_info)
-            };
-
-            // try to read top shard blocks data
-            for top_shard_block in top_shard_blocks_info {
-                // skip shard blocks that included in previous master blocks
-                if !top_shard_block.updated
-                    || top_shard_block.block.ref_by_mc_seqno <= self.inner.zerostate_mc_seqno
-                {
-                    continue;
-                }
-
-                // try get shard block from cache
-                if let Some(shard_cache) =
-                    self.inner.shards.get(&top_shard_block.block.block_id.shard)
-                    && let Some(sc_block_entry) = shard_cache
-                        .blocks
-                        .get(&top_shard_block.block.block_id.seqno)
-                    && sc_block_entry.ref_by_mc_seqno == subgraph_view.block_id.seqno
-                {
-                    // get diff
-                    let queue_diff = match &sc_block_entry.data {
-                        BlockCacheEntryData::Received { queue_diff, .. } => queue_diff.clone(),
-                        BlockCacheEntryData::Collated {
-                            candidate_stuff, ..
-                        } => candidate_stuff.candidate.queue_diff_aug.data.clone(),
-                    };
-
-                    subgraph_view.top_shard_blocks.push(CachedShardBlockView {
-                        block_id: top_shard_block.block.block_id,
-                        ref_by_mc_seqno: top_shard_block.block.ref_by_mc_seqno,
-                        queue_diff,
-                    });
-                } else {
-                    subgraph_view.missing_top_shard_block =
-                        Some(top_shard_block.block.block_id.as_short_id());
-                    break;
-                }
+                subgraph_view.top_shard_blocks.push(CachedShardBlockView {
+                    block_id: top_shard_block.block.block_id,
+                    ref_by_mc_seqno: top_shard_block.block.ref_by_mc_seqno,
+                    queue_diff,
+                });
+            } else {
+                subgraph_view.missing_top_shard_block =
+                    Some(top_shard_block.block.block_id.as_short_id());
+                break;
             }
-
-            return Ok(Some(subgraph_view));
         }
 
-        Ok(None)
+        Ok(Some(subgraph_view))
     }
 
     pub fn pop_front_applied_mc_block_subgraph(
         &self,
         from_seqno: u32,
     ) -> Result<(McBlockSubgraphExtract, bool)> {
-        let mut extracted_mc_block_entry = None;
-        let mut is_last = true;
-        {
+        let is_last;
+        let mc_block_entry = {
             let mut guard = self.inner.masters.lock();
-            let keys = guard.blocks.keys().copied().collect::<Vec<_>>();
-            for key in keys {
-                if key < from_seqno {
-                    continue;
-                }
-
-                let btree_map::Entry::Occupied(occupied_entry) = guard.blocks.entry(key) else {
-                    bail!("Block cache entry should exist ({})", key)
-                };
-
-                if matches!(
-                    occupied_entry.get().data,
+            let Some(key) = guard.blocks.range(from_seqno..).find_map(|(key, entry)| {
+                matches!(
+                    entry.data,
                     BlockCacheEntryData::Received { .. }
                         | BlockCacheEntryData::Collated {
                             received_after_collation: true,
                             ..
                         }
-                ) {
-                    if extracted_mc_block_entry.is_some() {
-                        is_last = false;
-                        break;
-                    } else {
-                        let mc_block_entry = occupied_entry.remove();
-                        // clean previous last collated blocks ids
-                        guard
-                            .data
-                            .remove_last_collated_block_ids_before(&mc_block_entry.block_id.seqno);
-                        // update range of received blocks
-                        guard.data.move_range_start(mc_block_entry.block_id.seqno);
-                        extracted_mc_block_entry = Some(mc_block_entry);
-                    }
-                }
-            }
-        }
-        let mc_block_entry = extracted_mc_block_entry.unwrap();
+                )
+                .then_some(*key)
+            }) else {
+                bail!(
+                    "Applied master block not found in cache from seqno {}",
+                    from_seqno
+                )
+            };
+
+            is_last = !guard
+                .blocks
+                .range((std::ops::Bound::Excluded(key), std::ops::Bound::Unbounded))
+                .any(|(_, entry)| {
+                    matches!(
+                        entry.data,
+                        BlockCacheEntryData::Received { .. }
+                            | BlockCacheEntryData::Collated {
+                                received_after_collation: true,
+                                ..
+                            }
+                    )
+                });
+
+            let mc_block_entry = guard.blocks.remove(&key).expect("block entry should exist");
+            // clean previous last collated blocks ids
+            guard
+                .data
+                .remove_last_collated_block_ids_before(&mc_block_entry.block_id.seqno);
+            // update range of received blocks
+            guard.data.move_range_start(mc_block_entry.block_id.seqno);
+            mc_block_entry
+        };
         let subgraph_extract = self.extract_mc_block_subgraph(mc_block_entry);
         Ok((subgraph_extract, is_last))
     }
