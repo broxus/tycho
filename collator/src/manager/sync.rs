@@ -12,6 +12,7 @@ use tycho_util::metrics::HistogramGuard;
 
 use super::CollationManager;
 use super::blocks_cache::BlocksCache;
+use super::msgs_queue::QueueRestoreProcessedTo;
 use super::state_update_handler::ProcessMcStateUpdateMode;
 use super::types::{
     ActiveSync, BlockCacheStoreResult, CollationStatus, CollationSyncState, CollatorJoinTask,
@@ -19,7 +20,7 @@ use super::types::{
 use crate::collator::CollatorFactory;
 use crate::state_node::StateNodeAdapter;
 use crate::tracing_targets;
-use crate::types::processed_upto::{BlockSeqno, find_min_processed_to_by_shards};
+use crate::types::processed_upto::BlockSeqno;
 use crate::types::{DisplayAsShortId, DisplayBlockIdsIntoIter, McData, ProcessedToByPartitions};
 use crate::validator::Validator;
 
@@ -441,20 +442,15 @@ where
 
         // get internals processed_to from master and all shards
         // for last applied master block
-        let all_shards_processed_to_by_partitions =
-            Self::get_all_shards_processed_to_by_partitions_for_mc_block(
-                &last_applied_mc_block_key,
-                &self.blocks_cache,
-                self.state_node_adapter.clone(),
-            )
+        let QueueRestoreProcessedTo {
+            all_shards_processed_to_by_partitions,
+            min_processed_to_by_shards,
+        } = self
+            .get_queue_restore_processed_to_by_shards(&last_applied_mc_block_key)
             .await_blocking()?;
 
-        // find internals min processed_to
-        let min_processed_to_by_shards =
-            find_min_processed_to_by_shards(&all_shards_processed_to_by_partitions);
-
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-            ?min_processed_to_by_shards,
+            min_processed_to_by_shards = ?min_processed_to_by_shards,
         );
 
         // find first applied mc block and tail shard blocks and get previous
@@ -482,29 +478,9 @@ where
         }
 
         // if `fast_sync` is enabled then we will skip already applied queue diffs
-        let queue_diffs_applied_to_top_blocks = if self.config.fast_sync
-            && let Some(applied_to_mc_block_id) =
-                self.get_queue_diffs_applied_to_mc_block_id(last_collated_mc_block_id)?
-        {
-            // BACKWARD COMPATIBILITY: `last_committed_mc_block_id` will not exist in queue storage
-            // in previous version. We will receive None and will use all required diffs to restore the queue
-
-            // NOTE: when the node started to sync from a persistent state with a bunch of archives after it,
-            //      the `last_collated_mc_block_id` will be None, and `applied_to_mc_block_id` will be equal
-            //      to the top block of the persistent state - init block. But the persistent state can be already
-            //      removed because of the long history after it when collator starts to sync by recent blocks.
-            //      So we will not able to read top blocks ids and will fallback the full sync.
-
-            // collect top blocks queue diffs already applied to
-            Self::get_top_blocks_seqno(
-                &applied_to_mc_block_id,
-                &self.blocks_cache,
-                self.state_node_adapter.clone(),
-            )
-            .await_blocking()?
-        } else {
-            None
-        };
+        let queue_diffs_applied_to_top_blocks = self
+            .get_queue_diffs_applied_to_top_blocks(last_collated_mc_block_id)
+            .await_blocking()?;
         if queue_diffs_applied_to_top_blocks.is_some() {
             tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
                 ?queue_diffs_applied_to_top_blocks,
@@ -664,33 +640,18 @@ where
 
         // get internals processed_to from master and all shards
         // for last applied master block
-        let all_shards_processed_to_by_partitions =
-            Self::get_all_shards_processed_to_by_partitions_for_mc_block(
-                &last_applied_mc_block_key,
-                &self.blocks_cache,
-                self.state_node_adapter.clone(),
-            )
+        let QueueRestoreProcessedTo {
+            min_processed_to_by_shards,
+            ..
+        } = self
+            .get_queue_restore_processed_to_by_shards(&last_applied_mc_block_key)
             .await?;
 
-        // find internals min processed_to
-        let min_processed_to_by_shards =
-            find_min_processed_to_by_shards(&all_shards_processed_to_by_partitions);
-
         // if `fast_sync` is enabled then take applied to boundary from queue
-        let queue_diffs_applied_to_top_blocks = if self.config.fast_sync
-            && let Some(applied_to_mc_block_id) =
-                self.get_queue_diffs_applied_to_mc_block_id(last_collated_mc_block_id)?
-        {
-            Self::get_top_blocks_seqno(
-                &applied_to_mc_block_id,
-                &self.blocks_cache,
-                self.state_node_adapter.clone(),
-            )
+        let queue_diffs_applied_to_top_blocks = self
+            .get_queue_diffs_applied_to_top_blocks(last_collated_mc_block_id)
             .await?
-        } else {
-            None
-        }
-        .unwrap_or_default();
+            .unwrap_or_default();
 
         // check master blocks and their top shard blocks one by one
         let mut top_removed_mc_block_id = None;

@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use tycho_block_util::queue::{QueueDiffStuff, QueueKey, QueuePartitionIdx};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_core::storage::LoadStateHint;
-use tycho_types::models::{BlockId, ShardIdent};
+use tycho_types::models::{BlockId, BlockIdShort, ShardIdent};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
 
@@ -20,7 +20,9 @@ use crate::internal_queue::types::stats::DiffStatistics;
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::StateNodeAdapter;
 use crate::tracing_targets;
-use crate::types::processed_upto::{BlockSeqno, ProcessedUptoInfoStuff};
+use crate::types::processed_upto::{
+    BlockSeqno, ProcessedUptoInfoStuff, find_min_processed_to_by_shards,
+};
 use crate::types::{ProcessedTo, ProcessedToByPartitions, TopBlockId, TopBlockIdUpdated};
 use crate::validator::Validator;
 
@@ -86,6 +88,29 @@ where
         Ok(result)
     }
 
+    pub(super) async fn get_queue_restore_processed_to_by_shards(
+        &self,
+        last_applied_mc_block_key: &BlockIdShort,
+    ) -> Result<QueueRestoreProcessedTo> {
+        // get internals processed_to from master and all shards for last applied master block
+        let all_shards_processed_to_by_partitions =
+            Self::get_all_shards_processed_to_by_partitions_for_mc_block(
+                last_applied_mc_block_key,
+                &self.blocks_cache,
+                self.state_node_adapter.clone(),
+            )
+            .await?;
+
+        // find internals min processed_to
+        let min_processed_to_by_shards =
+            find_min_processed_to_by_shards(&all_shards_processed_to_by_partitions);
+
+        Ok(QueueRestoreProcessedTo {
+            all_shards_processed_to_by_partitions,
+            min_processed_to_by_shards,
+        })
+    }
+
     // Returns top master block id upto which all queue diffs applied
     pub(super) fn get_queue_diffs_applied_to_mc_block_id(
         &self,
@@ -110,6 +135,37 @@ where
         };
 
         Ok(mc_block_id)
+    }
+
+    pub(super) async fn get_queue_diffs_applied_to_top_blocks(
+        &self,
+        last_collated_mc_block_id: Option<BlockId>,
+    ) -> Result<Option<FastHashMap<ShardIdent, BlockSeqno>>> {
+        if !self.config.fast_sync {
+            return Ok(None);
+        }
+
+        let Some(applied_to_mc_block_id) =
+            self.get_queue_diffs_applied_to_mc_block_id(last_collated_mc_block_id)?
+        else {
+            // BACKWARD COMPATIBILITY: `last_committed_mc_block_id` will not exist in queue storage
+            // in previous version. We will receive None and will use all required diffs to restore the queue
+            return Ok(None);
+        };
+
+        // NOTE: when the node started to sync from a persistent state with a bunch of archives after it,
+        //      the `last_collated_mc_block_id` will be None, and `applied_to_mc_block_id` will be equal
+        //      to the top block of the persistent state - init block. But the persistent state can be already
+        //      removed because of the long history after it when collator starts to sync by recent blocks.
+        //      So we will not able to read top blocks ids and will fallback the full sync.
+
+        // collect top blocks queue diffs already applied to
+        Self::get_top_blocks_seqno(
+            &applied_to_mc_block_id,
+            &self.blocks_cache,
+            self.state_node_adapter.clone(),
+        )
+        .await
     }
 
     /// Returns false when any of top block diffs is required or unable to check
@@ -660,6 +716,12 @@ pub(crate) struct RestoreQueueResult {
     pub prev_mc_block_id: Option<BlockId>,
     pub synced_to_blocks_keys: Vec<BlockCacheKey>,
     pub applied_diffs_ids: FastHashSet<BlockId>,
+}
+
+pub(super) struct QueueRestoreProcessedTo {
+    pub all_shards_processed_to_by_partitions:
+        FastHashMap<ShardIdent, (bool, ProcessedToByPartitions)>,
+    pub min_processed_to_by_shards: ProcessedTo,
 }
 
 enum QueueDiffRequired {
