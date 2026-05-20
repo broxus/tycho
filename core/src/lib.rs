@@ -9,6 +9,9 @@ pub mod storage;
 #[cfg(feature = "s3")]
 pub mod s3;
 
+#[cfg(test)]
+pub(crate) static ZEROSTATE_BOC: &[u8] = include_bytes!("../tests/data/zerostate.boc");
+
 mod util {
     pub(crate) mod downloader;
 }

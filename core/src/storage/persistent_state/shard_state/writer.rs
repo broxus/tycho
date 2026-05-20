@@ -7,7 +7,6 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use smallvec::SmallVec;
 use tycho_storage::fs::Dir;
-use tycho_storage::kv::refcount;
 use tycho_types::cell::{CellDescriptor, HashBytes};
 use tycho_types::models::*;
 use tycho_util::FastHashMap;
@@ -16,6 +15,7 @@ use tycho_util::progress_bar::ProgressBar;
 use tycho_util::sync::CancellationFlag;
 
 use crate::storage::CellsDb;
+use crate::storage::shard_state::decode_indexed_value;
 
 pub struct ShardStateWriter<'a> {
     db: &'a CellsDb,
@@ -310,12 +310,8 @@ impl<'a> ShardStateWriter<'a> {
                         .get_pinned_cf_opt(&cf, hash, read_options)?
                         .ok_or(CellWriterError::CellNotFound)?;
 
-                    let value = match refcount::strip_refcount(value.as_ref()) {
-                        Some(bytes) => bytes,
-                        None => {
-                            return Err(CellWriterError::CellNotFound.into());
-                        }
-                    };
+                    let (_, value) =
+                        decode_indexed_value(value.as_ref()).ok_or(CellWriterError::InvalidCell)?;
                     if value.is_empty() {
                         return Err(CellWriterError::InvalidCell.into());
                     }

@@ -46,6 +46,7 @@ mod util;
 
 pub const CORE_DB_SUBDIR: &str = "core";
 pub const CELLS_DB_SUBDIR: &str = "cells";
+pub const CELL_NURSERY_SUBDIR: &str = "cell-nursery";
 
 #[derive(Clone)]
 #[repr(transparent)]
