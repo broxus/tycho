@@ -4,11 +4,64 @@ use tycho_storage::kv::{
 use tycho_util::sync::CancellationFlag;
 use weedb::{MigrationError, Semver, VersionProvider, WeeDb};
 
+use super::shard_state::db_state::CountersStore;
 use super::tables;
 mod migrations;
 
 pub type CoreDb = WeeDb<CoreTables>;
 pub type CellsDb = WeeDb<CellsTables>;
+
+#[tracing::instrument(skip_all, fields(db = CellsTables::NAME))]
+pub(super) async fn apply_cells_migrations(
+    db: CellsDb,
+    cell_counters: CountersStore,
+) -> Result<CountersStore, MigrationError> {
+    let cancelled = CancellationFlag::new();
+
+    tracing::info!("started");
+    scopeguard::defer! {
+        cancelled.cancel();
+    }
+
+    let span = tracing::Span::current();
+    let cancelled = cancelled.clone();
+    tokio::task::spawn_blocking(move || {
+        let cell_counters = std::sync::Arc::new(std::sync::Mutex::new(cell_counters));
+        let _span = span.enter();
+
+        let guard = scopeguard::guard((), |_| {
+            tracing::warn!("cancelled");
+        });
+
+        // Cells migrations are not exposed through generic `ApplyMigrations`
+        // because v2->v3 needs counter snapshot state.
+        let mut migrations = weedb::Migrations::with_target_version_and_provider(
+            CellsTables::VERSION,
+            CellsTables::new_version_provider(),
+        );
+        let cancelled_v1_to_v2 = cancelled.clone();
+        migrations.register([0, 0, 1], [0, 0, 2], move |db| {
+            migrations::cells_v1_to_v2(db, &cancelled_v1_to_v2)
+        })?;
+        let cancelled_v2_to_v3 = cancelled;
+        let cell_counters_for_migration = cell_counters.clone();
+        migrations.register([0, 0, 2], [0, 0, 3], move |db| {
+            let mut cell_counters = cell_counters_for_migration.lock().unwrap();
+            migrations::cells_v2_to_v3(db, &mut cell_counters, &cancelled_v2_to_v3)
+        })?;
+        db.apply(migrations)?;
+
+        scopeguard::ScopeGuard::into_inner(guard);
+        tracing::info!("finished");
+        let cell_counters = match std::sync::Arc::try_unwrap(cell_counters) {
+            Ok(cell_counters) => cell_counters,
+            Err(_) => unreachable!("migration closure must be dropped"),
+        };
+        Ok(cell_counters.into_inner().unwrap())
+    })
+    .await
+    .map_err(|e| MigrationError::Custom(e.into()))?
+}
 
 pub trait CoreDbExt {
     fn normalize_version(&self) -> anyhow::Result<()>;
@@ -24,14 +77,8 @@ impl CoreDbExt for CoreDb {
             return Ok(());
         }
 
-        // Check if the DB is NOT EMPTY
-        {
-            let mut block_handles_iter = self.block_handles.raw_iterator();
-            block_handles_iter.seek_to_first();
-            block_handles_iter.status()?;
-            if block_handles_iter.item().is_none() {
-                return Ok(());
-            }
+        if is_table_empty(&self.block_handles)? {
+            return Ok(());
         }
 
         // Set the initial version
@@ -50,14 +97,8 @@ impl CoreDbExt for CellsDb {
             return Ok(());
         }
 
-        // Check if the DB is NOT EMPTY
-        {
-            let mut cells_iter = self.cells.raw_iterator();
-            cells_iter.seek_to_first();
-            cells_iter.status()?;
-            if cells_iter.item().is_none() {
-                return Ok(());
-            }
+        if is_table_empty(&self.cells)? {
+            return Ok(());
         }
 
         // Set the initial version
@@ -114,21 +155,20 @@ impl NamedTables for CellsTables {
     const NAME: &'static str = "cells";
 }
 
-impl WithMigrations for CellsTables {
-    const VERSION: Semver = [0, 0, 2];
+impl CellsTables {
+    const VERSION: Semver = [0, 0, 3];
 
-    type VersionProvider = StateVersionProvider<tables::State>;
-
-    fn new_version_provider() -> Self::VersionProvider {
+    fn new_version_provider() -> StateVersionProvider<tables::State> {
         StateVersionProvider::new::<Self>()
     }
+}
 
-    fn register_migrations(
-        migrations: &mut Migrations<Self::VersionProvider, Self>,
-        cancelled: CancellationFlag,
-    ) -> Result<(), MigrationError> {
-        migrations.register([0, 0, 1], [0, 0, 2], move |db| {
-            migrations::cells_v1_to_v2(db, &cancelled)
-        })
-    }
+pub(super) fn is_table_empty<T>(table: &weedb::Table<T>) -> anyhow::Result<bool>
+where
+    T: weedb::ColumnFamily,
+{
+    let mut iterator = table.raw_iterator();
+    iterator.seek_to_first();
+    iterator.status()?;
+    Ok(iterator.item().is_none())
 }

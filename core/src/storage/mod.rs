@@ -18,8 +18,8 @@ pub use self::config::{
     ArchivesGcConfig, BlocksCacheConfig, BlocksGcConfig, BlocksGcType, CoreStorageConfig,
     StatesGcConfig,
 };
-pub use self::db::{CellsDb, CoreDb, CoreDbExt, CoreTables};
-use self::gc::CoreStorageGc;
+use self::db::apply_cells_migrations;
+pub use self::db::{CellsDb, CoreDb, CoreDbExt};
 pub use self::gc::ManualGcTrigger;
 pub use self::node_state::{NodeStateStorage, NodeSyncState};
 pub use self::persistent_state::{
@@ -60,8 +60,19 @@ impl CoreStorage {
         db.apply_migrations().await?;
 
         let cells_db: CellsDb = ctx.open_preconfigured(CELLS_DB_SUBDIR)?;
+        let cell_counters = shard_state::db_state::CountersStore::open(cells_db.clone());
         cells_db.normalize_version()?;
-        cells_db.apply_migrations().await?;
+        let mut cell_counters = apply_cells_migrations(
+            cells_db.clone(),
+            cell_counters,
+            ctx.rocksdb_table_context().cells_compaction_filter_switch(),
+        )
+        .await?;
+        // WARNING: Raw imports are started through `ShardStateStorage`, which is constructed
+        // only after cells migrations complete. If raw import ever moves earlier in
+        // `open`, this cleanup must move before migrations too.
+        cell_counters.cleanup_interrupted_raw_import()?;
+        cell_counters.load_latest_or_empty()?;
 
         let node_state_storage = Arc::new(NodeStateStorage::new(db.clone()));
 

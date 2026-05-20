@@ -23,6 +23,7 @@ bytes = { workspace = true }
 bytesize = { workspace = true }
 clap = { workspace = true }
 clap-markdown = { workspace = true }
+croaring = { workspace = true }
 dirs = { workspace = true }
 ed25519-dalek = { workspace = true }
 futures-util = { workspace = true }

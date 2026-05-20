@@ -35,8 +35,13 @@ use super::{
 use crate::storage::BlockConnection;
 
 mod cell_storage;
+pub mod counters;
+pub mod db_state;
 mod entries_buffer;
 mod store_state_raw;
+mod util;
+
+pub use self::row_format::{decode_indexed_value, encode_indexed_value};
 
 pub struct ShardStateStorage {
     cells_db: CellsDb,
