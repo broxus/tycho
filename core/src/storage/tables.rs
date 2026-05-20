@@ -166,10 +166,10 @@ impl ColumnFamily for Cells {
 impl ColumnFamilyOptions<TableContext> for Cells {
     fn options(opts: &mut Options, ctx: &mut TableContext) {
         opts.set_level_compaction_dynamic_level_bytes(true);
+        // Kept for legacy/unresolved merge operands while old cells DBs migrate
+        // to indexed values. New storage writes canonical indexed rows directly.
         opts.set_merge_operator_associative("cell_merge", refcount::merge_operator);
-        opts.set_compaction_filter_factory(refcount::CellsCompactionFilterFactory::new(
-            ctx.cells_compaction_filter_switch(),
-        ));
+
         let write_buffer_size = ByteSize::mib(512);
         let buffers_to_merge = 4;
         let buffer_count = 12;

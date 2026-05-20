@@ -2,7 +2,6 @@ use std::cmp::Ordering;
 use std::convert::TryInto;
 
 use weedb::rocksdb;
-use weedb::rocksdb::compaction_filter::Decision;
 
 pub type RcType = i64;
 
@@ -32,20 +31,6 @@ pub fn merge_operator(
             result
         }
     })
-}
-
-pub fn compaction_filter(_level: u32, _key: &[u8], value: &[u8]) -> Decision {
-    if value.is_empty() {
-        #[cfg(feature = "cells-metrics")]
-        metrics::counter!("tycho_compaction_removes").increment(1);
-
-        Decision::Remove
-    } else {
-        #[cfg(feature = "cells-metrics")]
-        metrics::counter!("tycho_compaction_keeps").increment(1);
-
-        Decision::Keep
-    }
 }
 
 pub fn decode_value_with_rc(bytes: &[u8]) -> (RcType, Option<&[u8]>) {

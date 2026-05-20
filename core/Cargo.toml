@@ -49,6 +49,7 @@ futures-util = { workspace = true }
 governor = { workspace = true, optional = true }
 humantime = { workspace = true }
 indexmap = { workspace = true }
+libc = { workspace = true }
 metrics = { workspace = true }
 moka = { workspace = true }
 object_store = { workspace = true, optional = true }
