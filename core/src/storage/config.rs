@@ -123,20 +123,23 @@ impl Default for ArchivesGcConfig {
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct StatesGcConfig {
-    /// Wether to add random offset to the first interval.
+    /// Whether to add random offset to the first interval.
     ///
-    /// Default: true.
+    /// Default: false.
     pub random_offset: bool,
-    /// Default: 900
+    /// Default: 1s
     #[serde(with = "serde_helpers::humantime")]
     pub interval: Duration,
 }
 
 impl Default for StatesGcConfig {
     fn default() -> Self {
+        // Nursery keeps short-lived cells out of RocksDB only while old states
+        // are collected promptly. Use a deterministic short interval by
+        // default; operators can still add jitter through config if needed.
         Self {
-            random_offset: true,
-            interval: Duration::from_secs(60),
+            random_offset: false,
+            interval: Duration::from_secs(1),
         }
     }
 }

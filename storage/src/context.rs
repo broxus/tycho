@@ -194,7 +194,7 @@ impl StorageContext {
         let this = self.inner.as_ref();
         // TODO: Make configuration fallible in `weedb`?
         weedb::WeeDbRaw::builder("nonexisting", this.rocksdb_table_context.clone())
-            .with_options(|opts, _| self.apply_default_options(opts))
+            .with_options(|opts, _| self.apply_table_options::<T>(opts))
             .with_tables::<T>();
         Ok(())
     }
@@ -214,7 +214,7 @@ impl StorageContext {
         let db =
             weedb::WeeDb::<T>::builder_prepared(db_dir.path(), this.rocksdb_table_context.clone())
                 .with_metrics_enabled(this.config.rocksdb_enable_metrics)
-                .with_options(|opts, _| self.apply_default_options(opts))
+                .with_options(|opts, _| self.apply_table_options::<T>(opts))
                 .build()?;
 
         if let Some(name) = db.db_name() {
@@ -266,6 +266,46 @@ impl StorageContext {
         //
         // opts.enable_statistics();
         // opts.set_stats_dump_period_sec(600);
+    }
+
+    fn apply_table_options<T>(&self, opts: &mut rocksdb::Options)
+    where
+        T: NamedTables<Context = TableContext> + 'static,
+    {
+        self.apply_default_options(opts);
+        if T::NAME == "cells" {
+            Self::apply_cells_db_options(opts);
+        }
+    }
+
+    fn apply_cells_db_options(opts: &mut rocksdb::Options) {
+        const MIB: u64 = 1024 * 1024;
+        const GIB: u64 = 1024 * MIB;
+
+        // we have our own cache and don't want `kcompactd` goes brrr scenario
+        opts.set_use_direct_reads(true);
+        opts.set_use_direct_io_for_flush_and_compaction(true);
+
+        opts.set_max_background_jobs(8);
+        opts.set_max_subcompactions(4);
+
+        opts.set_bytes_per_sync(MIB);
+
+        // single writer optimizations
+        opts.set_enable_write_thread_adaptive_yield(false);
+        opts.set_enable_pipelined_write(false);
+        opts.set_unordered_write(false);
+
+        opts.set_auto_tuned_ratelimiter(
+            GIB as i64, // 1GB/s base rate
+            100_000,    // 100ms refill
+            10,         // fairness
+        );
+
+        opts.set_stats_dump_period_sec(60);
+        opts.set_report_bg_io_stats(true);
+
+        opts.set_avoid_unnecessary_blocking_io(true); // schedule unnecessary IO in background;
     }
 }
 
