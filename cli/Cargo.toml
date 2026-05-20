@@ -1,7 +1,13 @@
 [package]
 name = "tycho-cli"
 description = "Node CLI."
-include = ["src/**/*.rs", "res/**/*.boc", "./LICENSE-*", "./README.md", "build.rs"]
+include = [
+    "src/**/*.rs",
+    "res/**/*.boc",
+    "./LICENSE-*",
+    "./README.md",
+    "build.rs",
+]
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
@@ -23,7 +29,6 @@ bytes = { workspace = true }
 bytesize = { workspace = true }
 clap = { workspace = true }
 clap-markdown = { workspace = true }
-croaring = { workspace = true }
 dirs = { workspace = true }
 ed25519-dalek = { workspace = true }
 futures-util = { workspace = true }
