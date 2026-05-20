@@ -3,6 +3,7 @@ pub trait ByteOrderRead {
     fn read_be_uint(&mut self, bytes: usize) -> std::io::Result<u64>;
     fn read_byte(&mut self) -> std::io::Result<u8>;
     fn read_le_u32(&mut self) -> std::io::Result<u32>;
+    fn read_le_u64(&mut self) -> std::io::Result<u64>;
 }
 
 impl<T: std::io::Read> ByteOrderRead for T {
@@ -25,5 +26,12 @@ impl<T: std::io::Read> ByteOrderRead for T {
         let mut buf = [0; 4];
         self.read_exact(&mut buf)?;
         Ok(u32::from_le_bytes(buf))
+    }
+
+    #[inline]
+    fn read_le_u64(&mut self) -> std::io::Result<u64> {
+        let mut buf = [0; 8];
+        self.read_exact(&mut buf)?;
+        Ok(u64::from_le_bytes(buf))
     }
 }

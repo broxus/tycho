@@ -1,4 +1,4 @@
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::time::Duration;
 
 use bytesize::ByteSize;
@@ -40,6 +40,17 @@ pub struct CoreStorageConfig {
     ///
     /// Default: `500_000` cells
     pub max_new_cells_threshold: usize,
+
+    /// Thread count for parallel cell storage insert/remove traversal.
+    ///
+    /// Default: `4`
+    pub cell_storage_threads: NonZeroUsize,
+
+    /// Cell nursery WAL size after which checkpoint should be created.
+    ///
+    /// Default: 64 GiB.
+    #[important]
+    pub cell_nursery_checkpoint_wal_threshold: ByteSize,
 
     /// Archives storage config.
     ///
@@ -95,6 +106,8 @@ impl Default for CoreStorageConfig {
             shard_split_depth: 5,
             store_shard_state_step: NonZeroU32::new(5).unwrap(),
             max_new_cells_threshold: 500_000,
+            cell_storage_threads: NonZeroUsize::new(4).unwrap(),
+            cell_nursery_checkpoint_wal_threshold: ByteSize::gib(64),
             archives_gc: Some(ArchivesGcConfig::default()),
             states_gc: Some(StatesGcConfig::default()),
             blocks_gc: Some(BlocksGcConfig::default()),

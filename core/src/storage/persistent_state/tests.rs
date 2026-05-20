@@ -17,6 +17,7 @@ use tycho_types::num::Tokens;
 use tycho_util::FastHashSet;
 use tycho_util::compression::zstd_decompress_simple;
 
+use crate::ZEROSTATE_BOC;
 use crate::storage::persistent_state::{
     CacheKey, PersistentStateKind, QueueStateReader, QueueStateWriter,
 };
@@ -35,7 +36,6 @@ async fn persistent_shard_state() -> Result<()> {
     let persistent_states = storage.persistent_state_storage();
 
     // Read zerostate
-    static ZEROSTATE_BOC: &[u8] = include_bytes!("../../../../core/tests/data/zerostate.boc");
     let zerostate_root = Boc::decode(ZEROSTATE_BOC)?;
     let zerostate_id = BlockId {
         shard: ShardIdent::MASTERCHAIN,

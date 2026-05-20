@@ -25,6 +25,11 @@ mod util;
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 fn main() -> ExitCode {
+    // CRoaring owns its allocator hooks globally. Install the Rust allocator
+    // before command parsing can create any roaring bitmaps.
+    // SAFETY: this is the first code in `main`, so no CRoaring objects exist yet.
+    unsafe { croaring::configure_rust_alloc() };
+
     if std::env::var("RUST_BACKTRACE").is_err() {
         // Enable backtraces on panics by default.
         // SAFETY: There is only a single thread at the moment.

@@ -38,6 +38,8 @@ mod cell_storage;
 pub mod counters;
 pub mod db_state;
 mod entries_buffer;
+mod nursery_persistence;
+mod row_format;
 mod store_state_raw;
 mod util;
 

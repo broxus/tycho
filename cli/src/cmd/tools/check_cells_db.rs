@@ -49,9 +49,19 @@ impl Cmd {
                 self.db_root.display()
             );
 
-            let temp_dir = copy_db_partial(&self.db_root, self.temp_dir.as_deref(), &[
-                tycho_core::storage::CELLS_DB_SUBDIR,
-            ])?;
+            let subdirs = if self
+                .db_root
+                .join(tycho_core::storage::CELL_NURSERY_SUBDIR)
+                .exists()
+            {
+                &[
+                    tycho_core::storage::CELLS_DB_SUBDIR,
+                    tycho_core::storage::CELL_NURSERY_SUBDIR,
+                ][..]
+            } else {
+                &[tycho_core::storage::CELLS_DB_SUBDIR][..]
+            };
+            let temp_dir = copy_db_partial(&self.db_root, self.temp_dir.as_deref(), subdirs)?;
 
             tracing::info!("checking cells database consistency");
 
@@ -87,7 +97,7 @@ impl Cmd {
 
                 let (removed_cells, local_batch) = if block_id.is_masterchain() {
                     drop(cell);
-                    cell_storage.remove_cell(herd.get().as_bump(), &root_hash)?
+                    cell_storage.remove_cell_mt(&herd, &root_hash, Default::default())?
                 } else {
                     let split_at =
                         split_shard_accounts(Cell::from(cell), self.accounts_split_depth)?
