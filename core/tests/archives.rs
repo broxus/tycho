@@ -696,7 +696,7 @@ fn repack_heavy_archives() -> Result<()> {
 
         // Compress
         let chunk_size = ByteSize::kb(1024).as_u64() as usize;
-        let mut stream = ZstdCompressStream::new(9, chunk_size)?;
+        let mut stream = ZstdCompressStream::new(3, chunk_size)?;
         let workers = (std::thread::available_parallelism()?.get() / 4) as u8;
         stream.multithreaded(workers)?;
 

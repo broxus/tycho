@@ -36,16 +36,22 @@ pub(crate) struct CoreStorageGc {
     blocks_gc_trigger: ManualTriggerTx,
     states_gc_trigger: ManualTriggerTx,
 
-    blocks_gc_handle: AbortHandle,
-    states_gc_handle: AbortHandle,
-    archive_gc_handle: AbortHandle,
+    blocks_gc_handle: Option<AbortHandle>,
+    states_gc_handle: Option<AbortHandle>,
+    archive_gc_handle: Option<AbortHandle>,
 }
 
 impl Drop for CoreStorageGc {
     fn drop(&mut self) {
-        self.blocks_gc_handle.abort();
-        self.states_gc_handle.abort();
-        self.archive_gc_handle.abort();
+        if let Some(handle) = &self.blocks_gc_handle {
+            handle.abort();
+        }
+        if let Some(handle) = &self.states_gc_handle {
+            handle.abort();
+        }
+        if let Some(handle) = &self.archive_gc_handle {
+            handle.abort();
+        }
     }
 }
 
@@ -67,31 +73,40 @@ impl CoreStorageGc {
         let (tick_tx, tick_rx) = watch::channel(None::<Tick>);
 
         let (archives_gc_trigger, archives_gc_rx) = watch::channel(None::<ManualGcTrigger>);
-        let archives_gc = tokio::spawn(Self::archives_gc(
-            tick_rx.clone(),
-            archives_gc_rx,
-            persistent_states,
-            blocks.clone(),
-            config.archives_gc,
-        ));
+        let archive_gc_handle = config.archives_gc.map(|archives_gc_config| {
+            tokio::spawn(Self::archives_gc(
+                tick_rx.clone(),
+                archives_gc_rx,
+                persistent_states,
+                blocks.clone(),
+                archives_gc_config,
+            ))
+            .abort_handle()
+        });
 
         let (blocks_gc_trigger, blocks_gc_rx) = watch::channel(None::<ManualGcTrigger>);
-        let blocks_gc = tokio::spawn(Self::blocks_gc(
-            tick_rx.clone(),
-            blocks_gc_rx,
-            diff_tail_cache.clone(),
-            block_handles,
-            blocks,
-            config.blocks_gc,
-        ));
+        let blocks_gc_handle = config.blocks_gc.map(|blocks_gc_config| {
+            tokio::spawn(Self::blocks_gc(
+                tick_rx.clone(),
+                blocks_gc_rx,
+                diff_tail_cache.clone(),
+                block_handles,
+                blocks,
+                blocks_gc_config,
+            ))
+            .abort_handle()
+        });
 
         let (states_gc_trigger, states_gc_rx) = watch::channel(None::<ManualGcTrigger>);
-        let states_gc = tokio::spawn(Self::states_gc(
-            tick_rx,
-            states_gc_rx,
-            shard_states,
-            config.states_gc,
-        ));
+        let states_gc_handle = config.states_gc.map(|states_gc_config| {
+            tokio::spawn(Self::states_gc(
+                tick_rx,
+                states_gc_rx,
+                shard_states,
+                states_gc_config,
+            ))
+            .abort_handle()
+        });
 
         let last_known_mc_block = node_state.load_last_mc_block_id();
         if let Some(mc_block_id) = last_known_mc_block {
@@ -115,9 +130,9 @@ impl CoreStorageGc {
             blocks_gc_trigger,
             states_gc_trigger,
 
-            archive_gc_handle: archives_gc.abort_handle(),
-            blocks_gc_handle: blocks_gc.abort_handle(),
-            states_gc_handle: states_gc.abort_handle(),
+            archive_gc_handle,
+            blocks_gc_handle,
+            states_gc_handle,
         }
     }
 
@@ -158,12 +173,8 @@ impl CoreStorageGc {
         mut manual_rx: ManualTriggerRx,
         persistent_states: PersistentStateStorage,
         blocks: Arc<BlockStorage>,
-        config: Option<ArchivesGcConfig>,
+        config: ArchivesGcConfig,
     ) {
-        let Some(config) = config else {
-            tracing::warn!("manager disabled");
-            return;
-        };
         tracing::info!("manager started");
         defer! {
             tracing::info!("manager stopped");
@@ -241,12 +252,8 @@ impl CoreStorageGc {
         diff_tail_cache: DiffTailCache,
         block_handles: Arc<BlockHandleStorage>,
         blocks: Arc<BlockStorage>,
-        config: Option<BlocksGcConfig>,
+        config: BlocksGcConfig,
     ) {
-        let Some(config) = config else {
-            tracing::warn!("manager disabled");
-            return;
-        };
         tracing::info!("manager started");
         defer! {
             tracing::info!("manager stopped");
@@ -390,12 +397,8 @@ impl CoreStorageGc {
         mut tick_rx: TickRx,
         mut manual_rx: ManualTriggerRx,
         shard_states: Arc<ShardStateStorage>,
-        config: Option<StatesGcConfig>,
+        config: StatesGcConfig,
     ) {
-        let Some(config) = config else {
-            tracing::warn!("manager disabled");
-            return;
-        };
         tracing::info!(?config, "manager started");
         defer! {
             tracing::info!("manager stopped");

@@ -18,7 +18,7 @@ impl<'a> ArchiveWriter<'a> {
     pub(super) fn new(db: &'a CoreDb, archives_cas: &'a Cas<u32>, archive_id: u32) -> Result<Self> {
         let transaction = archives_cas.put(archive_id)?;
 
-        let mut zstd_compressor = ZstdCompressStream::new(9, 64 * 1024)?;
+        let mut zstd_compressor = ZstdCompressStream::new(3, 1024 * 1024)?;
 
         // Set up multithreaded compression
         let workers = (std::thread::available_parallelism()?.get() / 4) as u8;
@@ -29,7 +29,7 @@ impl<'a> ArchiveWriter<'a> {
             archive_id,
             transaction,
             zstd_compressor,
-            compress_buffer: Vec::with_capacity(64 * 1024),
+            compress_buffer: Vec::with_capacity(1024 * 1024),
         })
     }
 
