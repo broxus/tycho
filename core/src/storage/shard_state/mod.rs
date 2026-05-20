@@ -3,6 +3,7 @@ use std::fs::File;
 use std::io::Cursor;
 use std::mem::ManuallyDrop;
 use std::num::NonZeroU32;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
@@ -14,7 +15,7 @@ use futures_util::future::BoxFuture;
 use tycho_block_util::block::*;
 use tycho_block_util::dict::split_aug_dict_raw;
 use tycho_block_util::state::*;
-use tycho_storage::fs::TempFileStorage;
+use tycho_storage::fs::{Dir, TempFileStorage};
 use tycho_storage::kv::StoredValue;
 use tycho_types::merkle::{FindCell, MerkleUpdate, ParMerkleUpdateApplier};
 use tycho_types::models::*;
@@ -22,7 +23,8 @@ use tycho_types::prelude::*;
 use tycho_util::futures::Shared;
 use tycho_util::mem::Reclaimer;
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::sync::rayon_run;
+use tycho_util::progress_bar::ProgressBar;
+use tycho_util::sync::{CancellationFlag, rayon_run};
 use tycho_util::{FastDashMap, FastHashMap, FastHashSet};
 use weedb::rocksdb;
 
@@ -33,7 +35,9 @@ use super::{
     CoreStorageConfig, tables,
 };
 use crate::storage::BlockConnection;
+use crate::storage::persistent_state::ShardStateWriter;
 
+mod cell_nursery;
 mod cell_storage;
 pub mod counters;
 pub mod db_state;
@@ -65,21 +69,39 @@ pub struct ShardStateStorage {
     shard_states_cache: FastDashMap<ShardIdent, ShardStatesCache>,
 }
 
+pub struct ShardStateStorageInit<'a> {
+    pub cells_db: CellsDb,
+    pub cell_nursery_dir: PathBuf,
+    pub block_handle_storage: Arc<BlockHandleStorage>,
+    pub block_storage: Arc<BlockStorage>,
+    pub block_connections: Arc<BlockConnectionStorage>,
+    pub temp_file_storage: TempFileStorage,
+    pub cell_counters: db_state::CountersStore,
+    pub cell_storage_worker_pool: Arc<rayon::ThreadPool>,
+    pub config: &'a CoreStorageConfig,
+}
+
 impl ShardStateStorage {
-    // TODO: Replace args with a config.
-    pub fn new(
-        cells_db: CellsDb,
-        block_handle_storage: Arc<BlockHandleStorage>,
-        block_storage: Arc<BlockStorage>,
-        block_connections: Arc<BlockConnectionStorage>,
-        temp_file_storage: TempFileStorage,
-        config: &CoreStorageConfig,
-    ) -> Result<Arc<Self>> {
+    pub fn new(args: ShardStateStorageInit<'_>) -> Result<Arc<Self>> {
+        let ShardStateStorageInit {
+            cells_db,
+            cell_nursery_dir,
+            block_handle_storage,
+            block_storage,
+            block_connections,
+            temp_file_storage,
+            cell_counters,
+            cell_storage_worker_pool,
+            config,
+        } = args;
+
         let cell_storage = CellStorage::new(
             cells_db.clone(),
-            config.cells_cache_size,
-            config.drop_interval,
-        );
+            cell_nursery_dir,
+            cell_counters,
+            cell_storage_worker_pool,
+            config,
+        )?;
 
         Ok(Arc::new(Self {
             cells_db,
@@ -114,6 +136,77 @@ impl ShardStateStorage {
         &self.cell_storage
     }
 
+    pub async fn write_persistent_shard_state(
+        &self,
+        states_dir: Dir,
+        block_id: BlockId,
+        root_hash: HashBytes,
+        cancelled: Option<CancellationFlag>,
+    ) -> Result<HashBytes> {
+        let cells_db = self.cells_db.clone();
+        let cell_storage = self.cell_storage.clone();
+        let gc_lock = self.gc_lock.clone().lock_owned().await;
+        let span = tracing::Span::current();
+
+        tokio::task::spawn_blocking(move || {
+            let _span = span.enter();
+            {
+                // Serialize with state commits just long enough to publish
+                // nursery-only cells into RocksDB before the raw writer starts.
+                let _gc_lock = gc_lock;
+                cell_storage.prepare_persistent_state_save();
+            }
+
+            ShardStateWriter::new(&cells_db, &states_dir, &block_id)
+                .write(&root_hash, cancelled.as_ref())
+        })
+        .await?
+    }
+
+    pub async fn write_tracked_persistent_shard_state(
+        &self,
+        states_dir: Dir,
+        block_id: BlockId,
+        root_hash: HashBytes,
+        file_name: String,
+        cancelled: Option<CancellationFlag>,
+    ) -> Result<HashBytes> {
+        let cells_db = self.cells_db.clone();
+        let cell_storage = self.cell_storage.clone();
+        let gc_lock = self.gc_lock.clone().lock_owned().await;
+        let span = tracing::Span::current();
+
+        tokio::task::spawn_blocking(move || {
+            let _span = span.enter();
+            {
+                // Serialize with state commits just long enough to publish
+                // nursery-only cells into RocksDB before the raw writer starts.
+                let _gc_lock = gc_lock;
+                cell_storage.prepare_persistent_state_save();
+            }
+
+            let writer = ShardStateWriter::new(&cells_db, &states_dir, &block_id);
+            let mut progress_bar = ProgressBar::builder()
+                .exact_unit("bytes")
+                .build(move |msg| {
+                    tracing::info!(
+                        shard = %block_id.shard,
+                        "saving shard state to file... {msg}"
+                    );
+                });
+            let file_hash = writer.write_tracked(
+                &root_hash,
+                &file_name,
+                &mut progress_bar,
+                cancelled.as_ref(),
+            )?;
+            progress_bar.complete();
+
+            Ok(file_hash)
+        })
+        .await?
+    }
+
     pub fn begin_raw_import(&self) -> Result<()> {
         // Any restart before this marker is cleared must drop partial raw import state.
         self.cells_db
@@ -122,7 +215,6 @@ impl ShardStateStorage {
         Ok(())
     }
 
-    // cs[impl raw-import.bootstrap-guard]
     pub fn finish_raw_import(&self) -> Result<()> {
         // Keep the marker until metadata and persistent states are done so restart
         // cleanup drops any partial raw import state.
@@ -134,8 +226,7 @@ impl ShardStateStorage {
 
     /// Find mc block id from db snapshot
     pub fn load_mc_block_id(&self, seqno: u32) -> Result<Option<BlockId>> {
-        let snapshot = self.cells_db.rocksdb().snapshot();
-        self.find_mc_block_id(seqno, &snapshot)
+        self.find_mc_block_id(seqno, None)
     }
 
     pub async fn store_state_ignore_cache(
@@ -646,22 +737,20 @@ impl ShardStateStorage {
 
             let in_mem_store = HistogramGuard::begin("tycho_storage_cell_in_mem_store_time_high");
 
-            let new_cell_count = if handle.is_masterchain() {
-                cell_storage.store_cell(
-                    &mut batch,
-                    root_cell.as_ref(),
-                    estimated_merkle_update_size,
-                )?
+            let round = handle.ref_by_mc_seqno();
+            let split_at = if handle.is_masterchain() {
+                FastHashMap::default()
             } else {
-                let split_at = split_shard_accounts(&root_cell, shard_split_depth)?;
-
-                cell_storage.store_cell_mt(
-                    root_cell.as_ref(),
-                    &mut batch,
-                    split_at,
-                    estimated_merkle_update_size,
-                )?
+                split_shard_accounts(&root_cell, shard_split_depth)?
             };
+
+            let new_cell_count = cell_storage.store_cell_mt(
+                root_cell.as_ref(),
+                &mut batch,
+                split_at,
+                estimated_merkle_update_size,
+                round,
+            )?;
 
             in_mem_store.finish();
 
@@ -687,7 +776,17 @@ impl ShardStateStorage {
             };
             counter.fetch_max(new_cell_count, Ordering::Release);
 
-            cells_db.rocksdb().write(batch)?;
+            cells_db
+                .rocksdb()
+                .write(batch)
+                .expect("failed to commit shard state batch after cell store mutation started");
+            block_handles.set_has_shard_state(&handle);
+            cell_storage
+                .nursery_persistence
+                .lock()
+                .unwrap()
+                .checkpoint_if_needed(cell_storage.db(), &cell_storage.nursery)
+                .expect("failed to checkpoint cell nursery after shard state batch commit");
 
             // NOTE: We can signal that the future is complete as soon as the longest
             //       part is done. Maybe we can event signal about that before the actual
@@ -696,8 +795,6 @@ impl ShardStateStorage {
 
             // NOTE: Cell tree is still alive, just in case couple the ref handle lifetime with it.
             Reclaimer::instance().drop((root_cell, prev_ref_mc_state_handle));
-
-            block_handles.set_has_shard_state(&handle);
 
             // NOTE: Ensure that GC lock is dropped only after storing the state.
             drop(gc_lock);
@@ -734,6 +831,9 @@ impl ShardStateStorage {
             // NOTE: Ensure that GC lock is captured by the spawned thread.
             let _gc_lock = gc_lock;
 
+            // Raw import writes directly to RocksDB/counters; RawImportInProgress
+            // is bootstrap-scoped, so publish nursery-only cells before storing.
+            ctx.cell_storage.prepare_persistent_state_save();
             ctx.store(&block_id, boc)
         })
         .await?
@@ -919,50 +1019,47 @@ impl ShardStateStorage {
         let shard_split_depth = self.shard_split_depth;
 
         let (removed_states, removed_cells) = tokio::task::spawn_blocking(move || {
-            let raw = cells_db.rocksdb();
-
-            // Manually get required column factory and r/w options
-            let snapshot = raw.snapshot();
-            let shard_states_cf = cells_db.shard_states.get_unbounded_cf();
-            let mut states_read_options = cells_db.shard_states.new_read_config();
-            states_read_options.set_snapshot(&snapshot);
-
             let mut alloc = bumpalo_herd::Herd::new();
+            let candidates = {
+                // Collect first, then delete without holding an iterator snapshot.
+                // RocksDB snapshots keep old entries visible to compaction and can
+                // prevent obsolete single deletes from being collapsed.
+                // The retained shard state count is bounded by states GC config.
+                let mut candidates = Vec::new();
 
-            // Create iterator
-            let mut iter = raw.raw_iterator_cf_opt(&shard_states_cf.bound(), states_read_options);
-            iter.seek_to_first();
+                for item in cells_db.shard_states.iterator(rocksdb::IteratorMode::Start) {
+                    let (key, value) = item?;
+                    let block_id = BlockId::from_slice(key.as_ref());
+                    let root_hash = HashBytes::from_slice(&value[0..32]);
+
+                    // Skip blocks from zero state and top blocks.
+                    // NOTE: We intentionally don't skip hardforked zerostates (seqno > 0),
+                    // because we don't really need to keep them. For proof checker we
+                    // use zerostate proof which is stored separately, and for serving the
+                    // state we use a persistent state (where we don't remove these states).
+                    if block_id.seqno == 0
+                        || top_blocks.contains_shard_seqno(&block_id.shard, block_id.seqno)
+                    {
+                        continue;
+                    }
+
+                    candidates.push((block_id, root_hash));
+                }
+
+                candidates
+            };
+
+            tracing::info!(candidate_count = candidates.len(), "collected candidates");
 
             // Iterate all states and remove outdated
             let mut removed_states = 0usize;
             let mut removed_cells = 0usize;
 
-            loop {
+            for (block_id, root_hash) in candidates {
                 let _hist = HistogramGuard::begin("tycho_storage_state_gc_time_high");
-                let (key, value) = match iter.item() {
-                    Some(item) => item,
-                    None => match iter.status() {
-                        Ok(()) => break,
-                        Err(e) => return Err(e.into()),
-                    },
-                };
 
-                let block_id = BlockId::from_slice(key);
-                let root_hash = HashBytes::from_slice(&value[0..32]);
-
-                // Skip blocks from zero state and top blocks.
-                // NOTE: We intentionally don't skip hardforked zerostates (seqno > 0),
-                // because we don't really need to keep them. For proof checker we
-                // use zerostate proof which is stored separately, and for serving the
-                // state we use a persistent state (where we don't remove these states).
-                if block_id.seqno == 0
-                    || top_blocks.contains_shard_seqno(&block_id.shard, block_id.seqno)
-                {
-                    iter.next();
-                    continue;
-                }
-
-                // skip block marked by SKIP_GC flag
+                // Skip block marked by SKIP_GC flag. This must stay close to deletion
+                // because candidates are materialized before the actual removal loop.
                 if let Some(handle) = block_handle_storage.load_handle(&block_id)
                     && handle.skip_states_gc()
                 {
@@ -970,7 +1067,6 @@ impl ShardStateStorage {
                         block_id = %block_id,
                         "skipping states GC since it flagged by SKIP_STATES_GC"
                     );
-                    iter.next();
                     continue;
                 }
 
@@ -984,26 +1080,37 @@ impl ShardStateStorage {
                 let in_mem_remove =
                     HistogramGuard::begin("tycho_storage_cell_in_mem_remove_time_high");
 
-                let (total, mut batch) = if block_id.is_masterchain() {
-                    cell_storage.remove_cell(alloc.get().as_bump(), &root_hash)?
+                let split_at = if block_id.is_masterchain() {
+                    FastHashSet::default()
                 } else {
                     // NOTE: We use epoch `0` here so that cells of old states
                     // will not be used by recent loads.
                     let root_cell = Cell::from(cell_storage.load_cell(&root_hash, 0)? as Arc<_>);
 
-                    let split_at = split_shard_accounts(&root_cell, shard_split_depth)?
+                    split_shard_accounts(&root_cell, shard_split_depth)?
                         .into_keys()
-                        .collect::<FastHashSet<HashBytes>>();
-                    cell_storage.remove_cell_mt(&alloc, &root_hash, split_at)?
+                        .collect::<FastHashSet<HashBytes>>()
                 };
+                let (total, mut batch) =
+                    cell_storage.remove_cell_mt(&alloc, &root_hash, split_at)?;
 
                 in_mem_remove.finish();
 
-                batch.delete_cf(&cells_db.shard_states.get_unbounded_cf().bound(), key);
+                batch.delete_cf(
+                    &cells_db.shard_states.get_unbounded_cf().bound(),
+                    block_id.to_vec(),
+                );
                 cells_db
                     .raw()
                     .rocksdb()
-                    .write_opt(batch, cells_db.cells.write_config())?;
+                    .write_opt(batch, cells_db.cells.write_config())
+                    .expect("failed to commit state GC batch after cell remove mutation started");
+                cell_storage
+                    .nursery_persistence
+                    .lock()
+                    .unwrap()
+                    .checkpoint_if_needed(cell_storage.db(), &cell_storage.nursery)
+                    .expect("failed to checkpoint cell nursery after state GC batch commit");
 
                 // NOTE: Ensure that guard is dropped only after writing the batch.
                 drop(guard);
@@ -1012,7 +1119,6 @@ impl ShardStateStorage {
                 tracing::debug!(removed_cells = total, %block_id);
 
                 removed_states += 1;
-                iter.next();
 
                 metrics::counter!("tycho_storage_state_gc_count").increment(1);
                 metrics::counter!("tycho_storage_state_gc_cells_count").increment(1);
@@ -1054,7 +1160,7 @@ impl ShardStateStorage {
 
         // Find block id using states table
         let mc_block_id = match self
-            .find_mc_block_id(mc_seqno, &snapshot)
+            .find_mc_block_id(mc_seqno, Some(&snapshot))
             .context("Failed to find block id by seqno")?
         {
             Some(block_id) => block_id,
@@ -1077,7 +1183,7 @@ impl ShardStateStorage {
 
         // Find full min masterchain reference id
         let min_ref_mc_seqno = block_info.min_ref_mc_seqno;
-        let min_ref_block_id = match self.find_mc_block_id(min_ref_mc_seqno, &snapshot)? {
+        let min_ref_block_id = match self.find_mc_block_id(min_ref_mc_seqno, Some(&snapshot))? {
             Some(block_id) => block_id,
             None => return Ok(None),
         };
@@ -1088,6 +1194,8 @@ impl ShardStateStorage {
             // Skip blocks without handle or data
             _ => return Ok(None),
         };
+
+        drop(snapshot);
 
         // Compute `TopBlocks` from block data
         let block_storage = self.block_storage.clone();
@@ -1147,7 +1255,7 @@ impl ShardStateStorage {
     fn find_mc_block_id(
         &self,
         mc_seqno: u32,
-        snapshot: &rocksdb::Snapshot<'_>,
+        snapshot: Option<&rocksdb::Snapshot<'_>>,
     ) -> Result<Option<BlockId>> {
         let shard_states = &self.cells_db.shard_states;
 
@@ -1159,7 +1267,9 @@ impl ShardStateStorage {
         };
 
         let mut readopts = shard_states.new_read_config();
-        readopts.set_snapshot(snapshot);
+        if let Some(snapshot) = snapshot {
+            readopts.set_snapshot(snapshot);
+        }
         readopts.set_iterate_lower_bound(bound.to_vec().as_slice());
         bound.seqno += 1;
         readopts.set_iterate_upper_bound(bound.to_vec().as_slice());

@@ -369,35 +369,52 @@ impl PersistentStateStorage {
 
         let handle = handle.clone();
         let this = self.inner.clone();
-        let cancelled = cancelled.clone();
-        let span = tracing::Span::current();
 
+        let (root_hash, states_dir) = {
+            let handle = handle.clone();
+            let this = this.clone();
+            let span = tracing::Span::current();
+
+            tokio::task::spawn_blocking(move || {
+                let _span = span.enter();
+
+                let root_hash = this.shard_states.load_state_root_hash(handle.id())?;
+                let states_dir = this.prepare_persistent_states_dir(mc_seqno)?;
+
+                Ok::<_, anyhow::Error>((root_hash, states_dir))
+            })
+            .await??
+        };
+
+        match this
+            .shard_states
+            .write_persistent_shard_state(
+                states_dir,
+                *handle.id(),
+                root_hash,
+                Some(cancelled.clone()),
+            )
+            .await
+        {
+            Ok(_) => {
+                this.block_handles.set_has_persistent_shard_state(&handle);
+                tracing::info!("persistent shard state saved");
+            }
+            Err(e) => {
+                // NOTE: Keep trying `cache_state` after writer failure so a
+                // concurrently completed file can still be reused. If the file
+                // is absent or broken, `cache_state` returns the actual error.
+                tracing::error!("failed to write persistent shard state: {e:?}");
+            }
+        }
+
+        let span = tracing::Span::current();
         let state = tokio::task::spawn_blocking(move || {
             let _span = span.enter();
 
             let guard = scopeguard::guard((), |_| {
                 tracing::warn!("cancelled");
             });
-
-            let root_hash = this.shard_states.load_state_root_hash(handle.id())?;
-
-            let states_dir = this.prepare_persistent_states_dir(mc_seqno)?;
-
-            this.shard_states
-                .cell_storage()
-                .prepare_persistent_state_save();
-
-            let cell_writer = ShardStateWriter::new(&this.cells_db, &states_dir, handle.id());
-            match cell_writer.write(&root_hash, Some(&cancelled)) {
-                Ok(_) => {
-                    this.block_handles.set_has_persistent_shard_state(&handle);
-                    tracing::info!("persistent shard state saved");
-                }
-                Err(e) => {
-                    // NOTE: We are ignoring an error here. It might be intentional
-                    tracing::error!("failed to write persistent shard state: {e:?}");
-                }
-            }
 
             let state = this.cache_state(mc_seqno, handle.id(), PersistentStateKind::Shard)?;
 

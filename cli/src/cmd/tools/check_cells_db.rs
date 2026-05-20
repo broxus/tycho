@@ -49,7 +49,7 @@ impl Cmd {
                 self.db_root.display()
             );
 
-            let subdirs = if self
+            let subdirs: &[_] = if self
                 .db_root
                 .join(tycho_core::storage::CELL_NURSERY_SUBDIR)
                 .exists()
@@ -57,9 +57,9 @@ impl Cmd {
                 &[
                     tycho_core::storage::CELLS_DB_SUBDIR,
                     tycho_core::storage::CELL_NURSERY_SUBDIR,
-                ][..]
+                ]
             } else {
-                &[tycho_core::storage::CELLS_DB_SUBDIR][..]
+                &[tycho_core::storage::CELLS_DB_SUBDIR]
             };
             let temp_dir = copy_db_partial(&self.db_root, self.temp_dir.as_deref(), subdirs)?;
 

@@ -8,7 +8,7 @@ use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_core::global_config::ZerostateId;
-use tycho_core::storage::{CoreStorage, CoreStorageConfig, NewBlockMeta, ShardStateWriter};
+use tycho_core::storage::{CoreStorage, CoreStorageConfig, NewBlockMeta};
 use tycho_storage::fs::Dir;
 use tycho_storage::{StorageConfig, StorageContext};
 use tycho_types::cell::Lazy;
@@ -19,7 +19,6 @@ use tycho_types::models::{
 };
 use tycho_types::prelude::*;
 use tycho_util::cli::signal;
-use tycho_util::progress_bar::ProgressBar;
 use tycho_util::sync::CancellationFlag;
 
 use crate::util::print_json;
@@ -260,47 +259,31 @@ impl ShardStateHandler {
             cancelled.cancel();
         }
 
-        let cancelled = cancelled.clone();
-        let storage = self.storage.clone();
-        let output = self.output_path.clone();
-        tokio::task::spawn_blocking(move || {
-            let writer = ShardStateWriter::new(
-                storage.shard_state_storage().cell_storage().db(),
-                &output,
-                handle.id(),
-            );
-
-            let mut progress_bar = ProgressBar::builder()
-                .exact_unit("bytes")
-                .build(move |msg| {
-                    tracing::info!(
-                        shard = %block_id.shard,
-                        "saving shard state to file... {msg}"
-                    );
-                });
-
-            let root_hash = handle.id().root_hash;
-            let file_hash = writer.write_tracked(
-                &root_hash,
-                &block_id.shard.to_string(),
-                &mut progress_bar,
-                Some(&cancelled),
-            )?;
-            progress_bar.complete();
-
-            tracing::info!(
-                %block_id,
-                %root_hash,
-                %file_hash,
-                "saved shard state"
-            );
-
-            Ok(NewHashes {
+        let full_block_id = *handle.id();
+        let root_hash = full_block_id.root_hash;
+        let file_hash = self
+            .storage
+            .shard_state_storage()
+            .write_tracked_persistent_shard_state(
+                self.output_path.clone(),
+                full_block_id,
                 root_hash,
-                file_hash,
-            })
+                block_id.shard.to_string(),
+                Some(cancelled.clone()),
+            )
+            .await?;
+
+        tracing::info!(
+            %block_id,
+            %root_hash,
+            %file_hash,
+            "saved shard state"
+        );
+
+        Ok(NewHashes {
+            root_hash,
+            file_hash,
         })
-        .await?
     }
 
     fn prepare_zerostate(&self, state: &mut ShardStateUnsplit) -> Result<()> {

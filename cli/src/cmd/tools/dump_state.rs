@@ -13,8 +13,7 @@ use tycho_collator::types::{McData, ShardDescriptionShortExt};
 use tycho_core::global_config::ZerostateId;
 use tycho_core::node::ConfiguredStorage;
 use tycho_core::storage::{
-    BlockConnection, CoreStorage, CoreStorageConfig, QueueStateWriter, ShardStateWriter,
-    StoreStateHint,
+    BlockConnection, CoreStorage, CoreStorageConfig, QueueStateWriter, StoreStateHint,
 };
 use tycho_storage::StorageContext;
 use tycho_storage::fs::Dir;
@@ -249,14 +248,10 @@ impl Dumper {
         }
 
         let dir = Dir::new(self.output_dir.path().join("persistents"))?;
-        let writer = ShardStateWriter::new(
-            self.storage.shard_state_storage().cell_storage().db(),
-            &dir,
-            block_id,
-        );
-
-        writer
-            .write(state.root_cell().repr_hash(), None)
+        self.storage
+            .shard_state_storage()
+            .write_persistent_shard_state(dir, *block_id, *state.root_cell().repr_hash(), None)
+            .await
             .context(format!("Failed to write state for {}", block_id))?;
         println!(" - Persistent state saved");
         Ok(state)
