@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 
 use anyhow::Result;
 use tycho_block_util::block::BlockStuff;
@@ -32,6 +32,7 @@ pub use self::shard_state::{
     ShardStateStorageMetrics, StateNotFound, StoreStateHint, split_shard_accounts,
 };
 
+pub mod shard_state;
 pub mod tables;
 
 pub(crate) mod block;
@@ -55,24 +56,70 @@ pub struct CoreStorage {
 }
 
 impl CoreStorage {
+    pub fn open_cells_db(ctx: &StorageContext) -> Result<CellsDb> {
+        // CRoaring owns its allocator hooks globally. Install the Rust allocator
+        // before command parsing can create any roaring bitmaps.
+        // SAFETY: this is the first code in `main`, so no CRoaring objects exist yet.
+        static CROARING_INIT: Once = Once::new();
+        CROARING_INIT.call_once(|| unsafe {
+            croaring::configure_rust_alloc();
+        });
+
+        ctx.open(CELLS_DB_SUBDIR, |opts| {
+            const MIB: u64 = 1024 * 1024;
+            const GIB: u64 = 1024 * MIB;
+
+            ctx.apply_default_options(opts);
+
+            // we have our own cache and don't want `kcompactd` goes brrr scenario
+            opts.set_use_direct_reads(true);
+            opts.set_use_direct_io_for_flush_and_compaction(true);
+
+            opts.set_max_background_jobs(8);
+            opts.set_max_subcompactions(4);
+
+            opts.set_bytes_per_sync(MIB);
+
+            // single writer optimizations
+            opts.set_enable_write_thread_adaptive_yield(false);
+            opts.set_enable_pipelined_write(false);
+            opts.set_unordered_write(false);
+
+            opts.set_auto_tuned_ratelimiter(
+                GIB as i64, // 1GB/s base rate
+                100_000,    // 100ms refill
+                10,         // fairness
+            );
+
+            opts.set_stats_dump_period_sec(60);
+            opts.set_report_bg_io_stats(true);
+
+            opts.set_avoid_unnecessary_blocking_io(true); // schedule unnecessary IO in background;
+        })
+    }
+
     pub async fn open(ctx: StorageContext, config: CoreStorageConfig) -> Result<Self> {
         let db: CoreDb = ctx.open_preconfigured(CORE_DB_SUBDIR)?;
         db.normalize_version()?;
         db.apply_migrations().await?;
 
-        let cells_db: CellsDb = ctx.open_preconfigured(CELLS_DB_SUBDIR)?;
-        let cell_counters = shard_state::db_state::CountersStore::open(cells_db.clone());
-        cells_db.normalize_version()?;
-        let mut cell_counters = apply_cells_migrations(
+        let cells_db = CoreStorage::open_cells_db(&ctx)?;
+        let cell_storage_worker_pool = Arc::new(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(config.cell_storage_threads.get())
+                .stack_size(8 * 1024 * 1024)
+                .thread_name(|_| "cellstor".to_owned())
+                .build()?,
+        );
+        let mut cell_counters = shard_state::db_state::CountersStore::open(
             cells_db.clone(),
-            cell_counters,
-            ctx.rocksdb_table_context().cells_compaction_filter_switch(),
-        )
-        .await?;
-        // WARNING: Raw imports are started through `ShardStateStorage`, which is constructed
-        // only after cells migrations complete. If raw import ever moves earlier in
-        // `open`, this cleanup must move before migrations too.
+            cell_storage_worker_pool.clone(),
+        );
+        cells_db.normalize_version()?;
+        // WARNING: Raw import cleanup must run before migrations and counter loading so
+        // partial raw-import cells, counters, temp rows, and shard roots stay hidden.
         cell_counters.cleanup_interrupted_raw_import()?;
+        let mut cell_counters = apply_cells_migrations(cells_db.clone(), cell_counters).await?;
         cell_counters.load_latest_or_empty()?;
 
         let node_state_storage = Arc::new(NodeStateStorage::new(db.clone()));
@@ -93,14 +140,17 @@ impl CoreStorage {
         .await?;
         let block_storage = Arc::new(block_storage);
 
-        let shard_state_storage = ShardStateStorage::new(
-            cells_db.clone(),
-            block_handle_storage.clone(),
-            block_storage.clone(),
-            block_connection_storage.clone(),
-            ctx.temp_files().clone(),
-            &config,
-        )?;
+        let shard_state_storage = ShardStateStorage::new(shard_state::ShardStateStorageInit {
+            cells_db: cells_db.clone(),
+            cell_nursery_dir: ctx.root_dir().path().join(CELL_NURSERY_SUBDIR),
+            block_handle_storage: block_handle_storage.clone(),
+            block_storage: block_storage.clone(),
+            block_connections: block_connection_storage.clone(),
+            temp_file_storage: ctx.temp_files().clone(),
+            cell_counters,
+            cell_storage_worker_pool,
+            config: &config,
+        })?;
         let persistent_state_storage = PersistentStateStorage::new(
             cells_db.clone(),
             ctx.files_dir(),
@@ -112,7 +162,7 @@ impl CoreStorage {
 
         persistent_state_storage.preload().await?;
 
-        let gc = CoreStorageGc::new(
+        let gc = gc::CoreStorageGc::new(
             &node_state_storage,
             block_handle_storage.clone(),
             block_storage.clone(),
@@ -198,7 +248,7 @@ struct Inner {
     ctx: StorageContext,
     db: CoreDb,
     config: CoreStorageConfig,
-    gc: CoreStorageGc,
+    gc: gc::CoreStorageGc,
 
     block_handle_storage: Arc<BlockHandleStorage>,
     block_connection_storage: Arc<BlockConnectionStorage>,

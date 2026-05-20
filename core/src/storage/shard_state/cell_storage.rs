@@ -1,37 +1,54 @@
+//! Store/remove finalization publishes in-memory nursery/counter state before
+//! the outer `RocksDB` write. Those writes use `expect`, and the release profile
+//! has `panic = "abort"`, so a failed publish path is recovered by restart/WAL replay.
+
 use std::cell::UnsafeCell;
-use std::collections::hash_map;
 use std::mem::{ManuallyDrop, MaybeUninit};
-use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
-use std::sync::{Arc, Weak};
-use std::thread::Scope;
-use std::time::Duration;
-#[cfg(feature = "cells-metrics")]
-use std::time::Instant;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use bumpalo::Bump;
 use bumpalo_herd::{Herd, Member};
-use bytesize::ByteSize;
-use dashmap::Map;
+use bytes::Bytes;
+use hashbrown::hash_map;
+use qfilter::Filter;
 use quick_cache::sync::{Cache, DefaultLifecycle};
+use rayon::{Scope, ThreadPool};
 use triomphe::ThinArc;
-use tycho_storage::kv::refcount;
 use tycho_types::cell::*;
 use tycho_util::metrics::{HistogramGuard, spawn_metrics_loop};
-use tycho_util::{FastDashMap, FastHashMap, FastHashSet, FastHasherState};
+use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb::WriteBatch;
 use weedb::{BoundedCfHandle, rocksdb};
 
-use crate::storage::CellsDb;
+use super::cell_nursery::{CellNursery, NurseryDelta, NurseryReadGuard};
+use super::counters::{Counters, Idx, NextIdx};
+use super::db_state::{CellsDbStateError, CellsDbStateKey, CountersStore};
+use super::nursery_persistence::{NurseryPersistence, WalAppendProfile};
+use super::row_format::{decode_indexed_value, encode_indexed_value};
+use super::util::{BuildTrustedCellHasher, CellDashMap, CellHashMap, HashBytesKey, elapsed_us};
+use crate::storage::shard_state::cell_nursery::NurseryEntryRecord;
+use crate::storage::{CellsDb, CoreStorageConfig};
+
+const PERSISTED_CELL_FILTER_MAX_CAPACITY: u64 = 2_000_000_000;
+const PERSISTED_CELL_FILTER_FP_RATE: f64 = 0.001;
 
 pub struct CellStorage {
     cells_db: CellsDb,
+    cell_counters: Mutex<CountersStore>,
+    pub(super) nursery: CellNursery,
+    pub(super) nursery_persistence: Mutex<NurseryPersistence>,
+    persisted_filter: Mutex<PersistedCellFilter>,
     cells_cache: Arc<CellsIndex>,
     raw_cells_cache: Arc<RawCellsCache>,
+    worker_pool: Arc<ThreadPool>,
     drop_interval: u32,
+    metrics: StorageMetrics,
 }
 
-type CellsIndex = FastDashMap<HashBytes, CachedCell>;
+type CellsIndex = CellDashMap<CachedCell>;
 
 struct CachedCell {
     epoch: u32,
@@ -39,33 +56,131 @@ struct CachedCell {
 }
 
 impl CellStorage {
-    pub fn new(cells_db: CellsDb, cache_size_bytes: ByteSize, drop_interval: u32) -> Arc<Self> {
+    pub fn new(
+        cells_db: CellsDb,
+        cell_nursery_dir: PathBuf,
+        cell_counters: CountersStore,
+        worker_pool: Arc<ThreadPool>,
+        config: &CoreStorageConfig,
+    ) -> Result<Arc<Self>> {
         let cells_cache = Default::default();
-        let raw_cells_cache = Arc::new(RawCellsCache::new(cache_size_bytes.as_u64()));
+        let raw_cells_cache = Arc::new(RawCellsCache::new(config.cells_cache_size.as_u64()));
 
         spawn_metrics_loop(
             &raw_cells_cache.clone(),
             Duration::from_secs(5),
             |c| async move { c.refresh_metrics() },
         );
-
-        Arc::new(Self {
+        let persisted_filter = Self::build_persisted_filter(&cells_db)?;
+        let (nursery_persistence, nursery) = NurseryPersistence::open(
+            &cells_db,
+            &cell_nursery_dir,
+            config.cell_storage_threads,
+            worker_pool.clone(),
+            config.cell_nursery_checkpoint_wal_threshold.as_u64(),
+        )?;
+        nursery.record_metrics();
+        persisted_filter.record_metrics();
+        Ok(Arc::new(Self {
             cells_db,
+            cell_counters: Mutex::new(cell_counters),
+            nursery,
+            nursery_persistence: Mutex::new(nursery_persistence),
+            persisted_filter: Mutex::new(persisted_filter),
             cells_cache,
             raw_cells_cache,
-            drop_interval,
-        })
+            worker_pool,
+            drop_interval: config.drop_interval,
+            metrics: StorageMetrics::new(),
+        }))
     }
 
     pub fn db(&self) -> &CellsDb {
         &self.cells_db
     }
 
+    pub(super) fn prepare_persistent_state_save(&self) {
+        // Serialize with store/remove finalization so the nursery snapshot,
+        // WAL remove record, and in-memory publish describe the same entries.
+        // This writes one WAL record, so an extremely large nursery must be
+        // checkpointed/promoted before persistent-state save to stay below the
+        // u32 WAL payload limit.
+        let _cell_counters = self.cell_counters.lock().unwrap();
+        let mut nursery_persistence = self.nursery_persistence.lock().unwrap();
+        let entries = self.nursery.snapshot_entries();
+        if entries.is_empty() {
+            return;
+        }
+
+        let mut batch = WriteBatch::with_capacity_bytes(
+            entries
+                .iter()
+                .map(|entry| size_of::<u64>() + entry.data.len())
+                .sum(),
+        );
+        let mut commit = NurseryDelta::default();
+        let mut buffer = Vec::with_capacity(512);
+        let mut cell_bytes = 0usize;
+        {
+            let mut target = PersistedCellRowTarget {
+                batch: &mut batch,
+                commit: &mut commit,
+                buffer: &mut buffer,
+            };
+
+            for entry in &entries {
+                cell_bytes += entry.data.len();
+                self.stage_persisted_cell_row(
+                    &mut target,
+                    entry.hash,
+                    entry.idx,
+                    entry.data.as_ref(),
+                );
+            }
+        }
+
+        nursery_persistence
+            .append_commit(&self.cells_db, &mut batch, &commit)
+            .expect("failed to append cell nursery WAL before persistent state save");
+        // Persistent-state save reads cells from RocksDB, so nursery entries must
+        // be promoted first. After the WAL append, a RocksDB failure is fatal:
+        // restart recovery replays this branch from the WAL.
+        self.cells_db
+            .rocksdb()
+            .write(batch)
+            .expect("failed to flush cell nursery before persistent state save");
+
+        if !commit.removes.is_empty() {
+            let mut persisted_filter = self.persisted_filter.lock().unwrap();
+            for hash in &commit.removes {
+                persisted_filter.insert(hash);
+            }
+            persisted_filter.record_metrics();
+        }
+
+        self.nursery.apply_commit(commit);
+        self.nursery.record_metrics();
+
+        metrics::counter!("tycho_storage_cell_nursery_promoted_count")
+            .increment(entries.len() as u64);
+        metrics::counter!("tycho_storage_cell_nursery_promoted_bytes").increment(cell_bytes as u64);
+
+        tracing::info!(
+            cells = entries.len() as u64,
+            bytes = cell_bytes as u64,
+            "flushed cell nursery before persistent state save",
+        );
+    }
+
     pub fn apply_temp_cell(&self, root: &HashBytes) -> Result<()> {
+        // Raw-state import assumes nursery entries were flushed first. This
+        // path checks persisted data only; it intentionally does not consult
+        // nursery while converting temporary cells into canonical rows.
         const MAX_NEW_CELLS_BATCH_SIZE: usize = 10000;
 
         struct TempCell {
-            old_rc: i64,
+            old_rc: u64,
+            idx: Idx,
             additions: u32,
         }
 
@@ -106,29 +221,35 @@ impl CellStorage {
 
         struct Context<'a> {
             cells_cf: BoundedCfHandle<'a>,
-            cells_db: &'a CellsDb,
+            storage: &'a CellStorage,
+            cell_counters: &'a mut CountersStore,
+            persisted_filter: &'a mut PersistedCellFilter,
             buffer: Vec<u8>,
-            transaction: FastHashMap<HashBytes, TempCell>,
+            transaction: CellHashMap<TempCell>,
             new_cells_batch: rocksdb::WriteBatch,
             new_cell_count: usize,
-            raw_cache: &'a RawCellsCache,
         }
 
         impl<'a> Context<'a> {
-            fn new(cells_db: &'a CellsDb, raw_cache: &'a RawCellsCache) -> Self {
+            fn new(
+                storage: &'a CellStorage,
+                cell_counters: &'a mut CountersStore,
+                persisted_filter: &'a mut PersistedCellFilter,
+            ) -> Self {
                 Self {
-                    cells_cf: cells_db.cells.cf(),
-                    cells_db,
+                    cells_cf: storage.cells_db.cells.cf(),
+                    storage,
+                    cell_counters,
+                    persisted_filter,
                     buffer: Vec::with_capacity(512),
                     transaction: Default::default(),
                     new_cells_batch: rocksdb::WriteBatch::default(),
                     new_cell_count: 0,
-                    raw_cache,
                 }
             }
 
             fn load_temp(&self, key: &HashBytes) -> Result<CellHashesIter<'a>, CellStorageError> {
-                let data = match self.cells_db.temp_cells.get(key) {
+                let data = match self.storage.cells_db.temp_cells.get(key) {
                     Ok(Some(data)) => data,
                     Ok(None) => return Err(CellStorageError::CellNotFound),
                     Err(e) => return Err(CellStorageError::Internal(e)),
@@ -161,39 +282,39 @@ impl CellStorage {
                 &mut self,
                 key: &HashBytes,
             ) -> Result<InsertedCell<'a>, CellStorageError> {
-                Ok(match self.transaction.entry(*key) {
+                Ok(match self.transaction.entry(owned_hash_key(key)) {
                     hash_map::Entry::Occupied(mut entry) => {
                         entry.get_mut().additions += 1; // 1 new reference
                         InsertedCell::Existing
                     }
                     hash_map::Entry::Vacant(entry) => {
-                        if let Some(value) = self.cells_db.cells.get(key)? {
-                            let (rc, value) = refcount::decode_value_with_rc(value.as_ref());
-                            debug_assert!(rc > 0 && value.is_some() || rc == 0 && value.is_none());
-                            if value.is_some() {
-                                entry.insert(TempCell {
-                                    old_rc: rc,
-                                    additions: 1, // 1 new reference
-                                });
-                                return Ok(InsertedCell::Existing);
-                            }
+                        let existing = if self.persisted_filter.filter.contains(*key) {
+                            self.storage.get_raw_idx_for_insert(key, usize::MAX)?
+                        } else {
+                            None
+                        };
+                        if let Some(idx) = existing {
+                            entry.insert(TempCell {
+                                idx,
+                                old_rc: self.cell_counters.counters.get(idx),
+                                additions: 1, // 1 new reference
+                            });
+                            return Ok(InsertedCell::Existing);
                         }
 
+                        let idx = self.cell_counters.counters.alloc_idx();
                         entry.insert(TempCell {
+                            idx,
                             old_rc: 0,
                             additions: 1,
                         });
                         let iter = self.load_temp(key)?;
 
-                        self.buffer.clear();
-                        refcount::add_positive_refount(
-                            1,
-                            Some(iter.data.as_ref()),
-                            &mut self.buffer,
-                        );
+                        encode_indexed_value(idx, iter.data.as_ref(), &mut self.buffer);
 
                         self.new_cells_batch
                             .put_cf(&self.cells_cf, key, self.buffer.as_slice());
+                        self.persisted_filter.insert(key);
 
                         self.new_cell_count += 1;
                         if self.new_cell_count >= MAX_NEW_CELLS_BATCH_SIZE {
@@ -207,7 +328,8 @@ impl CellStorage {
 
             fn flush_new_cells(&mut self) -> Result<(), rocksdb::Error> {
                 if self.new_cell_count > 0 {
-                    self.cells_db
+                    self.storage
+                        .cells_db
                         .rocksdb()
                         .write(std::mem::take(&mut self.new_cells_batch))?;
                     self.new_cell_count = 0;
@@ -215,50 +337,51 @@ impl CellStorage {
                 Ok(())
             }
 
-            fn flush_existing_cells(mut self) -> Result<(), rocksdb::Error> {
+            fn flush_existing_cells(self) -> Result<(), CellStorageError> {
                 let mut batch = rocksdb::WriteBatch::default();
+                let mut counter_batch = self.cell_counters.counters.begin();
+                counter_batch.reserve(self.transaction.len());
 
-                for (key, item) in self.transaction {
-                    let mut refs_diff = item.additions;
-                    if item.old_rc == 0 {
-                        // 1 reference was added with the data while traversing the tree.
-                        refs_diff -= 1;
-                    }
-
-                    if refs_diff > 0 {
-                        self.buffer.clear();
-                        refcount::add_positive_refount(refs_diff, None, &mut self.buffer);
-                        batch.merge_cf(&self.cells_cf, key, self.buffer.as_slice());
-                    }
-
-                    let new_rc = item.old_rc + item.additions as i64;
-                    self.raw_cache.on_insert_cell(&key, new_rc, None);
+                for (_, item) in self.transaction {
+                    counter_batch.update_raw(
+                        item.idx,
+                        item.old_rc,
+                        item.old_rc + u64::from(item.additions),
+                    );
                 }
+                counter_batch.apply();
+                self.cell_counters.counters.shrink_if_needed();
 
-                self.cells_db.rocksdb().write(batch)
+                self.cell_counters
+                    .put_snapshot(&mut batch, CellsDbStateKey::CounterSnapshotLatest)
+                    .map_err(CellStorageError::State)?;
+
+                self.storage.cells_db.rocksdb().write(batch)?;
+                Ok(())
             }
         }
 
-        let mut ctx = Context::new(&self.cells_db, &self.raw_cells_cache);
+        let mut cell_counters = self.cell_counters.lock().unwrap();
+        let mut persisted_filter = self.persisted_filter.lock().unwrap();
+        let mut ctx = Context::new(self, &mut cell_counters, &mut persisted_filter);
 
-        let mut stack = Vec::with_capacity(16);
-        if let InsertedCell::New(iter) = ctx.insert_cell(root)? {
-            stack.push(iter);
-        }
-
-        'outer: while let Some(iter) = stack.last_mut() {
-            for ref child in iter {
-                if let InsertedCell::New(iter) = ctx.insert_cell(child)? {
-                    stack.push(iter);
-                    continue 'outer;
-                }
+        {
+            let mut stack = Vec::with_capacity(16);
+            if let InsertedCell::New(iter) = ctx.insert_cell(root)? {
+                stack.push(iter);
             }
 
-            stack.pop();
-        }
+            'outer: while let Some(iter) = stack.last_mut() {
+                for ref child in iter {
+                    if let InsertedCell::New(iter) = ctx.insert_cell(child)? {
+                        stack.push(iter);
+                        continue 'outer;
+                    }
+                }
 
-        // Clear big chunks of data before finalization
-        drop(stack);
+                stack.pop();
+            }
+        }
 
         ctx.flush_new_cells()?;
         ctx.flush_existing_cells()?;
@@ -272,73 +395,59 @@ impl CellStorage {
         batch: &mut WriteBatch,
         split_at: FastHashMap<HashBytes, Cell>,
         capacity: usize,
+        round: u32,
     ) -> Result<usize, CellStorageError> {
         type StoreResult = Result<(), CellStorageError>;
 
-        struct AddedCell<'a> {
-            old_rc: i64,
-            additions: u32,
-            data: Option<&'a [u8]>,
-        }
-
-        struct Alloc<'a> {
-            bump: Member<'a>,
-            buffer: Vec<u8>,
-        }
-
         struct StoreContext<'a> {
-            db: &'a CellsDb,
-            herd: &'a Herd,
-            raw_cache: &'a RawCellsCache,
+            storage: &'a CellStorage,
+            next_idx: AtomicU64,
             /// Subtrees to process in parallel.
             split_at: FastHashMap<HashBytes, Cell>,
-            // TODO: Use `&'a HashBytes` for key?
-            // Pros:
-            //   - Less `memcpy` calls;
-            //   - Less memory occupied (8 bytes per key vs 32 bytes);
-            // Cons:
-            //   - This reference is stored alongside with cell so
-            //     key locations will be very random and iteration
-            //     will be slower than it is with inplace keys.
             /// Transaction items.
-            transaction: FastDashMap<HashBytes, AddedCell<'a>>,
+            transaction: CellDashMap<AddedCell>,
             /// References of detached subtrees.
-            delayed_additions: std::sync::Mutex<FastHashMap<HashBytes, u32>>,
+            delayed_additions: std::sync::Mutex<CellHashMap<u32>>,
+        }
+
+        struct StoreReadContext<'a> {
+            counters: &'a Counters,
+            nursery: &'a NurseryReadGuard<'a>,
+            persisted_filter: &'a PersistedCellFilter,
         }
 
         impl<'a> StoreContext<'a> {
             fn new(
-                db: &'a CellsDb,
-                herd: &'a Herd,
-                raw_cache: &'a RawCellsCache,
+                storage: &'a CellStorage,
+                next_idx: NextIdx,
                 split_accounts: FastHashMap<HashBytes, Cell>,
                 capacity: usize,
             ) -> Self {
+                let split_len = split_accounts.len();
                 Self {
-                    db,
-                    raw_cache,
-                    herd,
+                    storage,
+                    next_idx: AtomicU64::new(next_idx.get()),
                     split_at: split_accounts,
-                    transaction: FastDashMap::with_capacity_and_hasher_and_shard_amount(
+                    transaction: CellDashMap::with_capacity_and_hasher_and_shard_amount(
                         capacity,
                         Default::default(),
                         512,
                     ),
-                    delayed_additions: Default::default(),
+                    delayed_additions: std::sync::Mutex::new(
+                        CellHashMap::with_capacity_and_hasher(split_len, Default::default()),
+                    ),
                 }
             }
+        }
 
-            fn traverse_cell<'c: 'scope, 'scope, 'env>(
-                &'c self,
-                root: &'c DynCell,
-                scope: &'scope Scope<'scope, 'env>,
+        impl<'a> StoreContext<'a> {
+            fn traverse_cell<'scope>(
+                &'scope self,
+                read: &'scope StoreReadContext<'scope>,
+                root: &'scope DynCell,
+                scope: &Scope<'scope>,
             ) -> StoreResult {
-                let mut alloc = Alloc {
-                    bump: self.herd.get(),
-                    buffer: Vec::with_capacity(512),
-                };
-
-                if !self.insert_cell(root.as_ref(), &mut alloc, 0)? {
+                if !self.insert_cell(read, root.as_ref(), 0)? {
                     return Ok(());
                 }
 
@@ -356,7 +465,7 @@ impl CellStorage {
                         let child_hash = child.repr_hash();
                         if self.split_at.contains_key(child_hash) {
                             let mut delayed_additions = self.delayed_additions.lock().unwrap();
-                            match delayed_additions.entry(*child_hash) {
+                            match delayed_additions.entry(owned_hash_key(child_hash)) {
                                 hash_map::Entry::Vacant(entry) => {
                                     // This subtree will be added by another thread,
                                     // so no additions is needed on first occurence.
@@ -365,7 +474,9 @@ impl CellStorage {
 
                                     // Spawn processing.
                                     // TODO: Handle error properly.
-                                    scope.spawn(|| self.traverse_cell(child, scope).unwrap());
+                                    scope.spawn(|scope| {
+                                        self.traverse_cell(read, child, scope).unwrap();
+                                    });
                                 }
                                 hash_map::Entry::Occupied(mut entry) => {
                                     // Other thread will add this subtree only once,
@@ -377,7 +488,7 @@ impl CellStorage {
                             continue 'outer;
                         }
 
-                        if self.insert_cell(child, &mut alloc, depth)? {
+                        if self.insert_cell(read, child, depth)? {
                             stack.push(child.references());
                             continue 'outer;
                         }
@@ -391,8 +502,8 @@ impl CellStorage {
 
             fn insert_cell(
                 &self,
+                read: &StoreReadContext<'_>,
                 cell: &DynCell,
-                alloc: &mut Alloc<'a>,
                 depth: usize,
             ) -> Result<bool, CellStorageError> {
                 use dashmap::mapref::entry::Entry;
@@ -400,7 +511,7 @@ impl CellStorage {
                 let key = cell.repr_hash();
 
                 // Fast path: cell is already presented in this transaction, just bump refs.
-                if let Some(mut value) = self.transaction.get_mut(key) {
+                if let Some(mut value) = self.transaction.get_mut(hash_key(key)) {
                     value.additions += 1;
                     return Ok(false);
                 }
@@ -410,37 +521,41 @@ impl CellStorage {
                 // threads can do this job without blocking each other on the
                 // same shard (going to rocksdb might be slow).
 
-                let old_rc = self.raw_cache.get_rc_for_insert(self.db, key, depth)?;
-
-                // Prepare `alloc.buffer` if the cell is new (but not flush it to
-                // the bump allocator yet).
-                let is_new = old_rc == 0;
-                if is_new {
-                    let buffer = &mut alloc.buffer;
-                    buffer.clear();
-                    if StorageCell::serialize_to(cell, buffer).is_err() {
-                        return Err(CellStorageError::InvalidCell);
+                let existing = match read.nursery.get_idx(key) {
+                    Some(idx) => Some(idx),
+                    None if read.persisted_filter.filter.contains(*key) => {
+                        self.storage.get_raw_idx_for_insert(key, depth)?
                     }
-                }
+                    None => None,
+                };
 
                 // Try to insert once more.
-                Ok(match self.transaction.entry(*key) {
+                Ok(match self.transaction.entry(owned_hash_key(key)) {
                     Entry::Occupied(mut value) => {
                         // Some other thread has already inserted this cell.
-                        // In this case we discard buffer data and juse bump refs.
+                        // In this case we just bump refs.
                         value.get_mut().additions += 1;
                         false
                     }
                     Entry::Vacant(entry) => {
-                        // Copy buffer data to the bump allocator to extend its lifetime.
-                        let data = if is_new {
-                            Some(alloc.bump.alloc_slice_copy(alloc.buffer.as_slice()) as &[u8])
+                        let (idx, old_rc, data) = if let Some(idx) = existing {
+                            (idx, read.counters.get(idx), None)
                         } else {
-                            None
+                            let len = StorageCell::serialized_len(cell);
+
+                            let mut bytes = Vec::with_capacity(len);
+                            StorageCell::serialize_to(cell, &mut bytes)
+                                .map_err(|_err| CellStorageError::InvalidCell)?;
+                            debug_assert_eq!(bytes.len(), len);
+
+                            let idx = Idx::new(self.next_idx.fetch_add(1, Ordering::Relaxed));
+                            (idx, 0, Some(Bytes::from(bytes)))
                         };
+                        let is_new = data.is_some();
 
                         // Add a new transaction entry.
                         entry.insert(AddedCell {
+                            idx,
                             old_rc,
                             additions: 1,
                             data,
@@ -450,208 +565,171 @@ impl CellStorage {
                 })
             }
 
-            fn finalize(self, batch: &mut WriteBatch) -> usize {
-                std::thread::scope(|s| {
-                    // Apply delayed additions before finalizing the transaction.
-                    for (hash, additions) in self.delayed_additions.into_inner().unwrap() {
-                        if additions > 0 {
-                            if let Some(mut item) = self.transaction.get_mut(&hash) {
-                                // TODO: Assert that `item.additions == 1` at first?
-                                item.additions += additions;
-                            } else {
-                                panic!("spawned subtree was not processed");
-                            }
+            fn finalize(
+                self,
+                batch: &mut WriteBatch,
+                cell_counters: &mut CountersStore,
+                nursery: &CellNursery,
+                nursery_persistence: &mut NurseryPersistence,
+                round: u32,
+            ) -> Result<(usize, StoreFinalizeProfile), CellStorageError> {
+                let mut profile = StoreFinalizeProfile::default();
+
+                // Apply delayed additions before finalizing the transaction.
+                for (hash, additions) in self.delayed_additions.into_inner().unwrap() {
+                    if additions > 0 {
+                        if let Some(mut item) = self.transaction.get_mut(&hash) {
+                            // TODO: Assert that `item.additions == 1` at first?
+                            item.additions += additions;
+                        } else {
+                            panic!("spawned subtree was not processed");
                         }
                     }
+                }
 
-                    // Split shards evenly between N threads and apply changes to cache.
-                    let num_shards = self.transaction._shard_count();
-                    let num_threads = std::thread::available_parallelism()
-                        .map_or(1, usize::from)
-                        .min(num_shards);
+                let total = self.transaction.len();
+                let next_idx = NextIdx::new(self.next_idx.load(Ordering::Relaxed));
 
-                    let chunk_size = num_shards / num_threads;
-                    assert!(chunk_size >= 1);
-                    let mut additional = num_shards % num_threads;
+                cell_counters.counters.next_idx = next_idx;
+                let mut counter_batch = cell_counters.counters.begin();
+                counter_batch.reserve(total);
+                let mut commit = NurseryDelta::default();
+                commit.inserts.reserve(total);
 
-                    let mut range_start = 0;
-                    for _ in 0..num_threads {
-                        let mut range_end = range_start + chunk_size;
-                        if additional > 0 {
-                            additional -= 1;
-                            range_end += 1;
+                let started_at = Instant::now();
+                for (key, item) in self.transaction {
+                    match item.data {
+                        Some(data) => {
+                            debug_assert_eq!(item.old_rc, 0);
+                            commit.inserts.push(NurseryEntryRecord {
+                                hash: HashBytes(key.0),
+                                idx: item.idx,
+                                born_round: round,
+                                data,
+                            });
+                            counter_batch.update_raw(item.idx, 0, u64::from(item.additions));
                         }
-                        assert!(range_end > range_start);
-
-                        // SAFETY: Index must be in bounds.
-                        let shards = unsafe {
-                            (range_start..range_end).map(|i| self.transaction._get_read_shard(i))
-                        };
-                        range_start = range_end;
-
-                        let cache = self.raw_cache;
-                        s.spawn(move || {
-                            for shard in shards {
-                                // SAFETY: `RawIter` will not outlibe the `RawTable`.
-                                for value in unsafe { shard.iter() } {
-                                    // SAFETY: `Bucket` is a valid item, received from a valid iterator.
-                                    let (key, value) = unsafe { value.as_ref() };
-                                    let item = value.get();
-                                    let new_rc = item.old_rc + item.additions as i64;
-                                    cache.on_insert_cell(key, new_rc, item.data);
-                                }
-                            }
-                        });
+                        None => {
+                            let new_rc = item.old_rc + u64::from(item.additions);
+                            // Insert path only increases refs, so existing overrides cannot become ONE.
+                            counter_batch.update_raw(item.idx, item.old_rc, new_rc);
+                        }
                     }
-                    assert_eq!(range_start, num_shards);
+                }
+                profile.transaction_merge_us = elapsed_us(started_at);
 
-                    // Merge transaction items into the final batch.
-                    let mut buffer = Vec::with_capacity(512);
-                    let total = self.transaction.len();
-                    let cells_cf = &self.db.cells.cf();
-                    for kv in self.transaction.iter() {
-                        let key = kv.key();
-                        let item = kv.value();
-
-                        buffer.clear();
-                        refcount::add_positive_refount(item.additions, item.data, &mut buffer);
-                        batch.merge_cf(cells_cf, key.as_slice(), &buffer);
+                let mut buffer = Vec::with_capacity(512);
+                let mut promoted_count = 0;
+                let mut promoted_bytes = 0;
+                let mut promoted_hashes = Vec::new();
+                let started_at = Instant::now();
+                // Raw cache is filled before the RocksDB write, matching the normal store path.
+                // This keeps in-process loads working after promotion moved bytes out of nursery.
+                {
+                    let mut target = PersistedCellRowTarget {
+                        batch,
+                        commit: &mut commit,
+                        buffer: &mut buffer,
+                    };
+                    nursery.drain_promotable(round, |hash, idx, data| {
+                        promoted_count += 1;
+                        promoted_bytes += data.len();
+                        promoted_hashes.push(hash);
+                        self.storage
+                            .stage_persisted_cell_row(&mut target, hash, idx, data);
+                    });
+                }
+                profile.promotion_us = elapsed_us(started_at);
+                if promoted_count > 0 {
+                    metrics::counter!("tycho_storage_cell_nursery_promoted_count")
+                        .increment(promoted_count);
+                    metrics::counter!("tycho_storage_cell_nursery_promoted_bytes")
+                        .increment(promoted_bytes as u64);
+                }
+                // Keep the in-memory persisted filter in sync with promoted rows.
+                // Without this batch update, a later store in the same process
+                // can skip raw-cache/RocksDB lookup and duplicate a promoted cell.
+                if !promoted_hashes.is_empty() {
+                    let mut persisted_filter = self.storage.persisted_filter.lock().unwrap();
+                    for hash in &promoted_hashes {
+                        persisted_filter.insert(hash);
                     }
-                    total
-                })
+                    persisted_filter.record_metrics();
+                }
+
+                let started_at = Instant::now();
+                counter_batch.apply();
+                profile.counter_apply_us = elapsed_us(started_at);
+
+                cell_counters.counters.shrink_if_needed();
+                cell_counters
+                    .put_snapshot(batch, CellsDbStateKey::CounterSnapshotLatest)
+                    .expect("failed to stage store cell counter snapshot after mutation started");
+
+                profile.wal = nursery_persistence
+                    .append_commit(&self.storage.cells_db, batch, &commit)
+                    .expect("failed to append cell nursery WAL after mutation started");
+
+                let started_at = Instant::now();
+                // Nursery publish intentionally happens before the caller writes the
+                // RocksDB batch. If that write fails, the node restarts and replays
+                // from WAL; state roots/counters are not persisted without the batch.
+                self.storage.nursery.apply_commit(commit);
+                self.storage.nursery.record_metrics();
+                profile.nursery_apply_us = elapsed_us(started_at);
+
+                Ok((total, profile))
             }
         }
 
-        let herd = Herd::new();
-        let ctx = StoreContext::new(
-            &self.cells_db,
-            &herd,
-            &self.raw_cells_cache,
-            split_at,
-            capacity,
+        let total_started_at = Instant::now();
+        let mut cell_counters = self.cell_counters.lock().unwrap();
+
+        let ctx = StoreContext::new(self, cell_counters.counters.next_idx, split_at, capacity);
+
+        let started_at = Instant::now();
+        {
+            let persisted_filter = self.persisted_filter.lock().unwrap();
+            let nursery = self.nursery.read();
+            let read = StoreReadContext {
+                counters: &cell_counters.counters,
+                nursery: &nursery,
+                persisted_filter: &persisted_filter,
+            };
+            self.worker_pool
+                .scope(|scope| ctx.traverse_cell(&read, root, scope))?;
+        }
+        let traverse_us = elapsed_us(started_at);
+
+        let mut nursery_persistence = self.nursery_persistence.lock().unwrap();
+
+        let started_at = Instant::now();
+        let (total, finalize_profile) = ctx.finalize(
+            batch,
+            &mut cell_counters,
+            &self.nursery,
+            &mut nursery_persistence,
+            round,
+        )?;
+        let finalize_us = elapsed_us(started_at);
+        let wal = finalize_profile.wal;
+
+        tracing::info!(
+            operation = "store_cell_mt",
+            total_us = elapsed_us(total_started_at),
+            traverse_us,
+            finalize_us,
+            transaction_merge_us = finalize_profile.transaction_merge_us,
+            promotion_us = finalize_profile.promotion_us,
+            counter_apply_us = finalize_profile.counter_apply_us,
+            nursery_apply_us = finalize_profile.nursery_apply_us,
+            total_cells = total as u64,
+            wal_bytes = wal.wal_bytes,
+            wal_total_us = wal.total_us,
+            "cell storage mt operation profile",
         );
 
-        std::thread::scope(|scope| ctx.traverse_cell(root, scope))?;
-
-        Ok(ctx.finalize(batch))
-    }
-
-    pub fn store_cell(
-        &self,
-        batch: &mut WriteBatch,
-        root: &DynCell,
-        estimated_cell_count: usize,
-    ) -> Result<usize, CellStorageError> {
-        struct AddedCell<'a> {
-            old_rc: i64,
-            additions: u32,
-            data: Option<&'a [u8]>,
-        }
-
-        struct Context<'a> {
-            db: &'a CellsDb,
-            raw_cells_cache: &'a RawCellsCache,
-            alloc: &'a Bump,
-            transaction: FastHashMap<&'a HashBytes, AddedCell<'a>>,
-            buffer: Vec<u8>,
-        }
-
-        impl<'a> Context<'a> {
-            fn insert_cell(
-                &mut self,
-                cell: &'a DynCell,
-                depth: usize,
-            ) -> Result<bool, CellStorageError> {
-                let key = cell.repr_hash();
-                Ok(match self.transaction.entry(key) {
-                    hash_map::Entry::Occupied(mut value) => {
-                        value.get_mut().additions += 1;
-                        false
-                    }
-                    hash_map::Entry::Vacant(entry) => {
-                        let old_rc = self
-                            .raw_cells_cache
-                            .get_rc_for_insert(self.db, key, depth)?;
-
-                        let is_new = old_rc == 0;
-                        let data = if is_new {
-                            self.buffer.clear();
-                            if StorageCell::serialize_to(cell, &mut self.buffer).is_err() {
-                                return Err(CellStorageError::InvalidCell);
-                            }
-                            Some(self.alloc.alloc_slice_copy(self.buffer.as_slice()) as &[u8])
-                        } else {
-                            None
-                        };
-
-                        entry.insert(AddedCell {
-                            old_rc,
-                            additions: 1,
-                            data,
-                        });
-                        is_new
-                    }
-                })
-            }
-
-            fn finalize(mut self, batch: &mut rocksdb::WriteBatch) -> usize {
-                let total = self.transaction.len();
-                let cells_cf = &self.db.cells.cf();
-
-                for (key, item) in self.transaction {
-                    self.buffer.clear();
-                    refcount::add_positive_refount(item.additions, item.data, &mut self.buffer);
-                    batch.merge_cf(cells_cf, key.as_slice(), &self.buffer);
-
-                    let new_rc = item.old_rc + item.additions as i64;
-                    self.raw_cells_cache.on_insert_cell(key, new_rc, item.data);
-                }
-
-                total
-            }
-        }
-
-        let alloc = bumpalo::Bump::new();
-
-        // Prepare context and handles
-        let mut ctx = Context {
-            db: &self.cells_db,
-            raw_cells_cache: &self.raw_cells_cache,
-            alloc: &alloc,
-            transaction: FastHashMap::with_capacity_and_hasher(
-                estimated_cell_count,
-                Default::default(),
-            ),
-            buffer: Vec::with_capacity(512),
-        };
-
-        'visit: {
-            // Check root cell
-            if !ctx.insert_cell(root.as_ref(), 0)? {
-                break 'visit;
-            }
-            let mut stack = Vec::with_capacity(16);
-            stack.push(root.references());
-
-            // Check other cells
-            'outer: loop {
-                let depth = stack.len();
-                let Some(iter) = stack.last_mut() else {
-                    break;
-                };
-
-                for child in &mut *iter {
-                    if ctx.insert_cell(child, depth)? {
-                        stack.push(child.references());
-                        continue 'outer;
-                    }
-                }
-
-                stack.pop();
-            }
-        }
-
-        Ok(ctx.finalize(batch))
+        Ok(total)
     }
 
     pub fn load_cell(
@@ -659,29 +737,70 @@ impl CellStorage {
         hash: &HashBytes,
         epoch: u32,
     ) -> Result<Arc<StorageCell>, CellStorageError> {
-        #[cfg(feature = "cells-metrics")]
-        let _histogram = HistogramGuard::begin("tycho_storage_load_cell_time");
+        self.metrics.load_cell_total.increment(1);
 
-        if let Some(cell) = self.cells_cache.get(hash)
+        if let Some(cell) = self.cells_cache.get(hash_key(hash))
             && cell.epoch.saturating_add(self.drop_interval) >= epoch
             && let Some(cell) = cell.weak.upgrade()
         {
+            // Tree cache stores already materialized cells for live state
+            // objects. It is not an existence check against current RocksDB or
+            // nursery contents; old loaded state can keep a removed cell alive.
+            self.metrics.load_cell_cache_hit.increment(1);
             return Ok(cell);
         }
 
-        let mut cell = match self.raw_cells_cache.get_raw(&self.cells_db, hash) {
-            Ok(Some(value)) => {
-                match StorageCell::deserialize(self.clone(), hash, &value.slice, epoch) {
-                    Some(cell) => Arc::new(cell),
-                    None => return Err(CellStorageError::InvalidCell),
-                }
-            }
-            Ok(None) => return Err(CellStorageError::CellNotFound),
-            Err(e) => return Err(CellStorageError::Internal(e)),
+        let deserialize = |data: &[u8]| {
+            StorageCell::deserialize(self.clone(), hash, data, epoch)
+                .map(Arc::new)
+                .ok_or(CellStorageError::InvalidCell)
         };
 
+        self.metrics.load_cell_nursery_checked.increment(1);
+        let nursery_data = self.nursery.get(hash);
+
+        let cell = if let Some(data) = nursery_data {
+            self.metrics.load_cell_nursery_hit.increment(1);
+            deserialize(data.as_ref())?
+        } else if let Some(value) = self.raw_cells_cache.inner.get(hash_key(hash)) {
+            self.metrics.load_cell_raw_cache_hit.increment(1);
+            deserialize(&value.slice)?
+        } else {
+            self.metrics.load_cell_raw_cache_miss.increment(1);
+
+            let value = {
+                #[cfg(feature = "cells-metrics")]
+                let _timer = scopeguard::guard(Instant::now(), |started_at| {
+                    self.raw_cells_cache
+                        .rocksdb_access_histogram
+                        .record(started_at.elapsed());
+                });
+
+                self.cells_db
+                    .cells
+                    .get(hash.as_slice())
+                    .map_err(CellStorageError::Internal)?
+            };
+
+            match value.and_then(|value| {
+                self.raw_cells_cache
+                    .cache_decoded_value(hash, value.as_ref())
+                    .map(|(_, item)| item)
+            }) {
+                Some(value) => {
+                    self.metrics.load_cell_raw_hit.increment(1);
+                    deserialize(&value.slice)?
+                }
+                None => {
+                    self.metrics.load_cell_raw_miss.increment(1);
+                    return Err(CellStorageError::CellNotFound);
+                }
+            }
+        };
+
+        let mut cell = cell;
         let has_new;
-        match self.cells_cache.entry(*hash) {
+        match self.cells_cache.entry(owned_hash_key(hash)) {
             dashmap::Entry::Vacant(entry) => {
                 has_new = true;
                 entry.insert(CachedCell {
@@ -707,7 +826,7 @@ impl CellStorage {
 
         if has_new {
             #[cfg(feature = "cells-metrics")]
-            metrics::gauge!("tycho_storage_cells_tree_cache_size").increment(1f64);
+            self.metrics.tree_cache_size.increment(1.0);
         }
 
         Ok(cell)
@@ -727,57 +846,59 @@ impl CellStorage {
         }
 
         struct RemoveContext<'a> {
-            db: &'a CellsDb,
+            storage: &'a CellStorage,
             herd: &'a Herd,
-            raw_cache: &'a RawCellsCache,
             /// Subtrees to process in parallel.
             split_at: FastHashSet<HashBytes>,
-            // TODO: Use `&'a HashBytes` for key?
-            // Pros:
-            //   - Less `memcpy` calls;
-            //   - Less memory occupied (8 bytes per key vs 32 bytes);
-            // Cons:
-            //   - This reference is stored alongside with cell so
-            //     key locations will be very random and iteration
-            //     will be slower than it is with inplace keys.
             /// Transaction items.
-            transaction: FastDashMap<HashBytes, RemovedCell<'a>>,
+            transaction: CellDashMap<RemovedCell<'a>>,
             /// References of detached subtrees.
-            delayed_removes: std::sync::Mutex<FastHashMap<HashBytes, u32>>,
+            delayed_removes: std::sync::Mutex<CellHashMap<u32>>,
+        }
+
+        struct RemoveReadContext<'a> {
+            counters: &'a Counters,
+            nursery: &'a NurseryReadGuard<'a>,
         }
 
         impl<'a> RemoveContext<'a> {
             fn new(
-                db: &'a CellsDb,
+                storage: &'a CellStorage,
                 herd: &'a Herd,
-                raw_cache: &'a RawCellsCache,
                 split_at: FastHashSet<HashBytes>,
             ) -> Self {
+                let transaction_capacity = 128.max(split_at.len());
+                let delayed_capacity = split_at.len();
                 Self {
-                    db,
-                    raw_cache,
+                    storage,
                     herd,
                     split_at,
-                    transaction: FastDashMap::with_capacity_and_hasher_and_shard_amount(
-                        128,
+                    transaction: CellDashMap::with_capacity_and_hasher_and_shard_amount(
+                        transaction_capacity,
                         Default::default(),
                         512,
                     ),
-                    delayed_removes: Default::default(),
+                    delayed_removes: std::sync::Mutex::new(CellHashMap::with_capacity_and_hasher(
+                        delayed_capacity,
+                        Default::default(),
+                    )),
                 }
             }
+        }
 
-            fn traverse_cell<'c: 'scope, 'scope, 'env>(
-                &'c self,
-                hash: &'c HashBytes,
-                scope: &'scope Scope<'scope, 'env>,
+        impl<'a> RemoveContext<'a> {
+            fn traverse_cell<'scope>(
+                &'scope self,
+                read: &'scope RemoveReadContext<'scope>,
+                hash: &'scope HashBytes,
+                scope: &Scope<'scope>,
             ) -> RemoveResult {
                 let mut alloc = Alloc {
                     bump: self.herd.get(),
                     buffer: Vec::with_capacity(4),
                 };
 
-                let Some(refs) = self.remove_cell(hash, &mut alloc)? else {
+                let Some(refs) = self.remove_cell(read, hash, &mut alloc)? else {
                     return Ok(());
                 };
 
@@ -790,7 +911,7 @@ impl CellStorage {
                         // Skip cell to remove it later in parallel
                         if self.split_at.contains(child_hash) {
                             let mut delayed_removes = self.delayed_removes.lock().unwrap();
-                            match delayed_removes.entry(*child_hash) {
+                            match delayed_removes.entry(owned_hash_key(child_hash)) {
                                 hash_map::Entry::Vacant(entry) => {
                                     // This subtree will be removed by another thread,
                                     // so no removes is needed on first occurrence.
@@ -799,8 +920,8 @@ impl CellStorage {
 
                                     // Spawn processing.
                                     // TODO: Handle error properly.
-                                    scope.spawn(|| {
-                                        self.traverse_cell(child_hash, scope).unwrap();
+                                    scope.spawn(|scope| {
+                                        self.traverse_cell(read, child_hash, scope).unwrap();
                                     });
                                 }
                                 hash_map::Entry::Occupied(mut entry) => {
@@ -814,7 +935,7 @@ impl CellStorage {
                         }
 
                         // Process the current cell.
-                        let refs = self.remove_cell(child_hash, &mut alloc)?;
+                        let refs = self.remove_cell(read, child_hash, &mut alloc)?;
 
                         if let Some(refs) = refs {
                             // And proceed to its refs if any.
@@ -831,14 +952,15 @@ impl CellStorage {
 
             fn remove_cell(
                 &self,
+                read: &RemoveReadContext<'_>,
                 repr_hash: &HashBytes,
                 alloc: &mut Alloc<'a>,
             ) -> Result<Option<&'a [HashBytes]>, CellStorageError> {
                 use dashmap::mapref::entry::Entry;
 
                 // Fast path: cell is already presented in this transaction, just update refs.
-                if let Some(mut value) = self.transaction.get_mut(repr_hash) {
-                    return value.remove();
+                if let Some(mut value) = self.transaction.get_mut(hash_key(repr_hash)) {
+                    return value.add_removes(1);
                 }
 
                 // Slow path: find an existing stored cell data.
@@ -847,185 +969,201 @@ impl CellStorage {
                 // same shard (going to rocksdb might be slow).
 
                 let buffer = &mut alloc.buffer;
-                let old_rc = self
-                    .raw_cache
-                    .get_rc_for_delete(self.db, repr_hash, buffer)?;
-                debug_assert!(old_rc > 0);
+                let (idx, source, data_len) = match read.nursery.get_data(repr_hash) {
+                    Some((idx, data)) => {
+                        buffer.clear();
+                        if !StorageCell::deserialize_references(data, buffer) {
+                            return Err(CellStorageError::InvalidCell);
+                        }
+                        (idx, CellSource::Nursery, data.len())
+                    }
+                    None => (
+                        self.storage.get_raw_idx_for_delete(repr_hash, buffer)?,
+                        CellSource::RocksDb,
+                        0,
+                    ),
+                };
+                let old_rc = read.counters.get(idx);
 
                 // Try to remove once more.
-                match self.transaction.entry(*repr_hash) {
+                match self.transaction.entry(owned_hash_key(repr_hash)) {
                     // Some other thread has already removed this cell.
                     // In this case we just used the existing entry state.
-                    Entry::Occupied(mut value) => value.get_mut().remove(),
-                    Entry::Vacant(v) => Ok(v
-                        .insert(RemovedCell {
+                    Entry::Occupied(mut value) => value.get_mut().add_removes(1),
+                    Entry::Vacant(v) => {
+                        let refs = alloc.bump.alloc_slice_copy(buffer.as_slice());
+                        v.insert(RemovedCell {
+                            idx,
+                            source,
+                            data_len,
                             old_rc,
                             removes: 1,
-                            refs: alloc.bump.alloc_slice_copy(buffer.as_slice()),
-                        })
-                        .next_refs()),
+                            refs,
+                        });
+                        Ok((old_rc == 1).then_some(refs))
+                    }
                 }
             }
 
-            fn finalize(self, batch: &mut WriteBatch) -> usize {
+            fn finalize(
+                self,
+                batch: &mut WriteBatch,
+                cell_counters: &mut CountersStore,
+                nursery_persistence: &mut NurseryPersistence,
+            ) -> Result<(usize, RemoveMtFinalizeProfile), CellStorageError> {
                 let _hist = HistogramGuard::begin("tycho_storage_batch_write_parallel_time_high");
+                let mut profile = RemoveMtFinalizeProfile::default();
 
                 // Write transaction to the `WriteBatch`
-                std::thread::scope(|s| {
-                    // Apply delayed removes before finalizing the transaction.
-                    for (hash, removes) in self.delayed_removes.into_inner().unwrap() {
-                        if removes > 0 {
-                            if let Some(mut item) = self.transaction.get_mut(&hash) {
-                                item.removes += removes;
-                            } else {
-                                panic!("spawned subtree was not processed");
+                // Apply delayed removes before finalizing the transaction.
+                for (hash, removes) in self.delayed_removes.into_inner().unwrap() {
+                    if removes > 0 {
+                        if let Some(mut item) = self.transaction.get_mut(&hash) {
+                            item.add_removes(removes)?;
+                        } else {
+                            panic!("spawned subtree was not processed");
+                        }
+                    }
+                }
+
+                let total = self.transaction.len();
+                let mut counter_batch = cell_counters.counters.begin();
+                counter_batch.reserve(total);
+                let mut deletes = Vec::with_capacity(total);
+                let mut commit = NurseryDelta::default();
+                commit.removes.reserve(total);
+                let mut discarded_before_promotion_count = 0;
+                let mut discarded_before_promotion_bytes = 0;
+
+                let started_at = Instant::now();
+                for (key, item) in self.transaction {
+                    let new_rc = item
+                        .old_rc
+                        .checked_sub(u64::from(item.removes))
+                        .expect("checked in RemovedCell::remove");
+
+                    counter_batch.update_raw(item.idx, item.old_rc, new_rc);
+
+                    // Only rc=0 deletes the cell row; rc=1 keeps the row and clears the counter override.
+                    if new_rc == 0 {
+                        match item.source {
+                            CellSource::Nursery => {
+                                discarded_before_promotion_count += 1;
+                                discarded_before_promotion_bytes += item.data_len as u64;
+                                commit.removes.push(HashBytes(key.0));
+                            }
+                            CellSource::RocksDb => {
+                                self.storage.raw_cells_cache.inner.remove(&key);
+                                deletes.push(HashBytes(key.0));
                             }
                         }
                     }
+                }
+                profile.transaction_merge_us = elapsed_us(started_at);
 
-                    // Split shards evenly between N threads and apply changes to cache.
-                    let num_shards = self.transaction._shard_count();
-                    let num_threads = std::thread::available_parallelism()
-                        .map_or(1, usize::from)
-                        .min(num_shards);
+                // Keep RocksDB skiplist deletes close to append order instead of hash-map order.
+                profile.rocksdb_delete_count = deletes.len() as u64;
+                deletes.sort_unstable();
 
-                    let chunk_size = num_shards / num_threads;
-                    assert!(chunk_size >= 1);
-                    let mut additional = num_shards % num_threads;
-
-                    let mut range_start = 0;
-                    for _ in 0..num_threads {
-                        let mut range_end = range_start + chunk_size;
-                        if additional > 0 {
-                            additional -= 1;
-                            range_end += 1;
-                        }
-                        assert!(range_end > range_start);
-
-                        // SAFETY: Index must be in bounds.
-                        let shards = unsafe {
-                            (range_start..range_end).map(|i| self.transaction._get_read_shard(i))
-                        };
-                        range_start = range_end;
-
-                        let cache = self.raw_cache;
-                        s.spawn(move || {
-                            for shard in shards {
-                                // SAFETY: `RawIter` will not outlibe the `RawTable`.
-                                for value in unsafe { shard.iter() } {
-                                    // SAFETY: `Bucket` is a valid item, received from a valid iterator.
-                                    let (key, value) = unsafe { value.as_ref() };
-                                    let item = value.get();
-
-                                    let new_rc = item.old_rc - item.removes as i64;
-                                    cache.on_remove_cell(key, new_rc);
-                                }
-                            }
-                        });
+                let cells_cf = &self.storage.cells_db.cells.cf();
+                if !deletes.is_empty() {
+                    let mut persisted_filter = self.storage.persisted_filter.lock().unwrap();
+                    for hash in &deletes {
+                        persisted_filter.filter.remove(*hash);
                     }
-                    assert_eq!(range_start, num_shards);
+                    persisted_filter.record_metrics();
+                }
+                // TODO: Use `SingleDelete` here once vanilla rocksdb exposes
+                // `WriteBatch::single_delete_cf`. This is the valid site: cell
+                // keys are immutable hashes, and counter GC only reaches this
+                // path after the last reference is gone. On devnet8 deploy-10kk,
+                // `delete_cf` vs `single_delete_cf` had +2.77% compaction output
+                // bytes, +5.41% RocksDB write time, and +7.89% write p99.
+                for key in deletes {
+                    batch.delete_cf(cells_cf, key.as_slice());
+                }
 
-                    // Merge transaction items into the final batch.
-                    let total = self.transaction.len();
-                    let cells_cf = &self.db.cells.cf();
-                    for kv in self.transaction.iter() {
-                        let key = kv.key();
-                        let item = kv.value();
+                let started_at = Instant::now();
+                counter_batch.apply();
+                profile.counter_apply_us = elapsed_us(started_at);
 
-                        batch.merge_cf(
-                            cells_cf,
-                            key.as_slice(),
-                            refcount::encode_negative_refcount(item.removes),
-                        );
-                    }
-                    total
-                })
+                cell_counters.counters.shrink_if_needed();
+                cell_counters
+                    .put_snapshot(batch, CellsDbStateKey::CounterSnapshotLatest)
+                    .expect("failed to stage remove cell counter snapshot after mutation started");
+
+                profile.wal = nursery_persistence
+                    .append_commit(&self.storage.cells_db, batch, &commit)
+                    .expect("failed to append cell nursery WAL after remove mutation started");
+
+                let started_at = Instant::now();
+                // Nursery publish intentionally happens before the caller writes the
+                // RocksDB batch. If that write fails, the node restarts and replays
+                // from WAL; state roots/counters are not persisted without the batch.
+                if discarded_before_promotion_count > 0 {
+                    metrics::counter!(
+                        "tycho_storage_cell_nursery_discarded_before_promotion_count"
+                    )
+                    .increment(discarded_before_promotion_count);
+                    metrics::counter!(
+                        "tycho_storage_cell_nursery_discarded_before_promotion_bytes"
+                    )
+                    .increment(discarded_before_promotion_bytes);
+                }
+                self.storage.nursery.apply_commit(commit);
+                self.storage.nursery.record_metrics();
+                profile.nursery_apply_us = elapsed_us(started_at);
+
+                Ok((total, profile))
             }
         }
 
-        let ctx = RemoveContext::new(&self.cells_db, herd, &self.raw_cells_cache, split_at);
+        let total_started_at = Instant::now();
 
-        std::thread::scope(|scope| ctx.traverse_cell(root, scope))?;
+        let mut cell_counters = self.cell_counters.lock().unwrap();
 
-        // NOTE: For each cell we have 32 bytes for key and 8 bytes for RC,
+        let ctx = RemoveContext::new(self, herd, split_at);
+
+        let started_at = Instant::now();
+        {
+            let nursery = self.nursery.read();
+            let read = RemoveReadContext {
+                counters: &cell_counters.counters,
+                nursery: &nursery,
+            };
+            self.worker_pool
+                .scope(|scope| ctx.traverse_cell(&read, root, scope))?;
+        }
+        let traverse_us = elapsed_us(started_at);
+
+        let mut nursery_persistence = self.nursery_persistence.lock().unwrap();
+
+        // NOTE: For each cell we have 32 bytes for key
         //       and a bit more just in case.
         let total = ctx.transaction.len();
-        let mut batch = WriteBatch::with_capacity_bytes(total * (32 + 8 + 8));
+        let batch_capacity_bytes = total * 32;
+        let mut batch = WriteBatch::with_capacity_bytes(batch_capacity_bytes);
 
-        Ok((ctx.finalize(&mut batch), batch))
-    }
+        let started_at = Instant::now();
+        let (total, finalize_profile) =
+            ctx.finalize(&mut batch, &mut cell_counters, &mut nursery_persistence)?;
+        let finalize_us = elapsed_us(started_at);
+        let wal = finalize_profile.wal;
 
-    #[allow(unused)]
-    pub fn remove_cell(
-        &self,
-        alloc: &Bump,
-        hash: &HashBytes,
-    ) -> Result<(usize, WriteBatch), CellStorageError> {
-        let cells = &self.cells_db.cells;
-        let cells_cf = &cells.cf();
-
-        let mut transaction: FastHashMap<&HashBytes, RemovedCell<'_>> =
-            FastHashMap::with_capacity_and_hasher(128, Default::default());
-        let mut buffer = Vec::with_capacity(4);
-
-        let mut stack = Vec::with_capacity(16);
-        stack.push(std::slice::from_ref(hash).iter());
-
-        // While some cells left
-        'outer: while let Some(iter) = stack.last_mut() {
-            for cell_id in iter.by_ref() {
-                // Process the current cell.
-                let refs = match transaction.entry(cell_id) {
-                    hash_map::Entry::Occupied(mut v) => v.get_mut().remove()?,
-                    hash_map::Entry::Vacant(v) => {
-                        let old_rc = self.raw_cells_cache.get_rc_for_delete(
-                            &self.cells_db,
-                            cell_id,
-                            &mut buffer,
-                        )?;
-                        debug_assert!(old_rc > 0);
-
-                        v.insert(RemovedCell {
-                            old_rc,
-                            removes: 1,
-                            refs: alloc.alloc_slice_copy(buffer.as_slice()),
-                        })
-                        .next_refs()
-                    }
-                };
-
-                if let Some(refs) = refs {
-                    // And proceed to its refs if any.
-                    stack.push(refs.iter());
-                    continue 'outer;
-                }
-            }
-
-            // Drop the current cell when all of its children were processed.
-            stack.pop();
-        }
-
-        // Clear big chunks of data before finalization
-        drop(stack);
-
-        // Write transaction to the `WriteBatch`
-        let _hist = HistogramGuard::begin("tycho_storage_batch_write_time_high");
-        let total = transaction.len();
-
-        // NOTE: For each cell we have 32 bytes for key and 8 bytes for RC,
-        //       and a bit more just in case.
-        let mut batch = WriteBatch::with_capacity_bytes(total * (32 + 8 + 8));
-
-        for (key, item) in transaction {
-            batch.merge_cf(
-                cells_cf,
-                key.as_slice(),
-                refcount::encode_negative_refcount(item.removes),
-            );
-
-            let new_rc = item.old_rc - item.removes as i64;
-            self.raw_cells_cache.on_remove_cell(key, new_rc);
-        }
+        tracing::info!(
+            operation = "remove_cell_mt",
+            total_us = elapsed_us(total_started_at),
+            traverse_us,
+            finalize_us,
+            transaction_merge_us = finalize_profile.transaction_merge_us,
+            counter_apply_us = finalize_profile.counter_apply_us,
+            nursery_apply_us = finalize_profile.nursery_apply_us,
+            total_cells = total as u64,
+            rocksdb_delete_count = finalize_profile.rocksdb_delete_count,
+            wal_bytes = wal.wal_bytes,
+            wal_total_us = wal.total_us,
+            "cell storage mt operation profile",
+        );
 
         Ok((total, batch))
     }
@@ -1033,41 +1171,280 @@ impl CellStorage {
     pub fn drop_cell(&self, hash: &HashBytes) {
         if self
             .cells_cache
-            .remove_if(hash, |_, cell| cell.weak.strong_count() == 0)
+            .remove_if(hash_key(hash), |_, cell| cell.weak.strong_count() == 0)
             .is_some()
         {
             #[cfg(feature = "cells-metrics")]
-            metrics::gauge!("tycho_storage_cells_tree_cache_size").decrement(1f64);
+            self.metrics.tree_cache_size.decrement(1.0);
+        }
+    }
+
+    fn build_persisted_filter(cells_db: &CellsDb) -> Result<PersistedCellFilter> {
+        let started_at = Instant::now();
+        let estimated_capacity = cells_db
+            .rocksdb()
+            .property_int_value_cf(&cells_db.cells.cf(), rocksdb::properties::ESTIMATE_NUM_KEYS)?
+            .unwrap_or_default();
+
+        let mut filter =
+            PersistedCellFilter::new(estimated_capacity, PERSISTED_CELL_FILTER_FP_RATE);
+        let mut capacity = 0u64;
+        let mut iterator = cells_db.cells.raw_iterator();
+        iterator.seek_to_first();
+        while let Some((key, _)) = iterator.item() {
+            let hash = HashBytes::from_slice(key);
+            filter.insert(&hash);
+            capacity += 1;
+            iterator.next();
+        }
+        iterator.status()?;
+
+        tracing::info!(
+            capacity,
+            estimated_capacity,
+            elapsed_sec = started_at.elapsed().as_secs_f64(),
+            "built persisted cell filter",
+        );
+        Ok(filter)
+    }
+
+    // Previously used `get_value_or_guard` which inserts into cache on miss.
+    // This caused two problems:
+    fn get_raw_idx_for_insert(
+        &self,
+        key: &HashBytes,
+        depth: usize,
+    ) -> Result<Option<Idx>, CellStorageError> {
+        // A constant which tells since which depth we should start to use cache.
+        // This method is used mostly for inserting new states, so we can assume
+        // that first N levels will mostly be new.
+        //
+        // This value was chosen empirically.
+        const NEW_CELLS_DEPTH_THRESHOLD: usize = 4;
+
+        if depth >= NEW_CELLS_DEPTH_THRESHOLD {
+            // NOTE: `get` here is used to affect a "hotness" of the value, because
+            // there is a big chance that we will need it soon during state processing.
+            if let Some(entry) = self.raw_cells_cache.inner.get(hash_key(key)) {
+                return Ok(Some(entry.header.header));
+            }
+        }
+
+        let Some(value) = self
+            .cells_db
+            .cells
+            .get(key)
+            .map_err(CellStorageError::Internal)?
+        else {
+            return Ok(None);
+        };
+
+        if depth >= NEW_CELLS_DEPTH_THRESHOLD {
+            let Some((idx, _)) = self
+                .raw_cells_cache
+                .cache_decoded_value(key, value.as_ref())
+            else {
+                return Err(CellStorageError::InvalidCell);
+            };
+            Ok(Some(idx))
+        } else {
+            let Some((idx, _)) = decode_indexed_value(value.as_ref()) else {
+                return Err(CellStorageError::InvalidCell);
+            };
+            Ok(Some(idx))
+        }
+    }
+
+    fn get_raw_idx_for_delete(
+        &self,
+        key: &HashBytes,
+        refs_buffer: &mut Vec<HashBytes>,
+    ) -> Result<Idx, CellStorageError> {
+        refs_buffer.clear();
+
+        // NOTE: `peek` here is used to avoid affecting a "hotness" of the value
+        if let Some(value) = self.raw_cells_cache.inner.peek(hash_key(key)) {
+            return StorageCell::deserialize_references(&value.slice, refs_buffer)
+                .then_some(value.header.header)
+                .ok_or(CellStorageError::InvalidCell);
+        }
+
+        let value = self
+            .cells_db
+            .cells
+            .get(key.as_slice())
+            .map_err(CellStorageError::Internal)?
+            .ok_or(CellStorageError::CellNotFound)?;
+        let (idx, data) =
+            decode_indexed_value(value.as_ref()).ok_or(CellStorageError::InvalidCell)?;
+        StorageCell::deserialize_references(data, refs_buffer)
+            .then_some(idx)
+            .ok_or(CellStorageError::InvalidCell)
+    }
+
+    fn stage_persisted_cell_row(
+        &self,
+        target: &mut PersistedCellRowTarget<'_>,
+        hash: HashBytes,
+        idx: Idx,
+        data: &[u8],
+    ) {
+        target.commit.removes.push(hash);
+        target.buffer.clear();
+        encode_indexed_value(idx, data, target.buffer);
+        target.batch.put_cf(
+            &self.cells_db.cells.cf(),
+            hash.as_slice(),
+            target.buffer.as_slice(),
+        );
+        self.raw_cells_cache.inner.insert(
+            owned_hash_key(&hash),
+            RawCellsCacheItem::from_header_and_slice(idx, data),
+        );
+    }
+}
+
+struct StorageMetrics {
+    tree_cache_size: metrics::Gauge,
+    load_cell_total: metrics::Counter,
+    load_cell_cache_hit: metrics::Counter,
+    load_cell_nursery_checked: metrics::Counter,
+    load_cell_nursery_hit: metrics::Counter,
+    load_cell_raw_cache_hit: metrics::Counter,
+    load_cell_raw_cache_miss: metrics::Counter,
+    load_cell_raw_hit: metrics::Counter,
+    load_cell_raw_miss: metrics::Counter,
+}
+
+impl StorageMetrics {
+    fn new() -> Self {
+        Self {
+            tree_cache_size: metrics::gauge!("tycho_storage_cells_tree_cache_size"),
+            load_cell_total: metrics::counter!("tycho_storage_load_cell_total"),
+            load_cell_cache_hit: metrics::counter!("tycho_storage_load_cell_cache_hit_total"),
+            load_cell_nursery_checked: metrics::counter!(
+                "tycho_storage_load_cell_nursery_checked_total"
+            ),
+            load_cell_nursery_hit: metrics::counter!("tycho_storage_load_cell_nursery_hit_total"),
+            load_cell_raw_cache_hit: metrics::counter!(
+                "tycho_storage_load_cell_raw_cache_hit_total"
+            ),
+            load_cell_raw_cache_miss: metrics::counter!(
+                "tycho_storage_load_cell_raw_cache_miss_total"
+            ),
+            load_cell_raw_hit: metrics::counter!("tycho_storage_load_cell_raw_hit_total"),
+            load_cell_raw_miss: metrics::counter!("tycho_storage_load_cell_raw_miss_total"),
         }
     }
 }
 
+struct PersistedCellFilter {
+    pub(super) filter: Filter,
+}
+
+impl PersistedCellFilter {
+    fn new(capacity: u64, fp_rate: f64) -> Self {
+        let capacity = capacity.clamp(1, PERSISTED_CELL_FILTER_MAX_CAPACITY);
+        let filter = Filter::new_resizeable(capacity, PERSISTED_CELL_FILTER_MAX_CAPACITY, fp_rate)
+            .unwrap_or_else(|err| panic!("failed to build persisted cell filter: {err}"));
+        Self { filter }
+    }
+
+    fn insert(&mut self, hash: &HashBytes) {
+        self.filter
+            .insert_duplicated(hash)
+            .unwrap_or_else(|err| panic!("failed to insert persisted cell filter entry: {err}"));
+    }
+
+    fn record_metrics(&self) {
+        metrics::gauge!("tycho_storage_cell_persisted_filter_len").set(self.filter.len() as f64);
+        metrics::gauge!("tycho_storage_cell_persisted_filter_capacity")
+            .set(self.filter.capacity() as f64);
+        metrics::gauge!("tycho_storage_cell_persisted_filter_memory_bytes")
+            .set(self.filter.memory_usage() as f64);
+        metrics::gauge!("tycho_storage_cell_persisted_filter_error_ratio")
+            .set(self.filter.current_error_ratio());
+    }
+}
+
 struct RemovedCell<'a> {
-    old_rc: i64,
+    idx: Idx,
+    source: CellSource,
+    data_len: usize,
+    // Removal traversal needs old_rc to decide whether to descend into refs.
+    // Keep it for finalization so counters do not decode the same idx again.
+    old_rc: u64,
     removes: u32,
     refs: &'a [HashBytes],
 }
 
 impl<'a> RemovedCell<'a> {
-    fn remove(&mut self) -> Result<Option<&'a [HashBytes]>, CellStorageError> {
-        self.removes += 1;
-        if self.removes as i64 <= self.old_rc {
-            Ok(self.next_refs())
-        } else {
-            Err(CellStorageError::CounterMismatch {
+    fn add_removes(&mut self, removes: u32) -> Result<Option<&'a [HashBytes]>, CellStorageError> {
+        self.removes =
+            self.removes
+                .checked_add(removes)
+                .ok_or(CellStorageError::CounterMismatch {
+                    expected: self.old_rc,
+                    actual: u32::MAX,
+                })?;
+        if u64::from(self.removes) > self.old_rc {
+            return Err(CellStorageError::CounterMismatch {
                 expected: self.old_rc,
                 actual: self.removes,
-            })
+            });
         }
-    }
 
-    fn next_refs(&self) -> Option<&'a [HashBytes]> {
-        if self.old_rc > self.removes as i64 {
-            None
-        } else {
-            Some(self.refs)
-        }
+        Ok((self.old_rc == u64::from(self.removes)).then_some(self.refs))
     }
+}
+
+struct AddedCell {
+    idx: Idx,
+    old_rc: u64,
+    additions: u32,
+    data: Option<Bytes>,
+}
+
+struct PersistedCellRowTarget<'a> {
+    batch: &'a mut WriteBatch,
+    commit: &'a mut NurseryDelta,
+    buffer: &'a mut Vec<u8>,
+}
+
+#[derive(Clone, Copy)]
+enum CellSource {
+    Nursery,
+    RocksDb,
+}
+
+#[derive(Default)]
+struct StoreFinalizeProfile {
+    transaction_merge_us: u64,
+    promotion_us: u64,
+    counter_apply_us: u64,
+    nursery_apply_us: u64,
+    wal: WalAppendProfile,
+}
+
+#[derive(Default)]
+struct RemoveMtFinalizeProfile {
+    transaction_merge_us: u64,
+    counter_apply_us: u64,
+    nursery_apply_us: u64,
+    rocksdb_delete_count: u64,
+    wal: WalAppendProfile,
+}
+
+#[inline]
+fn hash_key(hash: &HashBytes) -> &HashBytesKey {
+    // Keep map keys inline. Borrowed `&HashBytes` keys would copy less, but the
+    // key locations would follow cell storage layout and make iteration random.
+    HashBytesKey::wrap(hash.as_array())
+}
+
+#[inline]
+fn owned_hash_key(hash: &HashBytes) -> HashBytesKey {
+    HashBytesKey(*hash.as_array())
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -1077,7 +1454,11 @@ pub enum CellStorageError {
     #[error("Invalid cell")]
     InvalidCell,
     #[error("Cell counter mismatch: expected refcount {expected}, got {actual} removes")]
-    CounterMismatch { expected: i64, actual: u32 },
+    CounterMismatch { expected: u64, actual: u32 },
+    #[error("Counters state error: {0}")]
+    Counters(#[from] super::counters::CountersError),
+    #[error("Cells state error: {0}")]
+    State(#[from] CellsDbStateError),
     #[error("Internal rocksdb error")]
     Internal(#[from] rocksdb::Error),
 }
@@ -1104,6 +1485,10 @@ impl StorageCell {
     const REF_STORAGE: u8 = 0x2;
 
     const HASHES_ITEM_LEN: usize = 32 + 2;
+    const MAX_STORAGE_CELL_BYTES: usize = 6
+        + MAX_BIT_LEN.div_ceil(8) as usize
+        + Self::HASHES_ITEM_LEN * LevelMask::MAX_LEVEL as usize
+        + 32 * MAX_REF_COUNT;
 
     pub fn deserialize(
         cell_storage: Arc<CellStorage>,
@@ -1188,6 +1573,21 @@ impl StorageCell {
     }
 
     // NOTE: Repr hash is not stored into value because it is already a key.
+    pub fn serialized_len(cell: &DynCell) -> usize {
+        let descriptor = cell.descriptor();
+        let level = descriptor.level_mask().level() as usize;
+        let ref_count = descriptor.reference_count() as usize;
+
+        let is_pruned = descriptor.is_exotic() && ref_count == 0 && level > 0;
+        // Keep this in lockstep with `serialize_to`.
+        let other_hash_count = (!is_pruned) as usize * level;
+
+        6usize
+            + descriptor.byte_len() as usize
+            + Self::HASHES_ITEM_LEN * other_hash_count
+            + 32 * ref_count
+    }
+
     pub fn serialize_to(cell: &DynCell, target: &mut Vec<u8>) -> Result<()> {
         let descriptor = cell.descriptor();
         let level = descriptor.level_mask().level() as usize;
@@ -1493,6 +1893,8 @@ impl Drop for StorageCell {
 unsafe impl Send for StorageCell {}
 unsafe impl Sync for StorageCell {}
 
+const _: () = assert!(StorageCell::MAX_STORAGE_CELL_BYTES <= u16::MAX as usize);
+
 pub union StorageCellReferenceData {
     /// Incplmete state.
     hash: HashBytes,
@@ -1501,19 +1903,19 @@ pub union StorageCellReferenceData {
 }
 
 struct RawCellsCache {
-    inner: Cache<HashBytes, RawCellsCacheItem, CellSizeEstimator, FastHasherState>,
+    inner: Cache<HashBytesKey, RawCellsCacheItem, CellSizeEstimator, BuildTrustedCellHasher>,
     #[cfg(feature = "cells-metrics")]
     rocksdb_access_histogram: metrics::Histogram,
 }
 
-type RawCellsCacheItem = ThinArc<AtomicI64, u8>;
+type RawCellsCacheItem = ThinArc<Idx, u8>;
 
 #[derive(Clone, Copy)]
 pub struct CellSizeEstimator;
-impl quick_cache::Weighter<HashBytes, RawCellsCacheItem> for CellSizeEstimator {
-    fn weight(&self, key: &HashBytes, val: &RawCellsCacheItem) -> u64 {
+impl quick_cache::Weighter<HashBytesKey, RawCellsCacheItem> for CellSizeEstimator {
+    fn weight(&self, key: &HashBytesKey, val: &RawCellsCacheItem) -> u64 {
         const STATIC_SIZE: usize = std::mem::size_of::<RawCellsCacheItem>()
-            + std::mem::size_of::<i64>()
+            + std::mem::size_of::<Idx>()
             + std::mem::size_of::<usize>() * 2; // ArcInner refs + HeaderWithLength length
 
         let len = key.0.len() + val.slice.len() + STATIC_SIZE;
@@ -1522,8 +1924,6 @@ impl quick_cache::Weighter<HashBytes, RawCellsCacheItem> for CellSizeEstimator {
 }
 
 impl RawCellsCache {
-    const RC_NAN: i64 = i64::MAX;
-
     fn new(size_in_bytes: u64) -> Self {
         // Percentile 0.1%    from 96 to 127  => 1725119 count
         // Percentile 10%     from 128 to 191  => 82838849 count
@@ -1565,7 +1965,7 @@ impl RawCellsCache {
                 .build()
                 .unwrap(),
             CellSizeEstimator,
-            FastHasherState::default(),
+            BuildTrustedCellHasher::default(),
             DefaultLifecycle::default(),
         );
 
@@ -1578,148 +1978,15 @@ impl RawCellsCache {
         }
     }
 
-    // Previously used `get_value_or_guard` which inserts into cache on miss.
-    // This caused two problems:
-    // 1. Memory leak: `get_value_or_guard` allocates a Placeholder in LinkedSlab
-    //    BEFORE eviction runs (unlike `insert()` which evicts first).
-    // 2. Performance: `get_value_or_guard` holds the shard lock while the caller
-    //    reads from RocksDB, blocking all other operations on the same shard.
-    fn get_raw(
+    fn cache_decoded_value(
         &self,
-        db: &CellsDb,
         key: &HashBytes,
-    ) -> Result<Option<RawCellsCacheItem>, rocksdb::Error> {
-        if let Some(value) = self.inner.get(key) {
-            return Ok(Some(value));
-        }
-
-        // Fallback to RocksDB
-        let value = {
-            #[cfg(feature = "cells-metrics")]
-            let _timer = scopeguard::guard(Instant::now(), |started_at| {
-                self.rocksdb_access_histogram.record(started_at.elapsed());
-            });
-
-            db.cells.get(key.as_slice())?
-        };
-
-        Ok(value.and_then(|value| {
-            let (_, data) = refcount::decode_value_with_rc(value.as_ref());
-            data.map(|data| {
-                let item =
-                    RawCellsCacheItem::from_header_and_slice(AtomicI64::new(Self::RC_NAN), data);
-                self.inner.insert(*key, item.clone());
-                item
-            })
-        }))
-    }
-
-    fn get_rc_for_insert(
-        &self,
-        db: &CellsDb,
-        key: &HashBytes,
-        depth: usize,
-    ) -> Result<i64, CellStorageError> {
-        // A constant which tells since which depth we should start to use cache.
-        // This method is used mostly for inserting new states, so we can assume
-        // that first N levels will mostly be new.
-        //
-        // This value was chosen empirically.
-        const NEW_CELLS_DEPTH_THRESHOLD: usize = 4;
-
-        if depth >= NEW_CELLS_DEPTH_THRESHOLD {
-            // NOTE: `get` here is used to affect a "hotness" of the value, because
-            // there is a big chance that we will need it soon during state processing
-            if let Some(entry) = self.inner.get(key) {
-                let rc = entry.header.header.load(Ordering::Acquire);
-                if rc != Self::RC_NAN {
-                    return Ok(rc);
-                }
-            }
-        }
-
-        match db.cells.get(key).map_err(CellStorageError::Internal)? {
-            Some(value) => {
-                let (rc, value) = refcount::decode_value_with_rc(value.as_ref());
-
-                // TODO: lower to `debug_assert` when sure
-                let has_value = value.is_some();
-                assert!(has_value && rc > 0 || !has_value && rc == 0);
-
-                Ok(rc)
-            }
-            None => Ok(0),
-        }
-    }
-
-    fn get_rc_for_delete(
-        &self,
-        db: &CellsDb,
-        key: &HashBytes,
-        refs_buffer: &mut Vec<HashBytes>,
-    ) -> Result<i64, CellStorageError> {
-        refs_buffer.clear();
-
-        // NOTE: `peek` here is used to avoid affecting a "hotness" of the value
-        if let Some(value) = self.inner.peek(key) {
-            let rc = value.header.header.load(Ordering::Acquire);
-            if rc <= 0 {
-                return Err(CellStorageError::CellNotFound);
-            } else if rc != i64::MAX {
-                return StorageCell::deserialize_references(&value.slice, refs_buffer)
-                    .then_some(rc)
-                    .ok_or(CellStorageError::InvalidCell);
-            }
-        }
-
-        match db.cells.get(key.as_slice()) {
-            Ok(value) => {
-                if let Some(value) = value
-                    && let (rc, Some(value)) = refcount::decode_value_with_rc(&value)
-                {
-                    return StorageCell::deserialize_references(value, refs_buffer)
-                        .then_some(rc)
-                        .ok_or(CellStorageError::InvalidCell);
-                }
-
-                Err(CellStorageError::CellNotFound)
-            }
-            Err(e) => Err(CellStorageError::Internal(e)),
-        }
-    }
-
-    fn on_insert_cell(&self, key: &HashBytes, rc: i64, data: Option<&[u8]>) {
-        match data {
-            None => {
-                // NOTE: `get` here is used to affect a "hotness" of the value
-                if let Some(v) = self.inner.get(key) {
-                    v.header.header.store(rc, Ordering::Release);
-                }
-            }
-            Some(data) => self.inner.insert(
-                *key,
-                RawCellsCacheItem::from_header_and_slice(AtomicI64::new(rc), data),
-            ),
-        }
-    }
-
-    fn on_remove_cell(&self, key: &HashBytes, rc: i64) {
-        let v = if rc <= 0 {
-            debug_assert_eq!(rc, 0, "too many removed cells");
-
-            match self.inner.remove(key) {
-                None => return,
-                Some((_, v)) => v,
-            }
-        } else {
-            // NOTE: `peek` here is used to avoid affecting "hotness" of the value
-            match self.inner.peek(key) {
-                None => return,
-                Some(v) => v,
-            }
-        };
-
-        v.header.header.store(rc, Ordering::Release);
+        value: &[u8],
+    ) -> Option<(Idx, RawCellsCacheItem)> {
+        let (idx, data) = decode_indexed_value(value)?;
+        let item = RawCellsCacheItem::from_header_and_slice(idx, data);
+        self.inner.insert(owned_hash_key(key), item.clone());
+        Some((idx, item))
     }
 
     fn refresh_metrics(&self) {
@@ -1734,11 +2001,55 @@ impl RawCellsCache {
 
 #[cfg(test)]
 mod tests {
-    use tycho_storage::StorageContext;
+    use tycho_storage::{StorageConfig, StorageContext};
     use tycho_types::merkle::make_pruned_branch;
 
+    use super::super::cell_nursery::PROMOTION_DELAY_ROUNDS;
     use super::*;
     use crate::storage::{CoreStorage, CoreStorageConfig};
+
+    fn store_test_cell(cell_storage: &CellStorage, root: &DynCell, round: u32) -> Result<()> {
+        let mut batch = rocksdb::WriteBatch::default();
+        cell_storage.store_cell_mt(root, &mut batch, Default::default(), 1, round)?;
+        cell_storage
+            .cells_db
+            .rocksdb()
+            .write_opt(batch, cell_storage.cells_db.cells.write_config())?;
+        Ok(())
+    }
+
+    fn remove_test_cell(cell_storage: &CellStorage, alloc: &Herd, hash: &HashBytes) -> Result<()> {
+        let (_, batch) = cell_storage.remove_cell_mt(alloc, hash, Default::default())?;
+        cell_storage
+            .cells_db
+            .rocksdb()
+            .write_opt(batch, cell_storage.cells_db.cells.write_config())?;
+        Ok(())
+    }
+
+    #[test]
+    fn persisted_filter_tracks_exact_insert_and_delete() {
+        let mut filter = PersistedCellFilter::new(64, PERSISTED_CELL_FILTER_FP_RATE);
+        let hash = HashBytes([7; 32]);
+
+        filter.insert(&hash);
+        assert!(filter.filter.contains(hash));
+
+        filter.filter.remove(hash);
+        assert!(!filter.filter.contains(hash));
+    }
+
+    #[test]
+    fn persisted_filter_keeps_duplicate_fingerprints() {
+        let mut filter = PersistedCellFilter::new(64, PERSISTED_CELL_FILTER_FP_RATE);
+        let hash = HashBytes([11; 32]);
+
+        filter.insert(&hash);
+        filter.insert(&hash);
+        filter.filter.remove(hash);
+
+        assert!(filter.filter.contains(hash));
+    }
 
     #[tokio::test]
     async fn pruned_cells_have_proper_hashes() -> Result<()> {
@@ -1765,12 +2076,7 @@ mod tests {
 
         // Insert all cells.
         for root in &cells {
-            let mut batch = rocksdb::WriteBatch::default();
-            cell_storage.store_cell(&mut batch, root.as_ref(), 1)?;
-            cell_storage
-                .cells_db
-                .rocksdb()
-                .write_opt(batch, cell_storage.cells_db.cells.write_config())?;
+            store_test_cell(cell_storage, root.as_ref(), 0)?;
         }
 
         // Check hashes
@@ -1790,13 +2096,9 @@ mod tests {
         }
 
         // Remove all cells.
-        let mut alloc = bumpalo::Bump::new();
+        let mut alloc = Herd::new();
         for root in &cells {
-            let (_, batch) = cell_storage.remove_cell(&alloc, root.repr_hash())?;
-            cell_storage
-                .cells_db
-                .rocksdb()
-                .write_opt(batch, cell_storage.cells_db.cells.write_config())?;
+            remove_test_cell(cell_storage, &alloc, root.repr_hash())?;
             alloc.reset();
         }
 
@@ -1808,6 +2110,200 @@ mod tests {
         iterator.seek_to_first();
         assert!(iterator.item().is_none());
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn nursery_promotes_cells_after_delay() -> Result<()> {
+        let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
+        let config = CoreStorageConfig::new_potato();
+        let storage = CoreStorage::open(ctx, config).await?;
+        let cell_storage = &storage.shard_state_storage().cell_storage;
+
+        let root = CellBuilder::build_from(123u32)?;
+
+        store_test_cell(cell_storage, root.as_ref(), 0)?;
+
+        assert!(
+            cell_storage
+                .cells_db
+                .cells
+                .get(root.repr_hash().as_slice())?
+                .is_none()
+        );
+
+        store_test_cell(cell_storage, root.as_ref(), PROMOTION_DELAY_ROUNDS)?;
+
+        assert!(
+            cell_storage
+                .cells_db
+                .cells
+                .get(root.repr_hash().as_slice())?
+                .is_some()
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn promoted_cell_stays_visible_for_store_lookup_without_reopen() -> Result<()> {
+        let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
+        let config = CoreStorageConfig::new_potato();
+        let storage = CoreStorage::open(ctx, config).await?;
+        let cell_storage = &storage.shard_state_storage().cell_storage;
+
+        let root = CellBuilder::build_from(123u32)?;
+        let root_hash = *root.repr_hash();
+
+        store_test_cell(cell_storage, root.as_ref(), 0)?;
+        store_test_cell(cell_storage, root.as_ref(), PROMOTION_DELAY_ROUNDS)?;
+
+        assert!(
+            cell_storage
+                .cells_db
+                .cells
+                .get(root_hash.as_slice())?
+                .is_some()
+        );
+        assert!(cell_storage.nursery.get(&root_hash).is_none());
+
+        store_test_cell(cell_storage, root.as_ref(), PROMOTION_DELAY_ROUNDS + 1)?;
+
+        assert!(cell_storage.nursery.get(&root_hash).is_none());
+        assert!(
+            cell_storage
+                .cells_db
+                .cells
+                .get(root_hash.as_slice())?
+                .is_some()
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn nursery_remove_before_promotion_keeps_rocksdb_empty() -> Result<()> {
+        let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
+        let config = CoreStorageConfig::new_potato();
+        let storage = CoreStorage::open(ctx, config).await?;
+        let cell_storage = &storage.shard_state_storage().cell_storage;
+
+        let root = CellBuilder::build_from(123u32)?;
+
+        store_test_cell(cell_storage, root.as_ref(), 0)?;
+
+        let alloc = Herd::new();
+        remove_test_cell(cell_storage, &alloc, root.repr_hash())?;
+
+        assert!(
+            cell_storage
+                .cells_db
+                .cells
+                .get(root.repr_hash().as_slice())?
+                .is_none()
+        );
+        assert!(matches!(
+            cell_storage.load_cell(root.repr_hash(), 0),
+            Err(CellStorageError::CellNotFound)
+        ));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn nursery_replays_insert_after_reopen() -> Result<()> {
+        let (ctx, tmp_dir) = StorageContext::new_temp().await?;
+        let config = CoreStorageConfig::new_potato();
+        let root = CellBuilder::build_from(123u32)?;
+        let root_hash = *root.repr_hash();
+
+        {
+            let storage = CoreStorage::open(ctx, config.clone()).await?;
+            let cell_storage = &storage.shard_state_storage().cell_storage;
+            store_test_cell(cell_storage, root.as_ref(), 0)?;
+        }
+
+        let ctx = StorageContext::new(StorageConfig::new_potato(tmp_dir.path())).await?;
+        let storage = CoreStorage::open(ctx, config).await?;
+        let loaded = storage
+            .shard_state_storage()
+            .cell_storage
+            .load_cell(&root_hash, 0)?;
+
+        assert_eq!(loaded.hash(0), root.hash(0));
+        assert!(
+            storage
+                .shard_state_storage()
+                .cell_storage
+                .cells_db
+                .cells
+                .get(root_hash.as_slice())?
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn nursery_replays_remove_after_reopen() -> Result<()> {
+        let (ctx, tmp_dir) = StorageContext::new_temp().await?;
+        let config = CoreStorageConfig::new_potato();
+        let root = CellBuilder::build_from(123u32)?;
+        let root_hash = *root.repr_hash();
+
+        {
+            let storage = CoreStorage::open(ctx, config.clone()).await?;
+            let cell_storage = &storage.shard_state_storage().cell_storage;
+
+            store_test_cell(cell_storage, root.as_ref(), 0)?;
+
+            let alloc = Herd::new();
+            remove_test_cell(cell_storage, &alloc, &root_hash)?;
+        }
+
+        let ctx = StorageContext::new(StorageConfig::new_potato(tmp_dir.path())).await?;
+        let storage = CoreStorage::open(ctx, config).await?;
+        assert!(matches!(
+            storage
+                .shard_state_storage()
+                .cell_storage
+                .load_cell(&root_hash, 0),
+            Err(CellStorageError::CellNotFound)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn nursery_replays_promotion_after_reopen() -> Result<()> {
+        let (ctx, tmp_dir) = StorageContext::new_temp().await?;
+        let config = CoreStorageConfig::new_potato();
+        let root = CellBuilder::build_from(123u32)?;
+        let root_hash = *root.repr_hash();
+
+        {
+            let storage = CoreStorage::open(ctx, config.clone()).await?;
+            let cell_storage = &storage.shard_state_storage().cell_storage;
+
+            store_test_cell(cell_storage, root.as_ref(), 0)?;
+
+            store_test_cell(cell_storage, root.as_ref(), PROMOTION_DELAY_ROUNDS)?;
+        }
+
+        let ctx = StorageContext::new(StorageConfig::new_potato(tmp_dir.path())).await?;
+        let storage = CoreStorage::open(ctx, config).await?;
+        assert!(
+            storage
+                .shard_state_storage()
+                .cell_storage
+                .cells_db
+                .cells
+                .get(root_hash.as_slice())?
+                .is_some()
+        );
+        let loaded = storage
+            .shard_state_storage()
+            .cell_storage
+            .load_cell(&root_hash, 0)?;
+        assert_eq!(loaded.hash(0), root.hash(0));
         Ok(())
     }
 }
