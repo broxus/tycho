@@ -35,6 +35,8 @@ from grafanalib.core import (
     Table,
 )
 
+SHORT_FORMAT = "short"
+
 
 @dataclass(frozen=True)
 class FullWidth:
@@ -218,6 +220,78 @@ def create_percent_panel(
         targets=[percent_target],
         unit=unit_format,
         legend_placement=legend_placement,
+    )
+
+
+def nursery_rate(metric: str) -> str:
+    return (
+        f'sum(rate({metric}{{instance=~"$instance"}}[$__rate_interval])) by (instance)'
+    )
+
+
+def create_nursery_rate_panel(
+    title: str,
+    series: list[tuple[str, str]],
+    unit_format: str,
+) -> Panel:
+    return timeseries_panel(
+        title=title,
+        targets=[
+            target(nursery_rate(metric), legend_format=f"{{{{instance}}}} {legend}")
+            for metric, legend in series
+        ],
+        unit=unit_format,
+    )
+
+
+def create_nursery_outcome_ratio_panel(
+    promoted_metric: str,
+    discarded_metric: str,
+    title: str,
+) -> Panel:
+    promoted = nursery_rate(promoted_metric)
+    discarded = nursery_rate(discarded_metric)
+    total = f"clamp_min(({promoted}) + ({discarded}), 1e-9)"
+
+    return timeseries_panel(
+        title=title,
+        targets=[
+            target(
+                f"100 * ({promoted}) / {total}",
+                legend_format="{{instance}} promoted",
+            ),
+            target(
+                f"100 * ({discarded}) / {total}",
+                legend_format="{{instance}} discarded",
+            ),
+        ],
+        unit=UNITS.PERCENT_FORMAT,
+    )
+
+
+def create_nursery_traffic_panel(
+    admitted_metric: str,
+    promoted_metric: str,
+    discarded_metric: str,
+    title: str,
+    unit_format: str,
+) -> Panel:
+    return timeseries_panel(
+        title=title,
+        targets=[
+            target(
+                nursery_rate(admitted_metric),
+                legend_format="{{instance}} admitted",
+            ),
+            target(
+                nursery_rate(promoted_metric), legend_format="{{instance}} promoted"
+            ),
+            target(
+                nursery_rate(discarded_metric),
+                legend_format="{{instance}} discarded",
+            ),
+        ],
+        unit=unit_format,
     )
 
 
@@ -1015,13 +1089,62 @@ def core_block_strider() -> RowPanel:
 
 def storage() -> RowPanel:
     metrics = [
-        create_heatmap_panel(
-            "tycho_storage_load_cell_time", "Time to load cell from storage"
-        ),
         create_counter_panel(
-            expr_sum_rate("tycho_storage_load_cell_time_count"),
+            expr_sum_rate("tycho_storage_load_cell_total"),
             "Number of load_cell calls",
             UNITS.OPS_PER_SEC,
+        ),
+        create_nursery_rate_panel(
+            "load_cell path rate",
+            [
+                ("tycho_storage_load_cell_total", "total"),
+                ("tycho_storage_load_cell_cache_hit_total", "tree cache hit"),
+                ("tycho_storage_load_cell_raw_cache_hit_total", "raw cache hit"),
+                ("tycho_storage_load_cell_raw_cache_miss_total", "raw cache miss"),
+                ("tycho_storage_load_cell_nursery_checked_total", "nursery checked"),
+                ("tycho_storage_load_cell_nursery_hit_total", "nursery hit"),
+                ("tycho_storage_load_cell_raw_hit_total", "raw fallback hit"),
+                ("tycho_storage_load_cell_raw_miss_total", "raw miss"),
+            ],
+            UNITS.OPS_PER_SEC,
+        ),
+        timeseries_panel(
+            title="load_cell path ratio",
+            targets=[
+                target(
+                    f'100 * ({nursery_rate("tycho_storage_load_cell_cache_hit_total")}) / clamp_min({nursery_rate("tycho_storage_load_cell_total")}, 1e-9)',
+                    legend_format="{{instance}} tree cache hit",
+                ),
+                target(
+                    f'100 * ({nursery_rate("tycho_storage_load_cell_raw_cache_hit_total")}) / clamp_min({nursery_rate("tycho_storage_load_cell_total")}, 1e-9)',
+                    legend_format="{{instance}} raw cache hit",
+                ),
+                target(
+                    f'100 * ({nursery_rate("tycho_storage_load_cell_raw_cache_miss_total")}) / clamp_min({nursery_rate("tycho_storage_load_cell_total")}, 1e-9)',
+                    legend_format="{{instance}} raw cache miss",
+                ),
+                target(
+                    f'100 * ({nursery_rate("tycho_storage_load_cell_nursery_checked_total")}) / clamp_min({nursery_rate("tycho_storage_load_cell_total")}, 1e-9)',
+                    legend_format="{{instance}} nursery checked",
+                ),
+                target(
+                    f'100 * ({nursery_rate("tycho_storage_load_cell_nursery_hit_total")}) / clamp_min({nursery_rate("tycho_storage_load_cell_total")}, 1e-9)',
+                    legend_format="{{instance}} nursery hit",
+                ),
+                target(
+                    f'100 * clamp_min(({nursery_rate("tycho_storage_load_cell_nursery_checked_total")}) - ({nursery_rate("tycho_storage_load_cell_nursery_hit_total")}), 0) / clamp_min({nursery_rate("tycho_storage_load_cell_total")}, 1e-9)',
+                    legend_format="{{instance}} nursery miss",
+                ),
+                target(
+                    f'100 * ({nursery_rate("tycho_storage_load_cell_raw_hit_total")}) / clamp_min({nursery_rate("tycho_storage_load_cell_total")}, 1e-9)',
+                    legend_format="{{instance}} raw fallback hit",
+                ),
+                target(
+                    f'100 * ({nursery_rate("tycho_storage_load_cell_raw_miss_total")}) / clamp_min({nursery_rate("tycho_storage_load_cell_total")}, 1e-9)',
+                    legend_format="{{instance}} raw miss",
+                ),
+            ],
+            unit=UNITS.PERCENT_FORMAT,
         ),
         create_heatmap_panel(
             "tycho_storage_get_cell_from_rocksdb_time", "Time to load cell from RocksDB"
@@ -1035,7 +1158,7 @@ def storage() -> RowPanel:
             title="Storage Cache Hit Rate",
             targets=[
                 target(
-                    expr='(1 - (sum(rate(tycho_storage_get_cell_from_rocksdb_time_count{instance=~"$instance"}[$__rate_interval])) by (instance) / sum(rate(tycho_storage_load_cell_time_count{instance=~"$instance"}[$__rate_interval])) by (instance))) * 100',
+                    expr='(1 - (sum(rate(tycho_storage_get_cell_from_rocksdb_time_count{instance=~"$instance"}[$__rate_interval])) by (instance) / sum(rate(tycho_storage_load_cell_total{instance=~"$instance"}[$__rate_interval])) by (instance))) * 100',
                     legend_format="Hit Rate",
                 )
             ],
@@ -1223,6 +1346,215 @@ def storage() -> RowPanel:
         ),
     ]
     return create_row("Storage", metrics)
+
+
+def storage_cell_nursery() -> RowPanel:
+    metrics = [
+        create_gauge_panel(
+            "tycho_storage_cell_nursery_entries",
+            "Cell nursery entries",
+            SHORT_FORMAT,
+        ),
+        timeseries_panel(
+            title="Cell nursery memory",
+            targets=[
+                target(
+                    Expr("tycho_storage_cell_nursery_live_cell_bytes"),
+                    legend_format="{{instance}} live cells",
+                ),
+                target(
+                    Expr("tycho_storage_cell_nursery_entry_slots_bytes"),
+                    legend_format="{{instance}} entry slots",
+                ),
+                target(
+                    Expr("tycho_storage_cell_nursery_round_buffer_bytes"),
+                    legend_format="{{instance}} round buffers total",
+                ),
+            ],
+            unit=UNITS.BYTES_IEC,
+        ),
+        create_gauge_panel(
+            "tycho_storage_cell_nursery_wal_live_bytes",
+            "Cell nursery current WAL bytes",
+            UNITS.BYTES_IEC,
+        ),
+        create_gauge_panel(
+            "tycho_storage_cell_nursery_commits_since_checkpoint",
+            "Cell nursery commits since checkpoint",
+            SHORT_FORMAT,
+        ),
+        create_gauge_panel(
+            "tycho_storage_cell_nursery_checkpoint_wal_threshold_bytes",
+            "Cell nursery checkpoint WAL threshold",
+            UNITS.BYTES_IEC,
+        ),
+        create_gauge_panel(
+            "tycho_storage_cell_nursery_checkpoint_bytes",
+            "Cell nursery latest checkpoint bytes",
+            UNITS.BYTES_IEC,
+        ),
+        create_gauge_panel(
+            "tycho_storage_cell_persisted_filter_enabled",
+            "Cell persisted filter enabled",
+            SHORT_FORMAT,
+        ),
+        timeseries_panel(
+            title="Cell persisted filter capacity",
+            targets=[
+                target(
+                    Expr("tycho_storage_cell_persisted_filter_len"),
+                    legend_format="{{instance}} len",
+                ),
+                target(
+                    Expr("tycho_storage_cell_persisted_filter_capacity"),
+                    legend_format="{{instance}} capacity",
+                ),
+            ],
+            unit=SHORT_FORMAT,
+        ),
+        create_gauge_panel(
+            "tycho_storage_cell_persisted_filter_memory_bytes",
+            "Cell persisted filter memory",
+            UNITS.BYTES_IEC,
+        ),
+        timeseries_panel(
+            title="Cell persisted filter error ratio",
+            targets=[
+                target(
+                    '100 * tycho_storage_cell_persisted_filter_error_ratio{instance=~"$instance"}',
+                    legend_format="{{instance}}",
+                )
+            ],
+            unit=UNITS.PERCENT_FORMAT,
+        ),
+        create_nursery_traffic_panel(
+            "tycho_storage_cell_nursery_admitted_count",
+            "tycho_storage_cell_nursery_promoted_count",
+            "tycho_storage_cell_nursery_discarded_before_promotion_count",
+            "Cell nursery cell traffic",
+            UNITS.OPS_PER_SEC,
+        ),
+        create_nursery_traffic_panel(
+            "tycho_storage_cell_nursery_admitted_bytes",
+            "tycho_storage_cell_nursery_promoted_bytes",
+            "tycho_storage_cell_nursery_discarded_before_promotion_bytes",
+            "Cell nursery write traffic",
+            UNITS.BYTES_SEC_IEC,
+        ),
+        create_nursery_outcome_ratio_panel(
+            "tycho_storage_cell_nursery_promoted_count",
+            "tycho_storage_cell_nursery_discarded_before_promotion_count",
+            "Cell nursery promoted/discarded cell ratio",
+        ),
+        create_nursery_outcome_ratio_panel(
+            "tycho_storage_cell_nursery_promoted_bytes",
+            "tycho_storage_cell_nursery_discarded_before_promotion_bytes",
+            "Cell nursery promoted/discarded byte ratio",
+        ),
+        create_nursery_rate_panel(
+            "Cell nursery WAL traffic",
+            [
+                ("tycho_storage_cell_nursery_wal_bytes", "wal"),
+                ("tycho_storage_cell_nursery_wal_cell_bytes", "cells"),
+            ],
+            UNITS.BYTES_SEC_IEC,
+        ),
+        create_nursery_rate_panel(
+            "Cell nursery WAL ops",
+            [
+                ("tycho_storage_cell_nursery_wal_records", "records"),
+                ("tycho_storage_cell_nursery_wal_insert_ops", "inserts"),
+                ("tycho_storage_cell_nursery_wal_remove_ops", "removes"),
+            ],
+            UNITS.OPS_PER_SEC,
+        ),
+        create_nursery_rate_panel(
+            "Cell nursery checkpoint ops",
+            [
+                ("tycho_storage_cell_nursery_checkpoint_count", "checkpoints"),
+            ],
+            UNITS.OPS_PER_SEC,
+        ),
+        create_heatmap_panel(
+            "tycho_storage_cell_nursery_checkpoint_time",
+            "Cell nursery checkpoint time",
+        ),
+    ]
+    return create_row("storage: Cell nursery", metrics)
+
+
+def storage_counters() -> RowPanel:
+    metrics = [
+        create_gauge_panel(
+            "tycho_storage_cell_counters_total_cells",
+            "Counter total live cells",
+            SHORT_FORMAT,
+        ),
+        create_gauge_panel(
+            "tycho_storage_cell_counters_alive_ids_count",
+            "Counter alive ids",
+            SHORT_FORMAT,
+        ),
+        create_gauge_panel(
+            "tycho_storage_cell_counters_small_bit_count",
+            "Counter small bit values",
+            SHORT_FORMAT,
+            labels=['bit=~".*"'],
+        ),
+        create_gauge_panel(
+            "tycho_storage_cell_counters_big_entries",
+            "Counter big map entries",
+            SHORT_FORMAT,
+        ),
+        create_gauge_panel(
+            "tycho_storage_cell_counters_big_map_capacity",
+            "Counter big map capacity",
+            SHORT_FORMAT,
+        ),
+        create_gauge_panel(
+            "tycho_storage_cell_counters_next_idx",
+            "Counter next idx",
+            SHORT_FORMAT,
+        ),
+        timeseries_panel(
+            title="Counter memory",
+            targets=[
+                target(
+                    Expr("tycho_storage_cell_counters_alive_ids_serialized_bytes"),
+                    legend_format="{{instance}} alive ids",
+                ),
+                target(
+                    Expr("tycho_storage_cell_counters_small_bit_serialized_bytes"),
+                    legend_format="{{instance}} small bit {{bit}}",
+                ),
+                target(
+                    Expr("tycho_storage_cell_counters_big_map_bytes"),
+                    legend_format="{{instance}} big map",
+                ),
+                target(
+                    Expr("tycho_storage_cell_counters_snapshot_raw_bytes"),
+                    legend_format="{{instance}} snapshot",
+                ),
+            ],
+            unit=UNITS.BYTES_IEC,
+        ),
+        create_gauge_panel(
+            "tycho_storage_cell_counters_small_bit_serialized_bytes",
+            "Counter small bit serialized bytes",
+            UNITS.BYTES_IEC,
+            labels=['bit=~".*"'],
+        ),
+        create_gauge_panel(
+            "tycho_storage_cell_counters_snapshot_raw_bytes",
+            "Counter snapshot raw bytes",
+            UNITS.BYTES_IEC,
+        ),
+        create_heatmap_panel(
+            "tycho_storage_cell_counters_snapshot_serialize_time",
+            "Time to serialize counter snapshot",
+        ),
+    ]
+    return create_row("Storage Counters", metrics)
 
 
 def jrpc() -> RowPanel:
@@ -3651,6 +3983,8 @@ dashboard = Dashboard(
         core_blockchain_rpc_general(),
         core_blockchain_rpc_per_method_stats(),
         storage(),
+        storage_cell_nursery(),
+        storage_counters(),
         collator_params_metrics(),
         collation_metrics(),
         collator_execution_metrics(),
