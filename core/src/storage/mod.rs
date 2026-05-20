@@ -42,7 +42,6 @@ mod db;
 mod gc;
 mod node_state;
 mod persistent_state;
-mod shard_state;
 mod util;
 
 pub const CORE_DB_SUBDIR: &str = "core";
