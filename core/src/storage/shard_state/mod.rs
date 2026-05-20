@@ -107,6 +107,24 @@ impl ShardStateStorage {
         &self.cell_storage
     }
 
+    pub fn begin_raw_import(&self) -> Result<()> {
+        // Any restart before this marker is cleared must drop partial raw import state.
+        self.cells_db
+            .state
+            .insert(db_state::CellsDbStateKey::RawImportInProgress, [1u8])?;
+        Ok(())
+    }
+
+    // cs[impl raw-import.bootstrap-guard]
+    pub fn finish_raw_import(&self) -> Result<()> {
+        // Keep the marker until metadata and persistent states are done so restart
+        // cleanup drops any partial raw import state.
+        self.cells_db
+            .state
+            .remove(db_state::CellsDbStateKey::RawImportInProgress)?;
+        Ok(())
+    }
+
     /// Find mc block id from db snapshot
     pub fn load_mc_block_id(&self, seqno: u32) -> Result<Option<BlockId>> {
         let snapshot = self.cells_db.rocksdb().snapshot();

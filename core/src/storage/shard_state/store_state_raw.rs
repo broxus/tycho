@@ -15,6 +15,7 @@ use tycho_util::progress_bar::*;
 use weedb::{BoundedCfHandle, rocksdb};
 
 use super::cell_storage::*;
+use super::db_state::{CELL_HASH_RANGE_END, CELL_HASH_RANGE_START};
 use super::entries_buffer::*;
 use crate::storage::{BriefBocHeader, CellsDb, ShardStateReader};
 
@@ -118,7 +119,12 @@ impl StoreStateContext {
         let write_options = self.cells_db.temp_cells.write_config();
 
         let mut ctx = FinalizationContext::new(&self.cells_db);
-        ctx.clear_temp_cells(&self.cells_db)?;
+        raw.delete_range_cf_opt(
+            &ctx.temp_cells_cf,
+            CELL_HASH_RANGE_START.as_slice(),
+            CELL_HASH_RANGE_END.as_slice(),
+            write_options,
+        )?;
 
         // Allocate on heap to prevent big future size
         let mut chunk_buffer = Vec::with_capacity(1 << 20);
@@ -210,12 +216,19 @@ impl StoreStateContext {
 
         self.cell_storage
             .apply_temp_cell(HashBytes::wrap(root_hash))?;
-        ctx.clear_temp_cells(&self.cells_db)?;
-
         let shard_state_key = block_id.to_vec();
-        self.cells_db
-            .shard_states
-            .insert(&shard_state_key, root_hash.as_slice())?;
+        let mut finalize_batch = rocksdb::WriteBatch::default();
+        finalize_batch.delete_range_cf(
+            &self.cells_db.temp_cells.cf(),
+            CELL_HASH_RANGE_START.as_slice(),
+            CELL_HASH_RANGE_END.as_slice(),
+        );
+        finalize_batch.put_cf(
+            &self.cells_db.shard_states.cf(),
+            shard_state_key.as_slice(),
+            root_hash.as_slice(),
+        );
+        self.cells_db.rocksdb().write(finalize_batch)?;
 
         pg.complete();
 
@@ -246,12 +259,6 @@ impl<'a> FinalizationContext<'a> {
             temp_cells_cf: db.temp_cells.cf(),
             write_batch: rocksdb::WriteBatch::default(),
         }
-    }
-
-    fn clear_temp_cells(&self, db: &CellsDb) -> std::result::Result<(), rocksdb::Error> {
-        let from = &[0x00; 32];
-        let to = &[0xff; 32];
-        db.rocksdb().delete_range_cf(&self.temp_cells_cf, from, to)
     }
 
     // TODO: Somehow reuse `tycho_types::cell::CellParts`.
@@ -530,16 +537,21 @@ enum StoreStateError {
 mod test {
     use std::collections::BTreeSet;
 
+    use bytes::Bytes;
     use bytesize::ByteSize;
     use rand::seq::IndexedRandom;
     use rand::{Rng, SeedableRng};
     use tycho_storage::{StorageConfig, StorageContext};
-    use tycho_types::models::ShardIdent;
+    use tycho_types::boc::Boc;
+    use tycho_types::models::{BlockId, ShardIdent, ShardStateUnsplit};
     use tycho_types::prelude::Dict;
     use tycho_util::project_root;
     use weedb::rocksdb::{IteratorMode, WriteBatch};
 
     use super::*;
+    use crate::ZEROSTATE_BOC;
+    use crate::storage::db::is_table_empty;
+    use crate::storage::shard_state::db_state::{CellsDbStateKey, CountersStore};
     use crate::storage::{CoreStorage, CoreStorageConfig};
 
     #[tokio::test]
@@ -607,7 +619,7 @@ mod test {
 
     async fn states_gc(cell_storage: &Arc<CellStorage>, db: &CellsDb) -> Result<()> {
         let states_iterator = db.shard_states.iterator(IteratorMode::Start);
-        let bump = bumpalo::Bump::new();
+        let bump = bumpalo_herd::Herd::new();
 
         let total_states = db.shard_states.iterator(IteratorMode::Start).count();
 
@@ -617,7 +629,11 @@ mod test {
             // check that state actually exists
             let cell = cell_storage.load_cell(&HashBytes::from_slice(value[..32].as_ref()), 0)?;
 
-            let (_, batch) = cell_storage.remove_cell(&bump, cell.hash(LevelMask::MAX_LEVEL))?;
+            let (_, batch) = cell_storage.remove_cell_mt(
+                &bump,
+                cell.hash(LevelMask::MAX_LEVEL),
+                Default::default(),
+            )?;
 
             // execute batch
             db.rocksdb().write_opt(batch, db.cells.write_config())?;
@@ -707,6 +723,7 @@ mod test {
                 &mut batch,
                 Default::default(),
                 MODIFY_COUNT * 3,
+                i,
             )?;
 
             cell_keys.push(*cell_hash);
@@ -718,7 +735,7 @@ mod test {
             tracing::info!("Iteration {i} Finished. traversed: {traversed}",);
         }
 
-        let mut bump = bumpalo::Bump::new();
+        let mut bump = bumpalo_herd::Herd::new();
 
         tracing::info!("Starting GC");
         let total = cell_keys.len();
@@ -727,7 +744,7 @@ mod test {
 
             traverse_cell((cell as Arc<DynCell>).as_ref());
 
-            let (res, batch) = cell_storage.remove_cell(&bump, &key)?;
+            let (res, batch) = cell_storage.remove_cell_mt(&bump, &key, Default::default())?;
             cells_db
                 .rocksdb()
                 .write_opt(batch, cells_db.cells.write_config())?;
@@ -742,6 +759,59 @@ mod test {
         let cells_left = cells_db.cells.iterator(IteratorMode::Start).count();
         tracing::info!("States GC finished. Cells left: {cells_left}");
         assert_eq!(cells_left, 0, "Gc is broken. Press F to pay respect");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn raw_state_store_allows_existing_snapshot() -> Result<()> {
+        let (ctx, _tempdir) = StorageContext::new_temp().await?;
+        let storage = CoreStorage::open(ctx.clone(), CoreStorageConfig::new_potato()).await?;
+
+        let root = Boc::decode(ZEROSTATE_BOC)?;
+        let state = root.parse::<ShardStateUnsplit>()?;
+        let block_id = BlockId {
+            shard: state.shard_ident,
+            seqno: state.seqno,
+            root_hash: *root.repr_hash(),
+            file_hash: Boc::file_hash_blake(ZEROSTATE_BOC),
+        };
+        let next_block_id = BlockId {
+            seqno: block_id.seqno + 1,
+            ..block_id
+        };
+
+        let root_hash = storage
+            .shard_state_storage()
+            .store_state_bytes(&block_id, Bytes::from_static(ZEROSTATE_BOC))
+            .await?;
+        assert_eq!(root_hash, block_id.root_hash);
+
+        let cells_db = storage.shard_state_storage().cells_db.clone();
+        anyhow::ensure!(
+            is_table_empty(&cells_db.temp_cells)?,
+            "temp cells were not cleared"
+        );
+
+        // The first raw store creates CounterSnapshotLatest. Store the same
+        // cell set again under another block id to ensure raw store can reuse
+        // existing counters.
+        let root_hash = storage
+            .shard_state_storage()
+            .store_state_bytes(&next_block_id, Bytes::from_static(ZEROSTATE_BOC))
+            .await?;
+        assert_eq!(root_hash, next_block_id.root_hash);
+
+        drop(storage);
+        let pool = Arc::new(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(1)
+                .build()
+                .unwrap(),
+        );
+        let counters = CountersStore::open(cells_db, pool)
+            .load_snapshot(CellsDbStateKey::CounterSnapshotLatest)?;
+        assert_eq!(counters.next_idx.get(), 332);
+
         Ok(())
     }
 

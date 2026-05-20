@@ -472,6 +472,8 @@ impl StarterInner {
             );
         };
 
+        state_storage.begin_raw_import()?;
+
         let mc_block_id = self.zerostate.as_block_id();
         tracing::info!(%mc_block_id, "importing masterchain zerostate");
         let root_hash = state_storage
@@ -500,19 +502,12 @@ impl StarterInner {
 
         let global_id = mc_zerostate.state().global_id;
         let gen_utime = mc_zerostate.state().gen_utime;
-
-        let persistent_states = self.storage.persistent_state_storage();
-        let handle_storage = self.storage.block_handle_storage();
-
         let ref_by_mc_seqno = mc_block_id.seqno;
-        let (handle, _) = handle_storage.create_or_load_handle(&mc_block_id, NewBlockMeta {
-            is_key_block: true,
-            gen_utime,
-            ref_by_mc_seqno,
-        });
 
+        let mut shard_zerostate_ids = Vec::new();
         for entry in mc_zerostate.shards()?.latest_blocks() {
             let block_id = entry.context("invalid mc zerostate")?;
+            shard_zerostate_ids.push(block_id);
 
             let state_bytes = match zerostates.remove(&block_id.file_hash) {
                 Some(existing) => {
@@ -541,8 +536,25 @@ impl StarterInner {
                 root_hash == block_id.root_hash,
                 "imported zerostate root hash mismatch"
             );
+        }
 
-            let (handle, _) = handle_storage.create_or_load_handle(&block_id, NewBlockMeta {
+        anyhow::ensure!(
+            zerostates.is_empty(),
+            "unused zerostates left: {}",
+            zerostates.len()
+        );
+
+        let persistent_states = self.storage.persistent_state_storage();
+        let handle_storage = self.storage.block_handle_storage();
+
+        let (handle, _) = handle_storage.create_or_load_handle(&mc_block_id, NewBlockMeta {
+            is_key_block: true,
+            gen_utime,
+            ref_by_mc_seqno,
+        });
+
+        for block_id in &shard_zerostate_ids {
+            let (handle, _) = handle_storage.create_or_load_handle(block_id, NewBlockMeta {
                 is_key_block: false,
                 gen_utime,
                 ref_by_mc_seqno,
@@ -579,12 +591,6 @@ impl StarterInner {
             tracing::debug!(%block_id, "imported persistent shard state");
         }
 
-        anyhow::ensure!(
-            zerostates.is_empty(),
-            "unused zerostates left: {}",
-            zerostates.len()
-        );
-
         handle_storage.set_is_zerostate(&handle);
         handle_storage.set_has_shard_state(&handle);
         handle_storage.set_block_committed(&handle);
@@ -597,6 +603,8 @@ impl StarterInner {
         persistent_states
             .store_shard_state(mc_block_id.seqno, &handle)
             .await?;
+
+        state_storage.finish_raw_import()?;
 
         tracing::info!("imported zerostates");
 
@@ -869,7 +877,8 @@ impl StarterInner {
             };
 
             // NOTE: `store_state_file` error is mostly unrecoverable since the operation
-            //       context is too large to be atomic.
+            //       context is too large to be atomic. This downloaded-state path is
+            //       rebuild-only on interruption, unlike bootstrap raw import marker cleanup.
             // TODO: Make this operation recoverable to allow an infinite number of attempts.
             shard_states
                 .store_state_file(block_id, file)
