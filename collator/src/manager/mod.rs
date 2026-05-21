@@ -14,7 +14,7 @@ use tycho_util::{FastDashMap, FastHashMap};
 
 use self::blocks_cache::BlocksCache;
 use self::cancel_validation_runner::CancelValidationRunnerState;
-use self::collation_cancel::{ActionAfterCancel, CollationCancelHandle};
+use self::collation_cancel::{ActionAfterCancel, CollationCancelHandle, update_action_after};
 use self::state_event_listener::{ChannelStateEventListener, StateEvent};
 use self::state_update_handler::ProcessMcStateUpdateMode;
 use self::types::{
@@ -880,9 +880,7 @@ where
                 collator_tasks = res.collator_tasks;
             }
             // get the most actual action after cancel
-            if res.cancel_action.is_some() {
-                cancel_action = res.cancel_action;
-            }
+            update_action_after(&mut cancel_action, res.cancel_action);
         }
 
         Ok(HandleTaskResult {
