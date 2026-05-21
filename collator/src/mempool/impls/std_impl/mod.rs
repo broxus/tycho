@@ -148,7 +148,7 @@ impl MempoolAdapterStdImpl {
         tokio::spawn(async move {
             tokio::select! {
                 handler_result = &mut anchors_task => match handler_result {
-                    Err(error) => tracing::warn!(
+                    Err(error) => tracing::error!(
                         target: tracing_targets::MEMPOOL_ADAPTER,
                         "Mempool anchor handler stopped: {error}"
                     )

@@ -35,13 +35,14 @@ pub enum CacheError {
 }
 
 #[derive(thiserror::Error, Debug)]
-#[error("received non-unique anchor id: {self:?}")]
-pub struct DupAnchorError {
+#[error("received forked anchor: {self:?}")]
+pub struct AnchorForkError {
     id: MempoolAnchorId,
     is_paused: bool,
     prev_id_diff: Option<(Option<MempoolAnchorId>, Option<MempoolAnchorId>)>,
     chain_time_diff: Option<(u64, u64)>,
     externals_count_diff: Option<(usize, usize)>,
+    has_externals_diff: Option<bool>,
     author_diff: Option<(PeerId, PeerId)>,
 }
 
@@ -94,25 +95,66 @@ impl Cache {
         Some(after_anchor_id)
     }
 
-    pub fn push(&self, anchor: Arc<MempoolAnchor>) -> Result<(), Box<DupAnchorError>> {
-        let mut data = self.data.write();
+    pub fn push(&self, anchor: Arc<MempoolAnchor>) -> Result<(), Box<AnchorForkError>> {
+        let id = anchor.id;
         let prev_id = anchor.prev_id;
         let chain_time = anchor.chain_time;
         let externals_count = anchor.externals.len();
         let author = anchor.author;
-        if let Some(old) = data.anchors.insert(anchor.id, anchor) {
-            return Err(Box::new(DupAnchorError {
-                id: old.id,
-                is_paused: data.is_paused,
-                prev_id_diff: (old.prev_id != prev_id).then_some((old.prev_id, prev_id)),
+
+        let mut data = self.data.write();
+        if let Some(old) = data.anchors.insert(id, anchor) {
+            let is_paused = data.is_paused;
+            // restore as it was
+            let new = data.anchors.insert(id, old.clone()).expect("inserted");
+            drop(data);
+
+            let externals_count_diff = (old.externals.len() != externals_count)
+                .then_some((old.externals.len(), externals_count));
+
+            let has_externals_diff = if externals_count_diff.is_some() {
+                None
+            } else {
+                let has_diff = (old.externals.iter())
+                    .zip(&new.externals)
+                    .find(|(a, b)| a.hash() != b.hash())
+                    .is_some();
+                Some(has_diff)
+            };
+
+            let err = AnchorForkError {
+                id,
+                is_paused,
+                // first anchor after restart will not contain prev id
+                prev_id_diff: (prev_id.is_some() && old.prev_id != prev_id)
+                    .then_some((old.prev_id, prev_id)),
                 chain_time_diff: (old.chain_time != chain_time)
                     .then_some((old.chain_time, chain_time)),
-                externals_count_diff: (old.externals.len() != externals_count)
-                    .then_some((old.externals.len(), externals_count)),
+                externals_count_diff,
+                has_externals_diff,
                 author_diff: (old.author != author).then_some((old.author, author)),
-            }));
+            };
+            if err.prev_id_diff.is_some()
+                || err.chain_time_diff.is_some()
+                || err.externals_count_diff.is_some()
+                || err.has_externals_diff == Some(true)
+                || err.author_diff.is_some()
+            {
+                return Err(Box::new(err));
+            } else {
+                tracing::warn!(
+                    target: tracing_targets::MEMPOOL_ADAPTER,
+                    %id,
+                    ?prev_id,
+                    %chain_time,
+                    %externals_count,
+                    %is_paused,
+                    "ignoring same anchor replacement"
+                );
+            }
+        } else {
+            self.anchor_added.notify_waiters();
         }
-        self.anchor_added.notify_waiters();
         Ok(())
     }
 
@@ -536,7 +578,9 @@ mod tests {
         assert!(timeout(WAIT, &mut task).await.is_err());
 
         cache.push(anchor(6, Some(5))).unwrap();
-        assert!(cache.push(anchor(6, Some(5))).is_err(), "duplicate push");
+        assert!(cache.push(anchor(6, Some(5))).is_ok(), "duplicate push");
+        assert!(cache.push(anchor(6, None)).is_ok(), "push after restart");
+        assert!(cache.push(anchor(6, Some(15))).is_err(), "forked push");
 
         assert_eq!(cache.reopen(true), Some(5));
 
