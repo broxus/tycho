@@ -2,8 +2,8 @@ use tokio::sync::broadcast;
 use tokio::sync::broadcast::Receiver;
 use tycho_network::{PeerId, PrivateOverlay};
 use tycho_util::FastHashSet;
+use tycho_util::futures::JoinTask;
 
-use crate::effects::Task;
 use crate::intercom::peer_schedule::stateful::PeerScheduleStateful;
 use crate::intercom::peer_schedule::{PeerState, WeakPeerSchedule};
 use crate::models::PeerCount;
@@ -14,9 +14,9 @@ pub struct PeerScheduleLocked {
     pub(super) local_id: PeerId,
     /// source of updates, remapped and filtered locally
     pub(super) overlay: PrivateOverlay,
-    /// update task, aborts on drop
+    /// Update task, aborts on drop; don't use [`crate::effects::Task`]: PS is exposed to network.
     /// Note: we don't expect peer removal events from Network as it'll be a second source of truth
-    pub(super) resolve_peers_task: Option<Task<()>>,
+    pub(super) resolve_peers_task: Option<JoinTask<()>>,
     pub(super) banned: FastHashSet<PeerId>,
     // Connection to self is always "Added"
     // Updates are Resolved or Removed, sent single time

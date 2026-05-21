@@ -4,7 +4,7 @@ use tokio::sync::mpsc;
 use tycho_crypto::ed25519::KeyPair;
 use tycho_network::{Network, OverlayService, PeerResolver, PrivateOverlay};
 
-use crate::effects::{AltFormat, TaskTracker};
+use crate::effects::AltFormat;
 use crate::engine::round_watch::{Commit, RoundWatch, TopKnownAnchor};
 use crate::engine::{InputBuffer, MempoolMergedConfig};
 use crate::intercom::{Dispatcher, InitPeers, PeerSchedule, Responder};
@@ -42,7 +42,6 @@ pub struct EngineNetwork {
 impl EngineNetwork {
     pub(super) fn new(
         net_args: &EngineNetworkArgs,
-        task_tracker: &TaskTracker,
         merged_conf: &MempoolMergedConfig,
         init_peers: &InitPeers,
     ) -> Self {
@@ -68,8 +67,7 @@ impl EngineNetwork {
             &net_args.moderator,
             &merged_conf.conf,
         );
-        let peer_schedule =
-            PeerSchedule::new(net_args.key_pair.clone(), private_overlay, task_tracker);
+        let peer_schedule = PeerSchedule::new(net_args.key_pair.clone(), private_overlay);
         peer_schedule.init(merged_conf, init_peers);
         net_args.moderator.set_peer_schedule(&peer_schedule);
 

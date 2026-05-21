@@ -13,8 +13,9 @@ use tycho_network::{
     KnownPeerHandle, PeerId, PrivateOverlay, PrivateOverlayEntriesEvent,
     PrivateOverlayEntriesReadGuard,
 };
+use tycho_util::futures::JoinTask;
 
-use crate::effects::{AltFmt, AltFormat, Cancelled, Task, TaskTracker};
+use crate::effects::{AltFmt, AltFormat};
 use crate::engine::MempoolMergedConfig;
 use crate::intercom::peer_schedule::locked::PeerScheduleLocked;
 use crate::intercom::peer_schedule::stateless::PeerScheduleStateless;
@@ -36,7 +37,6 @@ pub struct WeakPeerSchedule(Weak<PeerScheduleInner>);
 struct PeerScheduleInner {
     locked: RwLock<PeerScheduleLocked>,
     atomic: ArcSwap<PeerScheduleStateless>,
-    task_tracker: TaskTracker,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,16 +82,11 @@ impl InitPeers {
 }
 
 impl PeerSchedule {
-    pub fn new(
-        local_keys: Arc<KeyPair>,
-        overlay: PrivateOverlay,
-        task_tracker: &TaskTracker,
-    ) -> Self {
+    pub fn new(local_keys: Arc<KeyPair>, overlay: PrivateOverlay) -> Self {
         let local_id = PeerId::from(local_keys.public_key);
         Self(Arc::new(PeerScheduleInner {
             locked: RwLock::new(PeerScheduleLocked::new(local_id, overlay)),
             atomic: ArcSwap::from_pointee(PeerScheduleStateless::new(local_keys)),
-            task_tracker: task_tracker.clone(),
         }))
     }
 
@@ -328,25 +323,20 @@ impl WeakPeerSchedule {
         mut resolved_waiters: FuturesUnordered<
             impl Future<Output = KnownPeerHandle> + Sized + Send + 'static,
         >,
-    ) -> Option<Task<()>> {
+    ) -> Option<JoinTask<()>> {
         let gauge = metrics::gauge!("tycho_mempool_peers_resolving");
         gauge.set(resolved_waiters.len() as u32);
         if resolved_waiters.is_empty() {
             tracing::info!("peer schedule resolve task not started: all peers resolved");
             return None;
         }
-        let Some(peer_schedule) = self.upgrade() else {
-            tracing::warn!("peer schedule is dropped, cannot spawn resolve task");
-            return None;
-        };
-        let task_ctx = peer_schedule.0.task_tracker.ctx();
-        Some(task_ctx.spawn(async move {
+        Some(JoinTask::new(async move {
             tracing::info!("peer schedule resolve task started");
             scopeguard::defer!(tracing::info!("peer schedule resolve task stopped"));
             while let Some(known_peer_handle) = resolved_waiters.next().await {
                 let Some(peer_schedule) = self.upgrade() else {
                     tracing::warn!("peer schedule is dropped, cannot apply resolve update");
-                    return Err(Cancelled());
+                    return;
                 };
                 let peer_id = &known_peer_handle.peer_info().id;
                 let mut guard = peer_schedule.write();
@@ -357,7 +347,6 @@ impl WeakPeerSchedule {
                 }
                 gauge.decrement(1);
             }
-            Ok(())
         }))
     }
 }
@@ -453,8 +442,7 @@ mod tests {
             .build(Responder::default());
         overlay_service.add_private_overlay(&private_overlay);
 
-        let task_tracker = TaskTracker::default();
-        let peer_schedule = PeerSchedule::new(local_keys, private_overlay, &task_tracker);
+        let peer_schedule = PeerSchedule::new(local_keys, private_overlay);
 
         let mut handles = Vec::new();
         for (i, remote_key) in remote_keys.iter().enumerate() {

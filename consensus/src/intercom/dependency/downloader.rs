@@ -178,7 +178,11 @@ impl DownloadTask {
         loop {
             tokio::select! {
                 biased; // mandatory priority: signals lifecycle, updates, data lifecycle
-                bcast_result = &mut broadcast_result => break bcast_result.map_err(|_e| Cancelled()),
+                bcast_result = &mut broadcast_result, if !broadcast_result.is_terminated() => {
+                    if let Ok(bcast_result) = bcast_result {
+                        break Ok(bcast_result);
+                    }
+                },
                 Some(depender) = dependers_rx.recv() => self.add_depender(&depender),
                 update = self.updates.recv() => self.match_peer_updates(update)?,
                 Some(out) = self.downloading.next() => {
