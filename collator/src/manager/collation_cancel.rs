@@ -54,6 +54,29 @@ impl std::fmt::Debug for DisplayActionAfterCancel<'_> {
     }
 }
 
+pub(super) fn update_action_after(
+    curr_action: &mut Option<ActionAfterCancel>,
+    new_action: Option<ActionAfterCancel>,
+) -> bool {
+    let Some(new_action) = new_action else {
+        return false;
+    };
+
+    // sync must not be downgraded to a drain-only cancel
+    if matches!(
+        (curr_action.as_ref(), &new_action),
+        (
+            Some(ActionAfterCancel::SyncToAppliedMcBlock { .. }),
+            ActionAfterCancel::Noop,
+        )
+    ) {
+        return false;
+    }
+
+    *curr_action = Some(new_action);
+    true
+}
+
 pub(super) struct CollationCancelHandle {
     action_after: Option<ActionAfterCancel>,
     task_wrapper: FuturesUnordered<JoinTask<CollationCancelResult>>,
@@ -80,16 +103,12 @@ impl CollationCancelHandle {
         // previous cancel task is not finished or cancel result is not handled,
         // so we can update action
         if self.action_after.is_some() {
-            if let Some(action) = action
-                && matches!(action, ActionAfterCancel::SyncToAppliedMcBlock { .. })
-            {
+            let action_updated = update_action_after(&mut self.action_after, action);
+            if action_updated {
                 tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-                    old_action_after = ?self.action_after.as_ref().map(DisplayActionAfterCancel),
-                    new_action_after = %DisplayActionAfterCancel(&action),
+                    action_after = ?self.action_after.as_ref().map(DisplayActionAfterCancel),
                     "collation cancel task already exists, action updated",
                 );
-
-                self.action_after = Some(action);
             }
 
             // if no new running collation tasks,
@@ -104,7 +123,7 @@ impl CollationCancelHandle {
                 "cancel task should be already drained here"
             );
 
-            let Some(action) = action else {
+            if !update_action_after(&mut self.action_after, action) {
                 // will not cancel if action after sync was not provided
                 return Ok(vec![]);
             };
@@ -112,6 +131,10 @@ impl CollationCancelHandle {
             // if no new running collation tasks,
             // then just handle action after cancel
             if collator_tasks.is_empty() {
+                let action = self
+                    .action_after
+                    .take()
+                    .expect("action after cancel should exist here");
                 tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
                     action_after = %DisplayActionAfterCancel(&action),
                     "no collator tasks, will handle action right now",
@@ -129,7 +152,6 @@ impl CollationCancelHandle {
                     .await;
             } else {
                 // otherwise store action because we will run cancel task
-                self.action_after = Some(action);
             }
         }
 
