@@ -44,7 +44,7 @@ pub fn make_engine_parts<const PEER_COUNT: usize>(
     let engine_ctx = EngineCtx::new(conf.genesis_round, conf, &task_tracker);
 
     // any peer id will be ok, network is not used
-    let peer_schedule = PeerSchedule::new(local_keys, private_overlay, &task_tracker);
+    let peer_schedule = PeerSchedule::new(local_keys, private_overlay);
     let init_peers = InitPeers::new(peers.iter().map(|(id, _)| *id).collect());
     peer_schedule.init(&merged_conf, &init_peers);
 

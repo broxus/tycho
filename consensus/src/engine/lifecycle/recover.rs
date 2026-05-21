@@ -43,6 +43,7 @@ impl EngineRecoverLoop {
         let mut fix_history_flag = FixHistoryFlag(false);
 
         loop {
+            tracing::info!("creating new engine");
             let engine = Engine::new(
                 net,
                 &task_tracker,
@@ -76,27 +77,37 @@ impl EngineRecoverLoop {
 
             let never_ok = engine_run.await;
 
+            tracing::info!("removing private overlay");
+
             self.net_args
                 .overlay_service
                 .remove_private_overlay(&self.merged_conf.overlay_id);
 
+            tracing::info!("stopping task tracker");
+
             task_tracker.stop().await;
+
+            tracing::info!("dropping task tracker");
+
             drop(task_tracker);
 
             let history_conflict = match never_ok {
-                Err(Cancelled()) => return,
+                Err(Cancelled()) => {
+                    tracing::warn!("engine run was cancelled");
+                    return;
+                }
                 Ok(history_conflict) => history_conflict,
             };
 
             // prevent restart-loop: Engine will fail the same way until TKA changes
             let mut current_tka = top_known_anchor_recv.get();
-            if engine_start_tka == current_tka {
+            if engine_start_tka == current_tka && fix_history_flag.0 {
                 tracing::warn!(
                     peer_id = %self.net_args.network.peer_id().alt(),
                     overlay_id = %self.merged_conf.overlay_id,
                     top_known_anchor = current_tka.0,
                     err = %history_conflict,
-                    "mempool failed twice at the same top known anchor; will retry when it changes"
+                    "mempool failed to fix history; will restart at next TKA"
                 );
 
                 'new_tka: loop {
@@ -121,17 +132,15 @@ impl EngineRecoverLoop {
 
             fix_history_flag = FixHistoryFlag(true);
             (task_tracker, net) = {
+                tracing::info!("locking run attributes");
                 let mut guard = self.run_attrs.lock();
+                tracing::info!("run attributes lock acquired");
+
                 if guard.is_stopping {
                     return; // do not update task tracker
                 }
                 guard.tracker = TaskTracker::default();
-                let net = EngineNetwork::new(
-                    &self.net_args,
-                    &guard.tracker,
-                    &self.merged_conf,
-                    &guard.last_peers,
-                );
+                let net = EngineNetwork::new(&self.net_args, &self.merged_conf, &guard.last_peers);
                 guard.peer_schedule = net.peer_schedule.downgrade();
 
                 #[cfg(feature = "mock-feedback")]

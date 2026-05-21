@@ -31,7 +31,7 @@ impl EngineSession {
         let span_fields = SpanFields::new(net_args, merged_conf);
 
         let task_tracker = TaskTracker::default();
-        let net = EngineNetwork::new(net_args, &task_tracker, merged_conf, &init_peers);
+        let net = EngineNetwork::new(net_args, merged_conf, &init_peers);
         let peer_schedule = net.peer_schedule.downgrade();
         let run_attrs = Arc::new(Mutex::new(RunAttributes {
             tracker: task_tracker.clone(),
