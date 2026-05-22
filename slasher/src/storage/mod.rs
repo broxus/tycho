@@ -177,6 +177,8 @@ impl Iterator for BlockBatchesIter<'_> {
 
 #[derive(Debug, Clone)]
 pub struct VsetSession {
+    // NOTE: Might be needed later.
+    #[expect(unused)]
     pub id: ValidationSessionId,
     pub start_seqno: u32,
 }
