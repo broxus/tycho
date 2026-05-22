@@ -120,7 +120,7 @@ impl DagFront {
         // so that every existing anchor trigger is not resolved (even no `HistoryConflict`).
         // Every point that references a trigger is `NotFound` and the whole mem usage is low.
         // Such condition is noticeable in metrics by huge max dag length.
-        // Note we could validate each point for `anchor_trigger()` but that extends happy flow.
+        // Also, a node that isn't a broadcast receiver may operate by syncing blocks only.
         let is_pathologic = committer.dag_len() > 2 * conf.consensus.max_total_rounds() as usize;
 
         if is_unrecoverable_gap | is_pathologic {
