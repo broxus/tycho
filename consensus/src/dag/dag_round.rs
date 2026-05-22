@@ -1,4 +1,3 @@
-use std::cmp;
 use std::sync::{Arc, Weak};
 
 use tokio::sync::mpsc;
@@ -12,7 +11,7 @@ use crate::dag::dag_location::DagLocation;
 use crate::dag::dag_point_future::{DagPointFuture, WeakDagPointFuture};
 use crate::dag::threshold::Threshold;
 use crate::effects::{AltFmt, AltFormat, Ctx, RoundCtx, ValidateCtx};
-use crate::engine::MempoolConfig;
+use crate::engine::{MempoolConfig, NodeConfig};
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{AnchorStageRole, Digest, PeerCount, Point, PointRestore, Round, WeakCert};
 use crate::storage::MempoolStore;
@@ -36,7 +35,8 @@ pub struct DagRoundInner {
     locations: FastDashMap<PeerId, DagLocation>,
     threshold: Threshold,
     triggers_tx: mpsc::UnboundedSender<WeakDagPointFuture>,
-    prev: WeakDagRound,
+    /// sequence of prev rounds: 0 for newest; never empty
+    prevs: Vec<WeakDagRound>,
 }
 
 impl WeakDagRound {
@@ -95,6 +95,24 @@ impl DagRound {
                 round.0
             )
         };
+
+        let prevs = match prev.upgrade() {
+            None => {
+                let prev_count = NodeConfig::get().weak_dag_round_links.get() as usize;
+                vec![WeakDagRound(Weak::default()); prev_count]
+            }
+            Some(prev_round) => {
+                let prev_count = prev_round.0.prevs.len();
+                let mut prevs = Vec::with_capacity(prev_count);
+                prevs.push(prev);
+                for weak in &prev_round.0.prevs[..prev_count - 1] {
+                    prevs.push(weak.clone());
+                }
+                assert_eq!(prevs.len(), prev_count, "same length for all prev links");
+                prevs
+            }
+        };
+
         let this = Self(Arc::new(DagRoundInner {
             round,
             peer_count,
@@ -102,7 +120,7 @@ impl DagRound {
             locations: FastDashMap::with_capacity_and_hasher(peers.len(), Default::default()),
             threshold: Threshold::new(round, peer_count, conf),
             triggers_tx: triggers_tx.clone(),
-            prev,
+            prevs,
         }));
 
         for peer in &*peers {
@@ -134,11 +152,6 @@ impl DagRound {
 
     pub fn threshold(&self) -> &Threshold {
         &self.0.threshold
-    }
-
-    #[cfg(any(feature = "test", test))]
-    pub fn locations(&self) -> &FastDashMap<PeerId, DagLocation> {
-        &self.0.locations
     }
 
     fn edit<F, R>(&self, author: &PeerId, edit: F) -> R
@@ -174,7 +187,7 @@ impl DagRound {
     }
 
     pub fn prev(&self) -> &WeakDagRound {
-        &self.0.prev
+        &self.0.prevs[0]
     }
 
     pub fn downgrade(&self) -> WeakDagRound {
@@ -397,28 +410,44 @@ impl DagRound {
 
     pub fn scan(&self, round: Round) -> Option<Self> {
         assert!(
-            round <= self.round(),
+            self.round() >= round,
             "Coding error: cannot scan DAG rounds chain for a future round"
         );
-        let mut visited = self.clone();
-        if visited.round() == round {
-            return Some(visited);
+        if self.round() == round {
+            return Some(self.clone());
         }
-        while let Some(dag_round) = visited.prev().upgrade() {
-            match dag_round.round().cmp(&round) {
-                cmp::Ordering::Less => panic!(
-                    "Coding error: linked list of dag rounds cannot contain gaps, \
-                    found {} to be prev for {}, scanned for {} from {}",
-                    dag_round.round().0,
-                    visited.round().0,
-                    round.0,
-                    self.round().0
-                ),
-                cmp::Ordering::Equal => return Some(dag_round),
-                cmp::Ordering::Greater => visited = dag_round,
-            }
+
+        let (hops, pos) = {
+            let prev_count = self.0.prevs.len(); // same for all dag rounds
+            let contiguous_pos = (self.round().prev().0)
+                .checked_sub(round.0)
+                .expect("self.round() > round");
+            let hops = contiguous_pos / prev_count as u32;
+            let pos = contiguous_pos as usize % prev_count;
+            (hops, pos)
+        };
+
+        if hops == 0 {
+            return self.0.prevs[pos].upgrade();
         }
-        None
+
+        let mut last_hop_to = self.0.prevs.last().expect("prevs non empty").upgrade()?;
+        for _ in 1..hops {
+            last_hop_to = (last_hop_to.0.prevs.last().expect("prevs non empty")).upgrade()?;
+        }
+        let found = last_hop_to.0.prevs[pos].upgrade()?;
+
+        assert_eq!(
+            found.round(),
+            round,
+            "linked list of dag rounds cannot contain gaps, \
+             found {} instead of {}, scanned from {}",
+            found.round().0,
+            round.0,
+            self.round().0
+        );
+
+        Some(found)
     }
 }
 

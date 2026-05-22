@@ -184,6 +184,10 @@ pub struct MempoolNodeConfig {
 
     /// Limits amount of unique points being simultaneously downloaded from all peers.
     pub max_download_tasks: NonZeroU16,
+
+    /// Each dag round has at least one weak reference to previous dag round;
+    /// more links reduce [`std::sync::Weak::upgrade`] calls which results are immediately dropped
+    pub weak_dag_round_links: NonZeroU8,
 }
 
 impl Default for MempoolNodeConfig {
@@ -196,6 +200,7 @@ impl Default for MempoolNodeConfig {
             max_blocking_tasks: 250.try_into().unwrap(),
             max_upload_tasks: 50.try_into().unwrap(),
             max_download_tasks: 250.try_into().unwrap(),
+            weak_dag_round_links: 7.try_into().unwrap(),
         }
     }
 }
