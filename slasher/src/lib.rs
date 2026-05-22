@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,16 +14,12 @@ use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_crypto::ed25519;
 use tycho_slasher_traits::{ValidationSessionId, ValidatorEventsListener};
 use tycho_storage::StorageContext;
-use tycho_types::boc::Boc;
-use tycho_types::cell::HashBytes;
-use tycho_types::models::{BlockchainConfig, SignatureContext, StdAddr};
+use tycho_types::models::{BlockchainConfig, SignatureContext, StdAddr, ValidatorSet};
+use tycho_types::prelude::*;
 use tycho_util::config::PartialConfig;
 use tycho_util::futures::JoinTask;
 use tycho_util::serde_helpers;
 
-pub use self::analyzer::{
-    SessionPenaltyReport, SessionValidatorScore, VsetPenaltyReport, VsetValidatorPenalty,
-};
 use self::bc::SlasherParams;
 pub use self::bc::{
     BlocksBatch, ContractSubscription, EncodeBlocksBatchMessage, MessageDelivered,
@@ -104,9 +99,9 @@ impl Slasher {
         let storage =
             SlasherStorage::open(storage_context).context("failed to open slasher storage")?;
 
-        let current_vset_hash = *blockchain_config
-            .get_current_validator_set_raw()?
-            .repr_hash();
+        let current_vset = Arc::new(ParsedVset::from_raw(
+            blockchain_config.get_current_validator_set_raw()?,
+        )?);
 
         let slasher_params = contract
             .find_params(blockchain_config)
@@ -141,7 +136,7 @@ impl Slasher {
                 storage,
                 known_session_id: AtomicValidationSessionId::new(known_session_id),
                 parsed_config: ArcSwap::new(Arc::new(ParsedConfig {
-                    current_vset_hash,
+                    current_vset,
                     signature_context: SignatureContext {
                         global_id,
                         capabilities: global.capabilities,
@@ -166,18 +161,19 @@ impl Slasher {
         let this = self.shared.as_ref();
         let state_extra = cx.state.state_extra()?;
 
-        let current_vset_hash = *state_extra
-            .config
-            .get_current_validator_set_raw()?
-            .repr_hash();
+        let current_vset_raw = state_extra.config.get_current_validator_set_raw()?;
+        let current_vset_hash = *current_vset_raw.repr_hash();
 
         // Apply config changes when needed.
         let mut vset_to_complete = None;
         if state_extra.after_key_block {
-            let known_vset_hash = self.shared.parsed_config.load().current_vset_hash;
-            if current_vset_hash != known_vset_hash {
-                vset_to_complete = Some(known_vset_hash);
-            }
+            let known_vset = self.shared.parsed_config.load().current_vset.clone();
+            let current_vset = if current_vset_hash == known_vset.hash {
+                known_vset
+            } else {
+                vset_to_complete = Some(known_vset);
+                Arc::new(ParsedVset::from_raw(current_vset_raw)?)
+            };
 
             let global = state_extra.config.get_global_version()?;
             let slasher_params = this
@@ -196,7 +192,7 @@ impl Slasher {
 
             // Update parsed config.
             self.shared.parsed_config.store(Arc::new(ParsedConfig {
-                current_vset_hash,
+                current_vset,
                 signature_context: SignatureContext {
                     global_id: cx.block.as_ref().global_id,
                     capabilities: global.capabilities,
@@ -234,7 +230,7 @@ impl Slasher {
             );
             this.known_session_id.set(current_session_id);
             this.storage
-                .store_vset_session(current_session_id, &current_vset_hash, mc_seqno);
+                .store_vset_session(current_session_id, &current_vset_hash, mc_seqno)?;
         }
 
         // TODO: Cleanup stored vset sessions.
@@ -308,11 +304,11 @@ impl Slasher {
         subscription.cleanup_expired_messages(cx.block.load_info()?.gen_utime);
 
         // Trigger reporting.
-        if let Some(vset_hash) = vset_to_complete
+        if let Some(vset) = vset_to_complete
             && let Some(last_seqno) = mc_seqno.checked_sub(1)
         {
             self.shared
-                .complete_vset(&vset_hash, last_seqno, &slasher_params)?;
+                .complete_vset(&vset, last_seqno, &slasher_params)?;
         }
 
         // Start session handlers.
@@ -374,45 +370,30 @@ struct SlasherSharedState {
     parsed_config: ArcSwap<ParsedConfig>,
 }
 
-struct ParsedConfig {
-    current_vset_hash: HashBytes,
-    signature_context: SignatureContext,
-    slasher_params: Option<SlasherParams>,
-}
-
 impl SlasherSharedState {
     fn complete_vset(
         &self,
-        vset_hash: &HashBytes,
+        vset: &ParsedVset,
         last_seqno: u32,
-        _params: &SlasherParams,
+        params: &SlasherParams,
     ) -> Result<()> {
-        // Session should containt at least this amount of blocks to do some reporting.
-        // TODO: Move into `SlasherParams`.
-        const MIN_VSET_LENGTH: u32 = 1000;
-
-        let snapshot = self.storage.snapshot();
-
-        // Compute vset block range.
-        let session_ids = snapshot.load_vset_sessions(vset_hash)?;
-        let start_seqno = session_ids
-            .iter()
-            .map(|item| item.start_seqno)
-            .min()
-            .unwrap_or(u32::MAX);
-        let vset_len = last_seqno.saturating_sub(start_seqno);
-        if vset_len < MIN_VSET_LENGTH {
-            tracing::warn!(%vset_hash, vset_len, "too short vset");
+        let Some(own_validator_idx) =
+            vset.vset.list.iter().position(|item| {
+                item.public_key.as_array() == self.node_keys.public_key.as_bytes()
+            })
+        else {
+            tracing::warn!(vset_hash = %vset.hash, "not in a validator set");
             return Ok(());
-        }
+        };
 
-        // Build a matrix from all known block batches.
-
-        for item in snapshot.iter_block_batches(vset_hash) {
-            let (validator_idx, batch) = item?;
-
-            // todo
-        }
+        let accusations = analyzer::analyze_vset(
+            self.storage.snapshot(),
+            vset,
+            last_seqno,
+            own_validator_idx,
+            params,
+        )?;
+        tracing::warn!("slasher accusations: {accusations:?}");
 
         Ok(())
     }
@@ -522,5 +503,26 @@ impl SlasherSharedState {
 
             tokio::time::sleep(self.config.message_retry_interval).await;
         }
+    }
+}
+
+struct ParsedConfig {
+    current_vset: Arc<ParsedVset>,
+    signature_context: SignatureContext,
+    slasher_params: Option<SlasherParams>,
+}
+
+struct ParsedVset {
+    hash: HashBytes,
+    vset: ValidatorSet,
+}
+
+impl ParsedVset {
+    fn from_raw(raw: Cell) -> Result<Self> {
+        let vset = raw.parse::<ValidatorSet>()?;
+        Ok(Self {
+            hash: *raw.repr_hash(),
+            vset,
+        })
     }
 }
