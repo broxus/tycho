@@ -244,21 +244,39 @@ impl Verifier {
             .unwrap_or_default(),
         );
 
+        let mut latest_invalid_dep = None;
+
         let is_valid_fut =
-            Self::check_valid(&info, deps_and_prev, ctx.conf()).instrument(entered_span.exit());
+            Self::check_valid(&info, deps_and_prev, &mut latest_invalid_dep, ctx.conf())
+                .instrument(entered_span.exit());
 
         // drop strong links before await
         drop(r_0);
         drop(r_1);
         drop(r_2_opt);
 
-        let valid_result = match is_valid_fut.await? {
-            ValidateResult::TransInvalid(inv_dep) => {
-                Self::check_indirect_links(&info, inv_dep, &r_0_weak, &downloader, &store, &ctx)
-                    .instrument(ctx.span().clone())
-                    .await?
+        let invalid_reason = match is_valid_fut.await? {
+            Some(direct) => Some(direct),
+            None => {
+                Self::check_indirect_links(
+                    &info,
+                    &mut latest_invalid_dep,
+                    &r_0_weak,
+                    &downloader,
+                    &store,
+                    &ctx,
+                )
+                .instrument(ctx.span().clone())
+                .await?
             }
-            other => other,
+        };
+
+        let valid_result = if let Some(reason) = invalid_reason {
+            ValidateResult::Invalid(reason)
+        } else if let Some(inv_dep) = latest_invalid_dep {
+            ValidateResult::TransInvalid(inv_dep)
+        } else {
+            ValidateResult::Valid
         };
 
         ctx.validated(&cert, valid_result)
@@ -399,8 +417,9 @@ impl Verifier {
     async fn check_valid(
         info: &PointInfo,
         mut deps_and_prev: FuturesUnordered<WeakDagPointFuture>,
+        latest_invalid_dep: &mut Option<InvalidDependency>,
         conf: &MempoolConfig,
-    ) -> TaskResult<ValidateResult> {
+    ) -> TaskResult<Option<InvalidReason>> {
         // point is well-formed if we got here, so point.proof matches point.includes
         let prev_digest_in_point = info.prev_digest();
         let prev_round = info.round().prev();
@@ -419,7 +438,6 @@ impl Verifier {
             info.time() + UnixTime::from_millis(conf.consensus.clock_skew_millis.get() as _);
 
         let mut invalid_reason = None;
-        let mut latest_invalid_dep = None;
 
         // join all dependencies despite the reason to invalidate the point is found
         while let Some(task_result) = deps_and_prev.next().await {
@@ -472,15 +490,14 @@ impl Verifier {
                 false
             };
 
-            let dep =
-                match Self::dependency(&mut latest_invalid_dep, &dag_point, None, prev_round, conf)
-                {
-                    Ok(dep) => dep,
-                    Err(reason) => {
-                        invalid_reason = Some(reason);
-                        continue; // invalidating deps (ill and not found) are not checked against
-                    }
-                };
+            let dep = match Self::dependency(latest_invalid_dep, &dag_point, None, prev_round, conf)
+            {
+                Ok(dep) => dep,
+                Err(reason) => {
+                    invalid_reason = Some(reason);
+                    continue; // invalidating deps (ill and not found) are not checked against
+                }
+            };
 
             if is_prev_point && let Some(reason) = Self::is_proof_ok(info, dep) {
                 invalid_reason = Some(reason);
@@ -533,23 +550,17 @@ impl Verifier {
             }
         }
 
-        Ok(if let Some(invalid) = invalid_reason {
-            ValidateResult::Invalid(invalid)
-        } else if let Some(inv_dep) = latest_invalid_dep {
-            ValidateResult::TransInvalid(inv_dep)
-        } else {
-            ValidateResult::Valid
-        })
+        Ok(invalid_reason)
     }
 
     async fn check_indirect_links(
         info: &PointInfo, // @ r+0
-        direct_invalid_dep: InvalidDependency,
+        latest_invalid_dep: &mut Option<InvalidDependency>,
         r_0: &WeakDagRound, // r+0
         downloader: &Downloader,
         store: &MempoolStore,
         ctx: &ValidateCtx,
-    ) -> TaskResult<ValidateResult> {
+    ) -> TaskResult<Option<InvalidReason>> {
         let anchor_trigger_link = match info.anchor_trigger() {
             AnchorLink::Indirect(link) => Some(link),
             AnchorLink::ToSelf | AnchorLink::Direct(_) => None,
@@ -565,7 +576,7 @@ impl Verifier {
 
         let mut linked_deps = FuturesUnordered::new();
         let Some(mut last_scanned_round) = r_0.upgrade() else {
-            return Ok(ValidateResult::TransInvalid(direct_invalid_dep)); // no new data
+            return Ok(None); // no new data
         };
         for maybe_link in rev_sorted {
             let Some(link) = maybe_link else {
@@ -593,7 +604,6 @@ impl Verifier {
         let max_allowed_dep_time =
             info.time() + UnixTime::from_millis(ctx.conf().consensus.clock_skew_millis.get() as _);
         let mut invalid_reason = None;
-        let mut latest_invalid_dep = Some(direct_invalid_dep);
 
         while let Some(task_result) = linked_deps.next().await {
             let Some((dag_point, through)) = task_result? else {
@@ -602,7 +612,7 @@ impl Verifier {
             let dep_id = *dag_point.id();
 
             let dep = match Self::dependency(
-                &mut latest_invalid_dep,
+                latest_invalid_dep,
                 &dag_point,
                 Some(through),
                 prev_round,
@@ -629,11 +639,7 @@ impl Verifier {
             }
         }
 
-        Ok(if let Some(invalid) = invalid_reason {
-            ValidateResult::Invalid(invalid)
-        } else {
-            ValidateResult::TransInvalid(latest_invalid_dep.expect("must be init with prev result"))
-        })
+        Ok(invalid_reason)
     }
 
     /// an equivalent to [`DagPoint::trusted`] that also breaks a chain of trans invalid points
