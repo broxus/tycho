@@ -2427,6 +2427,7 @@ async fn test_queue_restore_on_sync() {
         min_processed_to_by_shards,
         before_tail_block_ids,
         queue_diffs_applied_to_top_blocks.unwrap_or_default(),
+        None,
     )
     .await
     .unwrap();
@@ -2839,6 +2840,7 @@ async fn test_queue_restore_on_sync() {
         min_processed_to_by_shards,
         before_tail_block_ids,
         queue_diffs_applied_to_top_blocks.unwrap_or_default(),
+        None,
     )
     .await
     .unwrap();
@@ -3167,6 +3169,7 @@ async fn test_queue_restore_on_sync() {
         min_processed_to_by_shards,
         before_tail_block_ids,
         queue_diffs_applied_to_top_blocks.unwrap_or_default(),
+        None,
     )
     .await
     .unwrap();
@@ -3507,6 +3510,7 @@ async fn test_queue_restore_on_sync() {
         min_processed_to_by_shards,
         before_tail_block_ids,
         queue_diffs_applied_to_top_blocks.unwrap_or_default(),
+        None,
     )
     .await
     .unwrap();

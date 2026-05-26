@@ -510,6 +510,7 @@ where
             min_processed_to_by_shards,
             before_tail_block_ids,
             queue_diffs_applied_to_top_blocks.unwrap_or_default(),
+            self.config.slowdown_restore_queue_ms,
         )
         .await_blocking()?;
 

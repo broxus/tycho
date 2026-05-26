@@ -121,8 +121,17 @@ where
         min_processed_to_by_shards: BTreeMap<ShardIdent, QueueKey>,
         before_tail_block_ids: BTreeMap<ShardIdent, (Option<BlockId>, Vec<BlockId>)>,
         queue_diffs_applied_to_top_blocks: FastHashMap<ShardIdent, u32>,
+        slowdown_restore_queue_ms: Option<u64>,
     ) -> Result<RestoreQueueResult> {
         let mut res = RestoreQueueResult::default();
+        // slowdown queue restore when special flag is activated
+        if let Some(slowdown_ms) = slowdown_restore_queue_ms {
+            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                "HACK: slowdown queue restore on {} ms",
+                slowdown_ms,
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(slowdown_ms)).await;
+        }
 
         // load init block (from persistent state) to check if required diff was already applied from persistent
         let init_mc_block_id = state_node_adapter.load_init_block_id();
