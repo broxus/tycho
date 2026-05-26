@@ -1,11 +1,10 @@
 use std::sync::Arc;
-use std::time::Instant;
 
 use arc_swap::ArcSwapOption;
 use futures_util::future::BoxFuture;
 use futures_util::{FutureExt, future};
 use tycho_network::{PeerId, Response, Service, ServiceRequest};
-use tycho_util::sync::rayon_run_fifo;
+use tycho_util::metrics::HistogramGuard;
 
 use crate::dag::DagHead;
 use crate::effects::{AltFormat, Ctx, RoundCtx};
@@ -216,10 +215,11 @@ impl ResponderInner {
 
         let query = match medium_query {
             QueryRequestMedium::Broadcast(bytes) => {
-                let start = Instant::now();
-                let parse_result = rayon_run_fifo(|| Point::parse(bytes.into())).await;
-                metrics::histogram!("tycho_mempool_engine_parse_point_time")
-                    .record(start.elapsed());
+                let parse_duration = HistogramGuard::begin("tycho_mempool_engine_parse_point_time");
+                let parse_result = (round_ctx.rayon())
+                    .run_fifo(|| Point::parse(bytes.into()))
+                    .await;
+                drop(parse_duration);
                 match parse_result {
                     Ok(Ok(Ok(point))) if point.info().author() == peer_id => {
                         QueryRequest::Broadcast(point, None)

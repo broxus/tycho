@@ -15,10 +15,9 @@ use tycho_network::PeerId;
 use tycho_util::FastHashSet;
 use tycho_util::mem::Reclaimer;
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::sync::rayon_run_fifo;
 
 use crate::dag::{IllFormedReason, Verifier, VerifyError};
-use crate::effects::{AltFormat, Cancelled, Ctx, DownloadCtx, TaskResult};
+use crate::effects::{AltFormat, Cancelled, Ctx, DownloadCtx, MempoolRayon, TaskResult};
 use crate::engine::{MempoolConfig, NodeConfig};
 use crate::intercom::core::query::response::DownloadResponse;
 use crate::intercom::core::query::{DownloadQuery, QueryError};
@@ -99,9 +98,9 @@ impl Downloader {
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         let mut task = DownloadTask {
-            peer_schedule: self.inner.peer_schedule.clone(),
-            ctx,
             query: DownloadQuery::new(self.inner.dispatcher.clone(), point_id),
+            dependers_rx,
+            broadcast_result,
             peer_count,
             // this node is +1 to 2F; count every peer uniquely, as they may be removed and resolved
             not_found: FastHashSet::with_capacity(peer_count.majority_of_others()),
@@ -113,19 +112,18 @@ impl Downloader {
                 (undone_peers.iter()).chain(iter::once((&point_id.author, &author_state))),
             ),
             parse_queue: Vec::with_capacity(peer_count.reliable_minority()),
-            parse_slot: futures_util::future::pending().boxed(),
             downloading: FuturesUnordered::new(),
             interval,
             attempt: 0,
         };
         let downloaded = task
-            .run(dependers_rx, broadcast_result)
+            .run(&self.inner.peer_schedule, &ctx)
             .instrument(entered_span.exit())
             .await?;
 
         if matches!(downloaded, DownloadResult::NotFound) {
             tracing::warn!(
-                parent: task.ctx.span(),
+                parent: ctx.span(),
                 "not downloaded",
             );
         }
@@ -137,10 +135,9 @@ impl Downloader {
 }
 
 struct DownloadTask {
-    peer_schedule: PeerSchedule,
-    ctx: DownloadCtx,
-
     query: DownloadQuery,
+    dependers_rx: mpsc::UnboundedReceiver<PeerId>,
+    broadcast_result: oneshot::Receiver<DownloadResult>,
 
     peer_count: PeerCount,
     not_found: FastHashSet<PeerId>, // count peers towards `2F` to decide the point is unavailable
@@ -152,7 +149,6 @@ struct DownloadTask {
     downloading: FuturesUnordered<BoxFuture<'static, QueryFutureOutput<Bytes>>>,
 
     parse_queue: Vec<(PeerId, Bytes)>,
-    parse_slot: BoxFuture<'static, QueryFutureOutput<ParseResult>>,
 
     interval: Interval,
     attempt: u32,
@@ -168,22 +164,24 @@ impl DownloadTask {
     // recursively: every dependency is expected to be signed by 2/3+1
     pub async fn run(
         &mut self,
-        mut dependers_rx: mpsc::UnboundedReceiver<PeerId>,
-        mut broadcast_result: oneshot::Receiver<DownloadResult>,
+        peer_schedule: &PeerSchedule,
+        ctx: &DownloadCtx,
     ) -> TaskResult<DownloadResult> {
         // if parse slot is taken - neither create new queries nor increase task limit
         // but continue to poll created queries in order not to cancel them
         let mut parse_slot_taken = false;
+        let mut parse_slot: BoxFuture<'_, QueryFutureOutput<ParseResult>> =
+            futures_util::future::pending().boxed();
 
         loop {
             tokio::select! {
                 biased; // mandatory priority: signals lifecycle, updates, data lifecycle
-                bcast_result = &mut broadcast_result, if !broadcast_result.is_terminated() => {
+                bcast_result = &mut self.broadcast_result, if !self.broadcast_result.is_terminated() => {
                     if let Ok(bcast_result) = bcast_result {
                         break Ok(bcast_result);
                     }
                 },
-                Some(depender) = dependers_rx.recv() => self.add_depender(&depender),
+                Some(depender) = self.dependers_rx.recv() => self.add_depender(&depender),
                 update = self.updates.recv() => self.match_peer_updates(update)?,
                 Some(out) = self.downloading.next() => {
                     let new_result = match out.result {
@@ -191,7 +189,7 @@ impl DownloadTask {
                             if parse_slot_taken {
                                 self.parse_queue.push((out.peer_id, bytes));
                             } else {
-                                self.parse_slot = Self::parse(out.peer_id, bytes).boxed();
+                                parse_slot = parse(ctx.rayon(), out.peer_id, bytes);
                                 parse_slot_taken = true;
                             }
                             continue;
@@ -204,33 +202,33 @@ impl DownloadTask {
                         peer_id: out.peer_id,
                         result: new_result,
                     };
-                    if let Some(result) = self.inspect(new_out) {
+                    if let Some(result) = self.inspect(new_out, peer_schedule, ctx) {
                         break Ok(result);
                     } else if self.not_found.len() >= self.peer_count.majority_of_others() {
                         break Ok(DownloadResult::NotFound);
                     } else if !parse_slot_taken {
-                        self.download_random(); // keep the current request amount
+                        self.download_random(ctx); // keep the current request amount
                     }
                 },
-                parsed_out = &mut self.parse_slot, if parse_slot_taken => {
-                    if let Some(result) = self.inspect(parsed_out) {
+                parsed_out = &mut parse_slot, if parse_slot_taken => {
+                    if let Some(result) = self.inspect(parsed_out, peer_schedule, ctx) {
                         break Ok(result);
                     } else if self.not_found.len() >= self.peer_count.majority_of_others() {
                         break Ok(DownloadResult::NotFound);
                     }
                     if let Some((peer_id, bytes)) = self.parse_queue.pop() {
-                        self.parse_slot = Self::parse(peer_id, bytes).boxed();
+                        parse_slot = parse(ctx.rayon(), peer_id, bytes);
                     } else {
                         parse_slot_taken = false;
                     }
                     if !parse_slot_taken {
-                        self.download_random(); // keep the current request amount
+                        self.download_random(ctx); // keep the current request amount
                     }
                 }
                 // most rare arm to make progress despite slow responding peers
                 _ = self.interval.tick(), if !parse_slot_taken => {
                     // first tick fires immediately
-                    self.download_random();
+                    self.download_random(ctx);
                     self.attempt = self.attempt.wrapping_add(1);
                 },
             }
@@ -246,12 +244,12 @@ impl DownloadTask {
         });
     }
 
-    fn download_random(&mut self) {
+    fn download_random(&mut self, ctx: &DownloadCtx) {
         let amount = current_peers(
             self.attempt,
             self.downloading.len(),
             &self.peer_count,
-            self.ctx.conf(),
+            ctx.conf(),
         );
 
         for _ in 0..amount {
@@ -266,17 +264,12 @@ impl DownloadTask {
         }
     }
 
-    async fn parse(peer_id: PeerId, bytes: Bytes) -> QueryFutureOutput<ParseResult> {
-        let start = std::time::Instant::now();
-        let parse_result = rayon_run_fifo(|| Point::parse(bytes.into())).await;
-        metrics::histogram!("tycho_mempool_engine_parse_point_time").record(start.elapsed());
-        QueryFutureOutput {
-            peer_id,
-            result: Ok(DownloadResponse::Defined(parse_result)),
-        }
-    }
-
-    fn inspect(&mut self, out: QueryFutureOutput<ParseResult>) -> Option<DownloadResult> {
+    fn inspect(
+        &mut self,
+        out: QueryFutureOutput<ParseResult>,
+        peer_schedule: &PeerSchedule,
+        ctx: &DownloadCtx,
+    ) -> Option<DownloadResult> {
         // remove peer status: will not repeat request to the peer in this download task
         enum LastResponse {
             Point(Point),
@@ -285,6 +278,15 @@ impl DownloadTask {
             BadPoint(PointIntegrityError),
             TlError(tl_proto::TlError),
         }
+
+        let mut on_try_later = || {
+            if !self.undone_peers.update(&out.peer_id, |status| {
+                status.is_in_flight = false;
+                status.failed_queries = status.failed_queries.saturating_add(1);
+            }) {
+                panic!("Coding error: peer not in map {}", out.peer_id.alt());
+            };
+        };
 
         let last_response = match out.result {
             Ok(DownloadResponse::Defined(parse_result)) => match parse_result {
@@ -296,23 +298,12 @@ impl DownloadTask {
             Ok(DownloadResponse::DefinedNone) => LastResponse::DefinedNone,
             Err(QueryError::TlError(tl_error)) => LastResponse::TlError(tl_error),
             Ok(DownloadResponse::TryLater) => {
-                // apply the same retry strategy as for network errors
-                if !self.undone_peers.update(&out.peer_id, |status| {
-                    status.is_in_flight = false;
-                    status.failed_queries = status.failed_queries.saturating_add(1);
-                }) {
-                    panic!("Coding error: peer not in map {}", out.peer_id.alt());
-                };
+                on_try_later();
                 tracing::trace!(peer = display(out.peer_id.alt()), "try later");
                 return None;
             }
             Err(QueryError::Network(network_err)) => {
-                if !self.undone_peers.update(&out.peer_id, |status| {
-                    status.is_in_flight = false;
-                    status.failed_queries = status.failed_queries.saturating_add(1);
-                }) {
-                    panic!("Coding error: peer not in map {}", out.peer_id.alt());
-                };
+                on_try_later();
                 metrics::counter!("tycho_mempool_download_query_failed_count").increment(1);
                 tracing::debug!(
                     peer = display(out.peer_id.alt()),
@@ -410,7 +401,7 @@ impl DownloadTask {
                 None
             }
             LastResponse::Point(point) => {
-                match Verifier::verify(point.info(), &self.peer_schedule, self.ctx.conf()) {
+                match Verifier::verify(point.info(), peer_schedule, ctx.conf()) {
                     Ok(()) => Some(DownloadResult::Verified(point)), // `Some` breaks outer loop
                     Err(error) => {
                         tracing::error!(
@@ -445,6 +436,24 @@ impl DownloadTask {
             }
         }
     }
+}
+
+fn parse(
+    rayon: &MempoolRayon,
+    peer_id: PeerId,
+    bytes: Bytes,
+) -> BoxFuture<'_, QueryFutureOutput<ParseResult>> {
+    let parse_duration = HistogramGuard::begin("tycho_mempool_engine_parse_point_time");
+    rayon
+        .run_fifo(|| Point::parse(bytes.into()))
+        .map(move |parse_result| {
+            drop(parse_duration);
+            QueryFutureOutput {
+                peer_id,
+                result: Ok(DownloadResponse::Defined(parse_result)),
+            }
+        })
+        .boxed()
 }
 
 impl DownloadCtx {

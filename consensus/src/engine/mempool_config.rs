@@ -188,6 +188,9 @@ pub struct MempoolNodeConfig {
     /// Each dag round has at least one weak reference to previous dag round;
     /// more links reduce [`std::sync::Weak::upgrade`] calls which results are immediately dropped
     pub weak_dag_round_links: NonZeroU8,
+
+    /// Threads to use in a separate thread pool
+    pub rayon_threads: NonZeroU8,
 }
 
 impl Default for MempoolNodeConfig {
@@ -201,6 +204,7 @@ impl Default for MempoolNodeConfig {
             max_upload_tasks: 50.try_into().unwrap(),
             max_download_tasks: 250.try_into().unwrap(),
             weak_dag_round_links: 7.try_into().unwrap(),
+            rayon_threads: 4.try_into().unwrap(),
         }
     }
 }

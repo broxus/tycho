@@ -328,7 +328,6 @@ mod tests {
     use anyhow::{Context, Result, ensure};
     use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
     use test_point::{PEERS, new_key_pair, payload, point, prev_point_data};
-    use tycho_util::sync::rayon_run;
 
     use super::*;
     use crate::test_utils::default_test_config;
@@ -388,12 +387,12 @@ mod tests {
         let (digest, data) = prev_point_data();
 
         let timer = Instant::now();
-        rayon_run(|| ()).await;
+        tycho_util::sync::rayon_run(|| ()).await;
         let elapsed = timer.elapsed();
         println!("init rayon took {}", humantime::format_duration(elapsed));
 
         let timer = Instant::now();
-        rayon_run(move || {
+        tycho_util::sync::rayon_run(move || {
             assert!(
                 data.iter()
                     .all(|(peer_id, sig)| sig.verifies(peer_id, &digest)),

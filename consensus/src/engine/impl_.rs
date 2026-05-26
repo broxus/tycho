@@ -61,7 +61,7 @@ impl Engine {
         consensus_round.set_max(conf.genesis_round);
         bind.top_known_anchor.set_max(conf.genesis_round);
 
-        let engine_ctx = EngineCtx::new(consensus_round.get(), conf, task_tracker);
+        let engine_ctx = EngineCtx::new(consensus_round.get(), conf, task_tracker, &bind.rayon);
         let round_ctx = RoundCtx::new(&engine_ctx, Round::BOTTOM);
 
         let store = MempoolStore::new(bind.mempool_db.clone());

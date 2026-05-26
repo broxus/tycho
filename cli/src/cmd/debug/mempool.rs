@@ -10,7 +10,7 @@ use tokio::sync::{mpsc, oneshot};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_consensus::prelude::{
     EngineBinding, EngineNetworkArgs, EngineSession, InitPeers, InputBuffer, MempoolConfigBuilder,
-    MempoolDb, MempoolMergedConfig, Moderator,
+    MempoolDb, MempoolMergedConfig, MempoolRayon, Moderator,
 };
 use tycho_consensus::test_utils::{AnchorConsumer, LastAnchorFile, test_logger};
 use tycho_control::{ControlEndpoint, ControlServer, ControlServerConfig, ControlServerVersion};
@@ -179,6 +179,7 @@ struct Mempool {
 
     mempool_db: Arc<MempoolDb>,
     input_buffer: InputBuffer,
+    rayon: MempoolRayon,
     merged_conf: MempoolMergedConfig,
 
     // a guard to abort the server future on drop
@@ -186,7 +187,7 @@ struct Mempool {
 }
 
 impl Mempool {
-    async fn new(cmd: CmdRun, node_config: NodeConfig) -> Result<Mempool> {
+    async fn new(cmd: CmdRun, node_config: NodeConfig) -> Result<Self> {
         let global_config =
             GlobalConfig::from_file(&cmd.global_config).context("failed to load global config")?;
 
@@ -303,12 +304,15 @@ impl Mempool {
             &merged_conf.conf.consensus,
         );
 
-        Ok(Mempool {
+        let rayon = MempoolRayon::new(merged_conf.node_config().rayon_threads)?;
+
+        Ok(Self {
             net_args,
             init_peers,
 
             mempool_db,
             input_buffer,
+            rayon,
             merged_conf,
 
             _control_endpoint,
@@ -328,6 +332,7 @@ impl Mempool {
         let bind = EngineBinding {
             mempool_db: self.mempool_db.clone(),
             input_buffer: self.input_buffer.clone(),
+            rayon: self.rayon.clone(),
             top_known_anchor: anchor_consumer.top_known_anchor.clone(),
             commit_finished: anchor_consumer.commit_finished.clone(),
             anchors_tx,
