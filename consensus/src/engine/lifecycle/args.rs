@@ -4,7 +4,7 @@ use tokio::sync::mpsc;
 use tycho_crypto::ed25519::KeyPair;
 use tycho_network::{Network, OverlayService, PeerResolver, PrivateOverlay};
 
-use crate::effects::AltFormat;
+use crate::effects::{AltFormat, MempoolRayon};
 use crate::engine::round_watch::{Commit, RoundWatch, TopKnownAnchor};
 use crate::engine::{InputBuffer, MempoolMergedConfig};
 use crate::intercom::{Dispatcher, InitPeers, PeerSchedule, Responder};
@@ -16,6 +16,7 @@ use crate::storage::MempoolDb;
 pub struct EngineBinding {
     pub mempool_db: Arc<MempoolDb>,
     pub input_buffer: InputBuffer,
+    pub rayon: MempoolRayon,
     pub top_known_anchor: RoundWatch<TopKnownAnchor>,
     pub commit_finished: RoundWatch<Commit>,
     pub anchors_tx: mpsc::UnboundedSender<MempoolOutput>,

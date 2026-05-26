@@ -3095,10 +3095,6 @@ def mempool_misc() -> RowPanel:
             "Responder: query execution aborted (total at moment)",
             legend_format="{{instance}} - {{kind}}",
         ),
-        create_heatmap_panel(
-            "tycho_mempool_point_parse_verify_time",
-            "Responder and Downloader: point parse time (incl check sig and verify)",
-        ),
         create_counter_panel(
             expr_sum_increase(
                 "tycho_mempool_stats_merge_errors",
@@ -3109,15 +3105,40 @@ def mempool_misc() -> RowPanel:
             legend_format="{{instance}} - {{kind}}",
         ),
         create_heatmap_panel(
-            "tycho_mempool_engine_parse_point_time",
-            "Responder and Downloader: point parse task duration (async result)",
-        ),
-        create_heatmap_panel(
             "tycho_mempool_verifier_validate_time",
             "Verifier: validate() point dependencies in DAG and all-1 sigs",
         ),
     ]
     return create_row("Mempool misc", metrics)
+
+
+def mempool_rayon() -> RowPanel:
+    metrics = [
+        create_heatmap_panel(
+            "tycho_mempool_point_parse_verify_time",
+            "Responder and Downloader: point parse time (incl check sig and verify)",
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_engine_parse_point_time",
+            "Responder and Downloader: point parse task duration (async result)",
+        ),
+        create_heatmap_panel(
+            "tycho_rayon_mempool_task_time",
+            "Mempool fifo Task Time",
+            yaxis(UNITS.SECONDS),
+        ),
+        create_heatmap_panel(
+            "tycho_rayon_mempool_queue_time",
+            "Mempool fifo Queue Time",
+            yaxis(UNITS.SECONDS),
+        ),
+        create_heatmap_panel(
+            "tycho_rayon_mempool_threads",
+            "Mempool fifo Threads",
+            yaxis(UNITS.NUMBER_FORMAT),
+        ),
+    ]
+    return create_row("Mempool rayon", metrics)
 
 
 def mempool_broadcasts() -> RowPanel:
@@ -3652,6 +3673,7 @@ dashboard = Dashboard(
         mempool_engine(),
         mempool_stats(),
         mempool_misc(),
+        mempool_rayon(),
         mempool_broadcasts(),
         mempool_downloads(),
         mempool_peers(),

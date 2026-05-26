@@ -11,7 +11,7 @@ use tycho_network::{Network, OverlayId, PeerId, PrivateOverlay, Router};
 use tycho_util::FastHashMap;
 
 use crate::dag::{AnchorStage, DagRound, ValidateResult, Verifier};
-use crate::effects::{Ctx, EngineCtx, RoundCtx, TaskTracker, ValidateCtx};
+use crate::effects::{Ctx, EngineCtx, MempoolRayon, RoundCtx, TaskTracker, ValidateCtx};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Dispatcher, Downloader, InitPeers, PeerSchedule, Responder};
 use crate::models::{
@@ -41,7 +41,10 @@ pub fn make_engine_parts<const PEER_COUNT: usize>(
 
     let dispatcher = Dispatcher::new(&network, &private_overlay, &Moderator::new_stub(), conf);
 
-    let engine_ctx = EngineCtx::new(conf.genesis_round, conf, &task_tracker);
+    let rayon = MempoolRayon::new(merged_conf.node_config().rayon_threads)
+        .expect("failed to create mempool rayon thread pool");
+
+    let engine_ctx = EngineCtx::new(conf.genesis_round, conf, &task_tracker, &rayon);
 
     // any peer id will be ok, network is not used
     let peer_schedule = PeerSchedule::new(local_keys, private_overlay);

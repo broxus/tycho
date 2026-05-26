@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use tracing::Span;
 
 use crate::effects::task::TaskTracker;
-use crate::effects::{AltFormat, TaskCtx};
+use crate::effects::{AltFormat, MempoolRayon, TaskCtx};
 use crate::engine::MempoolConfig;
 use crate::models::{Point, PointId, PointInfo, Round};
 
@@ -12,14 +12,16 @@ use crate::models::{Point, PointId, PointInfo, Round};
 pub trait Ctx {
     fn span(&self) -> &Span;
     fn conf(&self) -> &MempoolConfig;
+    fn rayon(&self) -> &MempoolRayon;
     fn task(&self) -> TaskCtx<'_>;
 }
 
 /// Root context for uninterrupted sequence of engine rounds
-pub struct EngineCtx(Arc<EngineCtxInner>);
+pub struct EngineCtx(Box<EngineCtxInner>);
 struct EngineCtxInner {
     span: Span,
     conf: MempoolConfig,
+    rayon: MempoolRayon,
     task_tracker: TaskTracker,
 }
 impl Ctx for EngineCtx {
@@ -29,24 +31,29 @@ impl Ctx for EngineCtx {
     fn conf(&self) -> &MempoolConfig {
         &self.0.conf
     }
+    fn rayon(&self) -> &MempoolRayon {
+        &self.0.rayon
+    }
     fn task(&self) -> TaskCtx<'_> {
         self.0.task_tracker.ctx()
     }
 }
 impl EngineCtx {
-    pub fn new(since: Round, conf: &MempoolConfig, task_tracker: &TaskTracker) -> Self {
-        Self(Arc::new(EngineCtxInner {
+    pub fn new(
+        since: Round,
+        conf: &MempoolConfig,
+        task_tracker: &TaskTracker,
+        rayon: &MempoolRayon,
+    ) -> Self {
+        Self(Box::new(EngineCtxInner {
             span: tracing::error_span!("rounds", "since" = since.0),
             conf: conf.clone(),
+            rayon: rayon.clone(),
             task_tracker: task_tracker.clone(),
         }))
     }
     pub fn update(&mut self, since: Round) {
-        self.0 = Arc::new(EngineCtxInner {
-            span: tracing::error_span!("rounds", "since" = since.0),
-            conf: self.0.conf.clone(),
-            task_tracker: self.0.task_tracker.clone(),
-        });
+        self.0.span = tracing::error_span!("rounds", "since" = since.0);
     }
     pub fn meter_dag_len(len: usize) {
         metrics::gauge!("tycho_mempool_rounds_dag_length").set(len as u32);
@@ -58,6 +65,7 @@ pub struct RoundCtx(Arc<RoundCtxInner>);
 struct RoundCtxInner {
     span: Span,
     conf: MempoolConfig,
+    rayon: MempoolRayon,
     task_tracker: TaskTracker,
     current_round: Round,
     download_max_depth: AtomicU32,
@@ -68,6 +76,9 @@ impl Ctx for RoundCtx {
     }
     fn conf(&self) -> &MempoolConfig {
         &self.0.conf
+    }
+    fn rayon(&self) -> &MempoolRayon {
+        &self.0.rayon
     }
     fn task(&self) -> TaskCtx<'_> {
         self.0.task_tracker.ctx()
@@ -80,6 +91,7 @@ impl RoundCtx {
                 .span()
                 .in_scope(|| tracing::error_span!("round", "current" = current_round.0)),
             conf: parent.conf().clone(),
+            rayon: parent.rayon().clone(),
             task_tracker: parent.0.task_tracker.clone(),
             current_round,
             download_max_depth: Default::default(),
@@ -100,6 +112,9 @@ impl Ctx for CollectCtx {
     }
     fn conf(&self) -> &MempoolConfig {
         self.parent.conf()
+    }
+    fn rayon(&self) -> &MempoolRayon {
+        self.parent.rayon()
     }
     fn task(&self) -> TaskCtx<'_> {
         self.parent.task()
@@ -124,6 +139,9 @@ impl Ctx for BroadcastCtx {
     }
     fn conf(&self) -> &MempoolConfig {
         self.parent.conf()
+    }
+    fn rayon(&self) -> &MempoolRayon {
+        self.parent.rayon()
     }
     fn task(&self) -> TaskCtx<'_> {
         self.parent.task()
@@ -154,6 +172,9 @@ impl Ctx for DownloadCtx {
     }
     fn conf(&self) -> &MempoolConfig {
         self.parent.conf()
+    }
+    fn rayon(&self) -> &MempoolRayon {
+        self.parent.rayon()
     }
     fn task(&self) -> TaskCtx<'_> {
         self.parent.task()
@@ -211,6 +232,9 @@ impl Ctx for ValidateCtx {
     }
     fn conf(&self) -> &MempoolConfig {
         self.0.parent.conf()
+    }
+    fn rayon(&self) -> &MempoolRayon {
+        self.0.parent.rayon()
     }
     fn task(&self) -> TaskCtx<'_> {
         self.0.parent.task()

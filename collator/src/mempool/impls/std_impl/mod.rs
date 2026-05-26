@@ -98,6 +98,7 @@ impl MempoolAdapterStdImpl {
         let bind = EngineBinding {
             mempool_db: self.mempool_db.clone(),
             input_buffer: self.input_buffer.clone(),
+            rayon: MempoolRayon::new(merged_conf.node_config().rayon_threads)?,
             top_known_anchor: self.top_known_anchor.clone(),
             commit_finished: commit_finished.clone(),
             anchors_tx,

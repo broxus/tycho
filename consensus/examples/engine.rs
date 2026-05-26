@@ -10,8 +10,8 @@ use futures_util::FutureExt;
 use parking_lot::deadlock;
 use tokio::sync::{Notify, mpsc, oneshot};
 use tycho_consensus::prelude::{
-    EngineBinding, EngineNetworkArgs, EngineSession, InitPeers, InputBuffer, MempoolDb, Moderator,
-    ModeratorConfig,
+    EngineBinding, EngineNetworkArgs, EngineSession, InitPeers, InputBuffer, MempoolDb,
+    MempoolRayon, Moderator, ModeratorConfig,
 };
 use tycho_consensus::test_utils::*;
 use tycho_crypto::ed25519::{KeyPair, SecretKey};
@@ -195,6 +195,9 @@ fn make_network(
                             }
                         };
 
+                        let rayon = MempoolRayon::new(merged_conf.node_config().rayon_threads)
+                            .expect("failed to create mempool rayon thread pool");
+
                         let bind = EngineBinding {
                             mempool_db,
                             input_buffer: InputBuffer::new_stub(
@@ -202,6 +205,7 @@ fn make_network(
                                 cli.steps_until_full,
                                 &merged_conf.conf.consensus,
                             ),
+                            rayon,
                             top_known_anchor,
                             commit_finished,
                             anchors_tx,
