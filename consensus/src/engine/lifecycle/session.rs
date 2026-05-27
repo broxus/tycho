@@ -86,16 +86,22 @@ impl EngineSession {
     pub async fn stop(self) {
         let span = self.span_fields.stop_span();
 
-        span.in_scope(|| tracing::warn!("waiting engine threads to exit"));
+        span.in_scope(|| tracing::warn!("locking run attributes to stop mempool"));
 
         let engine_tracker = {
             let mut guard = self.run_attrs.lock();
             guard.is_stopping = true;
             guard.tracker.clone()
         };
-        drop(self.run_attrs); // drops `PeerSchedule` clone inside
-        engine_tracker.stop().await;
+
+        drop(self.run_attrs);
+        self.recover_loop.abort();
+
+        span.in_scope(|| tracing::warn!("waiting cancelled recover loop to exit"));
         self.recover_loop.await.ok();
+
+        span.in_scope(|| tracing::warn!("waiting tracked tasks to exit"));
+        engine_tracker.stop().await;
 
         span.in_scope(|| tracing::warn!("stop completed"));
 
