@@ -1,4 +1,5 @@
 use std::cmp;
+use std::cmp::Ordering;
 use std::sync::Arc;
 
 use indexmap::IndexMap;
@@ -23,6 +24,12 @@ pub enum CacheError {
     UnexpectedAnchor {
         prev_anchor_id: MempoolAnchorId,
         found_prev_id: MempoolAnchorId,
+        found_id: MempoolAnchorId,
+        is_paused: bool,
+    },
+    #[error("Mempool Adapter Cache contains out of order anchor: {self:?}")]
+    OutOfOrderAnchor {
+        lookup_id: MempoolAnchorId,
         found_id: MempoolAnchorId,
         is_paused: bool,
     },
@@ -149,7 +156,7 @@ impl Cache {
                     %chain_time,
                     %externals_count,
                     %is_paused,
-                    "ignoring same anchor replacement"
+                    "ignoring same anchor replacement:"
                 );
             }
         } else {
@@ -163,7 +170,10 @@ impl Cache {
         self.anchor_added.notify_waiters();
     }
 
-    pub async fn get_anchor_by_id(&self, anchor_id: MempoolAnchorId) -> Option<Arc<MempoolAnchor>> {
+    pub async fn get_anchor_by_id(
+        &self,
+        anchor_id: MempoolAnchorId,
+    ) -> Result<Option<Arc<MempoolAnchor>>, CacheError> {
         loop {
             // NOTE: Subscribe to notification before checking
             let anchor_added = self.anchor_added.notified();
@@ -171,7 +181,7 @@ impl Cache {
             'attempt: {
                 let data = &self.data.read();
 
-                if data.is_off_after_anchor.is_some_and(|off| anchor_id > off) {
+                if data.anchor_is_off(anchor_id) {
                     break 'attempt;
                 }
 
@@ -182,32 +192,46 @@ impl Cache {
                             target: tracing_targets::MEMPOOL_ADAPTER,
                             %anchor_id,
                             is_paused = data.is_paused.then_some(true),
-                            "Anchor cache is empty, waiting"
+                            "Anchor cache is empty, waiting:"
                         );
                     }
                     // Trying to get anchor that is too old
                     Some((first_id, _)) if anchor_id < *first_id => {
+                        if data.anchor_is_off(*first_id) {
+                            break 'attempt;
+                        }
                         tracing::warn!(
                             target: tracing_targets::MEMPOOL_ADAPTER,
                             %anchor_id,
                             %first_id,
                             is_paused = data.is_paused.then_some(true),
-                            "Requested anchor is too old"
+                            "Requested anchor is too old:"
                         );
-                        return None;
+                        return Ok(None);
                     }
                     Some(_) => {
-                        if let Some(found) = data.anchors.get(&anchor_id) {
-                            return Some(found.clone());
-                        }
-                        let (last_id, _) = data.anchors.last().expect("map is not empty");
-                        if *last_id > anchor_id {
-                            return None; // will not be received
+                        let pos = (data.anchors)
+                            .binary_search_keys(&anchor_id)
+                            .unwrap_or_else(std::convert::identity);
+
+                        if let Some((_, found)) = data.anchors.get_index(pos) {
+                            if data.anchor_is_off(found.id) {
+                                break 'attempt;
+                            }
+                            return match found.id.cmp(&anchor_id) {
+                                Ordering::Equal => Ok(Some(found.clone())),
+                                Ordering::Greater => Ok(None), // will not be received
+                                Ordering::Less => Err(CacheError::OutOfOrderAnchor {
+                                    lookup_id: anchor_id,
+                                    found_id: found.id,
+                                    is_paused: data.is_paused,
+                                }),
+                            };
                         } else {
                             tracing::warn!(
                                 target: tracing_targets::MEMPOOL_ADAPTER,
                                 %anchor_id,
-                                "Anchor is unknown, waiting"
+                                "Anchor is unknown, waiting:"
                             );
                         }
                     }
@@ -228,7 +252,7 @@ impl Cache {
             'attempt: {
                 let data = &self.data.read();
 
-                if (data.is_off_after_anchor).is_some_and(|off| prev_anchor_id >= off) {
+                if data.anchor_is_off(prev_anchor_id.saturating_add(1)) {
                     break 'attempt;
                 }
 
@@ -239,10 +263,13 @@ impl Cache {
                             target: tracing_targets::MEMPOOL_ADAPTER,
                             %prev_anchor_id,
                             is_paused = data.is_paused.then_some(true),
-                            "Anchor cache is empty, waiting"
+                            "Anchor cache is empty, waiting:"
                         );
                     }
                     Some((first_id, first)) if prev_anchor_id < *first_id => {
+                        if data.anchor_is_off(first.id) {
+                            break 'attempt;
+                        }
                         return match first.prev_id {
                             None => {
                                 // Return the first anchor after genesis
@@ -266,7 +293,7 @@ impl Cache {
                                     %first_id,
                                     first_prev_id = first.prev_id,
                                     is_paused = data.is_paused.then_some(true),
-                                    "Requested anchor is too old"
+                                    "Requested anchor is too old:"
 
                                 );
                                 Ok(None)
@@ -275,9 +302,15 @@ impl Cache {
                     }
                     Some(_) => {
                         // Find the index of the previous anchor
-                        if let Some(index) = data.anchors.get_index_of(&prev_anchor_id) {
+                        let search_result = (data.anchors).binary_search_keys(&prev_anchor_id);
+
+                        if let Ok(index) = search_result {
                             // Try to get the next anchor
                             if let Some((_, found)) = data.anchors.get_index(index + 1) {
+                                if data.anchor_is_off(found.id) {
+                                    break 'attempt;
+                                }
+
                                 let error = if let Some(found_prev_id) = found.prev_id {
                                     match prev_anchor_id.cmp(&found_prev_id) {
                                         cmp::Ordering::Equal => return Ok(Some(found.clone())),
@@ -300,7 +333,7 @@ impl Cache {
                                         %prev_anchor_id,
                                         found_anchor_id = found.id,
                                         is_paused = data.is_paused.then_some(true),
-                                        "Found first after a gep"
+                                        "Found first after a gep:"
                                     );
                                     return Ok(Some(found.clone()));
                                 };
@@ -314,21 +347,26 @@ impl Cache {
                                     target: tracing_targets::MEMPOOL_ADAPTER,
                                     %prev_anchor_id,
                                     is_paused = data.is_paused.then_some(true),
-                                    "Next anchor is unknown, waiting"
+                                    "Next anchor is unknown, waiting:"
                                 );
                             }
-                        } else {
-                            let (last_id, _) = data.anchors.last().expect("map is not empty");
-                            if *last_id > prev_anchor_id {
+                        } else if let Err(next_pos) = search_result {
+                            if let Some((next_id, _)) = data.anchors.get_index(next_pos) {
+                                // map is not empty
+                                if data.anchor_is_off(*next_id) {
+                                    break 'attempt;
+                                }
                                 return Ok(None); // will not be received
                             } else {
                                 tracing::warn!(
                                     target: tracing_targets::MEMPOOL_ADAPTER,
                                     %prev_anchor_id,
                                     is_paused = data.is_paused.then_some(true),
-                                    "Prev anchor is unknown, waiting"
+                                    "Prev anchor is unknown, waiting:"
                                 );
                             }
+                        } else {
+                            unreachable!("both `Ok` and `Err` have `if` branches");
                         };
                     }
                 }
@@ -360,12 +398,19 @@ impl Cache {
             target: tracing_targets::MEMPOOL_ADAPTER,
             %before_anchor_id,
             is_paused,
-            "anchors cache was cleared",
+            "anchors cache was cleared:",
         );
     }
 }
 
 impl CacheData {
+    // Close keeps future anchors buffered, but readers must not observe them
+    // until reopen decides whether to keep or drop that tail.
+    fn anchor_is_off(&self, anchor_id: MempoolAnchorId) -> bool {
+        self.is_off_after_anchor
+            .is_some_and(|after_anchor_id| anchor_id > after_anchor_id)
+    }
+
     fn shrink(&mut self) {
         let len = self.anchors.len();
         if self.anchors.capacity() > len.saturating_mul(4) {
@@ -376,7 +421,6 @@ impl CacheData {
 
 #[cfg(test)]
 mod tests {
-    use std::convert::Infallible;
     use std::fmt::Debug;
     use std::sync::Arc;
     use std::time::Duration;
@@ -477,8 +521,7 @@ mod tests {
         cache.close(5);
 
         let cache_copy = cache.clone();
-        let mut task =
-            tokio::spawn(async move { Ok::<_, Infallible>(cache_copy.get_anchor_by_id(6).await) });
+        let mut task = tokio::spawn(async move { cache_copy.get_anchor_by_id(6).await });
 
         assert!(timeout(WAIT, &mut task).await.is_err());
 
@@ -528,6 +571,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn close_hides_old_tail_above_boundary() {
+        let cache = Arc::new(Cache::default());
+        cache.push(anchor(15, None)).unwrap();
+        cache.close(13);
+
+        let cache_copy = cache.clone();
+        let mut by_id_task = tokio::spawn(async move { cache_copy.get_anchor_by_id(12).await });
+
+        let cache_copy = cache.clone();
+        let mut next_task = tokio::spawn(async move { cache_copy.get_next_anchor(12).await });
+
+        assert!(timeout(WAIT, &mut by_id_task).await.is_err());
+        assert!(timeout(WAIT, &mut next_task).await.is_err());
+
+        assert_eq!(cache.reopen(false), Some(13));
+
+        let maybe_id = unwrap_task(by_id_task).await.map(|a| a.id);
+        assert_eq!(maybe_id, None);
+
+        let next = unwrap_task(next_task).await.expect("anchor must exist");
+        assert_eq!(next.id, 15);
+    }
+
+    #[tokio::test]
     async fn close_reopen_drops_new_input() {
         let cache = Arc::new(Cache::default());
         cache.push(anchor(5, None)).unwrap();
@@ -535,8 +602,7 @@ mod tests {
         cache.close(5);
 
         let cache_copy = cache.clone();
-        let mut task =
-            tokio::spawn(async move { Ok::<_, Infallible>(cache_copy.get_anchor_by_id(6).await) });
+        let mut task = tokio::spawn(async move { cache_copy.get_anchor_by_id(6).await });
 
         assert!(timeout(WAIT, &mut task).await.is_err());
 
