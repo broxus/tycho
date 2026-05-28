@@ -89,6 +89,7 @@ impl ValidatorSession {
             info.session_id.into(),
             info.start_block_seqno,
             own_validator_idx,
+            info.vset_hash,
             info.validators,
         );
 

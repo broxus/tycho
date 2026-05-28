@@ -1,6 +1,6 @@
 import arg from "arg";
 import { address, beginCell, storeAccount, toNano } from "@ton/core";
-import { storeSlasherStubData } from "../wrappers/SlasherStub";
+import { storeSlasherData } from "../wrappers/Slasher";
 import { compile } from "@ton/blueprint";
 
 async function main() {
@@ -12,14 +12,14 @@ async function main() {
     throw new Error("`--balance` option is missing");
   }
 
-  const code = await compile("SlasherStub");
+  const code = await compile("Slasher");
 
   const account = beginCell()
     .storeBit(true)
     .store(
       storeAccount({
         addr: address(
-          "-1:0000000000000000000000000000000000000000000000000000000000000000"
+          "-1:0000000000000000000000000000000000000000000000000000000000000000",
         ),
         storage: {
           balance: {
@@ -32,9 +32,9 @@ async function main() {
               code,
               data: beginCell()
                 .store(
-                  storeSlasherStubData({
+                  storeSlasherData({
                     updatedAtMs: 0n,
-                  })
+                  }),
                 )
                 .endCell(),
             },
@@ -48,7 +48,7 @@ async function main() {
           lastPaid: 0,
           storageExtra: null,
         },
-      })
+      }),
     )
     .endCell();
   console.log(account.toBoc().toString("base64"));

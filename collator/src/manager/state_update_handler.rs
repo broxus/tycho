@@ -5,7 +5,10 @@ use ahash::HashMapExt;
 use anyhow::{Context, Result, anyhow};
 use tokio::sync::Notify;
 use tycho_block_util::block::{ValidatorSubsetInfo, calc_next_block_id_short};
-use tycho_types::models::{BlockId, GlobalCapabilities, IndexedValidatorDescription, ShardIdent};
+use tycho_block_util::config::BlockchainConfigExt;
+use tycho_types::models::{
+    BlockId, GlobalCapabilities, IndexedValidatorDescription, ShardIdent, ValidatorSet,
+};
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{DashMapEntry, FastHashMap, FastHashSet};
@@ -186,7 +189,8 @@ where
         let validation_session_id = (catchain_seqno, vset_switch_round);
 
         // we need full validators set to define the subset for each session and to check if current node should collate
-        let full_validators_set = mc_data.config.get_current_validator_set()?;
+        let raw_validators_set = mc_data.config.get_current_validator_set_raw()?;
+        let full_validators_set = raw_validators_set.parse::<ValidatorSet>()?;
         tracing::trace!(target: tracing_targets::COLLATION_MANAGER,
             "full_validators_set: since={}, until={}, main={}, total_weight={}, list={:?}",
             full_validators_set.utime_since, full_validators_set.utime_until,
@@ -409,6 +413,7 @@ where
                     shard_ident: shard_id,
                     session_id: new_session_info.get_validation_session_id(),
                     start_block_seqno: next_block_id_short.seqno,
+                    vset_hash: raw_validators_set.repr_hash(),
                     validators: &new_session_info.collators().validators,
                 })?;
             }

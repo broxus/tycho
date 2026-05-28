@@ -2,10 +2,14 @@ import "@stdlib/gas-payments"
 import "@stdlib/tvm-dicts"
 import "lib/config-params"
 
+const SLASHER_OP_SEND_BLOCKS_BATCH = stringCrc32("op::slasher_send_blocks_batch")
+const SLASHER_OP_VOTE = stringCrc32("op::slasher_vote")
+
 const ERROR_INVALID_SIGNATURE = 40
 const ERROR_VALIDATOR_NOT_FOUND = 50
 const ERROR_REPLAY_PROTECTION = 52
 const ERROR_MESSAGE_EXPIRED = 57
+const ERROR_UNKNOWN_OP = 60
 const ERROR_INVALID_BLOCKS_BATCH = 100
 const ERROR_NO_SLASHER_CONFIG = 101
 const ERROR_NO_PREV_BLOCK_ID = 102
@@ -63,13 +67,43 @@ fun onExternalMessage(inMsg: slice) {
     val signedBody = inMsg;
     val createdAtMs = inMsg.loadUint(64);
     val expireAtSec = inMsg.loadUint(32);
-    val validatorIdx = inMsg.loadUint(16);
-    val batch = inMsg.loadRef();
-    inMsg.assertEnd();
+
+    val op = inMsg.loadUint(32);
+    match (op) {
+        SLASHER_OP_SEND_BLOCKS_BATCH => {
+            handleBlocksBatchMessage(
+                signature,
+                signedBody,
+                createdAtMs,
+                expireAtSec,
+                inMsg,
+            )
+        }
+        // TODO: Handle `SLASHER_OP_VOTE`
+        else => {
+            throw(ERROR_UNKNOWN_OP)
+        }
+    }
+}
+
+fun handleBlocksBatchMessage(
+    signature: slice,
+    signedBody: slice,
+    createdAtMs: int,
+    expireAtSec: int,
+    rest: slice
+) {
+    val vsetHash = rest.loadUint(256);
+    val validatorIdx = rest.loadUint(16);
+    val batch = rest.loadRef();
+    rest.assertEnd();
     assert(blockchain.now() <= expireAtSec, ERROR_MESSAGE_EXPIRED);
 
     val toSign = beginCell().storeSlice(signedBody).endCell();
-    val vset = lazy ValidatorSet.fromCell(blockchain.configParam(PARAM_IDX_CURRENT_VSET)!);
+    val vsetRaw = blockchain.configParam(PARAM_IDX_CURRENT_VSET)!;
+    assert(vsetRaw.hash() == vsetHash, ERROR_VALIDATOR_NOT_FOUND);
+
+    val vset = lazy ValidatorSet.fromCell(vsetRaw);
     var (validatorCs, validatorFound) = vset.list.uDictGet(16, validatorIdx);
     assert(validatorFound, ERROR_VALIDATOR_NOT_FOUND);
     val validatorPubkey = ValidatorDescr.readPubkeyOnly(validatorCs!);
@@ -89,6 +123,8 @@ fun onExternalMessage(inMsg: slice) {
     ), ERROR_INVALID_BLOCKS_BATCH);
 
     var data = Storage.load();
+
+    // TODO: `updatedAtMs` must be separate for all validators.
     assert(createdAtMs > (data.updatedAtMs - REPLAY_OFFSET_MS) &&
     createdAtMs <= (blockchain.now() + FUTURE_OFFSET_SEC) * 1000, ERROR_REPLAY_PROTECTION);
 
@@ -106,7 +142,7 @@ struct ValidateBlocksBatchParams {
 
 fun validateBlocksBatch(batch: slice, params: ValidateBlocksBatchParams): bool {
     val startSeqno = batch.loadUint(32);
-    if (startSeqno + params.batchSize >= params.mcSeqno) {
+    if (startSeqno + params.batchSize > params.mcSeqno) {
         // Batch contains blocks that were not produced yet.
         return false;
     }

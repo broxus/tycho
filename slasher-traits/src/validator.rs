@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use indexmap::IndexMap;
+use tycho_types::cell::HashBytes;
 use tycho_types::models::{BlockId, IndexedValidatorDescription, McStateExtra};
 use tycho_util::FastHasherState;
 
@@ -65,10 +66,16 @@ impl ValidatorEvents {
         session_id: ValidationSessionId,
         first_mc_seqno: u32,
         own_validator_idx: u16,
+        vset_hash: &HashBytes,
         validators: &[IndexedValidatorDescription],
     ) -> ValidatorSessionScope {
-        self.listener
-            .on_session_started(session_id, first_mc_seqno, own_validator_idx, validators);
+        self.listener.on_session_started(
+            session_id,
+            first_mc_seqno,
+            own_validator_idx,
+            vset_hash,
+            validators,
+        );
 
         let mut remap = IndexMap::<u16, u16, FastHasherState>::with_capacity_and_hasher(
             validators.len(),
@@ -233,6 +240,7 @@ pub trait ValidatorEventsListener: Send + Sync + 'static {
         session_id: ValidationSessionId,
         first_mc_seqno: u32,
         own_validator_idx: u16,
+        vset_hash: &HashBytes,
         validators: &[IndexedValidatorDescription],
     );
 
@@ -260,6 +268,7 @@ impl ValidatorEventsListener for NoopValidatorEventsRecorder {
         _session_id: ValidationSessionId,
         _first_mc_seqno: u32,
         _own_validator_idx: u16,
+        _vset_hash: &HashBytes,
         _validators: &[IndexedValidatorDescription],
     ) {
     }
@@ -288,9 +297,16 @@ macro_rules! impl_recorder_for_tuples {
                 session_id: ValidationSessionId,
                 first_mc_seqno: u32,
                 own_validator_idx: u16,
+                vset_hash: &HashBytes,
                 validators: &[IndexedValidatorDescription],
             ) {
-                $(self.$n.on_session_started(session_id, first_mc_seqno, own_validator_idx, validators);)+
+                $(self.$n.on_session_started(
+                    session_id,
+                    first_mc_seqno,
+                    own_validator_idx,
+                    vset_hash,
+                    validators
+                );)+
             }
 
             fn on_session_finished(&self, session_id: ValidationSessionId) {
