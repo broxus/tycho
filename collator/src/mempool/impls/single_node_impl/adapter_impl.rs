@@ -55,7 +55,7 @@ impl MempoolAdapter for MempoolAdapterSingleNodeImpl {
             "get_anchor_by_id"
         );
 
-        let result = match self.cache.get_anchor_by_id(anchor_id).await {
+        let result = match self.cache.get_anchor_by_id(anchor_id).await? {
             Some(anchor) => GetAnchorResult::Exist(anchor),
             None => GetAnchorResult::NotExist,
         };
