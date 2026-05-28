@@ -11,16 +11,17 @@ use tycho_types::models::{
 };
 use tycho_util::FastDashMap;
 
-pub use self::stub_contract::StubSlasherContract;
+pub use self::contract::StdSlasherContract;
 use crate::util::BitSet;
 
-mod stub_contract;
+mod contract;
 
 #[derive(Clone, Copy)]
 pub struct EncodeBlocksBatchMessage<'a> {
     pub address: &'a StdAddr,
     pub session_id: ValidationSessionId,
     pub batch: &'a BlocksBatch,
+    pub vset_hash: &'a HashBytes,
     pub validator_idx: u16,
     pub signature_context: SignatureContext,
     pub keypair: &'a ed25519::KeyPair,

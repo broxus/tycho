@@ -18,10 +18,11 @@ import {
 import { TychoExecutor } from "@tychosdk/emulator";
 import {
   PARAM_IDX_SLASHER_PARAMS,
-  SlasherStub,
+  Slasher,
   storeSlasherParams,
-  storeSlasherStubData,
-} from "../wrappers/SlasherStub";
+  storeSlasherData,
+  SLASHER_OP_SEND_BLOCKS_BATCH,
+} from "../wrappers/Slasher";
 import {
   bufferToBigInt,
   ConfigParams,
@@ -45,6 +46,7 @@ describe("Slasher", () => {
   let blockchain: Blockchain;
   let slasher: SmartContract;
   let keypair: KeyPair;
+  let currentVsetHash: Buffer;
 
   beforeAll(async () => {
     keypair = await getSecureRandomBytes(32).then(keyPairFromSeed);
@@ -77,6 +79,7 @@ describe("Slasher", () => {
       adnlAddr: null,
     });
     params.setCurrentVset(vset);
+    currentVsetHash = params.getCurrentVsetHash()!;
 
     const fundamentalAddresses = Dictionary.load(
       Dictionary.Keys.Buffer(32),
@@ -88,7 +91,7 @@ describe("Slasher", () => {
 
     config = params.toCell();
 
-    code = await compile("SlasherStub", { debugInfo: true });
+    code = await compile("Slasher", { debugInfo: true });
     executor = await TychoExecutor.create();
   });
 
@@ -106,7 +109,7 @@ describe("Slasher", () => {
         code,
         data: beginCell()
           .store(
-            storeSlasherStubData({
+            storeSlasherData({
               updatedAtMs: 0n,
             }),
           )
@@ -132,15 +135,13 @@ describe("Slasher", () => {
 
     const nowMs = now * 1000 + 500;
     const expireAt = ~~(nowMs / 1000) + 60;
-    const catchainSeqno = 0;
-    const vsetSwitchRound = 0;
     const validatorIdx = 0;
 
     const bodyToSign = beginCell()
       .storeUint(nowMs, 64)
       .storeUint(expireAt, 32)
-      .storeUint(catchainSeqno, 32)
-      .storeUint(vsetSwitchRound, 32)
+      .storeUint(SLASHER_OP_SEND_BLOCKS_BATCH, 32)
+      .storeBuffer(currentVsetHash, 32)
       .storeUint(validatorIdx, 16)
       .storeRef(SAMPLE_BLOCKS_BATCH)
       .endCell();
@@ -188,7 +189,5 @@ describe("Slasher", () => {
 });
 
 function getters(blockchain: Blockchain, slasher: SmartContract) {
-  return blockchain.openContract(
-    SlasherStub.createFromAddress(slasher.address),
-  );
+  return blockchain.openContract(Slasher.createFromAddress(slasher.address));
 }

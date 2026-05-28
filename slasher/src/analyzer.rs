@@ -1,19 +1,8 @@
 use anyhow::Result;
 
-use crate::ParsedVset;
-use crate::bc::SlasherParams;
 use crate::storage::SlasherStorageSnapshot;
+use crate::{ParsedVset, SlasherConfig};
 
-// TODO: Move these constants into config.
-
-// Session should contain at least this amount of blocks to do some reporting.
-const MIN_VSET_LENGTH: u32 = 1000;
-// At least this number of samples must be collected to accuse someone.
-const MIN_SAMPLES: u64 = 100;
-// At least this number of malformed batches must be collected to accuse someone.
-const MIN_MALFORMED: u64 = 5;
-// We treat the node as slow if its block rate is this times the median rate.
-const SLOW_FACTOR: f64 = 0.5;
 // See https://en.wikipedia.org/wiki/Z-test
 const Z_95: f64 = 1.96;
 
@@ -23,7 +12,7 @@ pub fn analyze_vset(
     vset: &ParsedVset,
     last_seqno: u32,
     own_validator_idx: usize,
-    _params: &SlasherParams,
+    config: &SlasherConfig,
 ) -> Result<Vec<u16>> {
     let vset_hash = &vset.hash;
     let vset = &vset.vset;
@@ -35,13 +24,13 @@ pub fn analyze_vset(
         .map(|item| item.start_seqno)
         .min()
         .unwrap_or(u32::MAX);
-    let vset_len = last_seqno.saturating_sub(start_seqno);
-    if vset_len < MIN_VSET_LENGTH {
+    let vset_len = last_seqno.saturating_add(1).saturating_sub(start_seqno);
+    if vset_len < config.vset_len_threshold {
         tracing::warn!(vset_len, "too short vset");
         return Ok(Vec::new());
     }
 
-    let n = vset.list.len();
+    let n = vset.list.len().min(vset.main.get() as _);
     if n <= 1 {
         tracing::warn!(n, "not enough nodes in vset");
         return Ok(Vec::new());
@@ -50,12 +39,7 @@ pub fn analyze_vset(
     let mut scores = vec![vec![Score::default(); n]; n];
     let mut observed = vec![Observed::default(); n];
 
-    let max_weight = vset
-        .list
-        .iter()
-        .take(vset.main.get() as usize)
-        .map(|v| v.weight)
-        .sum::<u64>();
+    let max_weight = vset.list.iter().take(n).map(|v| v.weight).sum::<u64>();
     let weight_threshold = max_weight.saturating_mul(2) / 3 + 1;
 
     // Build a matrix from all known block batches.
@@ -90,7 +74,7 @@ pub fn analyze_vset(
             }
 
             let weight = vset.list[other].weight;
-            for block in 0..block_count {
+            for (block, total_block_weight) in weight_per_block.iter_mut().enumerate() {
                 if !batch.committed_blocks.get(block) {
                     // Ignore blocks which observer did not collate.
                     continue;
@@ -98,7 +82,7 @@ pub fn analyze_vset(
 
                 let valid_bit = block * 2 + 1;
                 if history.bits.get(valid_bit) {
-                    weight_per_block[block] += weight;
+                    *total_block_weight += weight;
                 }
             }
         }
@@ -145,20 +129,24 @@ pub fn analyze_vset(
     let mut accusation_weights = vec![0; n];
     let mut rates = Vec::with_capacity(n - 1);
     for (observer, (observed, scores)) in std::iter::zip(&observed, &scores).enumerate() {
-        if observed.samples < MIN_SAMPLES {
+        if observed.samples < config.block_samples_threshold {
             continue;
         }
         let observer_weight = vset.list[observer].weight;
 
         // Compute the rate of valid signatures from other nodes.
         rates.clear();
-        rates.extend(scores.iter().enumerate().filter_map(|(i, score)| {
-            (i != observer).then(|| score.valid_signatures as f64 / observed.samples as f64)
-        }));
+        rates.extend(
+            scores
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != observer)
+                .map(|(_, score)| score.valid_signatures as f64 / observed.samples as f64),
+        );
         rates.sort_by(|a, b| a.total_cmp(b));
 
         let baseline = rates[rates.len() / 2];
-        let slow_threshold = baseline * SLOW_FACTOR;
+        let slow_threshold = baseline * config.slow_node_factor;
 
         tracing::debug!(baseline, slow_threshold, "computed valid signature rates");
 
@@ -193,8 +181,9 @@ pub fn analyze_vset(
     let accusations = std::iter::zip(observed, accusation_weights)
         .enumerate()
         .filter_map(|(idx, (observed, weight))| {
-            let should_accuse = weight >= weight_threshold || observed.malformed >= MIN_MALFORMED;
-            if idx == own_validator_idx {
+            let should_accuse = weight >= weight_threshold
+                || observed.malformed >= config.malformed_samples_threshold;
+            if should_accuse && idx == own_validator_idx {
                 tracing::warn!(
                     own_validator_idx,
                     weight,

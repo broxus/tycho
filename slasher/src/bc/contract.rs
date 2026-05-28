@@ -23,27 +23,31 @@ use crate::util::BitSet;
 /// ```
 #[derive(Debug, Store, Load)]
 #[tlb(tag = "#01")]
-pub struct StubSlasherParams {
+pub struct StdSlasherParams {
     pub address: HashBytes,
     pub blocks_batch_size: NonZeroU8,
 }
 
-impl StubSlasherParams {
+impl StdSlasherParams {
     pub const IDX: u32 = 666;
 }
 
-pub struct StubSlasherContract;
+pub struct StdSlasherContract;
 
-impl SlasherContract for StubSlasherContract {
+impl StdSlasherContract {
+    const OP_SEND_BLOCKS_BATCH: u32 = 0x60e2ac7f;
+}
+
+impl SlasherContract for StdSlasherContract {
     fn default_batch_size(&self) -> NonZeroU32 {
         NonZeroU32::new(10).unwrap()
     }
 
     fn find_params(&self, config: &BlockchainConfigParams) -> Result<Option<SlasherParams>> {
-        let Some(raw) = config.get_raw_cell_ref(StubSlasherParams::IDX)? else {
+        let Some(raw) = config.get_raw_cell_ref(StdSlasherParams::IDX)? else {
             return Ok(None);
         };
-        let params = raw.parse::<StubSlasherParams>()?;
+        let params = raw.parse::<StdSlasherParams>()?;
         Ok(Some(SlasherParams {
             address: params.address,
             blocks_batch_size: params.blocks_batch_size.into(),
@@ -63,6 +67,8 @@ impl SlasherContract for StubSlasherContract {
             let mut b = CellBuilder::new();
             b.store_u64(now)?;
             b.store_u32(expire_at)?;
+            b.store_u32(Self::OP_SEND_BLOCKS_BATCH)?;
+            b.store_u256(&params.vset_hash)?;
             b.store_u16(params.validator_idx)?;
             b.store_reference(cell)?;
             b.build()?
@@ -118,6 +124,12 @@ impl SlasherContract for StubSlasherContract {
         // TODO: Add message op
         let mut body = msg.body;
         body.skip_first(512 + 64 + 32, 0)?;
+        let op = body.load_u32()?;
+        if op != Self::OP_SEND_BLOCKS_BATCH {
+            return Ok(None);
+        }
+
+        body.skip_first(256, 0)?;
         let validator_idx = body.load_u16()?;
         let mut batch_cs = body.load_reference_as_slice()?;
         let BlocksBatchBc(blocks_batch) = <_>::load_from(&mut batch_cs)?;

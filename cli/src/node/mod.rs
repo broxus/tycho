@@ -178,19 +178,16 @@ impl Node {
             .await
             .context("failed to load mc zerostate on run")?;
 
-        let config = mc_state.config_params()?;
-        let validator_session_id = {
-            let current_validator_set = config.get_current_validator_set()?;
+        {
+            let current_validator_set = mc_state.config_params()?.get_current_validator_set()?;
             base.validator_resolver()
                 .update_validator_set(&current_validator_set);
-            let v_set_len = current_validator_set.list.len();
+            let vset_len = current_validator_set.list.len();
             anyhow::ensure!(
-                is_single_node == (v_set_len == 1),
-                "cannot start with v_set_len={v_set_len} and single_node={is_single_node}"
+                is_single_node == (vset_len == 1),
+                "cannot start with vset_len={vset_len} and single_node={is_single_node}"
             );
-
-            tycho_slasher_traits::ValidationSessionId::from(mc_state.state_extra()?)
-        };
+        }
 
         // Create mempool adapter
         let mempool_adapter = self.rpc_mempool_adapter.inner.clone();
@@ -229,13 +226,11 @@ impl Node {
 
         let slasher = tycho_slasher::Slasher::new(
             base.keypair.clone(),
-            tycho_slasher::StubSlasherContract,
+            tycho_slasher::StdSlasherContract,
             base.blockchain_rpc_client.clone(),
             &base.storage_context,
             self.slasher_config,
-            mc_state.as_ref().global_id,
-            config,
-            validator_session_id,
+            &mc_state,
         )
         .context("failed to create slasher")?;
 

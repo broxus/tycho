@@ -8,6 +8,8 @@ import {
 } from "@ton/core";
 import { UnknownTagError } from "./util";
 
+export const SLASHER_OP_SEND_BLOCKS_BATCH = 0x60e2ac7f;
+
 export const PARAM_IDX_SLASHER_PARAMS = 666;
 
 const SLASHER_PARAMS_TAG = 0x01;
@@ -38,32 +40,30 @@ export function storeSlasherParams(
   };
 }
 
-export type SlasherStubData = {
+export type SlasherData = {
   updatedAtMs: bigint;
 };
 
-export function loadSlasherStubData(cs: Slice): SlasherStubData {
+export function loadSlasherData(cs: Slice): SlasherData {
   return {
     updatedAtMs: cs.loadUintBig(64),
   };
 }
 
-export function storeSlasherStubData(
-  s: SlasherStubData,
-): (builder: Builder) => void {
+export function storeSlasherData(s: SlasherData): (builder: Builder) => void {
   return (builder) => {
     builder.storeUint(s.updatedAtMs, 64);
   };
 }
 
-export class SlasherStub implements Contract {
+export class Slasher implements Contract {
   constructor(
     readonly address: Address,
     readonly init?: { code: Cell; data: Cell },
   ) {}
 
   static createFromAddress(address: Address) {
-    return new SlasherStub(address);
+    return new Slasher(address);
   }
 
   async isBlocksBatchValid(

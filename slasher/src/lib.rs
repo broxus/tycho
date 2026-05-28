@@ -9,12 +9,13 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 use tycho_block_util::config::BlockchainConfigExt;
+use tycho_block_util::state::ShardStateStuff;
 use tycho_core::block_strider::{StateSubscriber, StateSubscriberContext};
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_crypto::ed25519;
 use tycho_slasher_traits::{ValidationSessionId, ValidatorEventsListener};
 use tycho_storage::StorageContext;
-use tycho_types::models::{BlockchainConfig, SignatureContext, StdAddr, ValidatorSet};
+use tycho_types::models::{SignatureContext, StdAddr, ValidatorSet};
 use tycho_types::prelude::*;
 use tycho_util::config::PartialConfig;
 use tycho_util::futures::JoinTask;
@@ -23,7 +24,7 @@ use tycho_util::serde_helpers;
 use self::bc::SlasherParams;
 pub use self::bc::{
     BlocksBatch, ContractSubscription, EncodeBlocksBatchMessage, MessageDelivered,
-    SignatureHistory, SignedMessage, SlasherContract, StubSlasherContract,
+    SignatureHistory, SignedMessage, SlasherContract, StdSlasherContract,
 };
 use self::collector::{ValidatorEventsCollector, ValidatorSessionInfo};
 use self::storage::SlasherStorage;
@@ -61,10 +62,26 @@ pub struct SlasherConfig {
     #[serde(with = "serde_helpers::humantime")]
     pub prev_delivery_timeout: Option<Duration>,
 
-    /// Absolute threshold of bad-session weight after which validator is bad in a vset epoch.
+    /// Validator set round must contain at least this amount of blocks
+    /// to run analyzer.
     ///
-    /// Default: `100`
-    pub bad_sessions_weight_threshold: u64,
+    /// Default: `1000`
+    pub vset_len_threshold: u32,
+
+    // At least this number of block samples must be collected to accuse someone.
+    //
+    // Default: `100`
+    pub block_samples_threshold: u64,
+
+    /// At least this number of malformed batches must be collected to accuse someone.
+    ///
+    /// Default: `5`
+    pub malformed_samples_threshold: u64,
+
+    /// We treat the node as slow if its block rate is this times the median rate.
+    ///
+    /// Default: `0.5`
+    pub slow_node_factor: f64,
 }
 
 impl Default for SlasherConfig {
@@ -73,7 +90,10 @@ impl Default for SlasherConfig {
             message_ttl: Duration::from_secs(30),
             message_retry_interval: Duration::from_secs(1),
             prev_delivery_timeout: Some(Duration::from_secs(5)),
-            bad_sessions_weight_threshold: 100,
+            vset_len_threshold: 1000,
+            block_samples_threshold: 100,
+            malformed_samples_threshold: 5,
+            slow_node_factor: 0.5,
         }
     }
 }
@@ -85,17 +105,25 @@ pub struct Slasher {
 }
 
 impl Slasher {
-    #[allow(clippy::too_many_arguments)]
     pub fn new<C: SlasherContract>(
         node_keys: Arc<ed25519::KeyPair>,
         contract: C,
         blockchain_rpc_client: BlockchainRpcClient,
         storage_context: &StorageContext,
         config: SlasherConfig,
-        global_id: i32,
-        blockchain_config: &BlockchainConfig,
-        known_session_id: ValidationSessionId,
+        last_mc_state: &ShardStateStuff,
     ) -> Result<Self> {
+        anyhow::ensure!(
+            last_mc_state.block_id().is_masterchain(),
+            "slasher init requires masterchain state"
+        );
+
+        let global_id = last_mc_state.as_ref().global_id;
+
+        let state_extra = last_mc_state.state_extra()?;
+        let known_session_id = tycho_slasher_traits::ValidationSessionId::from(state_extra);
+        let blockchain_config = &state_extra.config;
+
         let storage =
             SlasherStorage::open(storage_context).context("failed to open slasher storage")?;
 
@@ -122,6 +150,14 @@ impl Slasher {
                 .map_or(contract.default_batch_size(), |p| p.blocks_batch_size),
         ));
         let global = blockchain_config.get_global_version()?;
+
+        if !storage.contains_vset_session(known_session_id)? {
+            storage.store_vset_session(
+                known_session_id,
+                &current_vset.hash,
+                last_mc_state.block_id().seqno,
+            )?;
+        }
 
         // TODO: Spawn previous unsubmitted reports.
 
@@ -375,7 +411,7 @@ impl SlasherSharedState {
         &self,
         vset: &ParsedVset,
         last_seqno: u32,
-        params: &SlasherParams,
+        _params: &SlasherParams,
     ) -> Result<()> {
         let Some(own_validator_idx) =
             vset.vset.list.iter().position(|item| {
@@ -391,7 +427,7 @@ impl SlasherSharedState {
             vset,
             last_seqno,
             own_validator_idx,
-            params,
+            &self.config,
         )?;
         tracing::warn!("slasher accusations: {accusations:?}");
 
@@ -409,6 +445,10 @@ impl SlasherSharedState {
 
         let mut send_task = None;
 
+        // NOTE: `send_task` will be cancelled when `rx` returns `None`.
+        // This is intentional - block batches are quite small and there
+        // is no requirement for them to be delivered. The last batch
+        // will definitly be cancelled and there is no problem in this.
         while let Some(batch) = rx.recv().await {
             if let Some(send_task) = send_task.take()
                 && let Some(timeout) = self.config.prev_delivery_timeout
@@ -419,6 +459,7 @@ impl SlasherSharedState {
 
             send_task = Some(JoinTask::new(self.clone().deliver_batch_message(
                 info.session_id,
+                info.vset_hash,
                 info.own_validator_idx,
                 batch,
             )));
@@ -428,6 +469,7 @@ impl SlasherSharedState {
     async fn deliver_batch_message(
         self: Arc<Self>,
         session_id: ValidationSessionId,
+        vset_hash: HashBytes,
         validator_idx: u16,
         batch: BlocksBatch,
     ) {
@@ -442,6 +484,7 @@ impl SlasherSharedState {
                 address: subscription.address(),
                 session_id,
                 batch: &batch,
+                vset_hash: &vset_hash,
                 validator_idx,
                 signature_context,
                 keypair: &self.node_keys,

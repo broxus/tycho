@@ -60,6 +60,14 @@ impl SlasherStorage {
         self.inner.db.vset_sessions.insert(key, value)?;
         Ok(())
     }
+
+    pub fn contains_vset_session(&self, session_id: ValidationSessionId) -> Result<bool> {
+        self.inner
+            .db
+            .vset_sessions
+            .contains_key(session_key(session_id))
+            .map_err(Into::into)
+    }
 }
 
 struct Inner {
@@ -161,7 +169,7 @@ impl Iterator for BlockBatchesIter<'_> {
         let batch = match tl_proto::deserialize(value) {
             Ok(StoredBlocksBatch(batch)) => batch,
             Err(e) => {
-                let start_seqno = u32::from_be_bytes(key[34..48].try_into().unwrap());
+                let start_seqno = u32::from_be_bytes(key[34..38].try_into().unwrap());
                 self.broken = true;
                 return Some(Err(anyhow::anyhow!(
                     "invalid stored blocks batch \
