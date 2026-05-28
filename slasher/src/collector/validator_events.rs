@@ -9,6 +9,7 @@ use tracing::instrument;
 use tycho_crypto::ed25519;
 use tycho_slasher_traits::{ReceivedSignature, ValidationSessionId, ValidatorEventsListener};
 use tycho_types::models::{BlockId, IndexedValidatorDescription};
+use tycho_types::prelude::*;
 use tycho_util::{DashMapEntry, FastDashMap};
 
 use crate::bc::BlocksBatch;
@@ -28,6 +29,7 @@ pub struct ValidatorEventsCollector {
 
 #[derive(Debug, Clone)]
 pub struct ValidatorSessionInfo {
+    pub vset_hash: HashBytes,
     pub session_id: ValidationSessionId,
     pub first_mc_seqno: u32,
     pub own_validator_idx: u16,
@@ -128,6 +130,7 @@ impl ValidatorEventsListener for ValidatorEventsCollector {
         session_id: ValidationSessionId,
         first_mc_seqno: u32,
         own_validator_idx: u16,
+        vset_hash: &HashBytes,
         validators: &[IndexedValidatorDescription],
     ) {
         tracing::debug!(first_mc_seqno, "on_session_started");
@@ -154,6 +157,7 @@ impl ValidatorEventsListener for ValidatorEventsCollector {
             });
 
             self.push_session_to_init(ValidatorSessionInfo {
+                vset_hash: *vset_hash,
                 session_id,
                 first_mc_seqno,
                 own_validator_idx,
@@ -286,6 +290,7 @@ impl SessionState {
         }
 
         let Some(tx) = complete_batches else {
+            // Something is really broken if ~100 blocks were not enough to initialize session.
             anyhow::bail!("not initialized");
         };
 

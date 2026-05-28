@@ -20,17 +20,20 @@ slasher.signatureHistory
     bits:bitset
     = slasher.SignatureHistory;
 
-slasher.report
-    pubkey:int256
-    validator_idx:int
-    entries:(vector slasher.ReportEntry)
-    = slasher.Report;
+slasher.storedVsetInfo
+    prev_vset_hash:int256
+    first_session_id:slasher.validationSessionId
+    start_seqno:int
+    = slasher.StoredVsetInfo;
 
-slasher.reportEntry
-    validator_idx:int
-    good_score:int
-    bad_score:int
-    punish:bool
-    = slasher.ReportEntry;
+slasher.storedVsetReport
+    public_key:int256
+    accusations:(vector int)
+    = slasher.StoredVsetReport;
+
+slasher.validationSessionId
+    catchain_seqno:int
+    vset_switch_round:int
+    = slasher.ValidationSessionId;
 
 bitset length:int data:bytes = BitSet;

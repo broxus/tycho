@@ -182,7 +182,6 @@ tycho-wu-tuner = { path = "./wu-tuner", version = "0.3.10" }
 
 [patch.crates-io]
 # patches here
-tycho-types = { git = "https://github.com/broxus/tycho-types.git", rev = "aeea4e8d007e8a64439d3d923a3752fc823b2256" }
 
 [workspace.lints.rust]
 future_incompatible = "warn"

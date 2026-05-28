@@ -211,10 +211,6 @@ impl ZerostateConfig {
                 fundamental_addresses.set(minter_address, ())?;
             }
 
-            if let Some(slasher_params) = self.params.get::<ConfigParam666>()? {
-                fundamental_addresses.set(slasher_params.address, ())?;
-            }
-
             self.params.set::<ConfigParam31>(&fundamental_addresses)?;
         }
 
