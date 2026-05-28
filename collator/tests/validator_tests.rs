@@ -140,6 +140,7 @@ async fn validator_signatures_match() -> Result<()> {
                 shard_ident: zerostate_id.shard,
                 session_id,
                 start_block_seqno: block_id.seqno,
+                vset_hash: &HashBytes::ZERO,
                 validators: &validators,
             })?;
         }
@@ -256,6 +257,7 @@ async fn malicious_validators_are_ignored() -> Result<()> {
                 shard_ident: zerostate_id.shard,
                 session_id,
                 start_block_seqno: block_id.seqno,
+                vset_hash: &HashBytes::ZERO,
                 validators: &validators,
             })?;
         }
@@ -392,6 +394,7 @@ async fn network_gets_stuck_without_signatures() -> Result<()> {
             shard_ident: zerostate_id.shard,
             session_id,
             start_block_seqno: block_id.seqno,
+            vset_hash: &HashBytes::ZERO,
             validators: &validators,
         })?;
     }

@@ -143,6 +143,10 @@ export class ConfigParams {
     };
   }
 
+  getCurrentVsetHash(): Buffer | undefined {
+    return this.getRaw(34)?.hash();
+  }
+
   getCurrentVset(): ValidatorSet | null {
     return this.getVsetParam(34);
   }

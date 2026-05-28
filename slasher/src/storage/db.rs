@@ -30,6 +30,7 @@ impl WithMigrations for SlasherTables {
 weedb::tables! {
     pub struct SlasherTables<TableContext> {
         pub state: tables::State,
+        pub vset_state: tables::VsetState,
         pub vset_sessions: tables::VsetSessions,
         pub block_batches: tables::BlockBatches,
     }
@@ -59,15 +60,36 @@ pub mod tables {
         }
     }
 
+    /// Info about validator sets.
+    ///
+    /// - Key: `vset_hash: 32 bytes, key: u8`.
+    pub struct VsetState;
+
+    impl VsetState {
+        pub const KEY_LEN: usize = 32 + 1;
+
+        pub const KEY_TYPE_INFO: u8 = 0;
+        pub const KEY_TYPE_REPORT: u8 = 1;
+    }
+
+    impl ColumnFamily for VsetState {
+        const NAME: &'static str = "vset_state";
+    }
+
+    impl ColumnFamilyOptions<TableContext> for VsetState {
+        fn options(opts: &mut Options, ctx: &mut TableContext) {
+            default_block_based_table_factory(opts, ctx);
+        }
+    }
+
     /// Maps validator sessions to vset.
     ///
-    /// - Key: `session_id: (catchain_seqno u32 BE, vset_switch_round u32 BE)`
-    /// - Value: `vset_hash: 32 bytes, start_seqno: u32 LE`
+    /// - Key: `vset_hash: 32 bytes, session_id: (catchain_seqno u32 BE, vset_switch_round u32 BE)`
+    /// - Value: `start_seqno: u32 LE`
     pub struct VsetSessions;
 
     impl VsetSessions {
-        pub const KEY_LEN: usize = 4 + 4;
-        pub const VALUE_LEN: usize = 32 + 4;
+        pub const KEY_LEN: usize = 32 + 4 + 4;
     }
 
     impl ColumnFamily for VsetSessions {

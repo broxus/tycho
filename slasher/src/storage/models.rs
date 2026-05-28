@@ -1,8 +1,28 @@
 use tl_proto::{TlError, TlPacket, TlRead, TlResult, TlWrite};
+use tycho_slasher_traits::ValidationSessionId;
 use tycho_util::FastHashSet;
 
 use crate::util::BitSet;
 use crate::{BlocksBatch, SignatureHistory};
+
+// === Vset State Stuff ===
+
+#[derive(Debug, Clone, Copy, TlRead, TlWrite)]
+#[tl(boxed, id = "slasher.storedVsetInfo", scheme = "proto.tl")]
+pub struct StoredVsetInfo {
+    pub prev_vset_hash: [u8; 32],
+    #[tl(with = "tl_session_id")]
+    pub first_session_id: ValidationSessionId,
+    pub start_seqno: u32,
+}
+
+#[derive(Debug, Clone, TlRead, TlWrite)]
+#[tl(boxed, id = "slasher.storedVsetReport", scheme = "proto.tl")]
+pub struct StoredVsetReport {
+    pub public_key: [u8; 32],
+    #[tl(with = "tl_accusations")]
+    pub accusations: Vec<u16>,
+}
 
 // === StoredBlocksBatch ===
 
@@ -96,5 +116,55 @@ impl<'tl> TlRead<'tl> for StoredBlocksBatch {
             committed_blocks,
             signatures_history: signatures_history.into_boxed_slice(),
         }))
+    }
+}
+
+// === Stuff ===
+
+mod tl_session_id {
+    use super::*;
+
+    pub fn size_hint(_: &ValidationSessionId) -> usize {
+        4 + 4
+    }
+
+    pub fn write<T: TlPacket>(value: &ValidationSessionId, packet: &mut T) {
+        packet.write_u32(value.catchain_seqno);
+        packet.write_u32(value.vset_switch_round);
+    }
+
+    pub fn read(packet: &mut &[u8]) -> TlResult<ValidationSessionId> {
+        Ok(ValidationSessionId {
+            catchain_seqno: u32::read_from(packet)?,
+            vset_switch_round: u32::read_from(packet)?,
+        })
+    }
+}
+
+mod tl_accusations {
+    use super::*;
+
+    pub fn size_hint(value: &[u16]) -> usize {
+        4 + 4 * value.len()
+    }
+
+    pub fn write<T: TlPacket>(value: &[u16], packet: &mut T) {
+        packet.write_u32(value.len() as u32);
+        for item in value {
+            packet.write_u32(*item as u32);
+        }
+    }
+
+    pub fn read(packet: &mut &[u8]) -> TlResult<Vec<u16>> {
+        let len = u32::read_from(packet)? as usize;
+        let mut result = Vec::with_capacity(len);
+        for _ in 0..len {
+            let idx = u32::read_from(packet)?;
+            if idx > u16::MAX as u32 {
+                return Err(TlError::InvalidData);
+            }
+            result.push(idx as u16);
+        }
+        Ok(result)
     }
 }
