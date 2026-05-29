@@ -671,9 +671,11 @@ where
         };
 
         // check if should sync to last applied mc block
+        let top_mc_block_id_for_next_collation =
+            self.get_top_mc_block_id_for_next_collation(store_res.last_collated_mc_block_id);
         let should_sync_to_last_applied_mc_block = self.check_should_sync_to_last_applied_mc_block(
             &store_res,
-            store_res.last_collated_mc_block_id,
+            top_mc_block_id_for_next_collation,
             self.config.min_mc_block_delta_from_bc_to_sync,
             collation_result
                 .mc_data

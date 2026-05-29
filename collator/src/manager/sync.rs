@@ -309,7 +309,7 @@ where
                 );
                 false
             }
-        } else {
+        } else if store_res.applied_mc_queue_range.is_some() {
             tracing::info!(target: tracing_targets::COLLATION_MANAGER,
                 last_synced_to_mc_block_id = ?last_synced_to_mc_block_id,
                 last_collated_mc_block_id = ?last_collated_mc_block_id,
@@ -319,6 +319,17 @@ where
                 "check_should_sync: should sync to last applied mc block when no last collated or prev sync to",
             );
             true
+        } else {
+            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                last_synced_to_mc_block_id = ?last_synced_to_mc_block_id,
+                last_collated_mc_block_id = ?last_collated_mc_block_id,
+                last_processed_mc_block_id = ?last_processed_mc_block_id,
+                has_active_collations,
+                is_key_block = ?is_key_block,
+                "check_should_sync: should continue local collation when no last collated or prev sync to \
+                and nothing applied ahead",
+            );
+            false
         }
     }
 
