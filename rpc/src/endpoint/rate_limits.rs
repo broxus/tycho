@@ -89,12 +89,12 @@ impl RpcRateLimiter {
 #[derive(Clone)]
 pub struct ActiveStreamLimiter {
     active: Arc<FastDashMap<IpAddr, u32>>,
-    max_streams_per_addr: NonZeroU32,
+    max_streams_per_addr: Option<NonZeroU32>,
     whitelist: Arc<FastHashSet<IpAddr>>,
 }
 
 impl ActiveStreamLimiter {
-    pub fn new(max_streams_per_addr: NonZeroU32, whitelist: Vec<IpAddr>) -> Self {
+    pub fn new(max_streams_per_addr: Option<NonZeroU32>, whitelist: Vec<IpAddr>) -> Self {
         Self {
             active: Arc::new(FastDashMap::default()),
             max_streams_per_addr,
@@ -103,6 +103,10 @@ impl ActiveStreamLimiter {
     }
 
     pub fn try_acquire(&self, ip: IpAddr) -> Option<ActiveStreamGuard> {
+        let Some(max_streams_per_addr) = self.max_streams_per_addr else {
+            return Some(ActiveStreamGuard::whitelisted());
+        };
+
         let ip = normalize_ip(ip);
         if self.whitelist.contains(&ip) {
             return Some(ActiveStreamGuard::whitelisted());
@@ -110,7 +114,7 @@ impl ActiveStreamLimiter {
 
         let mut entry = self.active.entry(ip).or_default();
 
-        if *entry >= self.max_streams_per_addr.get() {
+        if *entry >= max_streams_per_addr.get() {
             return None;
         }
 
