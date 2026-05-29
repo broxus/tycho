@@ -12,6 +12,7 @@ use tycho_block_util::queue::{QueueDiffStuff, QueueKey, QueuePartitionIdx};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_core::global_config::ZerostateId;
 use tycho_core::storage::{BlockHandle, LoadStateHint, NewBlockMeta, StoreStateHint};
+use tycho_crypto::ed25519::{KeyPair, SecretKey};
 use tycho_types::boc::Boc;
 use tycho_types::cell::{Cell, CellBuilder, CellFamily, HashBytes, Lazy};
 use tycho_types::merkle::MerkleUpdate;
@@ -39,6 +40,7 @@ use crate::manager::types::{
     BlockCacheStoreResult, CollationSyncState, McBlockSubgraphExtract, NextCollationStep,
 };
 use crate::manager::{CollatedBlockInfo, CollationStatus};
+use crate::mempool::MempoolAdapterStubImpl;
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::{CollatorSyncContext, InitiatedStoreState, StateNodeAdapter};
 use crate::test_utils::{create_test_queue_adapter, try_init_test_tracing};
@@ -47,10 +49,13 @@ use crate::types::processed_upto::{
     find_min_processed_to_by_shards,
 };
 use crate::types::{
-    BlockCandidate, BlockStuffForSync, ProcessedTo, ShardDescriptionShort,
+    BlockCandidate, BlockStuffForSync, CollatorConfig, ProcessedTo, ShardDescriptionShort,
     ShardDescriptionShortExt as _, ShardHashesExt, ShardIdentExt, TopBlockId, TopBlockIdUpdated,
 };
-use crate::validator::{ValidationComplete, ValidationStatus, ValidatorStdImpl};
+use crate::validator::{
+    AddSession, ValidationComplete, ValidationSessionId, ValidationStatus, Validator,
+    ValidatorStdImpl,
+};
 
 #[test]
 fn test_detect_next_collation_step() {
@@ -1879,6 +1884,60 @@ fn get_collation_status(guard: &mut CollationSyncState, shard_id: &ShardIdent) -
 }
 
 #[tokio::test]
+async fn test_should_not_sync_without_applied_range_after_known_sync() {
+    try_init_test_tracing(tracing_subscriber::filter::LevelFilter::TRACE);
+
+    let mc_block_id = BlockId {
+        shard: ShardIdent::MASTERCHAIN,
+        seqno: 0,
+        root_hash: HashBytes::default(),
+        file_hash: HashBytes::default(),
+    };
+    let (mq_adapter, _tmp_dir) = create_test_queue_adapter::<EnqueuedMessage>()
+        .await
+        .unwrap();
+    let collation_sync_state: Arc<Mutex<CollationSyncState>> = Default::default();
+    collation_sync_state.lock().last_synced_to_mc_block_id = Some(mc_block_id);
+    let manager = CollationManager::<CollatorStdImplFactory, NoopValidator> {
+        keypair: Arc::new(KeyPair::from(&SecretKey::from_bytes([1; 32]))),
+        config: Arc::new(CollatorConfig::default()),
+        state_node_adapter: Arc::new(TestStateNodeAdapter::default()),
+        state_event_receiver: Mutex::new(None),
+        mpool_adapter: MempoolAdapterStubImpl::with_stub_externals(None),
+        mq_adapter,
+        collator_factory: CollatorStdImplFactory {
+            wu_tuner_event_sender: None,
+        },
+        validator: Arc::new(NoopValidator),
+        cancel_validation_runner: Default::default(),
+        active_collation_sessions: Default::default(),
+        active_collators: Default::default(),
+        blocks_cache: BlocksCache::new(&Default::default()),
+        last_processed_mc_block_id: Default::default(),
+        collation_sync_state,
+        validator_set_cache: Default::default(),
+        mempool_config_override: None,
+        delayed_mc_state_update: Default::default(),
+    };
+    let store_res = BlockCacheStoreResult {
+        received_and_collated: false,
+        block_mismatch: false,
+        last_collated_mc_block_id: None,
+        applied_mc_queue_range: None,
+    };
+    let top_mc_block_id_for_next_collation =
+        manager.get_top_mc_block_id_for_next_collation(store_res.last_collated_mc_block_id);
+
+    assert_eq!(top_mc_block_id_for_next_collation, Some(mc_block_id));
+    assert!(!manager.check_should_sync_to_last_applied_mc_block(
+        &store_res,
+        top_mc_block_id_for_next_collation,
+        1,
+        None,
+    ));
+}
+
+#[tokio::test]
 async fn test_queue_restore_on_sync() {
     try_init_test_tracing(tracing_subscriber::filter::LevelFilter::TRACE);
 
@@ -3569,6 +3628,32 @@ async fn test_queue_restore_on_sync() {
 }
 
 type TestCollationManager = CollationManager<CollatorStdImplFactory, ValidatorStdImpl>;
+
+#[derive(Clone)]
+struct NoopValidator;
+
+#[async_trait]
+impl Validator for NoopValidator {
+    fn add_session(&self, _info: AddSession<'_>) -> Result<()> {
+        Ok(())
+    }
+
+    async fn validate(
+        &self,
+        _session_id: ValidationSessionId,
+        _block_id: &BlockId,
+    ) -> Result<ValidationStatus> {
+        Ok(ValidationStatus::Skipped)
+    }
+
+    fn cancel_validation(
+        &self,
+        _before: &BlockIdShort,
+        _session_id: Option<ValidationSessionId>,
+    ) -> Result<()> {
+        Ok(())
+    }
+}
 
 trait BlockStuffExt {
     fn end_lt(&self) -> Lt;
