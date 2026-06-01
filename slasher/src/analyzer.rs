@@ -60,7 +60,7 @@ pub fn analyze_vset(
         // Count weight of valid signatures per committed column (block).
         for history in &batch.signatures_history {
             let other = history.validator_idx as usize;
-            if other >= n || other == observer {
+            if other >= n {
                 malformed = true;
                 tracing::warn!(
                     observer,
@@ -69,6 +69,9 @@ pub fn analyze_vset(
                     reason = "invalid_history_entry",
                     "malformed batch",
                 );
+                continue;
+            } else if other == observer {
+                // Self signatures are not used.
                 continue;
             }
 
@@ -147,7 +150,12 @@ pub fn analyze_vset(
         let baseline = rates[rates.len() / 2];
         let slow_threshold = baseline * config.slow_node_factor;
 
-        tracing::debug!(baseline, slow_threshold, "computed valid signature rates");
+        tracing::debug!(
+            observer,
+            baseline,
+            slow_threshold,
+            "computed valid signature rates"
+        );
 
         for (other, score) in scores.iter().enumerate() {
             if other == observer {

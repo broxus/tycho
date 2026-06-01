@@ -106,10 +106,23 @@ do
 
     global_config=$(echo "${global_config}" | jq ".bootstrap_peers += [${dht_entry}]")
 
-    node_config=$(echo "${node_config}" | jq ".port = ${node_port} | .storage.root_dir = \"${storage_root_dir}\"")
-    node_config=$(echo "${node_config}" | jq "if .rpc.listen_addr? then .rpc.listen_addr = \"${rpc_listen_addr}\" else . end")
-    node_config=$(echo "${node_config}" | jq "if .metrics.listen_addr? then .metrics.listen_addr = \"${metrics_listen_addr}\" else . end")
-    node_config=$(echo "${node_config}" | jq "if .control.socket_path? then .control.socket_path = \"${control_socket_path}\" else . end")
+    node_config=$(echo "${node_config}" | jq "
+        .port = ${node_port}
+        | .storage.root_dir = \"${storage_root_dir}\"
+        | if .rpc.listen_addr? then .rpc.listen_addr = \"${rpc_listen_addr}\" else . end
+        | if .metrics.listen_addr? then .metrics.listen_addr = \"${metrics_listen_addr}\" else . end
+        | if .control.socket_path? then .control.socket_path = \"${control_socket_path}\" else . end
+        | if all(.logger.outputs[]; .type != \"File\") then .logger.outputs += [{
+            "type": \"File\",
+            "human_readable": true,
+        }] else . end
+        | .logger.outputs |= map(
+            if .type == \"File\" then
+                .dir=\"$base_dir\"
+                | .file_prefix=\"node${i}.log\"
+            else .
+        end)
+        ")
     echo "${node_config}" > "${base_dir}/config${i}.json"
 
     elections_config=$(

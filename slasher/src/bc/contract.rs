@@ -129,7 +129,7 @@ impl SlasherContract for StdSlasherContract {
             return Ok(None);
         }
 
-        body.skip_first(256, 0)?;
+        let vset_hash = body.load_u256()?;
         let validator_idx = body.load_u16()?;
         let mut batch_cs = body.load_reference_as_slice()?;
         let BlocksBatchBc(blocks_batch) = <_>::load_from(&mut batch_cs)?;
@@ -139,6 +139,7 @@ impl SlasherContract for StdSlasherContract {
 
         Ok(Some(SlasherContractEvent::SubmitBlocksBatch(
             SubmitBlocksBatch {
+                vset_hash,
                 validator_idx,
                 blocks_batch,
             },
