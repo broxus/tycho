@@ -156,10 +156,8 @@ impl SlasherStorageSnapshot {
     pub fn iter_block_batches(&self, vset_hash: &HashBytes) -> BlockBatchesIter<'_> {
         let mut readopts = self.db.block_batches.new_read_config();
         readopts.set_snapshot(&self.snapshot);
-        let mut key = block_batches_key(vset_hash, 0, 0);
-        readopts.set_iterate_lower_bound(key);
-        key[32..].fill(0xff);
-        readopts.set_iterate_upper_bound(key);
+        readopts.set_iterate_lower_bound(block_batches_key(vset_hash, 0, 0));
+        readopts.set_iterate_upper_bound(block_batches_key(vset_hash, u16::MAX, u32::MAX));
 
         let mut raw = self
             .db
