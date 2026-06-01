@@ -182,11 +182,7 @@ impl LoggerFileOutput {
             .build(&self.dir)?;
 
         Ok(match self.resolved_format() {
-            LogFormat::Human => fmt::layer()
-                .without_time()
-                .with_ansi(false)
-                .with_writer(writer)
-                .boxed(),
+            LogFormat::Human => fmt::layer().with_ansi(false).with_writer(writer).boxed(),
             LogFormat::Json | LogFormat::Auto => {
                 tracing_stackdriver::layer().with_writer(writer).boxed()
             }

@@ -770,10 +770,10 @@ impl Phase<FinalizeState> {
             value_flow,
             created_by: self.state.collation_data.created_by,
             queue_diff_aug: queue_diff.build(&new_block_id),
-            consensus_info: new_mc_data.as_ref().map_or_else(
-                || self.state.mc_data.consensus_info,
-                |mcd| mcd.consensus_info,
-            ),
+            // Proof signatures describe the session that signed this block.
+            // A key block may update the next session into its resulting state,
+            // so use pre-block consensus info here.
+            consensus_info: self.state.mc_data.consensus_info,
             processed_upto,
         });
 

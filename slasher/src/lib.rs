@@ -296,11 +296,7 @@ impl Slasher {
             return Ok(());
         };
 
-        tracing::trace!(
-            ?slasher_params,
-            ?current_session_id,
-            %current_vset_hash,
-        );
+        tracing::trace!(?slasher_params, ?current_session_id);
 
         // TODO: Move into blocking.
         let extra = cx.block.load_extra()?.account_blocks.load()?;
@@ -324,7 +320,7 @@ impl Slasher {
                             let batch = &submitted.blocks_batch;
                             tracing::info!(
                                 %tx_hash,
-                                %current_vset_hash,
+                                vset_hash = %submitted.vset_hash,
                                 validator_idx = submitted.validator_idx,
                                 batch_start_seqno = batch.start_seqno(),
                                 batch_seqno_after = batch.seqno_after(),
@@ -336,7 +332,7 @@ impl Slasher {
                             );
 
                             this.storage.store_blocks_batch(
-                                &current_vset_hash,
+                                &submitted.vset_hash,
                                 submitted.validator_idx,
                                 &submitted.blocks_batch,
                             )?;
