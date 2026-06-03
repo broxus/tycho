@@ -15,6 +15,8 @@ use tycho_util::{DashMapEntry, FastDashMap};
 use crate::bc::BlocksBatch;
 
 const INIT_QUEUE_CAPACITY: usize = 3;
+const METRIC_ACTIVE_SESSIONS: &str = "tycho_slasher_active_sessions";
+const METRIC_SESSION_INIT_QUEUE_LEN: &str = "tycho_slasher_session_init_queue_len";
 
 pub trait BlockBatchesStore {
     fn known_batch_size(&self) -> AtomicU32;
@@ -55,6 +57,8 @@ impl ValidatorEventsCollector {
     pub fn new(default_batch_size: NonZeroU32) -> Self {
         let init_queue_capacity = INIT_QUEUE_CAPACITY;
         let init_queue = Mutex::new(VecDeque::with_capacity(init_queue_capacity));
+        metrics::gauge!(METRIC_ACTIVE_SESSIONS).set(0);
+        metrics::gauge!(METRIC_SESSION_INIT_QUEUE_LEN).set(0);
 
         Self {
             default_batch_size: AtomicU32::new(default_batch_size.get()),
@@ -71,7 +75,9 @@ impl ValidatorEventsCollector {
         {
             return None;
         }
-        queue.pop_front()
+        let result = queue.pop_front();
+        metrics::gauge!(METRIC_SESSION_INIT_QUEUE_LEN).set(queue.len() as f64);
+        result
     }
 
     fn push_session_to_init(&self, info: ValidatorSessionInfo) {
@@ -85,6 +91,7 @@ impl ValidatorEventsCollector {
             );
         }
         items.push_back(info);
+        metrics::gauge!(METRIC_SESSION_INIT_QUEUE_LEN).set(items.len() as f64);
     }
 
     pub fn set_default_batch_size(&self, batch_size: NonZeroU32) {
@@ -119,7 +126,11 @@ impl ValidatorEventsCollector {
     }
 
     pub fn skip_session(&self, session_id: ValidationSessionId) -> bool {
-        self.sessions.remove(&session_id).is_some()
+        let removed = self.sessions.remove(&session_id).is_some();
+        if removed {
+            metrics::gauge!(METRIC_ACTIVE_SESSIONS).set(self.sessions.len() as f64);
+        }
+        removed
     }
 }
 
@@ -163,6 +174,7 @@ impl ValidatorEventsListener for ValidatorEventsCollector {
                 own_validator_idx,
                 validators,
             });
+            metrics::gauge!(METRIC_ACTIVE_SESSIONS).set(self.sessions.len() as f64);
         } else {
             tracing::warn!("duplicate session");
         }
@@ -176,6 +188,7 @@ impl ValidatorEventsListener for ValidatorEventsCollector {
         {
             tracing::warn!("failed to commit blocks batch on finish: {e:?}");
         }
+        metrics::gauge!(METRIC_ACTIVE_SESSIONS).set(self.sessions.len() as f64);
     }
 
     #[instrument(skip_all, fields(session_id = ?session_id))]
