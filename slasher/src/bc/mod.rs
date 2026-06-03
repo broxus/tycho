@@ -16,6 +16,8 @@ use crate::util::BitSet;
 
 mod contract;
 
+const METRIC_PENDING_MESSAGES: &str = "tycho_slasher_pending_messages";
+
 #[derive(Clone, Copy)]
 pub struct EncodeBlocksBatchMessage<'a> {
     pub address: &'a StdAddr,
@@ -82,6 +84,7 @@ impl ContractSubscription {
         match self.pending_messages.entry(*msg_hash) {
             Entry::Vacant(entry) => {
                 entry.insert(PendingMessage { expire_at, tx });
+                self.report_pending_messages();
                 Ok(rx)
             }
             Entry::Occupied(_) => anyhow::bail!("duplicate external message: {msg_hash}"),
@@ -100,6 +103,7 @@ impl ContractSubscription {
 
         if let Some((_, pending)) = self.pending_messages.remove(msg_hash) {
             pending.tx.send(MessageDelivered { tx_hash: *tx_hash }).ok();
+            self.report_pending_messages();
             return Ok(true);
         }
         Ok(false)
@@ -115,6 +119,15 @@ impl ContractSubscription {
         if dropped > 0 {
             tracing::warn!(dropped, "dropped pending messages");
         }
+        self.report_pending_messages();
+    }
+
+    pub fn reset_pending_messages_metrics() {
+        metrics::gauge!(METRIC_PENDING_MESSAGES).set(0);
+    }
+
+    pub fn report_pending_messages(&self) {
+        metrics::gauge!(METRIC_PENDING_MESSAGES).set(self.pending_messages.len() as f64);
     }
 }
 

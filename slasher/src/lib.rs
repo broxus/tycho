@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use arc_swap::{ArcSwap, ArcSwapOption};
@@ -19,6 +19,7 @@ use tycho_types::models::{SignatureContext, StdAddr, ValidatorSet};
 use tycho_types::prelude::*;
 use tycho_util::config::PartialConfig;
 use tycho_util::futures::JoinTask;
+use tycho_util::metrics::{GaugeGuard, HistogramGuard};
 use tycho_util::serde_helpers;
 
 use self::bc::SlasherParams;
@@ -42,6 +43,18 @@ pub mod collector {
 mod bc;
 mod storage;
 mod util;
+
+const METRIC_ENABLED: &str = "tycho_slasher_enabled";
+const METRIC_BLOCKS_BATCH_SIZE: &str = "tycho_slasher_blocks_batch_size";
+const METRIC_HANDLE_STATE_TIME: &str = "tycho_slasher_handle_state_time";
+const METRIC_BATCH_DELIVERY_TASKS: &str = "tycho_slasher_batch_delivery_tasks";
+const METRIC_BLOCKS_BATCH_SEND_ATTEMPTS_TOTAL: &str =
+    "tycho_slasher_blocks_batch_send_attempts_total";
+const METRIC_BLOCKS_BATCH_ERRORS_TOTAL: &str = "tycho_slasher_blocks_batch_errors_total";
+const METRIC_BLOCKS_BATCH_DELIVERY_TIME: &str = "tycho_slasher_blocks_batch_delivery_time";
+const METRIC_BLOCKS_BATCHES_SUBMITTED_TOTAL: &str = "tycho_slasher_blocks_batches_submitted_total";
+const METRIC_VSET_REPORTS_TOTAL: &str = "tycho_slasher_vset_reports_total";
+const METRIC_ACCUSATIONS_TOTAL: &str = "tycho_slasher_accusations_total";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialConfig)]
 #[serde(default)]
@@ -135,6 +148,8 @@ impl Slasher {
         let slasher_params = contract
             .find_params(blockchain_config)
             .context("failed to find slasher params")?;
+        report_config_metrics(slasher_params.as_ref());
+        metrics::gauge!(METRIC_BATCH_DELIVERY_TASKS).set(0);
 
         let subscription = match &slasher_params {
             Some(slasher_params) => {
@@ -144,6 +159,11 @@ impl Slasher {
             }
             None => None,
         };
+
+        match &subscription {
+            Some(subscription) => subscription.report_pending_messages(),
+            None => ContractSubscription::reset_pending_messages_metrics(),
+        }
 
         let collector = Arc::new(ValidatorEventsCollector::new(
             slasher_params
@@ -195,6 +215,7 @@ impl Slasher {
         if !cx.block.id().is_masterchain() {
             return Ok(());
         }
+        let _state_timer = HistogramGuard::begin(METRIC_HANDLE_STATE_TIME);
         let mc_seqno = cx.block.id().seqno;
 
         let this = self.shared.as_ref();
@@ -219,6 +240,7 @@ impl Slasher {
                 .contract
                 .find_params(&state_extra.config)
                 .context("failed to find slasher params")?;
+            report_config_metrics(slasher_params.as_ref());
 
             if let Some(slasher_params) = &slasher_params {
                 self.validator_events_collector
@@ -245,14 +267,16 @@ impl Slasher {
                 (_subscription, None) => {
                     // TODO: Notify subscription that it is no longer needed.
                     this.subscription.store(None);
+                    ContractSubscription::reset_pending_messages_metrics();
                 }
                 // Slasher address unchanged.
                 (Some(s), Some(slasher_address)) if s.address() == slasher_address => {}
                 // Slasher address has changed.
                 (_, Some(slasher_address)) => {
                     tracing::info!(%slasher_address, "slasher address changed");
-                    this.subscription
-                        .store(Some(Arc::new(ContractSubscription::new(slasher_address))));
+                    let subscription = Arc::new(ContractSubscription::new(slasher_address));
+                    this.subscription.store(Some(subscription.clone()));
+                    subscription.report_pending_messages();
                 }
             }
         }
@@ -318,6 +342,7 @@ impl Slasher {
                     Ok(Some(event)) => match event {
                         bc::SlasherContractEvent::SubmitBlocksBatch(submitted) => {
                             let batch = &submitted.blocks_batch;
+
                             tracing::info!(
                                 %tx_hash,
                                 vset_hash = %submitted.vset_hash,
@@ -331,6 +356,15 @@ impl Slasher {
                                 "blocks batch submitted",
                             );
 
+                            // NOTE: Might increment batches twice on restart,
+                            // but it's better to keep this simple.
+                            let origin = if own_message { "own" } else { "external" };
+                            metrics::counter!(
+                                METRIC_BLOCKS_BATCHES_SUBMITTED_TOTAL,
+                                "origin" => origin,
+                            )
+                            .increment(1);
+
                             this.storage.store_blocks_batch(
                                 &submitted.vset_hash,
                                 submitted.validator_idx,
@@ -340,10 +374,12 @@ impl Slasher {
                         }
                     },
                     Ok(None) => {}
-                    Err(e) => tracing::warn!(
-                        %tx_hash,
-                        "failed to parse slasher event: {e:?}"
-                    ),
+                    Err(e) => {
+                        tracing::warn!(
+                            %tx_hash,
+                            "failed to parse slasher event: {e:?}"
+                        );
+                    }
                 }
             }
         }
@@ -443,6 +479,17 @@ impl SlasherSharedState {
         )?;
         tracing::warn!("slasher accusations: {accusations:?}");
 
+        metrics::counter!(METRIC_VSET_REPORTS_TOTAL).increment(1);
+        for &validator_idx in &accusations {
+            if let Some(desc) = vset.vset.list.get(validator_idx as usize) {
+                metrics::counter!(
+                    METRIC_ACCUSATIONS_TOTAL,
+                    "pubkey" => desc.public_key.to_string(),
+                )
+                .increment(1);
+            }
+        }
+
         self.storage
             .store_vset_report(&vset.hash, &StoredVsetReport {
                 public_key: *self.node_keys.public_key.as_bytes(),
@@ -492,8 +539,13 @@ impl SlasherSharedState {
         validator_idx: u16,
         batch: BlocksBatch,
     ) {
+        let _delivery_task = GaugeGuard::increment(METRIC_BATCH_DELIVERY_TASKS, 1.0);
+
         loop {
+            metrics::counter!(METRIC_BLOCKS_BATCH_SEND_ATTEMPTS_TOTAL).increment(1);
+
             let Some(subscription) = self.subscription.load_full() else {
+                metrics::counter!(METRIC_BLOCKS_BATCH_ERRORS_TOTAL).increment(1);
                 tracing::warn!("no slasher contract subscription");
                 break;
             };
@@ -513,6 +565,7 @@ impl SlasherSharedState {
             let signed = match self.contract.encode_blocks_batch_message(&params) {
                 Ok(signed) => signed,
                 Err(e) => {
+                    metrics::counter!(METRIC_BLOCKS_BATCH_ERRORS_TOTAL).increment(1);
                     tracing::error!("failed to encode batch message: {e:?}");
                     return;
                 }
@@ -522,6 +575,7 @@ impl SlasherSharedState {
 
             match subscription.track_message(&msg_hash, signed.expire_at) {
                 Ok(res) => {
+                    let delivery_started_at = Instant::now();
                     tracing::info!(
                         %msg_hash,
                         address = %params.address,
@@ -541,6 +595,8 @@ impl SlasherSharedState {
 
                     match res.await {
                         Ok(MessageDelivered { tx_hash }) => {
+                            metrics::histogram!(METRIC_BLOCKS_BATCH_DELIVERY_TIME)
+                                .record(delivery_started_at.elapsed());
                             tracing::info!(
                                 %tx_hash,
                                 session_id = ?params.session_id,
@@ -555,12 +611,16 @@ impl SlasherSharedState {
                             return;
                         }
                         Err(_) => {
+                            metrics::counter!(METRIC_BLOCKS_BATCH_ERRORS_TOTAL).increment(1);
                             // TODO: Execute transaction locally to guess the reason.
                             tracing::warn!("batch message expired");
                         }
                     }
                 }
-                Err(e) => tracing::warn!("failed to track message: {e:?}"),
+                Err(e) => {
+                    metrics::counter!(METRIC_BLOCKS_BATCH_ERRORS_TOTAL).increment(1);
+                    tracing::warn!("failed to track message: {e:?}");
+                }
             }
 
             tokio::time::sleep(self.config.message_retry_interval).await;
@@ -587,4 +647,10 @@ impl ParsedVset {
             vset,
         })
     }
+}
+
+fn report_config_metrics(slasher_params: Option<&SlasherParams>) {
+    metrics::gauge!(METRIC_ENABLED).set(slasher_params.is_some() as u8);
+    metrics::gauge!(METRIC_BLOCKS_BATCH_SIZE)
+        .set(slasher_params.map_or(0, |params| params.blocks_batch_size.get()));
 }

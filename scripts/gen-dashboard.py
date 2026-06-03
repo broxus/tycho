@@ -3095,6 +3095,65 @@ def validator() -> RowPanel:
     return create_row("Validator", metrics)
 
 
+def slasher() -> RowPanel:
+    metrics = [
+        timeseries_panel(
+            targets=[
+                target(
+                    'tycho_slasher_blocks_batch_size{instance=~"$instance"} and \
+                    on(instance, job) tycho_slasher_enabled{instance=~"$instance"} == 1',
+                    legend_format="{{instance}}",
+                )
+            ],
+            title="Slasher blocks batch size",
+            unit=UNITS.NUMBER_FORMAT,
+        ),
+        create_gauge_panel("tycho_slasher_active_sessions", "Slasher active sessions"),
+        create_gauge_panel(
+            "tycho_slasher_session_init_queue_len", "Slasher session init queue"
+        ),
+        create_gauge_panel(
+            "tycho_slasher_batch_delivery_tasks", "Slasher batch delivery tasks"
+        ),
+        create_gauge_panel(
+            "tycho_slasher_pending_messages", "Slasher pending messages"
+        ),
+        create_counter_panel(
+            "tycho_slasher_blocks_batch_send_attempts_total",
+            "Blocks batch send attempts",
+        ),
+        create_counter_panel(
+            "tycho_slasher_blocks_batch_delivery_time_count",
+            "Delivered block batches",
+        ),
+        create_counter_panel(
+            "tycho_slasher_blocks_batch_errors_total", "Expired block batches"
+        ),
+        create_counter_panel(
+            "tycho_slasher_blocks_batches_submitted_total",
+            "Slasher submitted batches",
+            by_labels=["instance", "origin"],
+            legend_format="{{instance}} {{origin}}",
+        ),
+        create_gauge_panel("tycho_slasher_vset_reports_total", "Slasher vset reports"),
+        create_gauge_panel(
+            "tycho_slasher_accusations_total",
+            "Slasher accusations",
+            labels=['instance=~"$instance"', 'pubkey=~"$pubkey"'],
+            legend_format="{{instance}} {{pubkey}}",
+            legend_placement="bottom",
+        ),
+        create_heatmap_panel(
+            "tycho_slasher_handle_state_time", "Slasher handle state time"
+        ),
+        create_heatmap_panel(
+            "tycho_slasher_blocks_batch_delivery_time",
+            "Slasher blocks batch delivery time",
+        ),
+    ]
+    return create_row("Slasher", metrics)
+
+
 def mempool_rounds() -> RowPanel:
     metrics = [
         create_gauge_panel(
@@ -3973,6 +4032,16 @@ def templates() -> Templating:
                 all_value=".*",
             ),
             template(
+                name="pubkey",
+                query="label_values(tycho_slasher_accusations_total, pubkey)",
+                data_source="${source}",
+                hide=0,
+                regex=None,
+                multi=True,
+                include_all=True,
+                all_value=".*",
+            ),
+            template(
                 name="remote_addr",
                 query="label_values(tycho_network_connection_rtt_ms, addr)",
                 data_source="${source}",
@@ -4016,6 +4085,7 @@ dashboard = Dashboard(
         collator_misc_operations_metrics(),
         collator_commit_block_metrics(),
         validator(),
+        slasher(),
         mempool_rounds(),
         mempool_payload_rates(),
         mempool_engine_rates(),
