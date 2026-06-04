@@ -88,7 +88,7 @@ impl SlasherStorage {
             let vset_to_remove = HashBytes::wrap(&prev_vset.prev_vset_hash);
 
             batch.delete_range_cf(
-                &db.state.cf(),
+                &db.vset_state.cf(),
                 vset_state_key(vset_to_remove, 0),
                 vset_state_key(vset_to_remove, u8::MAX),
             );
@@ -105,7 +105,7 @@ impl SlasherStorage {
         }
 
         batch.put_cf(
-            &db.state.cf(),
+            &db.vset_state.cf(),
             vset_state_key(vset_hash, tables::VsetState::KEY_TYPE_INFO),
             tl_proto::serialize(info),
         );
