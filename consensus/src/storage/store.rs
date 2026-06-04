@@ -576,6 +576,7 @@ impl MempoolStoreImpl for MempoolDb {
         if !self.has_compatible_data(overlay_id.as_bytes())? {
             let _call_duration = meter_db_clean_points_time();
             self.remove_all_points()?;
+            self.set_data_version(overlay_id.as_bytes())?;
             tracing::info!("mempool DB cleaned on init");
             self.wait_for_compact()?;
             tracing::info!("mempool DB compacted on init");
