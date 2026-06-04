@@ -448,6 +448,7 @@ where
     ) -> Result<Vec<ShardIdent>> {
         let _global_write_guard = self.global_lock.write();
 
+        let old_commit_pointers = self.state.get_commit_pointers()?;
         let mut new_commit_pointers = FastHashMap::default();
 
         for item in to_top_blocks {
@@ -466,6 +467,29 @@ where
                         self.zerostate_id.seqno
                     )
                 }
+                None if !item.updated => {
+                    if let Some(old_pointer) = old_commit_pointers.get(&block_id.shard) {
+                        if old_pointer.seqno != block_id.seqno {
+                            bail!(
+                                "Cannot roll back commit pointer for unchanged shard {} to seqno {}: \
+                                target diff is missing and old pointer seqno is {}",
+                                block_id.shard,
+                                block_id.seqno,
+                                old_pointer.seqno,
+                            );
+                        }
+                        if new_commit_pointers
+                            .insert(block_id.shard, (old_pointer.queue_key, old_pointer.seqno))
+                            .is_some()
+                        {
+                            bail!(
+                                "Duplicate shard in rollback_commit_pointers: {}",
+                                block_id.shard
+                            );
+                        }
+                    }
+                    continue;
+                }
                 None => continue,
                 Some(diff) => diff,
             };
@@ -481,7 +505,6 @@ where
             }
         }
 
-        let old_commit_pointers = self.state.get_commit_pointers()?;
         let removed_commit_pointer_shards: Vec<_> = old_commit_pointers
             .keys()
             .filter(|shard_id| !new_commit_pointers.contains_key(shard_id))

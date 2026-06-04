@@ -15,6 +15,7 @@ use tycho_collator::internal_queue::types::ranges::QueueShardRange;
 use tycho_collator::internal_queue::types::router::PartitionRouter;
 use tycho_collator::internal_queue::types::stats::DiffStatistics;
 use tycho_collator::storage::InternalQueueStorage;
+use tycho_collator::storage::models::QueueRange;
 use tycho_collator::storage::snapshot::{AccountStatistics, InternalQueueSnapshot};
 use tycho_collator::types::{TopBlockId, TopBlockIdUpdated};
 use tycho_core::global_config::ZerostateId;
@@ -1615,10 +1616,56 @@ async fn test_version() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_rollback_commit_pointers() -> anyhow::Result<()> {
-    let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
+struct RollbackCommitPointersTestData {
+    _tmp_dir: tempfile::TempDir,
+    storage: InternalQueueStorage,
+    partitions: FastHashSet<QueuePartitionIdx>,
+    queue: QueueImpl<QueueStateStdImpl, StoredObject>,
+    shard: ShardIdent,
+    block_mc1: BlockId,
+    block_sc1: BlockId,
+    block_mc2: BlockId,
+    block_mc3: BlockId,
+    block_sc2: BlockId,
+    block_mc4: BlockId,
+    top_mc1: Vec<TopBlockIdUpdated>,
+    top_mc2: Vec<TopBlockIdUpdated>,
+    top_mc3: Vec<TopBlockIdUpdated>,
+    top_mc4: Vec<TopBlockIdUpdated>,
+    diff_sc2: QueueDiffWithMessages<StoredObject>,
+    diff_mc4: QueueDiffWithMessages<StoredObject>,
+    hash_sc2: HashBytes,
+    hash_mc4: HashBytes,
+}
 
+fn create_rollback_commit_pointers_diff(
+    key: u64,
+    account: u8,
+) -> anyhow::Result<QueueDiffWithMessages<StoredObject>> {
+    let mut diff = QueueDiffWithMessages::new();
+    let stored_object = create_stored_object(key, RouterAddr {
+        workchain: -1,
+        account: HashBytes::from([account; 32]),
+    })?;
+    diff.messages.insert(stored_object.key(), stored_object);
+    Ok(diff)
+}
+
+fn create_rollback_commit_pointers_statistics(
+    diff: &QueueDiffWithMessages<StoredObject>,
+    block_id: &BlockId,
+) -> DiffStatistics {
+    DiffStatistics::from_diff(
+        diff,
+        block_id.shard,
+        diff.min_message().cloned().unwrap_or_default(),
+        diff.max_message().cloned().unwrap_or_default(),
+    )
+}
+
+async fn prepare_rollback_commit_pointers_test_data()
+-> anyhow::Result<RollbackCommitPointersTestData> {
+    let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
     let queue_factory = QueueFactoryStdImpl {
         state: QueueStateImplFactory::new(ctx)?,
         config: QueueConfig {
@@ -1626,31 +1673,10 @@ async fn test_rollback_commit_pointers() -> anyhow::Result<()> {
         },
         zerostate_id: ZerostateId::default(),
     };
-
+    let storage = queue_factory.state.storage.clone();
     let partitions = FastHashSet::from_iter([0, 1].map(QueuePartitionIdx));
-
     let queue: QueueImpl<QueueStateStdImpl, StoredObject> = queue_factory.create()?;
-
     let shard = ShardIdent::new_full(0);
-
-    let create_diff = |key, account| -> anyhow::Result<QueueDiffWithMessages<StoredObject>> {
-        let mut diff = QueueDiffWithMessages::new();
-        let stored_object = create_stored_object(key, RouterAddr {
-            workchain: -1,
-            account: HashBytes::from([account; 32]),
-        })?;
-        diff.messages.insert(stored_object.key(), stored_object);
-        Ok(diff)
-    };
-    let create_statistics = |diff: &QueueDiffWithMessages<StoredObject>, block_id: &BlockId| {
-        DiffStatistics::from_diff(
-            diff,
-            block_id.shard,
-            diff.min_message().cloned().unwrap_or_default(),
-            diff.max_message().cloned().unwrap_or_default(),
-        )
-    };
-
     let block_mc1 = BlockId {
         shard: ShardIdent::MASTERCHAIN,
         seqno: 1,
@@ -1742,26 +1768,23 @@ async fn test_rollback_commit_pointers() -> anyhow::Result<()> {
             updated: true,
         },
     ];
-    let diff_mc1 = create_diff(1, 1)?;
-    let diff_sc1 = create_diff(2, 2)?;
-    let diff_mc2 = create_diff(3, 3)?;
-    let diff_mc3 = create_diff(4, 4)?;
-    let diff_sc2 = create_diff(5, 5)?;
-    let diff_mc4 = create_diff(6, 6)?;
+    let diff_mc1 = create_rollback_commit_pointers_diff(1, 1)?;
+    let diff_sc1 = create_rollback_commit_pointers_diff(2, 2)?;
+    let diff_mc2 = create_rollback_commit_pointers_diff(3, 3)?;
+    let diff_mc3 = create_rollback_commit_pointers_diff(4, 4)?;
+    let diff_sc2 = create_rollback_commit_pointers_diff(5, 5)?;
+    let diff_mc4 = create_rollback_commit_pointers_diff(6, 6)?;
     let hash_mc1 = HashBytes::from([1; 32]);
     let hash_sc1 = HashBytes::from([2; 32]);
     let hash_mc2 = HashBytes::from([3; 32]);
     let hash_mc3 = HashBytes::from([4; 32]);
     let hash_sc2 = HashBytes::from([5; 32]);
     let hash_mc4 = HashBytes::from([6; 32]);
-    let top_shards = [ShardIdent::MASTERCHAIN, shard];
-
-    // build and commit the full mc1 -> sb1 -> mc2 -> mc3 -> sb2 -> mc4 queue chain
     queue.apply_diff(
         diff_mc1.clone(),
         block_mc1.as_short_id(),
         &hash_mc1,
-        create_statistics(&diff_mc1, &block_mc1),
+        create_rollback_commit_pointers_statistics(&diff_mc1, &block_mc1),
         Some(DiffZone::Both),
     )?;
     queue.commit_diff(&top_mc1, &partitions)?;
@@ -1769,14 +1792,14 @@ async fn test_rollback_commit_pointers() -> anyhow::Result<()> {
         diff_sc1.clone(),
         block_sc1.as_short_id(),
         &hash_sc1,
-        create_statistics(&diff_sc1, &block_sc1),
+        create_rollback_commit_pointers_statistics(&diff_sc1, &block_sc1),
         Some(DiffZone::Both),
     )?;
     queue.apply_diff(
         diff_mc2.clone(),
         block_mc2.as_short_id(),
         &hash_mc2,
-        create_statistics(&diff_mc2, &block_mc2),
+        create_rollback_commit_pointers_statistics(&diff_mc2, &block_mc2),
         Some(DiffZone::Committed),
     )?;
     queue.commit_diff(&top_mc2, &partitions)?;
@@ -1784,7 +1807,7 @@ async fn test_rollback_commit_pointers() -> anyhow::Result<()> {
         diff_mc3.clone(),
         block_mc3.as_short_id(),
         &hash_mc3,
-        create_statistics(&diff_mc3, &block_mc3),
+        create_rollback_commit_pointers_statistics(&diff_mc3, &block_mc3),
         Some(DiffZone::Committed),
     )?;
     queue.commit_diff(&top_mc3, &partitions)?;
@@ -1792,18 +1815,65 @@ async fn test_rollback_commit_pointers() -> anyhow::Result<()> {
         diff_sc2.clone(),
         block_sc2.as_short_id(),
         &hash_sc2,
-        create_statistics(&diff_sc2, &block_sc2),
+        create_rollback_commit_pointers_statistics(&diff_sc2, &block_sc2),
         Some(DiffZone::Committed),
     )?;
     queue.apply_diff(
         diff_mc4.clone(),
         block_mc4.as_short_id(),
         &hash_mc4,
-        create_statistics(&diff_mc4, &block_mc4),
+        create_rollback_commit_pointers_statistics(&diff_mc4, &block_mc4),
         Some(DiffZone::Committed),
     )?;
     queue.commit_diff(&top_mc4, &partitions)?;
     assert_eq!(queue.get_last_committed_mc_block_id()?, Some(block_mc4));
+    Ok(RollbackCommitPointersTestData {
+        _tmp_dir,
+        storage,
+        partitions,
+        queue,
+        shard,
+        block_mc1,
+        block_sc1,
+        block_mc2,
+        block_mc3,
+        block_sc2,
+        block_mc4,
+        top_mc1,
+        top_mc2,
+        top_mc3,
+        top_mc4,
+        diff_sc2,
+        diff_mc4,
+        hash_sc2,
+        hash_mc4,
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_rollback_commit_pointers() -> anyhow::Result<()> {
+    let RollbackCommitPointersTestData {
+        _tmp_dir,
+        partitions,
+        queue,
+        shard,
+        block_mc1,
+        block_sc1,
+        block_mc2,
+        block_mc3,
+        block_sc2,
+        block_mc4,
+        top_mc1,
+        top_mc2,
+        top_mc3,
+        top_mc4,
+        diff_sc2,
+        diff_mc4,
+        hash_sc2,
+        hash_mc4,
+        ..
+    } = prepare_rollback_commit_pointers_test_data().await?;
+    let top_shards = [ShardIdent::MASTERCHAIN, shard];
 
     // first rollback: mc4 -> mc3, then cleanup and recommit the same sb2/mc4 diffs
     let removed_commit_pointer_shards = queue.rollback_commit_pointers(&block_mc3, &top_mc3)?;
@@ -1838,14 +1908,14 @@ async fn test_rollback_commit_pointers() -> anyhow::Result<()> {
         diff_sc2.clone(),
         block_sc2.as_short_id(),
         &hash_sc2,
-        create_statistics(&diff_sc2, &block_sc2),
+        create_rollback_commit_pointers_statistics(&diff_sc2, &block_sc2),
         Some(DiffZone::Committed),
     )?;
     queue.apply_diff(
         diff_mc4.clone(),
         block_mc4.as_short_id(),
         &hash_mc4,
-        create_statistics(&diff_mc4, &block_mc4),
+        create_rollback_commit_pointers_statistics(&diff_mc4, &block_mc4),
         Some(DiffZone::Committed),
     )?;
     queue.commit_diff(&top_mc4, &partitions)?;
@@ -1885,6 +1955,47 @@ async fn test_rollback_commit_pointers() -> anyhow::Result<()> {
             .is_none()
     );
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_rollback_commit_pointers_missing_unchanged_diff_keeps_old_state() -> anyhow::Result<()>
+{
+    let RollbackCommitPointersTestData {
+        _tmp_dir,
+        storage,
+        partitions,
+        queue,
+        shard,
+        block_sc1,
+        block_sc2,
+        block_mc3,
+        block_mc4,
+        top_mc3,
+        ..
+    } = prepare_rollback_commit_pointers_test_data().await?;
+    let ranges: Vec<_> = partitions
+        .iter()
+        .map(|partition| QueueRange {
+            shard_ident: shard,
+            partition: *partition,
+            from: QueueKey::MIN,
+            to: QueueKey::MAX,
+        })
+        .collect();
+    storage.begin_transaction().delete(&ranges)?;
+    assert!(
+        queue
+            .get_diff_info(&shard, block_sc1.seqno, DiffZone::Both)?
+            .is_none()
+    );
+    let err = queue
+        .rollback_commit_pointers(&block_mc3, &top_mc3)
+        .unwrap_err();
+    assert!(err.to_string().contains("target diff is missing"));
+    assert_eq!(queue.get_last_committed_mc_block_id()?, Some(block_mc4));
+    let commit_pointers = storage.make_snapshot().read_commit_pointers()?;
+    assert_eq!(commit_pointers.get(&shard).unwrap().seqno, block_sc2.seqno);
     Ok(())
 }
 
