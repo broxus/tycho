@@ -42,7 +42,7 @@ impl MempoolDb {
     pub(super) fn remove_all_points(&self) -> anyhow::Result<()> {
         let up_to_exclusive = [u8::MAX; PointKey::MAX_TL_BYTES];
         let zero = [0; PointKey::MAX_TL_BYTES];
-        let none = None::<[u8; PointKey::MAX_TL_BYTES]>;
+        let none = None::<&[u8]>;
 
         let status_cf = self.db.tables().points_status.cf();
         let info_cf = self.db.tables().points_info.cf();
@@ -55,9 +55,9 @@ impl MempoolDb {
         batch.delete_range_cf(&points_cf, &zero, &up_to_exclusive);
         rocksdb.write(batch)?;
 
-        rocksdb.compact_range_cf(&status_cf, none, Some(up_to_exclusive));
-        rocksdb.compact_range_cf(&info_cf, none, Some(up_to_exclusive));
-        rocksdb.compact_range_cf(&points_cf, none, Some(up_to_exclusive));
+        rocksdb.compact_range_cf(&status_cf, none, none);
+        rocksdb.compact_range_cf(&info_cf, none, none);
+        rocksdb.compact_range_cf(&points_cf, none, none);
 
         Ok(())
     }
@@ -136,40 +136,44 @@ impl MempoolDb {
         Ok(())
     }
 
-    /// returns `true` if only one value existed and was equal to provided arg
+    /// returns `true` if only one value exists and is equal to provided arg
     ///
     /// if returns `false` - should drop all data and wait for compactions to finish
     pub(super) fn has_compatible_data(&self, data_version: &[u8]) -> anyhow::Result<bool> {
         let default_cf = self.db.rocksdb();
 
         let mut has_same = false;
-        let mut other_values = Vec::<Box<[u8]>>::new();
 
         for result in default_cf.iterator(IteratorMode::Start) {
             let (key, _) = result?;
             if &*key == data_version {
                 has_same = true;
             } else {
-                other_values.push(key);
+                return Ok(false);
             }
         }
 
-        if has_same & other_values.is_empty() {
-            return Ok(true);
-        }
+        Ok(has_same)
+    }
+
+    /// write the given value and delete other ones
+    pub(super) fn set_data_version(&self, data_version: &[u8]) -> anyhow::Result<()> {
+        let none = None::<&[u8]>;
+
+        let default_cf = self.db.rocksdb();
 
         let mut batch = WriteBatch::default();
 
-        for other in other_values {
-            batch.delete(other);
+        for result in default_cf.iterator(IteratorMode::Start) {
+            let (key, _) = result?;
+            batch.delete(key);
         }
-        if !has_same {
-            batch.put(data_version, []);
-        }
+        batch.put(data_version, []);
+
         default_cf.write(batch)?;
 
-        default_cf.compact_range(None::<&[u8]>, None::<&[u8]>);
+        default_cf.compact_range(none, none);
 
-        Ok(false)
+        Ok(())
     }
 }
