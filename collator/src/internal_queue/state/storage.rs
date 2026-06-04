@@ -93,6 +93,14 @@ pub trait QueueState<V: InternalMessageValue>: Send + Sync {
         mc_block_id: &BlockId,
     ) -> Result<()>;
 
+    /// Replace commit pointers and last committed mc block id.
+    /// ATTENTION! Overrides old value without checks. Should validate the new value in the calling code.
+    fn replace_commit_pointers(
+        &self,
+        commit_pointers: FastHashMap<ShardIdent, (QueueKey, u32)>,
+        mc_block_id: &BlockId,
+    ) -> Result<()>;
+
     /// Load statistics for given partition and ranges
     fn load_diff_statistics(
         &self,
@@ -211,13 +219,18 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
     ) -> Result<()> {
         let mut tx = self.storage.begin_transaction();
         tx.commit_messages(commit_pointers)?;
-        tx.set_last_committed_mc_block_id(mc_block_id)?;
-        tx.write()?;
-        let db = self.storage.db();
-        db.rocksdb()
-            .flush_cf(&db.internal_message_commit_pointer.cf())?;
-        db.rocksdb().flush_cf(&db.internal_message_var.cf())?;
-        Ok(())
+        self.write_commit_transaction(tx, mc_block_id)
+    }
+
+    fn replace_commit_pointers(
+        &self,
+        commit_pointers: FastHashMap<ShardIdent, (QueueKey, u32)>,
+        mc_block_id: &BlockId,
+    ) -> Result<()> {
+        let old_commit_pointers = self.storage.make_snapshot().read_commit_pointers()?;
+        let mut tx = self.storage.begin_transaction();
+        tx.replace_commit_pointers(&old_commit_pointers, commit_pointers)?;
+        self.write_commit_transaction(tx, mc_block_id)
     }
 
     fn load_diff_statistics(
@@ -383,6 +396,20 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
 }
 
 impl QueueStateStdImpl {
+    fn write_commit_transaction(
+        &self,
+        mut tx: InternalQueueTransaction,
+        mc_block_id: &BlockId,
+    ) -> Result<()> {
+        tx.set_last_committed_mc_block_id(mc_block_id)?;
+        tx.write()?;
+        let db = self.storage.db();
+        db.rocksdb()
+            .flush_cf(&db.internal_message_commit_pointer.cf())?;
+        db.rocksdb().flush_cf(&db.internal_message_var.cf())?;
+        Ok(())
+    }
+
     /// write new messages to storage
     fn add_messages<V: InternalMessageValue>(
         internal_queue_tx: &mut InternalQueueTransaction,

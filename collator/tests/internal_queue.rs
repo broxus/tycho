@@ -1508,6 +1508,7 @@ async fn test_version() -> anyhow::Result<()> {
 
     let queue: QueueImpl<QueueStateStdImpl, StoredObject> = queue_factory.create()?;
 
+    // define the applied mc block, the ahead mc block, and an extra shard top block
     let block_mc1 = BlockId {
         shard: ShardIdent::MASTERCHAIN,
         seqno: 1,
@@ -1610,6 +1611,279 @@ async fn test_version() -> anyhow::Result<()> {
 
     let version = queue.get_last_committed_mc_block_id()?;
     assert_eq!(version, Some(block_mc2));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_rollback_commit_pointers() -> anyhow::Result<()> {
+    let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
+
+    let queue_factory = QueueFactoryStdImpl {
+        state: QueueStateImplFactory::new(ctx)?,
+        config: QueueConfig {
+            gc_interval: Duration::from_secs(1),
+        },
+        zerostate_id: ZerostateId::default(),
+    };
+
+    let partitions = FastHashSet::from_iter([0, 1].map(QueuePartitionIdx));
+
+    let queue: QueueImpl<QueueStateStdImpl, StoredObject> = queue_factory.create()?;
+
+    let shard = ShardIdent::new_full(0);
+
+    let create_diff = |key, account| -> anyhow::Result<QueueDiffWithMessages<StoredObject>> {
+        let mut diff = QueueDiffWithMessages::new();
+        let stored_object = create_stored_object(key, RouterAddr {
+            workchain: -1,
+            account: HashBytes::from([account; 32]),
+        })?;
+        diff.messages.insert(stored_object.key(), stored_object);
+        Ok(diff)
+    };
+    let create_statistics = |diff: &QueueDiffWithMessages<StoredObject>, block_id: &BlockId| {
+        DiffStatistics::from_diff(
+            diff,
+            block_id.shard,
+            diff.min_message().cloned().unwrap_or_default(),
+            diff.max_message().cloned().unwrap_or_default(),
+        )
+    };
+
+    let block_mc1 = BlockId {
+        shard: ShardIdent::MASTERCHAIN,
+        seqno: 1,
+        root_hash: HashBytes::from([11; 32]),
+        file_hash: HashBytes::from([12; 32]),
+    };
+    let block_sc1 = BlockId {
+        shard,
+        seqno: 1,
+        root_hash: HashBytes::from([21; 32]),
+        file_hash: HashBytes::from([22; 32]),
+    };
+    let block_mc2 = BlockId {
+        shard: ShardIdent::MASTERCHAIN,
+        seqno: 2,
+        root_hash: HashBytes::from([31; 32]),
+        file_hash: HashBytes::from([32; 32]),
+    };
+    let block_mc3 = BlockId {
+        shard: ShardIdent::MASTERCHAIN,
+        seqno: 3,
+        root_hash: HashBytes::from([41; 32]),
+        file_hash: HashBytes::from([42; 32]),
+    };
+    let block_sc2 = BlockId {
+        shard,
+        seqno: 2,
+        root_hash: HashBytes::from([51; 32]),
+        file_hash: HashBytes::from([52; 32]),
+    };
+    let block_mc4 = BlockId {
+        shard: ShardIdent::MASTERCHAIN,
+        seqno: 4,
+        root_hash: HashBytes::from([61; 32]),
+        file_hash: HashBytes::from([62; 32]),
+    };
+    let top_mc1 = vec![TopBlockIdUpdated {
+        block: TopBlockId {
+            ref_by_mc_seqno: block_mc1.seqno,
+            block_id: block_mc1,
+        },
+        updated: true,
+    }];
+    let top_mc2 = vec![
+        TopBlockIdUpdated {
+            block: TopBlockId {
+                ref_by_mc_seqno: block_mc2.seqno,
+                block_id: block_mc2,
+            },
+            updated: true,
+        },
+        TopBlockIdUpdated {
+            block: TopBlockId {
+                ref_by_mc_seqno: block_mc2.seqno,
+                block_id: block_sc1,
+            },
+            updated: true,
+        },
+    ];
+    let top_mc3 = vec![
+        TopBlockIdUpdated {
+            block: TopBlockId {
+                ref_by_mc_seqno: block_mc3.seqno,
+                block_id: block_mc3,
+            },
+            updated: true,
+        },
+        TopBlockIdUpdated {
+            block: TopBlockId {
+                ref_by_mc_seqno: block_mc2.seqno,
+                block_id: block_sc1,
+            },
+            updated: false,
+        },
+    ];
+    let top_mc4 = vec![
+        TopBlockIdUpdated {
+            block: TopBlockId {
+                ref_by_mc_seqno: block_mc4.seqno,
+                block_id: block_mc4,
+            },
+            updated: true,
+        },
+        TopBlockIdUpdated {
+            block: TopBlockId {
+                ref_by_mc_seqno: block_mc4.seqno,
+                block_id: block_sc2,
+            },
+            updated: true,
+        },
+    ];
+    let diff_mc1 = create_diff(1, 1)?;
+    let diff_sc1 = create_diff(2, 2)?;
+    let diff_mc2 = create_diff(3, 3)?;
+    let diff_mc3 = create_diff(4, 4)?;
+    let diff_sc2 = create_diff(5, 5)?;
+    let diff_mc4 = create_diff(6, 6)?;
+    let hash_mc1 = HashBytes::from([1; 32]);
+    let hash_sc1 = HashBytes::from([2; 32]);
+    let hash_mc2 = HashBytes::from([3; 32]);
+    let hash_mc3 = HashBytes::from([4; 32]);
+    let hash_sc2 = HashBytes::from([5; 32]);
+    let hash_mc4 = HashBytes::from([6; 32]);
+    let top_shards = [ShardIdent::MASTERCHAIN, shard];
+
+    // build and commit the full mc1 -> sb1 -> mc2 -> mc3 -> sb2 -> mc4 queue chain
+    queue.apply_diff(
+        diff_mc1.clone(),
+        block_mc1.as_short_id(),
+        &hash_mc1,
+        create_statistics(&diff_mc1, &block_mc1),
+        Some(DiffZone::Both),
+    )?;
+    queue.commit_diff(&top_mc1, &partitions)?;
+    queue.apply_diff(
+        diff_sc1.clone(),
+        block_sc1.as_short_id(),
+        &hash_sc1,
+        create_statistics(&diff_sc1, &block_sc1),
+        Some(DiffZone::Both),
+    )?;
+    queue.apply_diff(
+        diff_mc2.clone(),
+        block_mc2.as_short_id(),
+        &hash_mc2,
+        create_statistics(&diff_mc2, &block_mc2),
+        Some(DiffZone::Committed),
+    )?;
+    queue.commit_diff(&top_mc2, &partitions)?;
+    queue.apply_diff(
+        diff_mc3.clone(),
+        block_mc3.as_short_id(),
+        &hash_mc3,
+        create_statistics(&diff_mc3, &block_mc3),
+        Some(DiffZone::Committed),
+    )?;
+    queue.commit_diff(&top_mc3, &partitions)?;
+    queue.apply_diff(
+        diff_sc2.clone(),
+        block_sc2.as_short_id(),
+        &hash_sc2,
+        create_statistics(&diff_sc2, &block_sc2),
+        Some(DiffZone::Committed),
+    )?;
+    queue.apply_diff(
+        diff_mc4.clone(),
+        block_mc4.as_short_id(),
+        &hash_mc4,
+        create_statistics(&diff_mc4, &block_mc4),
+        Some(DiffZone::Committed),
+    )?;
+    queue.commit_diff(&top_mc4, &partitions)?;
+    assert_eq!(queue.get_last_committed_mc_block_id()?, Some(block_mc4));
+
+    // first rollback: mc4 -> mc3, then cleanup and recommit the same sb2/mc4 diffs
+    let removed_commit_pointer_shards = queue.rollback_commit_pointers(&block_mc3, &top_mc3)?;
+    assert!(removed_commit_pointer_shards.is_empty());
+    assert_eq!(queue.get_last_committed_mc_block_id()?, Some(block_mc3));
+    assert!(
+        queue
+            .get_diff_info(
+                &ShardIdent::MASTERCHAIN,
+                block_mc4.seqno,
+                DiffZone::Uncommitted
+            )?
+            .is_some()
+    );
+    assert!(
+        queue
+            .get_diff_info(&shard, block_sc2.seqno, DiffZone::Uncommitted)?
+            .is_some()
+    );
+    queue.clear_uncommitted_state(&partitions, &top_shards)?;
+    assert!(
+        queue
+            .get_diff_info(&ShardIdent::MASTERCHAIN, block_mc4.seqno, DiffZone::Both)?
+            .is_none()
+    );
+    assert!(
+        queue
+            .get_diff_info(&shard, block_sc2.seqno, DiffZone::Both)?
+            .is_none()
+    );
+    queue.apply_diff(
+        diff_sc2.clone(),
+        block_sc2.as_short_id(),
+        &hash_sc2,
+        create_statistics(&diff_sc2, &block_sc2),
+        Some(DiffZone::Committed),
+    )?;
+    queue.apply_diff(
+        diff_mc4.clone(),
+        block_mc4.as_short_id(),
+        &hash_mc4,
+        create_statistics(&diff_mc4, &block_mc4),
+        Some(DiffZone::Committed),
+    )?;
+    queue.commit_diff(&top_mc4, &partitions)?;
+    assert_eq!(queue.get_last_committed_mc_block_id()?, Some(block_mc4));
+
+    // second rollback: mc4 -> mc2, then cleanup without recommitting rolled-back diffs
+    let removed_commit_pointer_shards = queue.rollback_commit_pointers(&block_mc2, &top_mc2)?;
+    assert!(removed_commit_pointer_shards.is_empty());
+    assert_eq!(queue.get_last_committed_mc_block_id()?, Some(block_mc2));
+    queue.clear_uncommitted_state(&partitions, &top_shards)?;
+    assert!(
+        queue
+            .get_diff_info(&ShardIdent::MASTERCHAIN, block_mc3.seqno, DiffZone::Both)?
+            .is_none()
+    );
+    assert!(
+        queue
+            .get_diff_info(&shard, block_sc2.seqno, DiffZone::Both)?
+            .is_none()
+    );
+
+    // third rollback: mc2 -> mc1, removing the shard pointer and cleaning sb1/mc2
+    let removed_commit_pointer_shards = queue.rollback_commit_pointers(&block_mc1, &top_mc1)?;
+    assert_eq!(removed_commit_pointer_shards, vec![shard]);
+    assert_eq!(queue.get_last_committed_mc_block_id()?, Some(block_mc1));
+    let mut top_shards = vec![ShardIdent::MASTERCHAIN];
+    top_shards.extend(removed_commit_pointer_shards);
+    queue.clear_uncommitted_state(&partitions, &top_shards)?;
+    assert!(
+        queue
+            .get_diff_info(&ShardIdent::MASTERCHAIN, block_mc2.seqno, DiffZone::Both)?
+            .is_none()
+    );
+    assert!(
+        queue
+            .get_diff_info(&shard, block_sc1.seqno, DiffZone::Both)?
+            .is_none()
+    );
 
     Ok(())
 }

@@ -7,16 +7,20 @@ use bytes::Bytes;
 use futures_util::future;
 use futures_util::future::BoxFuture;
 use tycho_block_util::block::BlockIdRelation;
+use tycho_block_util::state::ShardStateStuff;
 use tycho_collator::collator::CollatorStdImplFactory;
 use tycho_collator::internal_queue::queue::{QueueConfig, QueueFactory, QueueFactoryStdImpl};
 use tycho_collator::internal_queue::state::storage::QueueStateImplFactory;
+use tycho_collator::internal_queue::types::message::EnqueuedMessage;
 use tycho_collator::manager::CollationManager;
 use tycho_collator::mempool::{
     MempoolAdapter, MempoolAdapterSingleNodeImpl, MempoolAdapterStdImpl,
 };
 use tycho_collator::queue_adapter::{MessageQueueAdapter, MessageQueueAdapterStdImpl};
 use tycho_collator::state_node::{CollatorSyncContext, StateNodeAdapter, StateNodeAdapterStdImpl};
-use tycho_collator::types::CollatorConfig;
+use tycho_collator::types::{
+    CollatorConfig, ShardDescriptionShortExt, TopBlockId, TopBlockIdUpdated,
+};
 use tycho_collator::validator::{
     ValidatorNetworkContext, ValidatorStdImpl, ValidatorStdImplConfig,
 };
@@ -164,6 +168,55 @@ impl Node {
             .await
     }
 
+    fn recover_messages_queue_commit_state_after_restart(
+        message_queue_adapter: &impl MessageQueueAdapter<EnqueuedMessage>,
+        last_mc_block_id: &BlockId,
+        mc_state: &ShardStateStuff,
+    ) -> Result<()> {
+        let mut top_shards_for_queue_clean = mc_state.get_top_shards()?;
+
+        // rollback commit pointers if committed queue is ahead of last applied mc state
+        if let Some(last_committed_mc_block_id) =
+            message_queue_adapter.get_last_committed_mc_block_id()?
+        {
+            if last_committed_mc_block_id.seqno > last_mc_block_id.seqno {
+                let top_shard_blocks_info = mc_state
+                    .shards()?
+                    .iter()
+                    .map(|item| {
+                        let (shard_id, shard_descr) = item?;
+                        Ok(TopBlockIdUpdated {
+                            block: TopBlockId {
+                                ref_by_mc_seqno: shard_descr.reg_mc_seqno,
+                                block_id: shard_descr.get_block_id(shard_id),
+                            },
+                            updated: shard_descr.top_sc_block_updated,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let removed_commit_pointer_shards = message_queue_adapter
+                    .rollback_commit_pointers(last_mc_block_id, top_shard_blocks_info)?;
+                for shard in removed_commit_pointer_shards {
+                    if !top_shards_for_queue_clean.contains(&shard) {
+                        top_shards_for_queue_clean.push(shard);
+                    }
+                }
+            } else {
+                anyhow::ensure!(
+                    last_committed_mc_block_id.seqno != last_mc_block_id.seqno
+                        || last_committed_mc_block_id == *last_mc_block_id,
+                    "internal messages queue is committed on different masterchain block: queue={}, applied={}",
+                    last_committed_mc_block_id,
+                    last_mc_block_id,
+                );
+            }
+        }
+
+        // We should clear uncommitted queue state because it may contain incorrect diffs
+        // that were created before node restart. We will restore queue strictly above last committed state
+        message_queue_adapter.clear_uncommitted_state(&top_shards_for_queue_clean)
+    }
+
     pub async fn run(self, last_block_id: &BlockId, is_single_node: bool) -> Result<()> {
         let base = &self.base;
 
@@ -217,10 +270,11 @@ impl Node {
         let queue = queue_factory.create()?;
         let message_queue_adapter = MessageQueueAdapterStdImpl::new(queue);
 
-        // We should clear uncommitted queue state because it may contain incorrect diffs
-        // that were created before node restart. We will restore queue strictly above last committed state
-        let top_shards = mc_state.get_top_shards()?;
-        message_queue_adapter.clear_uncommitted_state(&top_shards)?;
+        Self::recover_messages_queue_commit_state_after_restart(
+            &message_queue_adapter,
+            last_block_id,
+            &mc_state,
+        )?;
 
         let validator = ValidatorStdImpl::new(
             ValidatorNetworkContext {

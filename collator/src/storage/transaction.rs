@@ -85,6 +85,27 @@ impl InternalQueueTransaction {
         Ok(())
     }
 
+    /// Replaces all commit pointers with the provided set.
+    pub fn replace_commit_pointers(
+        &mut self,
+        old_commit_pointers: &FastHashMap<ShardIdent, CommitPointerValue>,
+        commit_pointers: FastHashMap<ShardIdent, (QueueKey, u32)>,
+    ) -> Result<()> {
+        let commit_pointers_cf = self.db.internal_message_commit_pointer.cf();
+
+        for shard_ident in old_commit_pointers.keys() {
+            if !commit_pointers.contains_key(shard_ident) {
+                let key = CommitPointerKey {
+                    shard_ident: *shard_ident,
+                }
+                .to_vec();
+                self.batch.delete_cf(&commit_pointers_cf, key);
+            }
+        }
+
+        self.commit_messages(commit_pointers)
+    }
+
     /// Removes all keys that are strictly above the committed pointers in each partition.
     /// (Anything above `pointer + 1` is considered "uncommitted" and will be deleted.)
     ///
@@ -115,10 +136,9 @@ impl InternalQueueTransaction {
             }
         }
 
-        // backoff: if no commit pointers (no any committed diff)
-        //          create full ranges for delete for each shard
-        if ranges.is_empty() {
-            for &shard_ident in top_shards {
+        // backoff: if no commit pointer for a shard, delete the full shard range
+        for &shard_ident in top_shards {
+            if !commit_pointers.contains_key(&shard_ident) {
                 for &partition in partitions {
                     ranges.push(QueueRange {
                         shard_ident,

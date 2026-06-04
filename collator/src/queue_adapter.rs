@@ -74,6 +74,13 @@ where
         partitions: &FastHashSet<QueuePartitionIdx>,
     ) -> Result<()>;
 
+    /// Roll back commit pointers to the specified top blocks.
+    fn rollback_commit_pointers(
+        &self,
+        to_mc_block_id: &BlockId,
+        to_top_shard_blocks: Vec<TopBlockIdUpdated>,
+    ) -> Result<Vec<ShardIdent>>;
+
     fn clear_uncommitted_state(&self, top_shards: &[ShardIdent]) -> Result<()>;
 
     /// Get diff for the given block from committed and/or uncommitted zone
@@ -266,6 +273,38 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         );
 
         Ok(())
+    }
+
+    #[instrument(skip_all, fields(%to_mc_block_id))]
+    fn rollback_commit_pointers(
+        &self,
+        to_mc_block_id: &BlockId,
+        to_top_shard_blocks: Vec<TopBlockIdUpdated>,
+    ) -> Result<Vec<ShardIdent>> {
+        let start_time = std::time::Instant::now();
+
+        let mut to_top_blocks = to_top_shard_blocks;
+        to_top_blocks.push(TopBlockIdUpdated {
+            block: crate::types::TopBlockId {
+                ref_by_mc_seqno: to_mc_block_id.seqno,
+                block_id: *to_mc_block_id,
+            },
+            updated: true,
+        });
+
+        let removed_commit_pointer_shards = self
+            .queue
+            .rollback_commit_pointers(to_mc_block_id, &to_top_blocks)?;
+
+        let elapsed = start_time.elapsed();
+        tracing::info!(target: tracing_targets::MQ_ADAPTER,
+            top_blocks = ?to_top_blocks,
+            ?removed_commit_pointer_shards,
+            elapsed = %humantime::format_duration(elapsed),
+            "rollback_commit_pointers completed"
+        );
+
+        Ok(removed_commit_pointer_shards)
     }
 
     #[instrument(skip_all)]
