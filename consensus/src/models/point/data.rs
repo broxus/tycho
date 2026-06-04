@@ -176,7 +176,7 @@ impl PointData {
     ) -> bool {
         let is_proof_far_enough = |proof_round: Round| {
             let rounds_to_proof = (round - proof_round.0).0;
-            if conf.consensus._unused == 0 {
+            if conf.consensus.sticky_anchors == 0 {
                 rounds_to_proof > 2
             } else {
                 rounds_to_proof > 3
