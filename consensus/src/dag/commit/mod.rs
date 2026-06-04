@@ -393,7 +393,7 @@ mod test {
         let local_keys = &peers[0].1;
 
         let mut merged_conf = test_utils::default_test_config();
-        merged_conf.conf.consensus._unused = sticky_anchors;
+        merged_conf.conf.consensus.sticky_anchors = sticky_anchors;
 
         let (peer_schedule, stub_downloader, genesis, engine_ctx) =
             test_utils::make_engine_parts(&merged_conf, &peers, local_keys.clone());

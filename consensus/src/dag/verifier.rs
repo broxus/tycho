@@ -522,7 +522,8 @@ impl Verifier {
                     }
 
                     if let Some(sticky_anchors) = info.sticky_anchors() {
-                        let mut is_sticky_sequence_ok = sticky_anchors < conf.consensus._unused;
+                        let mut is_sticky_sequence_ok =
+                            sticky_anchors < conf.consensus.sticky_anchors;
                         is_sticky_sequence_ok &= if let Some(prev_sticky) = dep.sticky_anchors() {
                             prev_sticky.checked_add(1) == Some(sticky_anchors)
                         } else {
@@ -862,7 +863,7 @@ impl Verifier {
         (info.check_structure(false)).map_err(IllFormedReason::Structure)?;
 
         if let Some(sticky_anchors) = info.sticky_anchors()
-            && sticky_anchors >= conf.consensus._unused
+            && sticky_anchors >= conf.consensus.sticky_anchors
         {
             return Err(IllFormedReason::TooManyStickyAnchors(sticky_anchors));
         }

@@ -113,7 +113,7 @@ impl Producer {
             let is_proof_far_enough = match &anchor_proof {
                 AnchorLink::Indirect(link) => {
                     let rounds_to_proof = (current_round - link.to.round.0).0;
-                    if conf.consensus._unused == 0 {
+                    if conf.consensus.sticky_anchors == 0 {
                         rounds_to_proof > 2
                     } else {
                         rounds_to_proof > 3
@@ -123,7 +123,7 @@ impl Producer {
             };
 
             if let Some(sticky_anchors) = last_own_point.sticky_anchors {
-                if sticky_anchors.saturating_add(1) < conf.consensus._unused {
+                if sticky_anchors.saturating_add(1) < conf.consensus.sticky_anchors {
                     PointRole::Sticky {
                         seq_no: sticky_anchors + 1,
                     }
@@ -131,7 +131,7 @@ impl Producer {
                     PointRole::AnchorTrigger
                 }
             } else if is_trigger {
-                if last_own_point.sticky_anchors.is_none() && 0 < conf.consensus._unused {
+                if last_own_point.sticky_anchors.is_none() && 0 < conf.consensus.sticky_anchors {
                     PointRole::Sticky { seq_no: 0 }
                 } else {
                     PointRole::AnchorTrigger
