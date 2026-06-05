@@ -1,5 +1,11 @@
 import arg from "arg";
-import { address, beginCell, storeAccount, toNano } from "@ton/core";
+import {
+  address,
+  beginCell,
+  Dictionary,
+  storeAccount,
+  toNano,
+} from "@ton/core";
 import { storeSlasherData } from "../wrappers/Slasher";
 import { compile } from "@ton/blueprint";
 
@@ -30,10 +36,16 @@ async function main() {
             type: "active",
             state: {
               code,
+              special: {
+                tick: true,
+                tock: false,
+              },
               data: beginCell()
                 .store(
                   storeSlasherData({
-                    updatedAtMs: 0n,
+                    currentVsetHash: Buffer.alloc(32),
+                    validatorCount: 0,
+                    sentBatches: Dictionary.empty(),
                   }),
                 )
                 .endCell(),

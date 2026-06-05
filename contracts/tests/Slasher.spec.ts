@@ -8,7 +8,7 @@ import {
   Dictionary,
   toNano,
 } from "@ton/core";
-import { Blockchain, createShardAccount, SmartContract } from "@ton/sandbox";
+import { Blockchain, EmulationError, SmartContract } from "@ton/sandbox";
 import {
   getSecureRandomBytes,
   KeyPair,
@@ -22,12 +22,12 @@ import {
   storeSlasherParams,
   storeSlasherData,
   SLASHER_OP_SEND_BLOCKS_BATCH,
+  loadSlasherData,
 } from "../wrappers/Slasher";
 import {
   bufferToBigInt,
   ConfigParams,
   makeStubValidatorSet,
-  ValidatorDescrValue,
 } from "../wrappers/util";
 
 const SLASHER_ADDR = address(
@@ -38,6 +38,8 @@ const BLOCKS_BATCH_SIZE = 10;
 const SAMPLE_BLOCKS_BATCH = Cell.fromBase64(
   "te6ccgEBCAEAMAABCwAAAObYYAECAswFAgIBIAQDAAfRCgDAAAdpRQBgAgEgBwYAB2UFAGAAB/SKAMA=",
 );
+
+const FIRST_MC_SEQNO = 241;
 
 describe("Slasher", () => {
   let config: Cell;
@@ -101,22 +103,45 @@ describe("Slasher", () => {
       executor,
     });
 
-    await blockchain.setShardAccount(
-      SLASHER_ADDR,
-      createShardAccount({
-        address: SLASHER_ADDR,
-        balance: toNano(500),
-        code,
-        data: beginCell()
-          .store(
-            storeSlasherData({
-              updatedAtMs: 0n,
-            }),
-          )
-          .endCell(),
-        workchain: -1,
-      }),
-    );
+    await blockchain.setShardAccount(SLASHER_ADDR, {
+      account: {
+        addr: SLASHER_ADDR,
+        storage: {
+          lastTransLt: 0n,
+          balance: { coins: toNano(500) },
+          state: {
+            type: "active",
+            state: {
+              code,
+              data: beginCell()
+                .store(
+                  storeSlasherData({
+                    currentVsetHash: Buffer.alloc(32),
+                    validatorCount: 0,
+                    sentBatches: Dictionary.empty(),
+                  }),
+                )
+                .endCell(),
+              special: {
+                tick: true,
+                tock: false,
+              },
+            },
+          },
+        },
+        storageStats: {
+          used: {
+            cells: 0n,
+            bits: 0n,
+          },
+          lastPaid: 0,
+          duePayment: null,
+          storageExtra: null,
+        },
+      },
+      lastTransactionLt: 0n,
+      lastTransactionHash: 0n,
+    });
 
     slasher = await blockchain.getContract(SLASHER_ADDR);
   });
@@ -124,7 +149,7 @@ describe("Slasher", () => {
   it("should accept valid blocks batch", async () => {
     const { isValid } = await getters(blockchain, slasher).isBlocksBatchValid({
       blocksBatch: SAMPLE_BLOCKS_BATCH,
-      mcSeqno: 241,
+      mcSeqno: FIRST_MC_SEQNO,
     });
     expect(isValid).toBe(true);
   });
@@ -138,7 +163,6 @@ describe("Slasher", () => {
     const validatorIdx = 0;
 
     const bodyToSign = beginCell()
-      .storeUint(nowMs, 64)
       .storeUint(expireAt, 32)
       .storeUint(SLASHER_OP_SEND_BLOCKS_BATCH, 32)
       .storeBuffer(currentVsetHash, 32)
@@ -162,7 +186,7 @@ describe("Slasher", () => {
         {
           workchain: -1,
           shard: 1n << 63n,
-          seqno: 241,
+          seqno: FIRST_MC_SEQNO,
           rootHash: Buffer.alloc(32),
           fileHash: Buffer.alloc(32),
         },
@@ -175,6 +199,19 @@ describe("Slasher", () => {
         fileHash: Buffer.alloc(32),
       },
     };
+
+    await slasher.runTickTock("tick");
+
+    // Check slasher state to have an updated vset
+    {
+      const state = slasher.accountState;
+      assert(state?.type === "active");
+
+      const slasherData = loadSlasherData(state.state.data!.asSlice());
+      expect(slasherData.currentVsetHash).toEqual(currentVsetHash);
+      expect(slasherData.validatorCount).toBe(13);
+    }
+
     const tx = await slasher.receiveMessage({
       info: {
         type: "external-in",
@@ -185,6 +222,36 @@ describe("Slasher", () => {
     });
     assert(tx.description.type === "generic");
     expect(tx.description.aborted).toBe(false);
+
+    {
+      const state = slasher.accountState;
+      assert(state?.type === "active");
+
+      const slasherData = loadSlasherData(state.state.data!.asSlice());
+      expect(slasherData.currentVsetHash).toEqual(currentVsetHash);
+      expect(slasherData.validatorCount).toBe(13);
+
+      const ourState = slasherData.sentBatches.get(0)!;
+      expect(ourState.pubkey).toEqual(keypair.publicKey);
+
+      const firstSeqno = SAMPLE_BLOCKS_BATCH.asSlice().loadUint(32);
+      expect(ourState.minSeqno).toBe(firstSeqno + BLOCKS_BATCH_SIZE);
+    }
+
+    try {
+      await slasher.receiveMessage({
+        info: {
+          type: "external-in",
+          dest: SLASHER_ADDR,
+          importFee: 0n,
+        },
+        body,
+      });
+      assert(false, "tx must fail");
+    } catch (error: any) {
+      assert(error instanceof EmulationError);
+      expect(error.exitCode).toBe(100);
+    }
   });
 });
 
