@@ -7,18 +7,19 @@ const SLASHER_OP_VOTE = stringCrc32("op::slasher_vote")
 
 const ERROR_INVALID_SIGNATURE = 40
 const ERROR_VALIDATOR_NOT_FOUND = 50
-const ERROR_REPLAY_PROTECTION = 52
 const ERROR_MESSAGE_EXPIRED = 57
 const ERROR_UNKNOWN_OP = 60
 const ERROR_INVALID_BLOCKS_BATCH = 100
 const ERROR_NO_SLASHER_CONFIG = 101
 const ERROR_NO_PREV_BLOCK_ID = 102
 
-const REPLAY_OFFSET_MS = 5000
-const FUTURE_OFFSET_SEC = 60
-
 struct Storage {
-    updatedAtMs: uint64
+    currentVsetHash: uint256
+    validatorCount: uint16
+    /// Per-participant replay protection.
+    ///
+    /// uint16 (validatorIdx) => `ValidatorState`
+    sentBatches: dict,
 }
 
 fun Storage.load(): Storage {
@@ -27,6 +28,16 @@ fun Storage.load(): Storage {
 
 fun Storage.save(self) {
     contract.setData(self.toCell());
+}
+
+struct ValidatorState {
+    pubkey: uint256
+    minSeqno: uint32
+}
+
+/// Create a new builder with this value.
+fun ValidatorState.toBuilder(self): builder {
+    return beginCell().storeAny(self);
 }
 
 //
@@ -46,26 +57,61 @@ get fun is_blocks_batch_valid(batch: cell, mcSeqno: int): bool {
     val params = loadSlasherParams();
     val vset = lazy ValidatorSet.fromCell(blockchain.configParam(PARAM_IDX_CURRENT_VSET)!);
     val validatorCount = min(vset.total, vset.main);
-    return validateBlocksBatch(
+    val nextSeqno = validateBlocksBatch(
         batch.beginParse(),
         {
+            minSeqno: 0,
             batchSize: params.blocksBatchSize,
             mcSeqno,
             validatorCount,
         }
     );
+    return nextSeqno != null;
 }
 
 //
 // === Logic ===
 //
+fun onRunTickTock(_isTock: bool) {
+    val vsetRaw = blockchain.configParam(PARAM_IDX_CURRENT_VSET)!;
+    val data = lazy Storage.load();
+    val currentVsetHash = vsetRaw.hash();
+    if (data.currentVsetHash == currentVsetHash) {
+        return;
+    }
+
+    val vset = lazy ValidatorSet.fromCell(vsetRaw);
+    val validatorCount = min(vset.total, vset.main);
+    val lastValidatorIdx = validatorCount - 1;
+
+    var sentBatches = createEmptyDict();
+
+    var iterNext = -1;
+    do {
+        val (validatorIdx, cs, found) = vset.list.uDictGetNext(16, iterNext);
+        if (found) {
+            iterNext = validatorIdx!;
+            val state = ValidatorState {
+                pubkey: ValidatorDescr.readPubkeyOnly(cs!),
+                minSeqno: 0,
+            };
+            sentBatches.uDictSetBuilder(16, validatorIdx!, state.toBuilder());
+        }
+    } while (found && validatorIdx! < lastValidatorIdx);
+
+    Storage {
+        currentVsetHash,
+        validatorCount,
+        sentBatches,
+    }.save();
+}
+
 fun onInternalMessage(_in: InMessage) {
 }
 
 fun onExternalMessage(inMsg: slice) {
     val signature = inMsg.loadBits(512);
     val signedBody = inMsg;
-    val createdAtMs = inMsg.loadUint(64);
     val expireAtSec = inMsg.loadUint(32);
 
     val op = inMsg.loadUint(32);
@@ -74,7 +120,6 @@ fun onExternalMessage(inMsg: slice) {
             handleBlocksBatchMessage(
                 signature,
                 signedBody,
-                createdAtMs,
                 expireAtSec,
                 inMsg,
             )
@@ -89,7 +134,6 @@ fun onExternalMessage(inMsg: slice) {
 fun handleBlocksBatchMessage(
     signature: slice,
     signedBody: slice,
-    createdAtMs: int,
     expireAtSec: int,
     rest: slice
 ) {
@@ -100,61 +144,61 @@ fun handleBlocksBatchMessage(
     assert(blockchain.now() <= expireAtSec, ERROR_MESSAGE_EXPIRED);
 
     val toSign = beginCell().storeSlice(signedBody).endCell();
-    val vsetRaw = blockchain.configParam(PARAM_IDX_CURRENT_VSET)!;
-    assert(vsetRaw.hash() == vsetHash, ERROR_VALIDATOR_NOT_FOUND);
 
-    val vset = lazy ValidatorSet.fromCell(vsetRaw);
-    var (validatorCs, validatorFound) = vset.list.uDictGet(16, validatorIdx);
+    var data = Storage.load();
+    assert(vsetHash == data.currentVsetHash, ERROR_VALIDATOR_NOT_FOUND);
+
+    val (validatorCs, validatorFound) = data.sentBatches.uDictGet(16, validatorIdx);
     assert(validatorFound, ERROR_VALIDATOR_NOT_FOUND);
-    val validatorPubkey = ValidatorDescr.readPubkeyOnly(validatorCs!);
-    assert(isSignatureValid(toSign.hash(), signature, validatorPubkey), ERROR_INVALID_SIGNATURE);
-
-    val validatorCount = min(vset.total, vset.main);
+    var validatorState = ValidatorState.fromSlice(validatorCs!);
+    assert(isSignatureValid(toSign.hash(), signature, validatorState.pubkey), ERROR_INVALID_SIGNATURE);
 
     val batchSize = loadSlasherParams().blocksBatchSize;
     val mcSeqno = blockchain.prevMcSeqno() + 1;
-    assert(validateBlocksBatch(
+    val nextSeqno = validateBlocksBatch(
         batch.beginParse(),
         {
+            minSeqno: validatorState.minSeqno,
             batchSize,
-            validatorCount,
+            validatorCount: data.validatorCount,
             mcSeqno,
         }
-    ), ERROR_INVALID_BLOCKS_BATCH);
+    );
+    assert(nextSeqno != null, ERROR_INVALID_BLOCKS_BATCH);
 
-    var data = Storage.load();
-
-    // TODO: `updatedAtMs` must be separate for all validators.
-    assert(createdAtMs > (data.updatedAtMs - REPLAY_OFFSET_MS) &&
-    createdAtMs <= (blockchain.now() + FUTURE_OFFSET_SEC) * 1000, ERROR_REPLAY_PROTECTION);
-
-    data.updatedAtMs = max(createdAtMs, data.updatedAtMs);
+    validatorState.minSeqno = nextSeqno;
+    data.sentBatches.uDictSetBuilder(16, validatorIdx, validatorState.toBuilder());
     data.save();
 
     acceptExternalMessage();
 }
 
 struct ValidateBlocksBatchParams {
+    minSeqno: int
     batchSize: int
     mcSeqno: int
     validatorCount: int
 }
 
-fun validateBlocksBatch(batch: slice, params: ValidateBlocksBatchParams): bool {
+fun validateBlocksBatch(batch: slice, params: ValidateBlocksBatchParams): int? {
     val startSeqno = batch.loadUint(32);
-    if (startSeqno + params.batchSize > params.mcSeqno) {
+    if (
+        // Repeated batch.
+        startSeqno < params.minSeqno
         // Batch contains blocks that were not produced yet.
-        return false;
-    }
-    if (startSeqno + params.batchSize * 2 < params.mcSeqno) {
+        || startSeqno + params.batchSize > params.mcSeqno
         // Batch contains too old blocks.
-        return false;
+        || startSeqno + params.batchSize * 2 < params.mcSeqno
+    ) {
+        return null;
     }
+
+    val nextSeqno = startSeqno + params.batchSize;
 
     batch.skipBits(params.batchSize);
     val history = batch.loadRef() as dict;
     if (!batch.isEmpty()) {
-        return false;
+        return null;
     }
 
     var iterNext = -1;
@@ -164,17 +208,17 @@ fun validateBlocksBatch(batch: slice, params: ValidateBlocksBatchParams): bool {
             iterNext = validatorIdx!;
 
             if (validatorIdx! >= params.validatorCount) {
-                return false;
+                return null;
             }
 
             val (csBits, csRefs) = cs!.remainingBitsAndRefsCount();
             if (csBits != params.batchSize * 2 || csRefs != 0) {
-                return false;
+                return null;
             }
         }
     } while (found);
 
-    return true;
+    return nextSeqno;
 }
 
 fun loadSlasherParams(): SlasherParams {

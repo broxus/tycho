@@ -4,6 +4,8 @@ import {
   Cell,
   Contract,
   ContractProvider,
+  Dictionary,
+  DictionaryValue,
   Slice,
 } from "@ton/core";
 import { UnknownTagError } from "./util";
@@ -41,18 +43,58 @@ export function storeSlasherParams(
 }
 
 export type SlasherData = {
-  updatedAtMs: bigint;
+  currentVsetHash: Buffer;
+  validatorCount: number;
+  sentBatches: Dictionary<number, SlasherValidatorState>;
 };
 
 export function loadSlasherData(cs: Slice): SlasherData {
   return {
-    updatedAtMs: cs.loadUintBig(64),
+    currentVsetHash: cs.loadBuffer(32),
+    validatorCount: cs.loadUint(16),
+    sentBatches: cs.loadDict(
+      Dictionary.Keys.Uint(16),
+      SlasherValidatorStateValue,
+    ),
   };
 }
 
 export function storeSlasherData(s: SlasherData): (builder: Builder) => void {
   return (builder) => {
-    builder.storeUint(s.updatedAtMs, 64);
+    builder.storeBuffer(s.currentVsetHash, 32);
+    builder.storeUint(s.validatorCount, 16);
+    builder.storeDict(s.sentBatches);
+  };
+}
+
+export const SlasherValidatorStateValue: DictionaryValue<SlasherValidatorState> =
+  {
+    serialize: (src, builder) => builder.store(storeSlasherValidatorState(src)),
+    parse: (cs) => {
+      const res = loadSlasherValidatorState(cs);
+      cs.endParse();
+      return res;
+    },
+  };
+
+export type SlasherValidatorState = {
+  pubkey: Buffer;
+  minSeqno: number;
+};
+
+export function loadSlasherValidatorState(cs: Slice): SlasherValidatorState {
+  return {
+    pubkey: cs.loadBuffer(32),
+    minSeqno: cs.loadUint(32),
+  };
+}
+
+export function storeSlasherValidatorState(
+  s: SlasherValidatorState,
+): (builder: Builder) => void {
+  return (builder) => {
+    builder.storeBuffer(s.pubkey, 32);
+    builder.storeUint(s.minSeqno, 32);
   };
 }
 

@@ -65,7 +65,6 @@ impl SlasherContract for StdSlasherContract {
         let expire_at = (now / 1000).saturating_add(params.ttl.as_secs()) as u32;
         let body_to_sign = {
             let mut b = CellBuilder::new();
-            b.store_u64(now)?;
             b.store_u32(expire_at)?;
             b.store_u32(Self::OP_SEND_BLOCKS_BATCH)?;
             b.store_u256(&params.vset_hash)?;
@@ -110,6 +109,7 @@ impl SlasherContract for StdSlasherContract {
             {
                 break 'check;
             }
+            // Skip all failed transactions.
             return Ok(None);
         };
 
@@ -123,7 +123,7 @@ impl SlasherContract for StdSlasherContract {
 
         // TODO: Add message op
         let mut body = msg.body;
-        body.skip_first(512 + 64 + 32, 0)?;
+        body.skip_first(512 + 32, 0)?;
         let op = body.load_u32()?;
         if op != Self::OP_SEND_BLOCKS_BATCH {
             return Ok(None);
