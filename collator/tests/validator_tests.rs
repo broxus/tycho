@@ -174,39 +174,6 @@ async fn validator_signatures_match() -> Result<()> {
                 tracing::info!(%peer_id, ?status, "validation completed");
             }
 
-            // TODO: Build test around some test-only events collector
-
-            // let short = block_id.as_short_id();
-            // let range = short..=short;
-
-            // for node in &nodes {
-            //     let events = node.event_collector.stats_for_blocks(range.clone());
-
-            //     // check current node signature
-            //     let self_stat = events
-            //         .get(&node.descr.peer_id)
-            //         .expect("current node should have stats");
-
-            //     assert_eq!(self_stat.invalid, 0);
-            //     assert_eq!(self_stat.valid, 1);
-
-            //     // check total valid signatures
-            //     let total_valid: usize = events.values().filter(|s| s.valid > 0).count();
-
-            //     assert!(
-            //         total_valid >= REQUIRED_SIGS,
-            //         "total_valid ({total_valid}) < REQUIRED_SIGS ({REQUIRED_SIGS})"
-            //     );
-
-            //     // check that no invalid signatures were given
-            //     for (peer, stat) in &events {
-            //         assert_eq!(
-            //             stat.invalid, 0,
-            //             "peer {peer:?} has invalid signatures: {stat:?}"
-            //         );
-            //     }
-            // }
-
             for node in &nodes {
                 node.validator
                     .cancel_validation(&block_id.as_short_id(), Some(session_id))?;
@@ -325,38 +292,6 @@ async fn malicious_validators_are_ignored() -> Result<()> {
                 }
             }
 
-            // TODO: Build test around some test-only events collector
-
-            // let short = block_id.as_short_id();
-            // let range = short..=short;
-            // for (i, node) in nodes.iter().enumerate() {
-            //     let stats = node.event_collector.stats_for_blocks(range.clone());
-            //     let s = stats.get(&node.descr.peer_id);
-
-            //     if i < MALICIOUS_NODE_COUNT {
-            //         // malicious node must not have valid stats
-            //         assert!(
-            //             s.is_none_or(|st| st.valid == 0),
-            //             "malicious node {:?} has valid sigs in stats: {:?}",
-            //             node.descr.peer_id,
-            //             s
-            //         );
-            //     } else {
-            //         // good node must have valid stats
-            //         let st = s.expect("good node must have stats");
-            //         assert_eq!(
-            //             st.valid, 1,
-            //             "good node {:?} valid !=1 {:?}",
-            //             node.descr.peer_id, st
-            //         );
-            //         assert_eq!(
-            //             st.invalid, 0,
-            //             "good node {:?} invalid !=0 {:?}",
-            //             node.descr.peer_id, st
-            //         );
-            //     }
-            // }
-
             block_id.seqno += 1;
         }
     }
@@ -430,7 +365,6 @@ async fn network_gets_stuck_without_signatures() -> Result<()> {
         }
     }
 
-    // let range = block_id.as_short_id()..=block_id.as_short_id();
     tokio::select! {
         _ = good_validators.next() => {
             panic!("good validator completed block");
@@ -440,49 +374,6 @@ async fn network_gets_stuck_without_signatures() -> Result<()> {
         }
         _ = tokio::time::sleep(STUCK_DURATION) => {
             tracing::info!("network got stuck as expected");
-
-            // TODO: Build test around some test-only events collector
-
-            // // 1) check event collector in each node
-            // for node in &nodes {
-            //     let events = node.event_collector.stats_for_blocks(range.clone());
-            //     // each node should have no events
-            //     assert_eq!(events.len(), 0);
-            // }
-
-            // // 2) notify all nodes about validation completion
-            // for (i, node) in nodes.iter().enumerate() {
-            //     let block_id = nodes_blocks.get(i)
-            //         .expect("should have block id for each node");
-            //     node.event_collector.on_validation_complete(
-            //         &SessionCtx { session_id },
-            //         block_id,
-            //     )?;
-            // }
-
-            // // 3) calc total valid and invalid signatures
-            // for (i, node) in nodes.iter().enumerate() {
-            //     let is_malicious = i < malicious_node_count;
-            //     let events = node.event_collector.stats_for_blocks(range.clone());
-            //     let total_invalid = events.values().map(|s| s.invalid).sum::<u32>() as usize;
-            //     let total_valid = events.values().map(|s| s.valid).sum::<u32>()  as usize;
-            //     if is_malicious {
-            //         // valid only self-own signature because block has a random root hash
-            //         assert_eq!(total_valid, 1,
-            //             "malicious node {:?} has valid signatures", node.descr.peer_id);
-            //         // malicious nodes should have no valid signatures except their own
-            //         assert_eq!(total_invalid, NODE_COUNT - 1,
-            //             "malicious node {:?} has valid signatures", node.descr.peer_id);
-            //     } else {
-            //         // good nodes should have valid signatures from all other good nodes
-            //         assert_eq!(total_valid, NODE_COUNT - malicious_node_count,
-            //             "good node {:?} has no valid signatures", node.descr.peer_id);
-            //         // good nodes should have invalid signatures from all malicious nodes
-            //         assert_eq!(total_invalid, malicious_node_count,
-            //             "good node {:?} has invalid signatures", node.descr.peer_id);
-
-            //     }
-            // }
         }
     }
 
