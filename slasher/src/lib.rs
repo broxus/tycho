@@ -322,109 +322,108 @@ impl Slasher {
 
         tracing::trace!(?slasher_params, ?current_session_id);
 
-        // TODO: Move into blocking.
-        let extra = cx.block.load_extra()?.account_blocks.load()?;
-        if let Some((_, account_block)) = extra.get(slasher_params.address)? {
-            for entry in account_block.transactions.iter() {
-                let (_, _, tx) = entry?;
-                let tx_hash = tx.repr_hash();
-                let tx = tx.load()?;
+        let block = cx.block.clone();
+        let shared = self.shared.clone();
+        let collector = self.validator_events_collector.clone();
+        let cancellation_token = self.cancellation_token.clone();
+        tokio::task::spawn_blocking(move || {
+            let extra = block.load_extra()?.account_blocks.load()?;
+            if let Some((_, account_block)) = extra.get(slasher_params.address)? {
+                for entry in account_block.transactions.iter() {
+                    let (_, _, tx) = entry?;
+                    let tx_hash = tx.repr_hash();
+                    let tx = tx.load()?;
 
-                tracing::debug!(
-                    %tx_hash,
-                    msg_hash = ?tx.in_msg.as_ref().map(|msg| msg.repr_hash()),
-                    "found slasher transaction",
-                );
+                    tracing::debug!(
+                        %tx_hash,
+                        msg_hash = ?tx.in_msg.as_ref().map(|msg| msg.repr_hash()),
+                        "found slasher transaction",
+                    );
 
-                let own_message = subscription.handle_account_transaction(tx_hash, &tx)?;
+                    let own_message = subscription.handle_account_transaction(tx_hash, &tx)?;
 
-                match self.shared.contract.decode_event(&tx) {
-                    Ok(Some(event)) => match event {
-                        bc::SlasherContractEvent::SubmitBlocksBatch(submitted) => {
-                            let batch = &submitted.blocks_batch;
+                    match shared.contract.decode_event(&tx) {
+                        Ok(Some(event)) => match event {
+                            bc::SlasherContractEvent::SubmitBlocksBatch(submitted) => {
+                                let batch = &submitted.blocks_batch;
 
-                            tracing::info!(
+                                tracing::info!(
+                                    %tx_hash,
+                                    vset_hash = %submitted.vset_hash,
+                                    validator_idx = submitted.validator_idx,
+                                    batch_start_seqno = batch.start_seqno(),
+                                    batch_seqno_after = batch.seqno_after(),
+                                    batch_slots = batch.committed_blocks.len(),
+                                    committed_blocks = batch.committed_block_count(),
+                                    validators = batch.validator_count(),
+                                    is_own = own_message,
+                                    "blocks batch submitted",
+                                );
+
+                                // NOTE: Might increment batches twice on restart,
+                                // but it's better to keep this simple.
+                                let origin = if own_message { "own" } else { "external" };
+                                metrics::counter!(
+                                    METRIC_BLOCKS_BATCHES_SUBMITTED_TOTAL,
+                                    "origin" => origin,
+                                )
+                                .increment(1);
+
+                                shared.storage.store_blocks_batch(
+                                    &submitted.vset_hash,
+                                    submitted.validator_idx,
+                                    &submitted.blocks_batch,
+                                )?;
+                            }
+                        },
+                        Ok(None) => {}
+                        Err(e) => {
+                            tracing::warn!(
                                 %tx_hash,
-                                vset_hash = %submitted.vset_hash,
-                                validator_idx = submitted.validator_idx,
-                                batch_start_seqno = batch.start_seqno(),
-                                batch_seqno_after = batch.seqno_after(),
-                                batch_slots = batch.committed_blocks.len(),
-                                committed_blocks = batch.committed_block_count(),
-                                validators = batch.validator_count(),
-                                is_own = own_message,
-                                "blocks batch submitted",
+                                "failed to parse slasher event: {e:?}"
                             );
-
-                            // NOTE: Might increment batches twice on restart,
-                            // but it's better to keep this simple.
-                            let origin = if own_message { "own" } else { "external" };
-                            metrics::counter!(
-                                METRIC_BLOCKS_BATCHES_SUBMITTED_TOTAL,
-                                "origin" => origin,
-                            )
-                            .increment(1);
-
-                            this.storage.store_blocks_batch(
-                                &submitted.vset_hash,
-                                submitted.validator_idx,
-                                &submitted.blocks_batch,
-                            )?;
-                            tokio::task::yield_now().await;
                         }
-                    },
-                    Ok(None) => {}
-                    Err(e) => {
-                        tracing::warn!(
-                            %tx_hash,
-                            "failed to parse slasher event: {e:?}"
-                        );
                     }
                 }
             }
-        }
 
-        // Update subscription state.
-        subscription.cleanup_expired_messages(cx.block.load_info()?.gen_utime);
+            // Update subscription state.
+            subscription.cleanup_expired_messages(block.load_info()?.gen_utime);
 
-        // Trigger reporting.
-        if let Some(vset) = vset_to_complete
-            && let Some(last_seqno) = mc_seqno.checked_sub(1)
-        {
-            self.shared
-                .complete_vset(&vset, last_seqno, &slasher_params)?;
-        }
-
-        // Start session handlers.
-        while let Some(session_info) = self
-            .validator_events_collector
-            .pop_session_to_init(mc_seqno)
-        {
-            let session_id = session_info.session_id;
-            tracing::info!(?session_id, "found session to init");
-            if !session_info.can_participate(&this.node_keys.public_key) {
-                tracing::info!(?session_id, "skipping session");
-                continue;
+            // Trigger reporting.
+            if let Some(vset) = vset_to_complete
+                && let Some(last_seqno) = mc_seqno.checked_sub(1)
+            {
+                shared.complete_vset(&vset, last_seqno, &slasher_params)?;
             }
 
-            let (tx, rx) = mpsc::unbounded_channel::<BlocksBatch>();
-            if !self.validator_events_collector.init_session(
-                session_id,
-                slasher_params.blocks_batch_size,
-                tx,
-            ) {
-                tracing::warn!(?session_id, "session removed before init");
-                continue;
+            // Start session handlers.
+            while let Some(session_info) = collector.pop_session_to_init(mc_seqno) {
+                let session_id = session_info.session_id;
+                tracing::info!(?session_id, "found session to init");
+                if !session_info.can_participate(&shared.node_keys.public_key) {
+                    tracing::info!(?session_id, "skipping session");
+                    continue;
+                }
+
+                let (tx, rx) = mpsc::unbounded_channel::<BlocksBatch>();
+                if !collector.init_session(session_id, slasher_params.blocks_batch_size, tx) {
+                    tracing::warn!(?session_id, "session removed before init");
+                    continue;
+                }
+
+                let token = cancellation_token.clone();
+                let shared = shared.clone();
+                tokio::task::spawn(
+                    token.run_until_cancelled_owned(
+                        shared.send_batches_to_contract(session_info, rx),
+                    ),
+                );
             }
 
-            let token = self.cancellation_token.clone();
-            let shared = self.shared.clone();
-            tokio::task::spawn(
-                token.run_until_cancelled_owned(shared.send_batches_to_contract(session_info, rx)),
-            );
-        }
-
-        Ok(())
+            Ok(())
+        })
+        .await?
     }
 }
 
