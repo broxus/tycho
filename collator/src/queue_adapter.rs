@@ -1,6 +1,7 @@
 use anyhow::Result;
 use tracing::instrument;
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
+use tycho_block_util::state::ShardStateStuff;
 use tycho_types::cell::HashBytes;
 use tycho_types::models::{BlockId, BlockIdShort, ShardIdent};
 use tycho_util::metrics::HistogramGuard;
@@ -20,7 +21,9 @@ use crate::internal_queue::types::stats::{
 use crate::storage::models::DiffInfo;
 use crate::storage::snapshot::AccountStatistics;
 use crate::tracing_targets;
-use crate::types::{DebugDisplayOpt, DebugIter, TopBlockIdUpdated};
+use crate::types::{
+    DebugDisplayOpt, DebugIter, ShardDescriptionShortExt, TopBlockId, TopBlockIdUpdated,
+};
 
 pub struct MessageQueueAdapterStdImpl<V: InternalMessageValue> {
     queue: QueueImpl<QueueStateStdImpl, V>,
@@ -118,6 +121,55 @@ where
         diff_info: DiffInfo,
         partition: QueuePartitionIdx,
     ) -> Result<(PartitionRouter, DiffStatistics)>;
+
+    /// Recovers message queue state after restart.
+    fn recover_after_restart(&self, mc_state: &ShardStateStuff) -> Result<()> {
+        let mc_block_id = mc_state.block_id();
+        assert!(
+            mc_block_id.is_masterchain(),
+            "latest masterchain block id and state must be provided"
+        );
+
+        let mut top_shards_for_queue_clean = mc_state.get_top_shards()?;
+
+        // rollback commit pointers if committed queue is ahead of last applied mc state
+        if let Some(last_committed_mc_block_id) = self.get_last_committed_mc_block_id()? {
+            if last_committed_mc_block_id.seqno > mc_block_id.seqno {
+                let top_shard_blocks_info = mc_state
+                    .shards()?
+                    .iter()
+                    .map(|item| {
+                        let (shard_id, shard_descr) = item?;
+                        Ok(TopBlockIdUpdated {
+                            block: TopBlockId {
+                                ref_by_mc_seqno: shard_descr.reg_mc_seqno,
+                                block_id: shard_descr.get_block_id(shard_id),
+                            },
+                            updated: shard_descr.top_sc_block_updated,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let removed_commit_pointer_shards =
+                    self.rollback_commit_pointers(mc_block_id, top_shard_blocks_info)?;
+                for shard in removed_commit_pointer_shards {
+                    if !top_shards_for_queue_clean.contains(&shard) {
+                        top_shards_for_queue_clean.push(shard);
+                    }
+                }
+            } else {
+                anyhow::ensure!(
+                    last_committed_mc_block_id.seqno != mc_block_id.seqno
+                        || last_committed_mc_block_id == *mc_block_id,
+                    "internal messages queue is committed on different masterchain block: \
+                    queue={last_committed_mc_block_id}, applied={mc_block_id}",
+                );
+            }
+        }
+
+        // We should clear uncommitted queue state because it may contain incorrect diffs
+        // that were created before node restart. We will restore queue strictly above last committed state
+        self.clear_uncommitted_state(&top_shards_for_queue_clean)
+    }
 }
 
 impl<V: InternalMessageValue> MessageQueueAdapterStdImpl<V> {
