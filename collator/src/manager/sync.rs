@@ -625,6 +625,7 @@ where
         &self,
         last_collated_mc_block_id: Option<BlockId>,
         applied_range: Option<(BlockSeqno, BlockSeqno)>,
+        before_mc_seqno: Option<BlockSeqno>,
     ) -> Result<Option<BlockId>> {
         let Some(applied_range) = applied_range else {
             return Ok(None);
@@ -632,6 +633,7 @@ where
 
         tracing::info!(target: tracing_targets::COLLATION_MANAGER,
             ?applied_range,
+            ?before_mc_seqno,
             "start cache cleanup after sync was skipped when newer master block received",
         );
 
@@ -670,6 +672,10 @@ where
             else {
                 break;
             };
+
+            if before_mc_seqno.is_some_and(|seqno| mc_block_subgraph_view.block_id.seqno >= seqno) {
+                break;
+            }
 
             // check if top blocks diffs required for queue restore
             if !Self::check_top_blocks_diffs_not_required(

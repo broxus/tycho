@@ -500,6 +500,7 @@ where
                             .gc_applied_blocks_with_not_required_diffs(
                                 last_collated_mc_block_id,
                                 applied_range,
+                                None,
                             )
                             .await?;
                         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
@@ -708,6 +709,7 @@ where
                 .gc_applied_blocks_with_not_required_diffs(
                     store_res.last_collated_mc_block_id,
                     store_res.applied_mc_queue_range,
+                    block_id.is_masterchain().then_some(block_id.seqno),
                 )
                 .await?;
             tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
@@ -1028,6 +1030,7 @@ where
                 .gc_applied_blocks_with_not_required_diffs(
                     store_res.last_collated_mc_block_id,
                     store_res.applied_mc_queue_range,
+                    Some(block_id.seqno),
                 )
                 .await?;
             tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
