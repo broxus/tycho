@@ -3880,6 +3880,23 @@ async fn test_cache_gc_on_skipped_sync() {
         .gc_applied_blocks_with_not_required_diffs(
             store_res.last_collated_mc_block_id,
             store_res.applied_mc_queue_range,
+            Some(1),
+        )
+        .await
+        .unwrap();
+    assert_eq!(cleanup_res, None);
+    assert_eq!(
+        manager
+            .blocks_cache
+            .get_last_collated_block_and_applied_mc_queue_range()
+            .1,
+        Some((1, 2))
+    );
+    let cleanup_res = manager
+        .gc_applied_blocks_with_not_required_diffs(
+            store_res.last_collated_mc_block_id,
+            store_res.applied_mc_queue_range,
+            None,
         )
         .await
         .unwrap();
