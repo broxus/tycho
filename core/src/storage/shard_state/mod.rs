@@ -175,25 +175,27 @@ impl ShardStateStorage {
                 if !split.is_empty() {
                     // write parts if exist
                     for (part_root_hash, part) in &split {
-                        ShardStateWriter::new_part(
-                            &cells_db,
-                            &states_dir,
-                            &block_id,
-                            part.prefix,
-                        )
-                        .write(part_root_hash, cancelled.as_ref())?;
+                        ShardStateWriter::new_part(&cells_db, &states_dir, &block_id, part.prefix)
+                            .write(part_root_hash, cancelled.as_ref())?;
                     }
 
                     // write persistent metadata
                     meta.write(&states_dir, &block_id)?;
+
+                    // write main
                     let absent_cells = split
                         .iter()
                         .map(|(root_hash, part)| (*root_hash, part.cell.clone()))
                         .collect();
-                    ShardStateWriter::new(&cells_db, &states_dir, &block_id)
-                        .write_with_absent(&root_hash, absent_cells, cancelled.as_ref())?;
+                    ShardStateWriter::new(&cells_db, &states_dir, &block_id).write_with_absent(
+                        &root_hash,
+                        absent_cells,
+                        cancelled.as_ref(),
+                    )?;
                 } else {
+                    // write persistent metadata
                     meta.write(&states_dir, &block_id)?;
+
                     ShardStateWriter::new(&cells_db, &states_dir, &block_id)
                         .write(&root_hash, cancelled.as_ref())?;
                 }
