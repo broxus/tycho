@@ -66,7 +66,7 @@ impl<R: Read> ShardStateReader<R> {
         let root_count = reader.read_be_uint(ref_size)?;
         total_size += ref_size as u64;
 
-        reader.read_be_uint(ref_size)?; // skip absent
+        let absent_count = reader.read_be_uint(ref_size)?;
         total_size += ref_size as u64;
 
         if root_count != 1 {
@@ -131,6 +131,7 @@ impl<R: Read> ShardStateReader<R> {
             ref_size,
             offset_size,
             cell_count,
+            absent_count,
             total_size,
         };
 
@@ -148,26 +149,34 @@ impl<R: Read> ShardStateReader<R> {
             CellDescriptor::new(bytes)
         };
 
-        if descriptor.is_absent() {
-            return Err(parser_error("absent cell are not supported"));
-        }
+        let mut refs = descriptor.reference_count() as usize;
 
-        let refs = descriptor.reference_count() as usize;
+        // skip refs for absent cells because `reference_count = 7` is just a marker
+        if descriptor.is_absent() {
+            refs = 0;
+        }
+        // check refs count
         if refs > 4 {
             return Err(parser_error("invalid reference count"));
         }
 
+        // NOTE: in the boc hashes go first and then goes data
+
+        let mut hashes_len = 0;
         let hash_count = descriptor.hash_count();
         if descriptor.store_hashes() {
-            // NOTE: We must forward all skipped bytes to the CRC reader to get the correct checksum
-            std::io::copy(
-                &mut self.reader.by_ref().take(hash_count as u64 * (32 + 2)),
-                &mut std::io::sink(),
-            )?;
+            let len = hash_count as u64 * (32 + 2);
+            if descriptor.is_absent() {
+                // for absent cells we read all hashes and will use them
+                hashes_len = len as usize;
+            } else {
+                // NOTE: We must forward all skipped bytes to the CRC reader to get the correct checksum
+                std::io::copy(&mut self.reader.by_ref().take(len), &mut std::io::sink())?;
+            }
         }
 
         let byte_len = descriptor.byte_len() as usize;
-        let total_len = 2 + byte_len + refs * self.header.ref_size;
+        let total_len = 2 + hashes_len + byte_len + refs * self.header.ref_size;
 
         buffer[0] = descriptor.d1;
         buffer[1] = descriptor.d2;
@@ -204,6 +213,7 @@ pub struct BriefBocHeader {
     pub ref_size: usize,
     pub offset_size: u64,
     pub cell_count: u64,
+    pub absent_count: u64,
     pub total_size: u64,
 }
 
