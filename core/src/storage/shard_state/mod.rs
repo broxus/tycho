@@ -13,7 +13,7 @@ use bytes::Bytes;
 use futures_util::FutureExt;
 use futures_util::future::BoxFuture;
 use tycho_block_util::block::*;
-use tycho_block_util::dict::{split_aug_dict, split_aug_dict_raw};
+use tycho_block_util::dict::{split_aug_dict_raw, split_aug_dict_raw_by_shards};
 use tycho_block_util::state::*;
 use tycho_storage::fs::{Dir, TempFileStorage};
 use tycho_storage::kv::StoredValue;
@@ -148,16 +148,16 @@ impl ShardStateStorage {
         let cell_storage = self.cell_storage.clone();
         let gc_lock = self.gc_lock.clone().lock_owned().await;
 
-        let parts = if split_depth == 0 || block_id.is_masterchain() {
-            Vec::new()
+        let split = if split_depth == 0 || block_id.is_masterchain() {
+            FastHashMap::default()
         } else {
             let root_cell = self.load_state(0, &block_id).await?.root_cell().clone();
             split_shard_accounts_for_persistent(&block_id.shard, &root_cell, split_depth)?
         };
-        let meta = PersistentStateMeta::new(
-            if parts.is_empty() { 0 } else { split_depth },
-            parts.iter().map(|part| part.prefix).collect(),
-        );
+
+        let mut parts: Vec<u64> = split.values().map(|part| part.prefix).collect();
+        parts.sort_unstable();
+        let meta = PersistentStateMeta::new(if parts.is_empty() { 0 } else { split_depth }, parts);
 
         let span = tracing::Span::current();
 
@@ -172,18 +172,31 @@ impl ShardStateStorage {
                     cell_storage.prepare_persistent_state_save();
                 }
 
-                // write parts if exist
-                for part in parts {
-                    ShardStateWriter::new_part(&cells_db, &states_dir, &block_id, part.prefix)
-                        .write(&part.root_hash, cancelled.as_ref())?;
+                if !split.is_empty() {
+                    // write parts if exist
+                    for (part_root_hash, part) in &split {
+                        ShardStateWriter::new_part(
+                            &cells_db,
+                            &states_dir,
+                            &block_id,
+                            part.prefix,
+                        )
+                        .write(part_root_hash, cancelled.as_ref())?;
+                    }
+
+                    // write persistent metadata
+                    meta.write(&states_dir, &block_id)?;
+                    let absent_cells = split
+                        .iter()
+                        .map(|(root_hash, part)| (*root_hash, part.cell.clone()))
+                        .collect();
+                    ShardStateWriter::new(&cells_db, &states_dir, &block_id)
+                        .write_with_absent(&root_hash, absent_cells, cancelled.as_ref())?;
+                } else {
+                    meta.write(&states_dir, &block_id)?;
+                    ShardStateWriter::new(&cells_db, &states_dir, &block_id)
+                        .write(&root_hash, cancelled.as_ref())?;
                 }
-
-                // write persistent metadata
-                meta.write(&states_dir, &block_id)?;
-
-                // write main
-                ShardStateWriter::new(&cells_db, &states_dir, &block_id)
-                    .write(&root_hash, cancelled.as_ref())?;
 
                 Ok::<_, anyhow::Error>(meta)
             }
@@ -834,15 +847,31 @@ impl ShardStateStorage {
 
     // Stores shard state and returns the hash of its root cell.
     pub async fn store_state_file(&self, block_id: &BlockId, boc: File) -> Result<HashBytes> {
-        self.store_state_raw_inner(block_id, boc).await
+        self.store_state_raw_inner(block_id, boc, Vec::new()).await
+    }
+
+    // Stores shard state from parts and returns the hash of its root cell.
+    pub async fn store_state_split_files(
+        &self,
+        block_id: &BlockId,
+        main: File,
+        parts: Vec<File>,
+    ) -> Result<HashBytes> {
+        self.store_state_raw_inner(block_id, main, parts).await
     }
 
     pub async fn store_state_bytes(&self, block_id: &BlockId, boc: Bytes) -> Result<HashBytes> {
         let cursor = Cursor::new(boc);
-        self.store_state_raw_inner(block_id, cursor).await
+        self.store_state_raw_inner(block_id, cursor, Vec::new())
+            .await
     }
 
-    async fn store_state_raw_inner<R>(&self, block_id: &BlockId, boc: R) -> Result<HashBytes>
+    async fn store_state_raw_inner<R>(
+        &self,
+        block_id: &BlockId,
+        main: R,
+        parts: Vec<R>,
+    ) -> Result<HashBytes>
     where
         R: std::io::Read + Send + 'static,
     {
@@ -862,7 +891,7 @@ impl ShardStateStorage {
             // Raw import writes directly to RocksDB/counters; RawImportInProgress
             // is bootstrap-scoped, so publish nursery-only cells before storing.
             ctx.cell_storage.prepare_persistent_state_save();
-            ctx.store(&block_id, boc)
+            Ok(ctx.store_split(&block_id, main, parts)?.root_hash)
         })
         .await?
     }
@@ -1824,11 +1853,16 @@ pub fn split_shard_accounts(
     split_aug_dict_raw(shard_accounts, split_depth).context("failed to split shard accounts")
 }
 
+/// Splits shard accounts dict by shards, skips empty shards,
+/// and returns map of **not empty** shard branch root cells by hashes:
+/// `{ hash: (cell, shard) }`.
 pub fn split_shard_accounts_for_persistent(
     state_shard: &ShardIdent,
     root_cell: impl AsRef<DynCell>,
     split_depth: u8,
-) -> Result<Vec<ShardAccountsSplitPart>> {
+) -> Result<FastHashMap<HashBytes, ShardAccountsSplitPart>> {
+    // Cell#0 - processed_upto
+    // Cell#1 - accounts
     let shard_accounts = root_cell
         .as_ref()
         .reference_cloned(1)
@@ -1836,27 +1870,25 @@ pub fn split_shard_accounts_for_persistent(
         .parse::<ShardAccounts>()
         .context("failed to load shard accounts")?;
 
-    let mut result = Vec::new();
-    for (shard, dict) in split_aug_dict(state_shard.workchain(), shard_accounts, split_depth)
-        .context("failed to split shard accounts")?
-    {
-        let (dict, _) = dict.into_parts();
-        if let Some(cell) = dict.into_root() {
-            result.push(ShardAccountsSplitPart {
+    let shards = split_aug_dict_raw_by_shards(state_shard.workchain(), shard_accounts, split_depth)
+        .context("failed to split shard accounts for persistent state")?;
+
+    let mut result = FastHashMap::default();
+    for (shard, dict) in shards {
+        if let Some(cell) = dict {
+            result.insert(*cell.repr_hash(), ShardAccountsSplitPart {
                 prefix: shard.prefix(),
-                root_hash: *cell.repr_hash(),
                 cell,
             });
         }
     }
-    result.sort_unstable_by_key(|part| part.prefix);
+
     Ok(result)
 }
 
 #[derive(Debug, Clone)]
 pub struct ShardAccountsSplitPart {
     pub prefix: u64,
-    pub root_hash: HashBytes,
     pub cell: Cell,
 }
 

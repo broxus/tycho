@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
+use std::io::{Seek, SeekFrom, Write};
 
 use anyhow::Result;
+use bytes::Bytes;
 use bytesize::ByteSize;
 use tycho_block_util::queue::{
     QueueDiffStuff, QueueKey, QueueStateHeader, RouterAddr, RouterPartitions,
@@ -15,8 +17,8 @@ use tycho_types::models::{
     MsgInfo, OutMsg, OutMsgDescr, OutMsgNew, OutMsgQueueUpdates, ShardIdent, StdAddr,
 };
 use tycho_types::num::Tokens;
-use tycho_util::FastHashSet;
 use tycho_util::compression::zstd_decompress_simple;
+use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::ZEROSTATE_BOC;
 use crate::storage::persistent_state::{
@@ -102,6 +104,53 @@ async fn cache_rejects_split_sidecars_without_metadata() -> Result<()> {
     };
     assert!(err.to_string().contains("missing metadata"));
     assert!(!persistent_states.state_exists(&block_id, PersistentStateKind::Shard));
+    Ok(())
+}
+
+#[tokio::test]
+async fn persistent_state_writer_rejects_missing_absent_cell() -> Result<()> {
+    // Store a real shard state first so the DB-backed writer can load the root by hash.
+    let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
+    let storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
+    let shard_states = storage.shard_state_storage();
+    let persistent_states = storage.persistent_state_storage();
+    let zerostate_root = Boc::decode(ZEROSTATE_BOC)?;
+    let zerostate_id = BlockId {
+        shard: ShardIdent::MASTERCHAIN,
+        seqno: 0,
+        root_hash: *zerostate_root.repr_hash(),
+        file_hash: Boc::file_hash_blake(ZEROSTATE_BOC),
+    };
+    let zerostate = ShardStateStuff::from_root(
+        &zerostate_id,
+        zerostate_root.clone(),
+        shard_states.min_ref_mc_state().insert_untracked(),
+    )?;
+    let (handle, _) = storage.block_handle_storage().create_or_load_handle(
+        &zerostate_id,
+        NewBlockMeta::zero_state(zerostate.as_ref().gen_utime, true),
+    );
+    shard_states
+        .store_state_ignore_cache(&handle, &zerostate, Default::default())
+        .await?;
+    storage.block_handle_storage().set_skip_states_gc(&handle);
+    persistent_states.store_shard_state(0, &handle).await?;
+
+    // Ask the writer to replace a hash that is not reachable from the root.
+    let temp_dir = tempfile::tempdir()?;
+    let dir = Dir::new(temp_dir.path())?;
+    let mut absent_cells = FastHashMap::default();
+    absent_cells.insert(HashBytes::from([3; 32]), zerostate_root);
+
+    let err = ShardStateWriter::new(&persistent_states.inner.cells_db, &dir, &zerostate_id)
+        .write_with_absent(&zerostate_id.root_hash, absent_cells, None)
+        .unwrap_err();
+
+    assert!(err.chain().any(|e| {
+        e.to_string()
+            .contains("not all requested absent cells were written")
+    }));
+
     Ok(())
 }
 
@@ -279,6 +328,137 @@ async fn persistent_shard_state() -> Result<()> {
         .clone();
     assert_eq!(new_cached.mc_seqno, new_mc_seqno);
     assert_eq!(new_cached.file.as_slice(), new_file);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn split_persistent_shard_state_import_from_dump() -> Result<()> {
+    tycho_util::test::init_logger("split_persistent_shard_state_import_from_dump", "debug");
+
+    const DUMP_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test/data/dump/persistents/",
+        "0:8000000000000000:36:",
+        "78d7e559cf68d9d1821520d1b53b16ba5cf9cef139106efd388af2bfe2016817:",
+        "a875088e0557ab41241aaf07db46e9422e070d7d3842fe4f7269ae6a0bd69ae5.boc",
+    );
+
+    fn tempfile_from_bytes(bytes: &[u8]) -> Result<std::fs::File> {
+        let mut file = tempfile::tempfile()?;
+        file.write_all(bytes)?;
+        file.seek(SeekFrom::Start(0))?;
+        Ok(file)
+    }
+
+    let dump_path = std::path::Path::new(DUMP_PATH);
+    let block_id: BlockId = dump_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap()
+        .parse()?;
+    let full_boc = zstd_decompress_simple(&std::fs::read(dump_path)?)?;
+    let expected_state_root_hash = *Boc::decode(&full_boc)?.repr_hash();
+
+    // Import the compressed dump as a regular single-file persistent state.
+    let mut config = CoreStorageConfig::new_potato();
+    config.persistent_state_split_depth = 2;
+    let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
+    let storage = CoreStorage::open(ctx, config).await?;
+    let shard_states = storage.shard_state_storage();
+
+    shard_states.begin_raw_import()?;
+    let root_hash = shard_states
+        .store_state_bytes(&block_id, Bytes::from(full_boc.clone()))
+        .await?;
+    anyhow::ensure!(
+        root_hash == expected_state_root_hash,
+        "dump state root hash mismatch"
+    );
+    shard_states.finish_raw_import()?;
+
+    let loaded_state = shard_states.load_state(block_id.seqno, &block_id).await?;
+    let (handle, _) =
+        storage
+            .block_handle_storage()
+            .create_or_load_handle(&block_id, NewBlockMeta {
+                is_key_block: block_id.is_masterchain(),
+                gen_utime: loaded_state.as_ref().gen_utime,
+                ref_by_mc_seqno: block_id.seqno,
+            });
+    storage.block_handle_storage().set_has_shard_state(&handle);
+    storage.block_handle_storage().set_skip_states_gc(&handle);
+
+    // Save the imported state as a split persistent bundle.
+    let persistent_states = storage.persistent_state_storage();
+    persistent_states
+        .store_shard_state(block_id.seqno, &handle)
+        .await?;
+
+    let states_dir = persistent_states.inner.mc_states_dir(block_id.seqno);
+    let meta = PersistentStateMeta::read(&states_dir, &block_id)?.unwrap();
+    assert_eq!(meta.split_depth, 2);
+    assert!(!meta.parts.is_empty());
+
+    let read_decompressed = |file_name| -> Result<Vec<u8>> {
+        Ok(zstd_decompress_simple(&std::fs::read(
+            states_dir.file(file_name).path(),
+        )?)?)
+    };
+
+    let main_boc = read_decompressed(ShardStateWriter::file_name(block_id))?;
+    let part_bocs = meta
+        .parts
+        .iter()
+        .map(|&prefix| read_decompressed(ShardStateWriter::file_name_ext(block_id, Some(prefix))))
+        .collect::<Result<Vec<_>>>()?;
+
+    // Import the split bundle into a fresh storage and verify it reconstructs the same state.
+    let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
+    let imported_storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
+    let imported_shard_states = imported_storage.shard_state_storage();
+    let part_files = part_bocs
+        .iter()
+        .map(|part| tempfile_from_bytes(part))
+        .collect::<Result<Vec<_>>>()?;
+
+    imported_shard_states.begin_raw_import()?;
+    let imported_root_hash = imported_shard_states
+        .store_state_split_files(&block_id, tempfile_from_bytes(&main_boc)?, part_files)
+        .await?;
+    anyhow::ensure!(
+        imported_root_hash == expected_state_root_hash,
+        "split import root hash mismatch"
+    );
+    imported_shard_states.finish_raw_import()?;
+
+    let imported_state = imported_shard_states
+        .load_state(block_id.seqno, &block_id)
+        .await?;
+    assert_eq!(imported_state.block_id(), &block_id);
+    assert_eq!(
+        imported_state.root_cell().repr_hash(),
+        &expected_state_root_hash
+    );
+
+    // Dropping a required part must fail before the split bundle is accepted.
+    let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
+    let broken_storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
+    let broken_shard_states = broken_storage.shard_state_storage();
+    broken_shard_states.begin_raw_import()?;
+    let missing_parts = part_bocs
+        .iter()
+        .skip(1)
+        .map(|part| tempfile_from_bytes(part))
+        .collect::<Result<Vec<_>>>()?;
+    let err = broken_shard_states
+        .store_state_split_files(&block_id, tempfile_from_bytes(&main_boc)?, missing_parts)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("split shard state parts do not match main file absent cells")
+    );
 
     Ok(())
 }
