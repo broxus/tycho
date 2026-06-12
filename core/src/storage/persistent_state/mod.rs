@@ -479,11 +479,13 @@ impl PersistentStateStorage {
     }
 
     #[tracing::instrument(skip_all, fields(mc_seqno, block_id = %handle.id()))]
-    pub async fn store_shard_state_file(
+    pub async fn store_shard_state_files(
         &self,
         mc_seqno: u32,
         handle: &BlockHandle,
-        file: File,
+        main: File,
+        parts: Vec<(u64, File)>,
+        split_depth: u8,
     ) -> Result<()> {
         if self
             .try_reuse_persistent_state(mc_seqno, handle, PersistentStateKind::Shard)
@@ -511,12 +513,21 @@ impl PersistentStateStorage {
 
             let states_dir = this.prepare_persistent_states_dir(mc_seqno)?;
 
+            // write parts if exist
+            let mut prefixes = Vec::with_capacity(parts.len());
+            for (prefix, file) in parts {
+                ShardStateWriter::new_part(&this.cells_db, &states_dir, handle.id(), prefix)
+                    .write_file(file, Some(&cancelled))?;
+                prefixes.push(prefix);
+            }
+
             // write persistent metadata even for single file
-            PersistentStateMeta::default().write(&states_dir, handle.id())?;
+            PersistentStateMeta::new(if prefixes.is_empty() { 0 } else { split_depth }, prefixes)
+                .write(&states_dir, handle.id())?;
 
             // write main
-            let cell_writer = ShardStateWriter::new(&this.cells_db, &states_dir, handle.id());
-            cell_writer.write_file(file, Some(&cancelled))?;
+            ShardStateWriter::new(&this.cells_db, &states_dir, handle.id())
+                .write_file(main, Some(&cancelled))?;
 
             this.block_handles.set_has_persistent_shard_state(&handle);
             let state = this.cache_state(mc_seqno, handle.id(), PersistentStateKind::Shard)?;

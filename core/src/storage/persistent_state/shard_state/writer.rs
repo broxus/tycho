@@ -582,6 +582,10 @@ impl PersistentStateMeta {
         let file_path = states_dir
             .path()
             .join(ShardStateWriter::meta_file_name(block_id));
+        self.write_to_file(file_path)
+    }
+
+    pub fn write_to_file(&self, file_path: impl AsRef<std::path::Path>) -> Result<()> {
         let raw = RawPersistentStateMeta {
             version: Self::VERSION,
             split_depth: self.split_depth,
@@ -599,7 +603,11 @@ impl PersistentStateMeta {
         let file_path = states_dir
             .path()
             .join(ShardStateWriter::meta_file_name(block_id));
-        if !file_path.exists() {
+        Self::read_from_file(file_path)
+    }
+
+    pub fn read_from_file(file_path: impl AsRef<std::path::Path>) -> Result<Option<Self>> {
+        if !file_path.as_ref().exists() {
             return Ok(None);
         }
 

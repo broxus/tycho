@@ -363,7 +363,7 @@ async fn split_persistent_shard_state_import_from_dump() -> Result<()> {
     // Import the compressed dump as a regular single-file persistent state.
     let mut config = CoreStorageConfig::new_potato();
     config.persistent_state_split_depth = 2;
-    let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
+    let (ctx, tmp_dir) = StorageContext::new_temp().await?;
     let storage = CoreStorage::open(ctx, config).await?;
     let shard_states = storage.shard_state_storage();
 
@@ -433,6 +433,18 @@ async fn split_persistent_shard_state_import_from_dump() -> Result<()> {
         .await
         .unwrap();
     assert_eq!(zstd_decompress_simple(&part_chunk)?, part_bocs[0]);
+
+    // Test preload flow
+    drop(loaded_state);
+    drop(storage);
+    let ctx = StorageContext::new(StorageConfig::new_potato(tmp_dir.path())).await?;
+    let reloaded_storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
+    let reloaded_persistent_states = reloaded_storage.persistent_state_storage();
+    let reloaded_state_info = reloaded_persistent_states
+        .get_state_info(&block_id, PersistentStateKind::Shard)
+        .unwrap();
+    assert_eq!(reloaded_state_info.split_depth, 2);
+    assert_eq!(reloaded_state_info.parts.len(), meta.parts.len());
 
     // Import the split bundle into a fresh storage and verify it reconstructs the same state.
     let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
