@@ -346,11 +346,12 @@ impl PersistentStateStorage {
             })
     }
 
-    pub async fn read_state_part(
+    pub async fn read_state_chunk(
         &self,
         block_id: &BlockId,
         offset: u64,
         state_kind: PersistentStateKind,
+        part_shard_prefix: Option<u64>,
     ) -> Option<Vec<u8>> {
         // NOTE: Should be noop on x64
         let offset = usize::try_from(offset).ok()?;
@@ -369,7 +370,18 @@ impl PersistentStateStorage {
             kind: state_kind,
         };
         let cached = self.inner.descriptor_cache.get(&key)?.clone();
-        if offset > cached.file.length() {
+        let part_index = match (state_kind, part_shard_prefix) {
+            (PersistentStateKind::Shard, Some(prefix)) => {
+                Some(cached.parts.iter().position(|part| part.prefix == prefix)?)
+            }
+            _ => None,
+        };
+
+        let file = match part_index {
+            Some(index) => &cached.parts[index].file,
+            None => &cached.file,
+        };
+        if offset > file.length() {
             return None;
         }
 
@@ -380,11 +392,15 @@ impl PersistentStateStorage {
             // Ensure that permit is dropped only after cached state is used.
             let _permit = permit;
 
-            let end = std::cmp::min(offset.saturating_add(chunk_size), cached.file.length());
-            cached.file.as_slice()[offset..end].to_vec()
+            let file = match part_index {
+                Some(index) => &cached.parts[index].file,
+                None => &cached.file,
+            };
+            let end = std::cmp::min(offset.saturating_add(chunk_size), file.length());
+            Some(file.as_slice()[offset..end].to_vec())
         })
         .await
-        .ok()
+        .ok()?
     }
 
     #[tracing::instrument(skip_all, fields(mc_seqno, block_id = %handle.id()))]

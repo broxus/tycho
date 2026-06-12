@@ -37,7 +37,7 @@ impl StarterClient for BlockchainRpcClient {
             download: Box::new(move |output| {
                 Box::pin(async move {
                     let output = this
-                        .download_persistent_state(pending_state, output)
+                        .download_persistent_state(pending_state, None, output)
                         .await?;
                     Ok(output)
                 })

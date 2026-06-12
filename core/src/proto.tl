@@ -137,6 +137,17 @@ blockchain.archiveInfo.tooNew = blockchain.ArchiveInfo;
 blockchain.archiveInfo.notFound = blockchain.ArchiveInfo;
 
 /**
+* Persistent state part metadata
+*
+* @param prefix        shard prefix of the state part
+* @param size          state part file size in bytes
+*/
+blockchain.persistentStatePartInfo
+    prefix:long
+    size:long
+    = blockchain.PersistentStatePartInfo;
+
+/**
 * A successful response for the 'getPersistentStateInfo' query
 *
 * @param size           state file size in bytes
@@ -145,6 +156,22 @@ blockchain.archiveInfo.notFound = blockchain.ArchiveInfo;
 blockchain.persistentStateInfo.found
     size:long
     chunk_size:long
+    = blockchain.PersistentStateInfo;
+
+/**
+* A successful response for the 'getPersistentStateInfo' query
+* when persistent state stored with parts
+*
+* @param size           state main file size in bytes
+* @param chunk_size     chunk size in bytes
+* @param split_depth    state split depth on parts
+* @param parts          list of state parts files
+*/
+blockchain.persistentStateInfo.foundWithParts
+    size:long
+    chunk_size:long
+    split_depth:int
+    parts:(vector blockchain.persistentStatePartInfo)
     = blockchain.PersistentStateInfo;
 
 /**
@@ -258,6 +285,19 @@ blockchain.getPersistentShardStateInfo
 */
 blockchain.getPersistentShardStateChunk
     block_id:blockchain.blockId
+    offset:long
+    = overlay.Response blockchain.Data;
+
+/**
+* Get persistent shard state part chunk
+*
+* @param block_id       requested block id
+* @param prefix         persistent shard state part prefix
+* @param offset         part offset in bytes
+*/
+blockchain.getPersistentShardStatePartChunk
+    block_id:blockchain.blockId
+    prefix:long
     offset:long
     = overlay.Response blockchain.Data;
 
