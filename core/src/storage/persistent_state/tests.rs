@@ -222,7 +222,7 @@ async fn persistent_shard_state() -> Result<()> {
 
     let read_verify_state = || async {
         let persistent_state_data = persistent_states
-            .read_state_part(zerostate.block_id(), 0, PersistentStateKind::Shard)
+            .read_state_chunk(zerostate.block_id(), 0, PersistentStateKind::Shard, None)
             .await
             .unwrap();
 
@@ -412,6 +412,23 @@ async fn split_persistent_shard_state_import_from_dump() -> Result<()> {
         .iter()
         .map(|&prefix| read_decompressed(ShardStateWriter::file_name_ext(block_id, Some(prefix))))
         .collect::<Result<Vec<_>>>()?;
+
+    let persistent_state_info = persistent_states
+        .get_state_info(&block_id, PersistentStateKind::Shard)
+        .unwrap();
+    assert_eq!(persistent_state_info.split_depth, 2);
+    assert_eq!(persistent_state_info.parts.len(), meta.parts.len());
+
+    let part_chunk = persistent_states
+        .read_state_chunk(
+            &block_id,
+            0,
+            PersistentStateKind::Shard,
+            Some(meta.parts[0]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(zstd_decompress_simple(&part_chunk)?, part_bocs[0]);
 
     // Import the split bundle into a fresh storage and verify it reconstructs the same state.
     let (ctx, _tmp_dir) = StorageContext::new_temp().await?;

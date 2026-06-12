@@ -38,6 +38,7 @@ pub trait RpcDataProvider: Send + Sync + 'static {
         block_id: &BlockId,
         offset: u64,
         kind: PersistentStateKind,
+        part_shard_prefix: Option<u64>,
     ) -> Result<Option<Bytes>>;
 }
 
@@ -109,10 +110,11 @@ impl RpcDataProvider for StorageRpcDataProvider {
         block_id: &BlockId,
         offset: u64,
         kind: PersistentStateKind,
+        part_shard_prefix: Option<u64>,
     ) -> Result<Option<Bytes>> {
         let persistent_state_storage = self.storage.persistent_state_storage();
         Ok(persistent_state_storage
-            .read_state_part(block_id, offset, kind)
+            .read_state_chunk(block_id, offset, kind, part_shard_prefix)
             .await
             .map(Bytes::from))
     }
@@ -227,6 +229,8 @@ mod s3_impl {
                 .map(|info| PersistentStateInfo {
                     size: info.size,
                     chunk_size: self.chunk_size,
+                    split_depth: 0,
+                    parts: Vec::new(),
                 }))
         }
 
@@ -235,7 +239,12 @@ mod s3_impl {
             block_id: &BlockId,
             offset: u64,
             kind: PersistentStateKind,
+            part_shard_prefix: Option<u64>,
         ) -> Result<Option<Bytes>> {
+            if part_shard_prefix.is_some() {
+                return Ok(None);
+            }
+
             self.check_rate_limit()?;
             self.check_bandwidth_limit()?;
 
@@ -354,11 +363,12 @@ where
         block_id: &BlockId,
         offset: u64,
         kind: PersistentStateKind,
+        part_shard_prefix: Option<u64>,
     ) -> Result<Option<Bytes>> {
         // Try primary first
         match self
             .primary
-            .get_persistent_state_chunk(block_id, offset, kind)
+            .get_persistent_state_chunk(block_id, offset, kind, part_shard_prefix)
             .await
         {
             Ok(Some(chunk)) => return Ok(Some(chunk)),
@@ -368,6 +378,7 @@ where
                     ?block_id,
                     offset,
                     ?kind,
+                    ?part_shard_prefix,
                     "primary state provider error: {e:?}"
                 );
             }
@@ -375,7 +386,7 @@ where
 
         // Fallback
         self.fallback
-            .get_persistent_state_chunk(block_id, offset, kind)
+            .get_persistent_state_chunk(block_id, offset, kind, part_shard_prefix)
             .await
     }
 }
