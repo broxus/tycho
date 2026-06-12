@@ -181,6 +181,8 @@ impl ShardStateStorage {
 
                     // write persistent metadata
                     meta.write(&states_dir, &block_id)?;
+
+                    // write main
                     let absent_cells = split
                         .iter()
                         .map(|(root_hash, part)| (*root_hash, part.cell.clone()))
@@ -191,7 +193,9 @@ impl ShardStateStorage {
                         cancelled.as_ref(),
                     )?;
                 } else {
+                    // write persistent metadata
                     meta.write(&states_dir, &block_id)?;
+
                     ShardStateWriter::new(&cells_db, &states_dir, &block_id)
                         .write(&root_hash, cancelled.as_ref())?;
                 }
