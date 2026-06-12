@@ -23,7 +23,7 @@ pub use self::db::{CellsDb, CoreDb, CoreDbExt};
 pub use self::gc::ManualGcTrigger;
 pub use self::node_state::{NodeStateStorage, NodeSyncState};
 pub use self::persistent_state::{
-    BriefBocHeader, PersistentState, PersistentStateInfo, PersistentStateKind,
+    BriefBocHeader, PersistentState, PersistentStateInfo, PersistentStateKind, PersistentStateMeta,
     PersistentStateStorage, QueueDiffReader, QueueStateReader, QueueStateWriter, ShardStateReader,
     ShardStateWriter,
 };
