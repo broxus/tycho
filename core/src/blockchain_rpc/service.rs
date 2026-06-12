@@ -344,6 +344,16 @@ impl<B: BroadcastListener> Service<ServiceRequest> for BlockchainRpcService<B> {
             },
 
             #[meta(
+                "getPersistentShardStatePartChunk",
+                block_id = %req.block_id,
+                prefix = %req.prefix,
+                offset = %req.offset,
+            )]
+            rpc::GetPersistentShardStatePartChunk as req => {
+                inner.handle_get_persistent_shard_state_part_chunk(&req).await
+            },
+
+            #[meta(
                 "getPersistentQueueStateChunk",
                 block_id = %req.block_id,
                 offset = %req.offset,
@@ -669,16 +679,39 @@ impl<B> Inner<B> {
         &self,
         req: &rpc::GetPersistentShardStateChunk,
     ) -> overlay::Response<Data> {
-        self.read_persistent_state_chunk(&req.block_id, req.offset, PersistentStateKind::Shard)
-            .await
+        self.read_persistent_state_chunk(
+            &req.block_id,
+            req.offset,
+            PersistentStateKind::Shard,
+            None,
+        )
+        .await
+    }
+
+    async fn handle_get_persistent_shard_state_part_chunk(
+        &self,
+        req: &rpc::GetPersistentShardStatePartChunk,
+    ) -> overlay::Response<Data> {
+        self.read_persistent_state_chunk(
+            &req.block_id,
+            req.offset,
+            PersistentStateKind::Shard,
+            Some(req.prefix),
+        )
+        .await
     }
 
     async fn handle_get_persistent_queue_state_chunk(
         &self,
         req: &rpc::GetPersistentQueueStateChunk,
     ) -> overlay::Response<Data> {
-        self.read_persistent_state_chunk(&req.block_id, req.offset, PersistentStateKind::Queue)
-            .await
+        self.read_persistent_state_chunk(
+            &req.block_id,
+            req.offset,
+            PersistentStateKind::Queue,
+            None,
+        )
+        .await
     }
 }
 
@@ -745,10 +778,26 @@ impl<B> Inner<B> {
                 .get_persistent_state_info(block_id, state_kind)
                 .await?
         {
-            return Ok(PersistentStateInfo::Found {
-                size: info.size,
-                chunk_size: info.chunk_size,
-            });
+            return if state_kind == PersistentStateKind::Shard && !info.parts.is_empty() {
+                Ok(PersistentStateInfo::FoundWithParts {
+                    size: info.size,
+                    chunk_size: info.chunk_size,
+                    split_depth: u32::from(info.split_depth),
+                    parts: info
+                        .parts
+                        .into_iter()
+                        .map(|part| PersistentStatePartInfo {
+                            prefix: part.prefix,
+                            size: part.size,
+                        })
+                        .collect(),
+                })
+            } else {
+                Ok(PersistentStateInfo::Found {
+                    size: info.size,
+                    chunk_size: info.chunk_size,
+                })
+            };
         }
 
         Ok(PersistentStateInfo::NotFound)
@@ -759,6 +808,7 @@ impl<B> Inner<B> {
         block_id: &BlockId,
         offset: u64,
         state_kind: PersistentStateKind,
+        part_shard_prefix: Option<u64>,
     ) -> overlay::Response<Data> {
         let persistent_state_request_validation = || {
             anyhow::ensure!(
@@ -775,7 +825,7 @@ impl<B> Inner<B> {
 
         match self
             .rpc_data_provider
-            .get_persistent_state_chunk(block_id, offset, state_kind)
+            .get_persistent_state_chunk(block_id, offset, state_kind, part_shard_prefix)
             .await
         {
             Ok(Some(data)) => overlay::Response::Ok(Data { data }),
@@ -785,6 +835,7 @@ impl<B> Inner<B> {
                     ?block_id,
                     offset,
                     ?state_kind,
+                    ?part_shard_prefix,
                     "get_persistent_state_chunk failed: {e:?}"
                 );
                 overlay::Response::Err(INTERNAL_ERROR_CODE)
