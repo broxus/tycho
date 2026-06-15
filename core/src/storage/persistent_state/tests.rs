@@ -6,6 +6,7 @@ use tycho_block_util::queue::{
     QueueDiffStuff, QueueKey, QueueStateHeader, RouterAddr, RouterPartitions,
 };
 use tycho_block_util::state::ShardStateStuff;
+use tycho_storage::fs::Dir;
 use tycho_storage::{StorageConfig, StorageContext};
 use tycho_types::boc::Boc;
 use tycho_types::cell::{Cell, CellBuilder, CellSlice, HashBytes, Lazy};
@@ -19,9 +20,90 @@ use tycho_util::compression::zstd_decompress_simple;
 
 use crate::ZEROSTATE_BOC;
 use crate::storage::persistent_state::{
-    CacheKey, PersistentStateKind, QueueStateReader, QueueStateWriter,
+    CacheKey, PersistentStateKind, PersistentStateMeta, QueueStateReader, QueueStateWriter,
+    ShardStateWriter, parse_shard_state_part_file_name,
 };
 use crate::storage::{CoreStorage, CoreStorageConfig, NewBlockMeta};
+
+#[test]
+fn persistent_state_meta_roundtrip() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let dir = Dir::new(temp_dir.path())?;
+    let block_id = BlockId {
+        shard: ShardIdent::BASECHAIN,
+        seqno: 36,
+        root_hash: HashBytes::from([1; 32]),
+        file_hash: HashBytes::from([2; 32]),
+    };
+    let meta = PersistentStateMeta::new(2, vec![0xa000000000000000, 0x2000000000000000]);
+
+    meta.write(&dir, &block_id)?;
+    let loaded = PersistentStateMeta::read(&dir, &block_id)?.unwrap();
+
+    assert_eq!(loaded, meta);
+    Ok(())
+}
+
+#[test]
+fn shard_state_part_file_name_parser_recognizes_only_parts() -> Result<()> {
+    let block_id = BlockId {
+        shard: ShardIdent::BASECHAIN,
+        seqno: 36,
+        root_hash: HashBytes::from([1; 32]),
+        file_hash: HashBytes::from([2; 32]),
+    };
+    let part_file = ShardStateWriter::file_name_ext(block_id, Some(0xa000000000000000));
+    let main_file = ShardStateWriter::file_name(block_id);
+    let block_id_string = block_id.to_string();
+    assert_eq!(
+        parse_shard_state_part_file_name(&part_file),
+        Some((block_id_string.as_str(), 0xa000000000000000))
+    );
+    assert!(parse_shard_state_part_file_name(&main_file).is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn cache_rejects_split_sidecars_without_metadata() -> Result<()> {
+    let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
+    let storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
+    let persistent_states = storage.persistent_state_storage();
+    let block_id = BlockId {
+        shard: ShardIdent::BASECHAIN,
+        seqno: 36,
+        root_hash: HashBytes::from([1; 32]),
+        file_hash: HashBytes::from([2; 32]),
+    };
+    let states_dir = persistent_states
+        .inner
+        .prepare_persistent_states_dir(block_id.seqno)?;
+    std::fs::write(
+        states_dir
+            .file(ShardStateWriter::file_name(block_id))
+            .path(),
+        [1],
+    )?;
+    std::fs::write(
+        states_dir
+            .file(ShardStateWriter::file_name_ext(
+                block_id,
+                Some(0xa000000000000000),
+            ))
+            .path(),
+        [2],
+    )?;
+    let err = match persistent_states.inner.cache_state(
+        block_id.seqno,
+        &block_id,
+        PersistentStateKind::Shard,
+    ) {
+        Ok(_) => panic!("split sidecars without metadata must not be cached"),
+        Err(e) => e,
+    };
+    assert!(err.to_string().contains("missing metadata"));
+    assert!(!persistent_states.state_exists(&block_id, PersistentStateKind::Shard));
+    Ok(())
+}
 
 #[tokio::test]
 async fn persistent_shard_state() -> Result<()> {
@@ -80,6 +162,11 @@ async fn persistent_shard_state() -> Result<()> {
     storage.block_handle_storage().set_skip_states_gc(&handle);
     persistent_states.store_shard_state(0, &handle).await?;
 
+    // Read metadata
+    let meta = PersistentStateMeta::read(&persistent_states.inner.mc_states_dir(0), &zerostate_id)?
+        .unwrap();
+    assert_eq!(meta, PersistentStateMeta::default());
+
     // Check if state exists
     let exist = persistent_states.state_exists(zerostate.block_id(), PersistentStateKind::Shard);
     assert!(exist);
@@ -130,6 +217,14 @@ async fn persistent_shard_state() -> Result<()> {
     persistent_states
         .store_shard_state(new_mc_seqno, &handle)
         .await?;
+
+    // Read metadata
+    let meta = PersistentStateMeta::read(
+        &persistent_states.inner.mc_states_dir(new_mc_seqno),
+        &zerostate_id,
+    )?
+    .unwrap();
+    assert_eq!(meta, PersistentStateMeta::default());
 
     // Check if state exists
     let exist = persistent_states.state_exists(zerostate.block_id(), PersistentStateKind::Shard);
