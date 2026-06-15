@@ -158,6 +158,7 @@ impl CoreStorage {
             block_handle_storage.clone(),
             block_storage.clone(),
             shard_state_storage.clone(),
+            config.persistent_state_split_depth,
         )?;
 
         persistent_state_storage.preload().await?;

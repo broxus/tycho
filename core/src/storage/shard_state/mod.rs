@@ -13,7 +13,7 @@ use bytes::Bytes;
 use futures_util::FutureExt;
 use futures_util::future::BoxFuture;
 use tycho_block_util::block::*;
-use tycho_block_util::dict::split_aug_dict_raw;
+use tycho_block_util::dict::{split_aug_dict, split_aug_dict_raw};
 use tycho_block_util::state::*;
 use tycho_storage::fs::{Dir, TempFileStorage};
 use tycho_storage::kv::StoredValue;
@@ -35,7 +35,7 @@ use super::{
     CoreStorageConfig, tables,
 };
 use crate::storage::BlockConnection;
-use crate::storage::persistent_state::ShardStateWriter;
+use crate::storage::persistent_state::{PersistentStateMeta, ShardStateWriter};
 
 mod cell_nursery;
 mod cell_storage;
@@ -141,24 +141,52 @@ impl ShardStateStorage {
         states_dir: Dir,
         block_id: BlockId,
         root_hash: HashBytes,
+        split_depth: u8,
         cancelled: Option<CancellationFlag>,
-    ) -> Result<HashBytes> {
+    ) -> Result<PersistentStateMeta> {
         let cells_db = self.cells_db.clone();
         let cell_storage = self.cell_storage.clone();
         let gc_lock = self.gc_lock.clone().lock_owned().await;
+
+        let parts = if split_depth == 0 || block_id.is_masterchain() {
+            Vec::new()
+        } else {
+            let root_cell = self.load_state(0, &block_id).await?.root_cell().clone();
+            split_shard_accounts_for_persistent(&block_id.shard, &root_cell, split_depth)?
+        };
+        let meta = PersistentStateMeta::new(
+            if parts.is_empty() { 0 } else { split_depth },
+            parts.iter().map(|part| part.prefix).collect(),
+        );
+
         let span = tracing::Span::current();
 
-        tokio::task::spawn_blocking(move || {
-            let _span = span.enter();
-            {
-                // Serialize with state commits just long enough to publish
-                // nursery-only cells into RocksDB before the raw writer starts.
-                let _gc_lock = gc_lock;
-                cell_storage.prepare_persistent_state_save();
-            }
+        tokio::task::spawn_blocking({
+            let meta = meta.clone();
+            move || {
+                let _span = span.enter();
+                {
+                    // Serialize with state commits just long enough to publish
+                    // nursery-only cells into RocksDB before the raw writer starts.
+                    let _gc_lock = gc_lock;
+                    cell_storage.prepare_persistent_state_save();
+                }
 
-            ShardStateWriter::new(&cells_db, &states_dir, &block_id)
-                .write(&root_hash, cancelled.as_ref())
+                // write parts if exist
+                for part in parts {
+                    ShardStateWriter::new_part(&cells_db, &states_dir, &block_id, part.prefix)
+                        .write(&part.root_hash, cancelled.as_ref())?;
+                }
+
+                // write persistent metadata
+                meta.write(&states_dir, &block_id)?;
+
+                // write main
+                ShardStateWriter::new(&cells_db, &states_dir, &block_id)
+                    .write(&root_hash, cancelled.as_ref())?;
+
+                Ok::<_, anyhow::Error>(meta)
+            }
         })
         .await?
     }
@@ -1812,6 +1840,42 @@ pub fn split_shard_accounts(
         .context("failed to load shard accounts")?;
 
     split_aug_dict_raw(shard_accounts, split_depth).context("failed to split shard accounts")
+}
+
+pub fn split_shard_accounts_for_persistent(
+    state_shard: &ShardIdent,
+    root_cell: impl AsRef<DynCell>,
+    split_depth: u8,
+) -> Result<Vec<ShardAccountsSplitPart>> {
+    let shard_accounts = root_cell
+        .as_ref()
+        .reference_cloned(1)
+        .context("invalid shard state")?
+        .parse::<ShardAccounts>()
+        .context("failed to load shard accounts")?;
+
+    let mut result = Vec::new();
+    for (shard, dict) in split_aug_dict(state_shard.workchain(), shard_accounts, split_depth)
+        .context("failed to split shard accounts")?
+    {
+        let (dict, _) = dict.into_parts();
+        if let Some(cell) = dict.into_root() {
+            result.push(ShardAccountsSplitPart {
+                prefix: shard.prefix(),
+                root_hash: *cell.repr_hash(),
+                cell,
+            });
+        }
+    }
+    result.sort_unstable_by_key(|part| part.prefix);
+    Ok(result)
+}
+
+#[derive(Debug, Clone)]
+pub struct ShardAccountsSplitPart {
+    pub prefix: u64,
+    pub root_hash: HashBytes,
+    pub cell: Cell,
 }
 
 #[derive(Debug, Clone)]
