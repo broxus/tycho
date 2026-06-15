@@ -4574,8 +4574,7 @@ dependencies = [
 [[package]]
 name = "tycho-types"
 version = "0.3.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "104f8eaefe8d4c12e480906a876f0c6dd6f68c1e7eaeb8fd2c236e8f729019fd"
+source = "git+https://github.com/broxus/tycho-types.git?rev=b529060a4f229bc17f9a30cd12f90ee44931e16a#b529060a4f229bc17f9a30cd12f90ee44931e16a"
 dependencies = [
  "ahash",
  "anyhow",
@@ -4608,8 +4607,7 @@ dependencies = [
 [[package]]
 name = "tycho-types-abi-proc"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c813c08a03554252747f9e5e88485d9af4c30077394a1c3bb6d774ddca56b07"
+source = "git+https://github.com/broxus/tycho-types.git?rev=b529060a4f229bc17f9a30cd12f90ee44931e16a#b529060a4f229bc17f9a30cd12f90ee44931e16a"
 dependencies = [
  "anyhow",
  "proc-macro2",
@@ -4620,8 +4618,7 @@ dependencies = [
 [[package]]
 name = "tycho-types-proc"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ad05cf4ab89631f8c11d85c3aa80f781502440f75361d251f866e0d76ae9d31"
+source = "git+https://github.com/broxus/tycho-types.git?rev=b529060a4f229bc17f9a30cd12f90ee44931e16a#b529060a4f229bc17f9a30cd12f90ee44931e16a"
 dependencies = [
  "proc-macro2",
  "quote",

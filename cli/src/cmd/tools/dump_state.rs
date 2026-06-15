@@ -250,7 +250,7 @@ impl Dumper {
         let dir = Dir::new(self.output_dir.path().join("persistents"))?;
         self.storage
             .shard_state_storage()
-            .write_persistent_shard_state(dir, *block_id, *state.root_cell().repr_hash(), None)
+            .write_persistent_shard_state(dir, *block_id, *state.root_cell().repr_hash(), 0, None)
             .await
             .context(format!("Failed to write state for {}", block_id))?;
         println!(" - Persistent state saved");
