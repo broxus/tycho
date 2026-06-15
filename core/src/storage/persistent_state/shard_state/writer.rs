@@ -5,6 +5,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use tycho_storage::fs::Dir;
 use tycho_types::cell::{CellDescriptor, HashBytes};
@@ -21,6 +22,7 @@ pub struct ShardStateWriter<'a> {
     db: &'a CellsDb,
     states_dir: &'a Dir,
     block_id: &'a BlockId,
+    part_prefix: Option<u64>,
 }
 
 impl<'a> ShardStateWriter<'a> {
@@ -31,18 +33,50 @@ impl<'a> ShardStateWriter<'a> {
     // Partially written BOC file.
     const FILE_EXTENSION_TEMP: &'static str = "boc.temp";
 
+    pub const META_FILE_EXTENSION: &'static str = "meta.json";
+
+    fn build_file_name_base<S>(name: S, part_prefix: Option<u64>) -> String
+    where
+        S: Display,
+    {
+        match part_prefix {
+            Some(prefix) => format!("{name}_part_{prefix:016x}"),
+            None => name.to_string(),
+        }
+    }
+
     pub fn file_name<S>(name: S) -> PathBuf
     where
         S: Display,
     {
-        PathBuf::from(name.to_string()).with_extension(Self::FILE_EXTENSION)
+        Self::file_name_ext(name, None)
+    }
+
+    pub fn file_name_ext<S>(name: S, part_prefix: Option<u64>) -> PathBuf
+    where
+        S: Display,
+    {
+        PathBuf::from(Self::build_file_name_base(name, part_prefix))
+            .with_extension(Self::FILE_EXTENSION)
     }
 
     pub fn temp_file_name<S>(name: S) -> PathBuf
     where
         S: Display,
     {
-        PathBuf::from(name.to_string()).with_extension(Self::FILE_EXTENSION_TEMP)
+        Self::temp_file_name_ext(name, None)
+    }
+
+    pub fn temp_file_name_ext<S>(name: S, part_prefix: Option<u64>) -> PathBuf
+    where
+        S: Display,
+    {
+        PathBuf::from(Self::build_file_name_base(name, part_prefix))
+            .with_extension(Self::FILE_EXTENSION_TEMP)
+    }
+
+    pub fn meta_file_name(block_id: &BlockId) -> PathBuf {
+        PathBuf::from(block_id.to_string()).with_extension(Self::META_FILE_EXTENSION)
     }
 
     pub fn new(db: &'a CellsDb, states_dir: &'a Dir, block_id: &'a BlockId) -> Self {
@@ -50,6 +84,21 @@ impl<'a> ShardStateWriter<'a> {
             db,
             states_dir,
             block_id,
+            part_prefix: None,
+        }
+    }
+
+    pub fn new_part(
+        db: &'a CellsDb,
+        states_dir: &'a Dir,
+        block_id: &'a BlockId,
+        part_prefix: u64,
+    ) -> Self {
+        Self {
+            db,
+            states_dir,
+            block_id,
+            part_prefix: Some(part_prefix),
         }
     }
 
@@ -58,7 +107,7 @@ impl<'a> ShardStateWriter<'a> {
         mut boc_file: File,
         _cancelled: Option<&CancellationFlag>,
     ) -> Result<()> {
-        let temp_file_name = Self::temp_file_name(self.block_id);
+        let temp_file_name = Self::temp_file_name_ext(self.block_id, self.part_prefix);
         scopeguard::defer! {
             self.states_dir.remove_file(&temp_file_name).ok();
         }
@@ -89,7 +138,7 @@ impl<'a> ShardStateWriter<'a> {
         // Atomically rename the file
         self.states_dir
             .file(&temp_file_name)
-            .rename(Self::file_name(self.block_id))
+            .rename(Self::file_name_ext(self.block_id, self.part_prefix))
             .map_err(Into::into)
     }
 
@@ -119,8 +168,8 @@ impl<'a> ShardStateWriter<'a> {
         cancelled: Option<&CancellationFlag>,
     ) -> Result<HashBytes> {
         let temp_file_name = match file_name {
-            Some(name) => Self::temp_file_name(name),
-            None => Self::temp_file_name(self.block_id),
+            Some(name) => Self::temp_file_name_ext(name, self.part_prefix),
+            None => Self::temp_file_name_ext(self.block_id, self.part_prefix),
         };
 
         scopeguard::defer! {
@@ -248,8 +297,8 @@ impl<'a> ShardStateWriter<'a> {
         };
 
         let name = match file_name {
-            None => Self::file_name(self.block_id),
-            Some(name) => Self::file_name(name),
+            None => Self::file_name_ext(self.block_id, self.part_prefix),
+            Some(name) => Self::file_name_ext(name, self.part_prefix),
         };
 
         self.states_dir.file(&temp_file_name).rename(name)?;
@@ -418,6 +467,76 @@ impl<'a> ShardStateWriter<'a> {
             total_size,
         })
     }
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub struct PersistentStateMeta {
+    pub split_depth: u8,
+    pub parts: Vec<u64>,
+}
+
+impl PersistentStateMeta {
+    pub const VERSION: u8 = 1;
+
+    pub fn new(split_depth: u8, mut parts: Vec<u64>) -> Self {
+        parts.sort_unstable();
+        parts.dedup();
+        Self {
+            split_depth,
+            parts,
+        }
+    }
+
+    pub fn write(&self, states_dir: &Dir, block_id: &BlockId) -> Result<()> {
+        let file_path = states_dir
+            .path()
+            .join(ShardStateWriter::meta_file_name(block_id));
+        let raw = RawPersistentStateMeta {
+            version: Self::VERSION,
+            split_depth: self.split_depth,
+            parts: self
+                .parts
+                .iter()
+                .map(|prefix| format!("{prefix:016x}"))
+                .collect(),
+        };
+        tycho_util::serde_helpers::save_json_to_file(&raw, file_path)?;
+        Ok(())
+    }
+
+    pub fn read(states_dir: &Dir, block_id: &BlockId) -> Result<Option<Self>> {
+        let file_path = states_dir
+            .path()
+            .join(ShardStateWriter::meta_file_name(block_id));
+        if !file_path.exists() {
+            return Ok(None);
+        }
+
+        let raw: RawPersistentStateMeta =
+            tycho_util::serde_helpers::load_json_from_file(file_path)?;
+        anyhow::ensure!(
+            raw.version == Self::VERSION,
+            "unsupported persistent state meta version: {}",
+            raw.version
+        );
+        let mut parts = Vec::with_capacity(raw.parts.len());
+        for prefix in raw.parts {
+            if prefix.len() != 16 || !prefix.chars().all(|c| c.is_ascii_hexdigit()) {
+                anyhow::bail!("invalid persistent state part prefix: {prefix}");
+            }
+            parts.push(u64::from_str_radix(&prefix, 16)?);
+        }
+
+        Ok(Some(Self::new(raw.split_depth, parts)))
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RawPersistentStateMeta {
+    version: u8,
+    split_depth: u8,
+    #[serde(default)]
+    parts: Vec<String>,
 }
 
 struct IntermediateState {
