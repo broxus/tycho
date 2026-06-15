@@ -19,6 +19,7 @@ use tycho_storage::StorageContext;
 use tycho_types::boc::{Boc, BocRepr};
 use tycho_types::cell::CellBuilder;
 use tycho_types::models::{Block, BlockId, ShardStateUnsplit};
+#[cfg(any(test, feature = "test"))]
 use tycho_util::compression::zstd_decompress_simple;
 
 use crate::internal_queue::queue::{QueueConfig, QueueFactory, QueueFactoryStdImpl};
