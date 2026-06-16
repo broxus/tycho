@@ -35,7 +35,9 @@ use super::{
     CoreStorageConfig, tables,
 };
 use crate::storage::BlockConnection;
-use crate::storage::persistent_state::{PersistentStateMeta, ShardStateWriter};
+use crate::storage::persistent_state::{
+    PersistentStateMeta, ShardStateWriter, check_can_reuse_shard_state_part_files,
+};
 
 mod cell_nursery;
 mod cell_storage;
@@ -173,14 +175,24 @@ impl ShardStateStorage {
                 }
 
                 if !split.is_empty() {
-                    // write parts if exist
-                    for (part_root_hash, part) in &split {
-                        ShardStateWriter::new_part(&cells_db, &states_dir, &block_id, part.prefix)
+                    // try reuse existing parts and metadata if exist
+                    if check_can_reuse_shard_state_part_files(&states_dir, &block_id, &meta)? {
+                        tracing::debug!("reusing split persistent shard state parts");
+                    } else {
+                        // write parts if exist
+                        for (part_root_hash, part) in &split {
+                            ShardStateWriter::new_part(
+                                &cells_db,
+                                &states_dir,
+                                &block_id,
+                                part.prefix,
+                            )
                             .write(part_root_hash, cancelled.as_ref())?;
-                    }
+                        }
 
-                    // write persistent metadata
-                    meta.write(&states_dir, &block_id)?;
+                        // write persistent metadata
+                        meta.write(&states_dir, &block_id)?;
+                    }
 
                     // write main
                     let absent_cells = split
