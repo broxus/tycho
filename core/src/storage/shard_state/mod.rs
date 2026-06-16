@@ -161,10 +161,13 @@ impl ShardStateStorage {
         parts.sort_unstable();
         let meta = PersistentStateMeta::new(if parts.is_empty() { 0 } else { split_depth }, parts);
 
-        let span = tracing::Span::current();
-
-        tokio::task::spawn_blocking({
+        // prepare, check for parts reuse
+        let parts_reused = tokio::task::spawn_blocking({
             let meta = meta.clone();
+            let states_dir = states_dir.clone();
+            let is_split = !split.is_empty();
+            let span = tracing::Span::current();
+
             move || {
                 let _span = span.enter();
                 {
@@ -174,46 +177,109 @@ impl ShardStateStorage {
                     cell_storage.prepare_persistent_state_save();
                 }
 
-                if !split.is_empty() {
-                    // try reuse existing parts and metadata if exist
-                    if check_can_reuse_shard_state_part_files(&states_dir, &block_id, &meta)? {
-                        tracing::debug!("reusing split persistent shard state parts");
-                    } else {
-                        // write parts if exist
-                        for (part_root_hash, part) in &split {
-                            ShardStateWriter::new_part(
-                                &cells_db,
-                                &states_dir,
-                                &block_id,
-                                part.prefix,
-                            )
-                            .write(part_root_hash, cancelled.as_ref())?;
-                        }
-
-                        // write persistent metadata
-                        meta.write(&states_dir, &block_id)?;
-                    }
-
-                    // write main
-                    let absent_cells = split
-                        .iter()
-                        .map(|(root_hash, part)| (*root_hash, part.cell.clone()))
-                        .collect();
-                    ShardStateWriter::new(&cells_db, &states_dir, &block_id).write_with_absent(
-                        &root_hash,
-                        absent_cells,
-                        cancelled.as_ref(),
-                    )?;
-                } else {
-                    // write persistent metadata
-                    meta.write(&states_dir, &block_id)?;
-
-                    ShardStateWriter::new(&cells_db, &states_dir, &block_id)
-                        .write(&root_hash, cancelled.as_ref())?;
+                if is_split
+                    && check_can_reuse_shard_state_part_files(&states_dir, &block_id, &meta)?
+                {
+                    tracing::debug!("reusing split persistent shard state parts");
+                    return Ok::<_, anyhow::Error>(true);
                 }
 
-                Ok::<_, anyhow::Error>(meta)
+                Ok::<_, anyhow::Error>(false)
             }
+        })
+        .await??;
+
+        // write parts in parallel if exist
+        if !split.is_empty() && !parts_reused {
+            // will use semaphore to limit parrallel io operations
+            const MAX_PARALLEL_PERSISTENT_STATE_PART_WRITES: usize = 4;
+            let semaphore = Arc::new(tokio::sync::Semaphore::new(
+                MAX_PARALLEL_PERSISTENT_STATE_PART_WRITES,
+            ));
+
+            let mut parts_writes = tokio::task::JoinSet::new();
+            for (part_root_hash, part) in &split {
+                let permit = semaphore
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .context("persistent state part write semaphore closed")?;
+                let cells_db = cells_db.clone();
+                let states_dir = states_dir.clone();
+                let part_root_hash = *part_root_hash;
+                let part_prefix = part.prefix;
+                let cancelled = cancelled.clone();
+                let span = tracing::Span::current();
+
+                parts_writes.spawn_blocking(move || {
+                    let _permit = permit;
+                    let _span = span.enter();
+
+                    ShardStateWriter::new_part(&cells_db, &states_dir, &block_id, part_prefix)
+                        .write(&part_root_hash, cancelled.as_ref())
+                        .with_context(|| {
+                            format!("failed to write persistent state part {part_prefix:016x}")
+                        })
+                });
+            }
+
+            // collect results
+            let mut write_result = Ok::<_, anyhow::Error>(());
+            while let Some(result) = parts_writes.join_next().await {
+                match result {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => {
+                        if let Some(cancelled) = &cancelled {
+                            cancelled.cancel();
+                        }
+                        if write_result.is_ok() {
+                            write_result = Err(e);
+                        }
+                    }
+                    Err(e) => {
+                        if let Some(cancelled) = &cancelled {
+                            cancelled.cancel();
+                        }
+                        if write_result.is_ok() {
+                            write_result = Err(e.into());
+                        }
+                    }
+                }
+            }
+            write_result?;
+        }
+
+        // write metadata and main file
+        let span = tracing::Span::current();
+
+        tokio::task::spawn_blocking(move || {
+            let _span = span.enter();
+
+            if !split.is_empty() {
+                if !parts_reused {
+                    // write persistent metadata
+                    meta.write(&states_dir, &block_id)?;
+                }
+
+                // write main
+                let absent_cells = split
+                    .iter()
+                    .map(|(root_hash, part)| (*root_hash, part.cell.clone()))
+                    .collect();
+                ShardStateWriter::new(&cells_db, &states_dir, &block_id).write_with_absent(
+                    &root_hash,
+                    absent_cells,
+                    cancelled.as_ref(),
+                )?;
+            } else {
+                // write persistent metadata
+                meta.write(&states_dir, &block_id)?;
+
+                ShardStateWriter::new(&cells_db, &states_dir, &block_id)
+                    .write(&root_hash, cancelled.as_ref())?;
+            }
+
+            Ok::<_, anyhow::Error>(meta)
         })
         .await?
     }
