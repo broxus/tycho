@@ -23,7 +23,7 @@ use tycho_util::{FastHashMap, FastHashSet};
 use crate::ZEROSTATE_BOC;
 use crate::storage::persistent_state::{
     CacheKey, PersistentStateKind, PersistentStateMeta, QueueStateReader, QueueStateWriter,
-    ShardStateWriter, parse_shard_state_part_file_name,
+    ShardStateWriter, check_can_reuse_shard_state_part_files, parse_shard_state_part_file_name,
 };
 use crate::storage::{CoreStorage, CoreStorageConfig, NewBlockMeta};
 
@@ -62,6 +62,66 @@ fn shard_state_part_file_name_parser_recognizes_only_parts() -> Result<()> {
         Some((block_id_string.as_str(), 0xa000000000000000))
     );
     assert!(parse_shard_state_part_file_name(&main_file).is_none());
+    Ok(())
+}
+
+#[test]
+fn test_check_can_reuse_shard_state_part_files() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let dir = Dir::new(temp_dir.path())?;
+    let block_id = BlockId {
+        shard: ShardIdent::BASECHAIN,
+        seqno: 36,
+        root_hash: HashBytes::from([1; 32]),
+        file_hash: HashBytes::from([2; 32]),
+    };
+    let part_prefix = 0xa000000000000000;
+    let expected_meta = PersistentStateMeta::new(2, vec![part_prefix]);
+
+    expected_meta.write(&dir, &block_id)?;
+    std::fs::write(
+        dir.file(ShardStateWriter::file_name_ext(block_id, Some(part_prefix)))
+            .path(),
+        [1],
+    )?;
+    assert!(check_can_reuse_shard_state_part_files(
+        &dir,
+        &block_id,
+        &expected_meta
+    )?);
+
+    PersistentStateMeta::new(3, vec![part_prefix]).write(&dir, &block_id)?;
+    assert!(!check_can_reuse_shard_state_part_files(
+        &dir,
+        &block_id,
+        &expected_meta
+    )?);
+
+    expected_meta.write(&dir, &block_id)?;
+    std::fs::remove_file(
+        dir.file(ShardStateWriter::file_name_ext(block_id, Some(part_prefix)))
+            .path(),
+    )?;
+    assert!(!check_can_reuse_shard_state_part_files(
+        &dir,
+        &block_id,
+        &expected_meta
+    )?);
+
+    std::fs::write(
+        dir.file(ShardStateWriter::file_name_ext(block_id, Some(part_prefix)))
+            .path(),
+        [1],
+    )?;
+    std::fs::write(
+        dir.file(ShardStateWriter::meta_file_name(&block_id)).path(),
+        "{",
+    )?;
+    assert!(!check_can_reuse_shard_state_part_files(
+        &dir,
+        &block_id,
+        &expected_meta
+    )?);
     Ok(())
 }
 
