@@ -498,28 +498,83 @@ impl PersistentStateStorage {
         scopeguard::defer! {
             cancelled.cancel();
         }
+        let guard = scopeguard::guard((), |_| {
+            tracing::warn!("cancelled");
+        });
 
         let handle = handle.clone();
         let this = self.inner.clone();
+        let span = tracing::Span::current();
+
+        // prepare persistent state dir
+        let states_dir = {
+            let this = this.clone();
+            tokio::task::spawn_blocking(move || {
+                let _span = span.enter();
+
+                this.prepare_persistent_states_dir(mc_seqno)
+            })
+            .await??
+        };
+
+        // will use semaphore to limit parrallel io operations
+        const MAX_PARALLEL_STATE_FILE_WRITES: usize = 4;
+        let semaphore = Arc::new(Semaphore::new(MAX_PARALLEL_STATE_FILE_WRITES));
+
+        // write part files in parallel
+        let mut prefixes = Vec::with_capacity(parts.len());
+        let mut parts_writes = tokio::task::JoinSet::new();
+        for (prefix, file) in parts {
+            prefixes.push(prefix);
+
+            let permit = semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .context("state file write semaphore closed")?;
+            let cells_db = this.cells_db.clone();
+            let states_dir = states_dir.clone();
+            let block_id = *handle.id();
+            let cancelled = cancelled.clone();
+            let span = tracing::Span::current();
+
+            parts_writes.spawn_blocking(move || {
+                let _permit = permit;
+                let _span = span.enter();
+
+                ShardStateWriter::new_part(&cells_db, &states_dir, &block_id, prefix)
+                    .write_file(file, Some(&cancelled))
+                    .with_context(|| format!("failed to write persistent state part {prefix:016x}"))
+            });
+        }
+
+        // collect results
+        let mut write_result = Ok::<_, anyhow::Error>(());
+        while let Some(result) = parts_writes.join_next().await {
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    cancelled.cancel();
+                    if write_result.is_ok() {
+                        write_result = Err(e);
+                    }
+                }
+                Err(e) => {
+                    cancelled.cancel();
+                    if write_result.is_ok() {
+                        write_result = Err(e.into());
+                    }
+                }
+            }
+        }
+        write_result?;
+
+        // write metadata and main file
         let cancelled = cancelled.clone();
         let span = tracing::Span::current();
 
         let state = tokio::task::spawn_blocking(move || {
             let _span = span.enter();
-
-            let guard = scopeguard::guard((), |_| {
-                tracing::warn!("cancelled");
-            });
-
-            let states_dir = this.prepare_persistent_states_dir(mc_seqno)?;
-
-            // write parts if exist
-            let mut prefixes = Vec::with_capacity(parts.len());
-            for (prefix, file) in parts {
-                ShardStateWriter::new_part(&this.cells_db, &states_dir, handle.id(), prefix)
-                    .write_file(file, Some(&cancelled))?;
-                prefixes.push(prefix);
-            }
 
             // write persistent metadata even for single file
             PersistentStateMeta::new(if prefixes.is_empty() { 0 } else { split_depth }, prefixes)
@@ -532,12 +587,13 @@ impl PersistentStateStorage {
             this.block_handles.set_has_persistent_shard_state(&handle);
             let state = this.cache_state(mc_seqno, handle.id(), PersistentStateKind::Shard)?;
 
-            scopeguard::ScopeGuard::into_inner(guard);
             Ok::<_, anyhow::Error>(state)
         })
         .await??;
 
         self.notify_with_persistent_state(&state).await;
+
+        scopeguard::ScopeGuard::into_inner(guard);
         Ok(())
     }
 
