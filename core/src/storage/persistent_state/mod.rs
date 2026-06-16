@@ -1093,6 +1093,33 @@ fn parse_shard_state_part_file_name(path: &std::path::Path) -> Option<(&str, u64
     Some((block_id, prefix))
 }
 
+pub(super) fn check_can_reuse_shard_state_part_files(
+    states_dir: &Dir,
+    block_id: &BlockId,
+    expected_meta: &PersistentStateMeta,
+) -> Result<bool> {
+    // read metadata from the disk
+    let meta = match PersistentStateMeta::read(states_dir, block_id) {
+        Ok(Some(meta)) => meta,
+        Ok(None) => return Ok(false),
+        Err(e) if e.downcast_ref::<std::io::Error>().is_none() => return Ok(false),
+        Err(e) => return Err(e),
+    };
+
+    // can reuse existing parts only if metadata matches and all part files exist
+    if meta != *expected_meta {
+        return Ok(false);
+    }
+    for &prefix in &expected_meta.parts {
+        let file_name = ShardStateWriter::file_name_ext(block_id, Some(prefix));
+        if !states_dir.file(&file_name).path().is_file() {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
 #[derive(Debug, Clone)]
 pub struct PersistentStateInfo {
     pub size: NonZeroU64,
