@@ -101,6 +101,27 @@ impl CellStorage {
         &self.cells_db
     }
 
+    #[cfg(test)]
+    pub(crate) fn get_counter_value(
+        &self,
+        key: &HashBytes,
+    ) -> Result<Option<u64>, CellStorageError> {
+        let Some(value) = self
+            .cells_db
+            .cells
+            .get(key)
+            .map_err(CellStorageError::Internal)?
+        else {
+            return Ok(None);
+        };
+        let Some((idx, _)) = decode_indexed_value(value.as_ref()) else {
+            return Err(CellStorageError::InvalidCell);
+        };
+
+        let cell_counters = self.cell_counters.lock().unwrap();
+        Ok(Some(cell_counters.counters.get(idx)))
+    }
+
     pub(super) fn prepare_persistent_state_save(&self) {
         // Serialize with store/remove finalization so the nursery snapshot,
         // WAL remove record, and in-memory publish describe the same entries.
