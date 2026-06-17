@@ -45,6 +45,7 @@ castaway = { workspace = true }
 clap = { workspace = true, optional = true }
 crc32c = { workspace = true }
 croaring = { workspace = true }
+crossbeam-queue = { workspace = true }
 dashmap = { workspace = true }
 futures-util = { workspace = true }
 governor = { workspace = true, optional = true }

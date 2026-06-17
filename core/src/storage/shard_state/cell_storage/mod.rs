@@ -35,6 +35,8 @@ use crate::storage::{CellsDb, CoreStorageConfig};
 const PERSISTED_CELL_FILTER_MAX_CAPACITY: u64 = 2_000_000_000;
 const PERSISTED_CELL_FILTER_FP_RATE: f64 = 0.001;
 
+pub mod raw;
+
 pub struct CellStorage {
     cells_db: CellsDb,
     cell_counters: Mutex<CountersStore>,
@@ -1451,6 +1453,8 @@ fn owned_hash_key(hash: &HashBytes) -> HashBytesKey {
 pub enum CellStorageError {
     #[error("Cell not found in cell db")]
     CellNotFound,
+    #[error("Raw import writer stopped")]
+    RawImportWriterStopped,
     #[error("Invalid cell")]
     InvalidCell,
     #[error("Cell counter mismatch: expected refcount {expected}, got {actual} removes")]
