@@ -19,6 +19,7 @@ use tycho_types::models::{
 use tycho_types::num::Tokens;
 use tycho_util::compression::zstd_decompress_simple;
 use tycho_util::{FastHashMap, FastHashSet};
+use weedb::rocksdb::IteratorMode;
 
 use crate::ZEROSTATE_BOC;
 use crate::storage::persistent_state::{
@@ -411,6 +412,20 @@ async fn split_persistent_shard_state_import_from_dump() -> Result<()> {
         Ok(file)
     }
 
+    let collect_cell_counters = |storage: &CoreStorage| -> Result<FastHashMap<HashBytes, u64>> {
+        let cell_storage = storage.shard_state_storage().cell_storage();
+        let mut counters = FastHashMap::default();
+        for item in cell_storage.db().cells.iterator(IteratorMode::Start) {
+            let (key, _) = item?;
+            let hash = HashBytes::from_slice(key.as_ref());
+            let Some(counter) = cell_storage.get_counter_value(&hash)? else {
+                anyhow::bail!("missing counter for persisted cell {hash}");
+            };
+            counters.insert(hash, counter);
+        }
+        Ok(counters)
+    };
+
     let dump_path = std::path::Path::new(DUMP_PATH);
     let block_id: BlockId = dump_path
         .file_stem()
@@ -436,6 +451,7 @@ async fn split_persistent_shard_state_import_from_dump() -> Result<()> {
         "dump state root hash mismatch"
     );
     shard_states.finish_raw_import()?;
+    let full_import_counters = collect_cell_counters(&storage)?;
 
     let loaded_state = shard_states.load_state(block_id.seqno, &block_id).await?;
     let (handle, _) =
@@ -520,6 +536,8 @@ async fn split_persistent_shard_state_import_from_dump() -> Result<()> {
         "split import root hash mismatch"
     );
     imported_shard_states.finish_raw_import()?;
+    let split_import_counters = collect_cell_counters(&imported_storage)?;
+    assert_eq!(split_import_counters, full_import_counters);
 
     let imported_state = imported_shard_states
         .load_state(block_id.seqno, &block_id)
