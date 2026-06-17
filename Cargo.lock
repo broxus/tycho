@@ -4301,6 +4301,7 @@ dependencies = [
  "crc32c",
  "criterion",
  "croaring",
+ "crossbeam-queue",
  "dashmap",
  "futures-util",
  "governor",
