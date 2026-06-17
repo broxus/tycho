@@ -301,8 +301,12 @@ mod tests {
 
     #[test]
     fn split_persistent_bundle_paths_are_rejected_for_zerostate_import() {
-        assert!(!is_split_persistent_bundle_path(&PathBuf::from("state.boc")));
-        assert!(is_split_persistent_bundle_path(&PathBuf::from("state.meta.json")));
+        assert!(!is_split_persistent_bundle_path(&PathBuf::from(
+            "state.boc"
+        )));
+        assert!(is_split_persistent_bundle_path(&PathBuf::from(
+            "state.meta.json"
+        )));
         assert!(is_split_persistent_bundle_path(&PathBuf::from(
             "state_part_8000000000000000.boc"
         )));
