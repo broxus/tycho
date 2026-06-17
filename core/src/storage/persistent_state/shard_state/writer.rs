@@ -595,7 +595,16 @@ impl PersistentStateMeta {
                 .map(|prefix| format!("{prefix:016x}"))
                 .collect(),
         };
-        tycho_util::serde_helpers::save_json_to_file(&raw, file_path)?;
+
+        let file_path = file_path.as_ref();
+        let temp_file_path = file_path.with_extension("temp");
+        scopeguard::defer! {
+            std::fs::remove_file(&temp_file_path).ok();
+        }
+
+        tycho_util::serde_helpers::save_json_to_file(&raw, &temp_file_path)?;
+        std::fs::rename(&temp_file_path, file_path)?;
+
         Ok(())
     }
 
