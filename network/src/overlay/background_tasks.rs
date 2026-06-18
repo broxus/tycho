@@ -60,15 +60,17 @@ impl OverlayServiceInner {
             let mut public_overlays_changed = Box::pin(public_overlays_notify.notified());
             let mut public_overlays_state = None::<PublicOverlaysState>;
 
-            let dht_peer_added = dht_service
+            let dht_peer_added_notify = dht_service
                 .as_ref()
                 .map(|s| s.peer_added())
                 .cloned()
                 .unwrap_or_default();
+            let mut dht_peer_added = Box::pin(dht_peer_added_notify.notified());
 
             let empty_overlays = OverlayIdsQueue::default();
+            let mut drain_empty_overlays = false;
 
-            loop {
+            'outer: loop {
                 let action = match &mut public_overlays_state {
                     // Initial update for public overlays list
                     None => Action::UpdatePublicOverlaysList(public_overlays_state.insert(
@@ -80,7 +82,21 @@ impl OverlayServiceInner {
                         },
                     )),
                     // Default actions
-                    Some(public_overlays_state) => {
+                    Some(public_overlays_state) => 'action: {
+                        if drain_empty_overlays && let Some(overlay_id) = empty_overlays.pop() {
+                            tracing::debug!(
+                                %overlay_id,
+                                "force discover public overlay peers on new DHT peer",
+                            );
+                            break 'action Action::DiscoverPublicOverlayEntries {
+                                overlay_id,
+                                tasks: &mut public_overlays_state.discover,
+                                force: true,
+                            };
+                        } else {
+                            drain_empty_overlays = false;
+                        }
+
                         tokio::select! {
                             _ = &mut public_overlays_changed => {
                                 public_overlays_changed = Box::pin(public_overlays_notify.notified());
@@ -91,7 +107,7 @@ impl OverlayServiceInner {
                                     overlay_id: id,
                                     tasks: &mut public_overlays_state.exchange,
                                 },
-                                None => continue,
+                                None => continue 'outer,
                             },
                             overlay_id = public_overlays_state.discover.next() => match overlay_id {
                                 Some(id) => Action::DiscoverPublicOverlayEntries {
@@ -99,36 +115,28 @@ impl OverlayServiceInner {
                                     tasks: &mut public_overlays_state.discover,
                                     force: false,
                                 },
-                                None => continue,
+                                None => continue 'outer,
                             },
                             overlay_id = public_overlays_state.collect.next() => match overlay_id {
                                 Some(id) => Action::CollectPublicEntries {
                                     overlay_id: id,
                                     tasks: &mut public_overlays_state.collect,
                                 },
-                                None => continue,
+                                None => continue 'outer,
                             },
                             overlay_id = public_overlays_state.store.next() => match overlay_id {
                                 Some(id) => Action::StorePublicEntries {
                                     overlay_id: id,
                                     tasks: &mut public_overlays_state.store,
                                 },
-                                None => continue,
+                                None => continue 'outer,
                             },
-                            _ = dht_peer_added.notified(), if !empty_overlays.is_empty() => {
-                                let Some(id) = empty_overlays.pop() else {
-                                    continue;
-                                };
-                                tracing::debug!(
-                                    overlay_id = %id,
-                                    "force discover public overlay peers on new DHT peer",
-                                );
-                                Action::DiscoverPublicOverlayEntries {
-                                    overlay_id: id,
-                                    tasks: &mut public_overlays_state.discover,
-                                    force: true,
-                                }
-                            },
+                            _ = &mut dht_peer_added, if !empty_overlays.is_empty() => {
+                                dht_peer_added = Box::pin(dht_peer_added_notify.notified());
+                                // Trigger `empty_overlays.pop()` on next retry.
+                                drain_empty_overlays = true;
+                                continue 'outer;
+                            }
                         }
                     }
                 };
