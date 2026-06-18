@@ -171,21 +171,23 @@ impl Query {
         }));
 
         // Prepare request to initial candidates
+        let mut scheduled = FastHashSet::new();
         let semaphore = Semaphore::new(MAX_PARALLEL_REQUESTS);
         let mut futures = FuturesUnordered::new();
         self.candidates
             .visit_closest(self.local_id(), self.max_k, |node| {
-                futures.push(Self::visit::<ValueResponse>(
-                    self.network.clone(),
-                    node.clone(),
-                    request_body.clone(),
-                    &semaphore,
-                    self.timeout,
-                ));
+                if scheduled.insert(node.id) {
+                    futures.push(Self::visit::<ValueResponse>(
+                        self.network.clone(),
+                        node.clone(),
+                        request_body.clone(),
+                        &semaphore,
+                        self.timeout,
+                    ));
+                }
             });
 
         // Process responses and refill futures until the value is found or all peers are traversed
-        let mut visited = FastHashSet::new();
         while let Some((node, res)) = futures.next().await {
             match res {
                 // Return the value if found
@@ -207,30 +209,27 @@ impl Query {
                 // Refill futures from the nodes response
                 Some(Ok(ValueResponse::NotFound(nodes))) => {
                     let node_count = nodes.len();
-                    let has_new = self
-                        .update_candidates(now_sec(), self.max_k, nodes, &mut visited)
-                        .await;
-                    tracing::debug!(peer_id = %node.id, count = node_count, has_new, "received nodes");
 
-                    if !has_new {
-                        // Do nothing if candidates were not changed
-                        continue;
-                    }
+                    // Update candidates.
+                    let mut has_new = false;
+                    process_only_valid(now_sec(), nodes, |node| {
+                        has_new = self.candidates.add(node, self.max_k, &Duration::MAX, Some);
+                    })
+                    .await;
+                    tracing::debug!(peer_id = %node.id, count = node_count, has_new, "received nodes");
 
                     // Add new nodes from the closest range
                     self.candidates
                         .visit_closest(self.local_id(), self.max_k, |node| {
-                            if visited.contains(&node.id) {
-                                // Skip already visited nodes
-                                return;
+                            if scheduled.insert(node.id) {
+                                futures.push(Self::visit::<ValueResponse>(
+                                    self.network.clone(),
+                                    node.clone(),
+                                    request_body.clone(),
+                                    &semaphore,
+                                    self.timeout,
+                                ));
                             }
-                            futures.push(Self::visit::<ValueResponse>(
-                                self.network.clone(),
-                                node.clone(),
-                                request_body.clone(),
-                                &semaphore,
-                                self.timeout,
-                            ));
                         });
                 }
                 // Do nothing on error
@@ -257,56 +256,75 @@ impl Query {
         }));
 
         // Prepare request to initial candidates
+        let mut scheduled = FastHashSet::new();
+        let mut candidate_depths = FastHashMap::new();
         let semaphore = Semaphore::new(MAX_PARALLEL_REQUESTS);
         let mut futures = FuturesUnordered::new();
+
+        let visit = |this: &Query, node: &Arc<PeerInfo>, depth: usize| {
+            use futures_util::FutureExt;
+
+            Self::visit::<NodeResponse>(
+                this.network.clone(),
+                node.clone(),
+                request_body.clone(),
+                &semaphore,
+                this.timeout,
+            )
+            .map(move |res| (res, depth))
+        };
+
         self.candidates
             .visit_closest(self.local_id(), self.max_k, |node| {
-                futures.push(Self::visit::<NodeResponse>(
-                    self.network.clone(),
-                    node.clone(),
-                    request_body.clone(),
-                    &semaphore,
-                    self.timeout,
-                ));
+                if scheduled.insert(node.id) {
+                    candidate_depths.insert(node.id, 0);
+                    futures.push(visit(&self, node, 0));
+                }
             });
 
         // Process responses and refill futures until all peers are traversed
-        let mut current_depth = 0;
         let max_depth = depth.unwrap_or(usize::MAX);
         let mut result = FastHashMap::<PeerId, Arc<PeerInfo>>::new();
-        while let Some((node, res)) = futures.next().await {
+        while let Some(((node, res), query_depth)) = futures.next().await {
             match res {
                 // Refill futures from the nodes response
                 Some(Ok(NodeResponse { nodes })) => {
                     tracing::debug!(peer_id = %node.id, count = nodes.len(), "received nodes");
-                    if !self
-                        .update_candidates_full(now_sec(), self.max_k, nodes, &mut result)
-                        .await
-                    {
-                        // Do nothing if candidates were not changed
-                        continue;
-                    }
 
-                    current_depth += 1;
-                    if current_depth >= max_depth {
-                        // Stop on max depth
-                        break;
-                    }
+                    // Update candidates.
+                    process_only_valid(now_sec(), nodes, |node| {
+                        let discovered_depth = query_depth.saturating_add(1);
+                        candidate_depths
+                            .entry(node.id)
+                            .and_modify(|depth| *depth = (*depth).min(discovered_depth))
+                            .or_insert(discovered_depth);
+
+                        match result.entry(node.id) {
+                            // Insert a new entry
+                            hash_map::Entry::Vacant(entry) => {
+                                let node = entry.insert(node).clone();
+                                self.candidates.add(node, self.max_k, &Duration::MAX, Some);
+                            }
+                            // Try to replace an old entry
+                            hash_map::Entry::Occupied(mut entry) => {
+                                if entry.get().created_at < node.created_at {
+                                    *entry.get_mut() = node;
+                                }
+                            }
+                        }
+                    })
+                    .await;
 
                     // Add new nodes from the closest range
                     self.candidates
                         .visit_closest(self.local_id(), self.max_k, |node| {
-                            if result.contains_key(&node.id) {
-                                // Skip already visited nodes
+                            let Some(&candidate_depth) = candidate_depths.get(&node.id) else {
                                 return;
+                            };
+
+                            if candidate_depth <= max_depth && scheduled.insert(node.id) {
+                                futures.push(visit(&self, node, candidate_depth));
                             }
-                            futures.push(Self::visit::<NodeResponse>(
-                                self.network.clone(),
-                                node.clone(),
-                                request_body.clone(),
-                                &semaphore,
-                                self.timeout,
-                            ));
                         });
                 }
                 // Do nothing on error
@@ -322,55 +340,6 @@ impl Query {
 
         // Done
         result
-    }
-
-    async fn update_candidates(
-        &mut self,
-        now: u32,
-        max_k: usize,
-        nodes: Vec<Arc<PeerInfo>>,
-        visited: &mut FastHashSet<PeerId>,
-    ) -> bool {
-        let mut has_new = false;
-        process_only_valid(now, nodes, |node| {
-            // Insert a new entry
-            if visited.insert(node.id) {
-                self.candidates.add(node, max_k, &Duration::MAX, Some);
-                has_new = true;
-            }
-        })
-        .await;
-
-        has_new
-    }
-
-    async fn update_candidates_full(
-        &mut self,
-        now: u32,
-        max_k: usize,
-        nodes: Vec<Arc<PeerInfo>>,
-        visited: &mut FastHashMap<PeerId, Arc<PeerInfo>>,
-    ) -> bool {
-        let mut has_new = false;
-        process_only_valid(now, nodes, |node| {
-            match visited.entry(node.id) {
-                // Insert a new entry
-                hash_map::Entry::Vacant(entry) => {
-                    let node = entry.insert(node).clone();
-                    self.candidates.add(node, max_k, &Duration::MAX, Some);
-                    has_new = true;
-                }
-                // Try to replace an old entry
-                hash_map::Entry::Occupied(mut entry) => {
-                    if entry.get().created_at < node.created_at {
-                        *entry.get_mut() = node;
-                    }
-                }
-            }
-        })
-        .await;
-
-        has_new
     }
 
     async fn visit<T>(
@@ -516,3 +485,91 @@ where
 }
 
 const MAX_PARALLEL_REQUESTS: usize = 10;
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv4Addr;
+
+    use tycho_crypto::ed25519;
+
+    use super::*;
+    use crate::dht::{DhtClient, DhtService};
+    use crate::util::Router;
+
+    struct Node {
+        network: Network,
+        dht: DhtClient,
+    }
+
+    impl Node {
+        fn new() -> Self {
+            let key = rand::random::<ed25519::SecretKey>();
+            let local_id = ed25519::PublicKey::from(&key).into();
+
+            let (_, dht_service) = DhtService::builder(local_id).build();
+            let router = Router::builder().route(dht_service.clone()).build();
+            let network = Network::builder()
+                .with_private_key(key.to_bytes())
+                .build((Ipv4Addr::LOCALHOST, 0), router)
+                .unwrap();
+            let dht = dht_service.make_client(&network);
+
+            Self { network, dht }
+        }
+
+        fn add_peer(&self, peer: &Self) {
+            self.dht.add_peer(peer.peer_info()).unwrap();
+        }
+
+        fn peer_info(&self) -> Arc<PeerInfo> {
+            Arc::new(self.network.sign_peer_info(now_sec(), 60))
+        }
+
+        fn make_query(&self, target_id: &[u8; 32]) -> Query {
+            let routing_table = self.dht.inner.routing_table.lock().unwrap();
+            Query::new(
+                self.network.clone(),
+                &routing_table,
+                target_id,
+                &DhtConfig::default(),
+                DhtQueryMode::Closest,
+            )
+        }
+    }
+
+    #[tokio::test]
+    async fn find_peers_limits_queries_by_hop_depth() {
+        let [a, b, c, d, e] = std::array::from_fn(|_| Node::new());
+
+        a.add_peer(&b);
+        b.add_peer(&c);
+        c.add_peer(&d);
+        d.add_peer(&e);
+
+        // All peers except `b` can be accessed from `a`.
+        let _known_peers = [&c, &d, &e].map(|peer| {
+            a.network
+                .known_peers()
+                .insert(peer.peer_info(), false)
+                .unwrap()
+        });
+
+        let target_id = rand::random();
+
+        let result = a.make_query(&target_id).find_peers(Some(0)).await;
+        assert!(!result.contains_key(a.network.peer_id()));
+        assert!(!result.contains_key(b.network.peer_id()));
+        assert!(result.contains_key(c.network.peer_id()));
+        assert!(!result.contains_key(d.network.peer_id()));
+
+        let result = a.make_query(&target_id).find_peers(Some(1)).await;
+        assert!(result.contains_key(c.network.peer_id()));
+        assert!(result.contains_key(d.network.peer_id()));
+        assert!(!result.contains_key(e.network.peer_id()));
+
+        let result = a.make_query(&target_id).find_peers(Some(2)).await;
+        assert!(result.contains_key(c.network.peer_id()));
+        assert!(result.contains_key(d.network.peer_id()));
+        assert!(result.contains_key(e.network.peer_id()));
+    }
+}
