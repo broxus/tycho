@@ -14,8 +14,8 @@ use tycho_util::time::now_sec;
 use tycho_util::{FastDashMap, FastHashMap, FastHashSet};
 
 use crate::dht::config::DhtConfig;
-use crate::dht::routing::{HandlesRoutingTable, SimpleRoutingTable};
-use crate::network::Network;
+use crate::dht::routing::HandlesRoutingTable;
+use crate::network::{KnownPeerHandle, KnownPeers, KnownPeersError, Network};
 use crate::proto::dht::{NodeResponse, Value, ValueRef, ValueResponse, rpc};
 use crate::types::{PeerId, PeerInfo, Request};
 use crate::util::NetworkExt;
@@ -119,7 +119,7 @@ pub enum DhtQueryMode {
 
 pub struct Query {
     network: Network,
-    candidates: SimpleRoutingTable,
+    candidates: HandlesRoutingTable,
     max_k: usize,
     timeout: Duration,
 }
@@ -132,7 +132,7 @@ impl Query {
         config: &DhtConfig,
         mode: DhtQueryMode,
     ) -> Self {
-        let mut candidates = SimpleRoutingTable::new(PeerId(*target_id));
+        let mut candidates = HandlesRoutingTable::new(PeerId(*target_id));
 
         let random_id;
         let target_id_for_full = match mode {
@@ -146,8 +146,10 @@ impl Query {
         let max_k = config.max_k;
         let timeout = config.request_timeout;
 
-        routing_table.visit_closest(target_id_for_full, max_k, |node| {
-            candidates.add(node.load_peer_info(), max_k, &Duration::MAX, Some);
+        routing_table.visit_closest(target_id_for_full, max_k, |handle| {
+            candidates.add(handle.load_peer_info(), max_k, &Duration::MAX, |_| {
+                Some(handle.clone())
+            });
         });
 
         Self {
@@ -174,28 +176,33 @@ impl Query {
         let mut scheduled = FastHashSet::new();
         let semaphore = Semaphore::new(MAX_PARALLEL_REQUESTS);
         let mut futures = FuturesUnordered::new();
+
+        let visit = |this: &Query, handle: &KnownPeerHandle| {
+            Self::visit::<ValueResponse>(
+                this.network.clone(),
+                handle.clone(),
+                request_body.clone(),
+                &semaphore,
+                this.timeout,
+            )
+        };
+
         self.candidates
-            .visit_closest(self.local_id(), self.max_k, |node| {
-                if scheduled.insert(node.id) {
-                    futures.push(Self::visit::<ValueResponse>(
-                        self.network.clone(),
-                        node.clone(),
-                        request_body.clone(),
-                        &semaphore,
-                        self.timeout,
-                    ));
+            .visit_closest(self.local_id(), self.max_k, |handle| {
+                if scheduled.insert(handle.peer_info().id) {
+                    futures.push(visit(&self, handle));
                 }
             });
 
         // Process responses and refill futures until the value is found or all peers are traversed
-        while let Some((node, res)) = futures.next().await {
+        while let Some((handle, res)) = futures.next().await {
             match res {
                 // Return the value if found
                 Some(Ok(ValueResponse::Found(value))) => {
                     let mut signature_checked = false;
                     let is_valid =
                         value.verify_ext(now_sec(), self.local_id(), &mut signature_checked);
-                    tracing::debug!(peer_id = %node.id, is_valid, "found value");
+                    tracing::debug!(peer_id = %handle.peer_info().id, is_valid, "found value");
 
                     yield_on_complex(signature_checked).await;
 
@@ -209,36 +216,42 @@ impl Query {
                 // Refill futures from the nodes response
                 Some(Ok(ValueResponse::NotFound(nodes))) => {
                     let node_count = nodes.len();
+                    let known_peers = self.network.known_peers().clone();
 
                     // Update candidates.
                     let mut has_new = false;
-                    process_only_valid(now_sec(), nodes, |node| {
-                        has_new = self.candidates.add(node, self.max_k, &Duration::MAX, Some);
+                    process_only_valid(now_sec(), nodes, |peer_info| {
+                        has_new |= self.candidates.add(
+                            peer_info,
+                            self.max_k,
+                            &Duration::MAX,
+                            |peer_info| Self::retain_candidate(&known_peers, peer_info),
+                        );
                     })
                     .await;
-                    tracing::debug!(peer_id = %node.id, count = node_count, has_new, "received nodes");
+
+                    tracing::debug!(
+                        peer_id = %handle.peer_info().id,
+                        count = node_count,
+                        has_new,
+                        "received nodes",
+                    );
 
                     // Add new nodes from the closest range
                     self.candidates
-                        .visit_closest(self.local_id(), self.max_k, |node| {
-                            if scheduled.insert(node.id) {
-                                futures.push(Self::visit::<ValueResponse>(
-                                    self.network.clone(),
-                                    node.clone(),
-                                    request_body.clone(),
-                                    &semaphore,
-                                    self.timeout,
-                                ));
+                        .visit_closest(self.local_id(), self.max_k, |handle| {
+                            if scheduled.insert(handle.peer_info().id) {
+                                futures.push(visit(&self, handle));
                             }
                         });
                 }
                 // Do nothing on error
                 Some(Err(e)) => {
-                    tracing::warn!(peer_id = %node.id, "failed to query nodes: {e}");
+                    tracing::warn!(peer_id = %handle.peer_info().id, "failed to query nodes: {e}");
                 }
                 // Do nothing on timeout
                 None => {
-                    tracing::warn!(peer_id = %node.id, "failed to query nodes: timeout");
+                    tracing::warn!(peer_id = %handle.peer_info().id, "failed to query nodes: timeout");
                 }
             }
         }
@@ -261,7 +274,7 @@ impl Query {
         let semaphore = Semaphore::new(MAX_PARALLEL_REQUESTS);
         let mut futures = FuturesUnordered::new();
 
-        let visit = |this: &Query, node: &Arc<PeerInfo>, depth: usize| {
+        let visit = |this: &Query, node: &KnownPeerHandle, depth: usize| {
             use futures_util::FutureExt;
 
             Self::visit::<NodeResponse>(
@@ -276,8 +289,9 @@ impl Query {
 
         self.candidates
             .visit_closest(self.local_id(), self.max_k, |node| {
-                if scheduled.insert(node.id) {
-                    candidate_depths.insert(node.id, 0);
+                let peer_id = node.peer_info().id;
+                if scheduled.insert(peer_id) {
+                    candidate_depths.insert(peer_id, 0);
                     futures.push(visit(&self, node, 0));
                 }
             });
@@ -289,51 +303,56 @@ impl Query {
             match res {
                 // Refill futures from the nodes response
                 Some(Ok(NodeResponse { nodes })) => {
-                    tracing::debug!(peer_id = %node.id, count = nodes.len(), "received nodes");
+                    tracing::debug!(peer_id = %node.peer_info().id, count = nodes.len(), "received nodes");
+                    let known_peers = self.network.known_peers().clone();
 
                     // Update candidates.
-                    process_only_valid(now_sec(), nodes, |node| {
+                    process_only_valid(now_sec(), nodes, |peer_info| {
                         let discovered_depth = query_depth.saturating_add(1);
                         candidate_depths
-                            .entry(node.id)
+                            .entry(peer_info.id)
                             .and_modify(|depth| *depth = (*depth).min(discovered_depth))
                             .or_insert(discovered_depth);
 
-                        match result.entry(node.id) {
+                        let peer_info = match result.entry(peer_info.id) {
                             // Insert a new entry
-                            hash_map::Entry::Vacant(entry) => {
-                                let node = entry.insert(node).clone();
-                                self.candidates.add(node, self.max_k, &Duration::MAX, Some);
-                            }
+                            hash_map::Entry::Vacant(entry) => entry.insert(peer_info).clone(),
                             // Try to replace an old entry
                             hash_map::Entry::Occupied(mut entry) => {
-                                if entry.get().created_at < node.created_at {
-                                    *entry.get_mut() = node;
+                                if entry.get().created_at < peer_info.created_at {
+                                    *entry.get_mut() = peer_info;
                                 }
+                                entry.get().clone()
                             }
-                        }
+                        };
+
+                        self.candidates
+                            .add(peer_info, self.max_k, &Duration::MAX, |peer_info| {
+                                Self::retain_candidate(&known_peers, peer_info)
+                            });
                     })
                     .await;
 
                     // Add new nodes from the closest range
                     self.candidates
                         .visit_closest(self.local_id(), self.max_k, |node| {
-                            let Some(&candidate_depth) = candidate_depths.get(&node.id) else {
+                            let peer_id = node.peer_info().id;
+                            let Some(&candidate_depth) = candidate_depths.get(&peer_id) else {
                                 return;
                             };
 
-                            if candidate_depth <= max_depth && scheduled.insert(node.id) {
+                            if candidate_depth <= max_depth && scheduled.insert(peer_id) {
                                 futures.push(visit(&self, node, candidate_depth));
                             }
                         });
                 }
                 // Do nothing on error
                 Some(Err(e)) => {
-                    tracing::warn!(peer_id = %node.id, "failed to query nodes: {e}");
+                    tracing::warn!(peer_id = %node.peer_info().id, "failed to query nodes: {e}");
                 }
                 // Do nothing on timeout
                 None => {
-                    tracing::warn!(peer_id = %node.id, "failed to query nodes: timeout");
+                    tracing::warn!(peer_id = %node.peer_info().id, "failed to query nodes: timeout");
                 }
             }
         }
@@ -344,19 +363,20 @@ impl Query {
 
     async fn visit<T>(
         network: Network,
-        node: Arc<PeerInfo>,
+        handle: KnownPeerHandle,
         request_body: Bytes,
         semaphore: &Semaphore,
         timeout: Duration,
-    ) -> (Arc<PeerInfo>, Option<Result<T>>)
+    ) -> (KnownPeerHandle, Option<Result<T>>)
     where
         for<'a> T: tl_proto::TlRead<'a, Repr = tl_proto::Boxed>,
     {
         let Ok(_permit) = semaphore.acquire().await else {
-            return (node, None);
+            return (handle, None);
         };
 
-        let req = network.query(&node.id, Request {
+        let peer_id = handle.peer_info().id;
+        let req = network.query(&peer_id, Request {
             version: Default::default(),
             body: request_body.clone(),
         });
@@ -368,7 +388,25 @@ impl Query {
             Err(_) => None,
         };
 
-        (node, res)
+        (handle, res)
+    }
+
+    fn retain_candidate(
+        known_peers: &KnownPeers,
+        peer_info: Arc<PeerInfo>,
+    ) -> Option<KnownPeerHandle> {
+        if let Some(handle) = known_peers.make_handle(&peer_info.id, false) {
+            match handle.update_peer_info(&peer_info) {
+                Ok(()) | Err(KnownPeersError::OutdatedInfo) => return Some(handle),
+                Err(KnownPeersError::PeerBanned(_)) => return None,
+            }
+        }
+
+        match known_peers.insert(peer_info.clone(), false) {
+            Ok(handle) => Some(handle),
+            Err(KnownPeersError::OutdatedInfo) => known_peers.make_handle(&peer_info.id, false),
+            Err(KnownPeersError::PeerBanned(_)) => None,
+        }
     }
 }
 
@@ -494,6 +532,7 @@ mod tests {
 
     use super::*;
     use crate::dht::{DhtClient, DhtService};
+    use crate::proto::dht::PeerValueKeyName;
     use crate::util::Router;
 
     struct Node {
@@ -525,6 +564,23 @@ mod tests {
             Arc::new(self.network.sign_peer_info(now_sec(), 60))
         }
 
+        fn peer_id(&self) -> PeerId {
+            *self.network.peer_id()
+        }
+
+        fn ban_peer(&self, peer: &Self) {
+            self.network.known_peers().ban(&peer.peer_id());
+        }
+
+        fn store_local_peer_info(&self) {
+            let peer_info = self.peer_info();
+            self.dht
+                .entry(PeerValueKeyName::NodeInfo)
+                .with_data(peer_info.as_ref())
+                .store_locally()
+                .unwrap();
+        }
+
         fn make_query(&self, target_id: &[u8; 32]) -> Query {
             let routing_table = self.dht.inner.routing_table.lock().unwrap();
             Query::new(
@@ -538,7 +594,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn find_peers_limits_queries_by_hop_depth() {
+    async fn find_peers_with_depth_works() {
         let [a, b, c, d, e] = std::array::from_fn(|_| Node::new());
 
         a.add_peer(&b);
@@ -546,30 +602,89 @@ mod tests {
         c.add_peer(&d);
         d.add_peer(&e);
 
-        // All peers except `b` can be accessed from `a`.
-        let _known_peers = [&c, &d, &e].map(|peer| {
-            a.network
-                .known_peers()
-                .insert(peer.peer_info(), false)
-                .unwrap()
-        });
-
         let target_id = rand::random();
 
         let result = a.make_query(&target_id).find_peers(Some(0)).await;
         assert!(!result.contains_key(a.network.peer_id()));
         assert!(!result.contains_key(b.network.peer_id()));
-        assert!(result.contains_key(c.network.peer_id()));
-        assert!(!result.contains_key(d.network.peer_id()));
+        assert!(result.contains_key(&c.peer_id()));
+        assert!(!result.contains_key(&d.peer_id()));
 
         let result = a.make_query(&target_id).find_peers(Some(1)).await;
-        assert!(result.contains_key(c.network.peer_id()));
-        assert!(result.contains_key(d.network.peer_id()));
-        assert!(!result.contains_key(e.network.peer_id()));
+        assert!(result.contains_key(&c.peer_id()));
+        assert!(result.contains_key(&d.peer_id()));
+        assert!(!result.contains_key(&e.peer_id()));
 
         let result = a.make_query(&target_id).find_peers(Some(2)).await;
-        assert!(result.contains_key(c.network.peer_id()));
-        assert!(result.contains_key(d.network.peer_id()));
-        assert!(result.contains_key(e.network.peer_id()));
+        assert!(result.contains_key(&c.peer_id()));
+        assert!(result.contains_key(&d.peer_id()));
+        assert!(result.contains_key(&e.peer_id()));
+    }
+
+    #[tokio::test]
+    async fn query_reuses_local_dht_storage() {
+        let [a, b, c, d] = std::array::from_fn(|_| Node::new());
+
+        a.add_peer(&b);
+        b.add_peer(&c);
+        c.add_peer(&d);
+        d.store_local_peer_info();
+
+        let peer_info = a
+            .dht
+            .entry(PeerValueKeyName::NodeInfo)
+            .find_value::<PeerInfo>(&d.peer_id())
+            .await
+            .unwrap();
+
+        assert_eq!(peer_info.id, d.peer_id());
+    }
+
+    #[tokio::test]
+    async fn query_skips_banned_nodes() {
+        let [a, b, c, d] = std::array::from_fn(|_| Node::new());
+
+        a.add_peer(&b);
+        b.add_peer(&c);
+        c.add_peer(&d);
+        a.ban_peer(&c);
+
+        let target_id = rand::random();
+        let result = a.make_query(&target_id).find_peers(Some(2)).await;
+
+        assert!(result.contains_key(&c.peer_id()));
+        assert!(!result.contains_key(&d.peer_id()));
+    }
+
+    #[tokio::test]
+    async fn query_overrides_outdated_peer_info() {
+        let [a, b, c, d] = std::array::from_fn(|_| Node::new());
+
+        a.add_peer(&b);
+        b.add_peer(&c);
+        c.add_peer(&d);
+
+        let newer_peer_info = c.peer_info();
+        let older_peer_info = Arc::new(
+            c.network
+                .sign_peer_info(newer_peer_info.created_at.saturating_sub(10), 60),
+        );
+
+        let known_handle = a
+            .network
+            .known_peers()
+            .insert(newer_peer_info.clone(), false)
+            .unwrap();
+        b.dht.add_peer(older_peer_info).unwrap();
+
+        let target_id = rand::random();
+        let result = a.make_query(&target_id).find_peers(Some(1)).await;
+
+        assert!(result.contains_key(&c.peer_id()));
+        assert!(result.contains_key(&d.peer_id()));
+        assert_eq!(
+            known_handle.load_peer_info().created_at,
+            newer_peer_info.created_at
+        );
     }
 }
