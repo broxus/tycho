@@ -1,4 +1,5 @@
 use std::mem::ManuallyDrop;
+use std::pin::pin;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
@@ -242,6 +243,8 @@ impl PeerResolverInner {
         data: &PeerResolverHandleData,
         prev_timings: &Option<PeerResolverTimings>,
     ) -> Option<(Network, Arc<PeerInfo>)> {
+        use futures_util::future::Either;
+
         struct Iter<'a> {
             backoff: Option<exponential_backoff::Iter<'a>>,
             data: &'a PeerResolverHandleData,
@@ -290,6 +293,7 @@ impl PeerResolverInner {
             let is_stale = attempts > self.config.fast_retry_count as usize;
 
             // NOTE: Acquire network ref only during the operation.
+            let mut new_peer_added = self.dht_service.peer_added().notified();
             {
                 let network = self.weak_network.upgrade()?;
                 if let Some(peer_info) = network.known_peers().get(&data.peer_id)
@@ -345,7 +349,30 @@ impl PeerResolverInner {
             }
 
             let interval = iter.next().expect("retries iterator must be infinite");
-            tokio::time::sleep(interval).await;
+            let mut sleep = pin!(tokio::time::sleep(interval));
+            'inner: loop {
+                match futures_util::future::select(&mut sleep, pin!(new_peer_added)).await {
+                    // Backoff interval elapsed.
+                    Either::Left(_) => break 'inner,
+                    // A new peer has been discovered.
+                    Either::Right(_) => {
+                        new_peer_added = self.dht_service.peer_added().notified();
+
+                        let network = self.weak_network.upgrade()?;
+                        if let Some(peer_info) = network.known_peers().get(&data.peer_id)
+                            && PeerResolverTimings::is_new_info(prev_timings, &peer_info)
+                        {
+                            tracing::trace!(
+                                peer_id = %data.peer_id,
+                                attempts,
+                                is_stale,
+                                "peer info exists",
+                            );
+                            return Some((network, peer_info));
+                        }
+                    }
+                }
+            }
         }
     }
 
