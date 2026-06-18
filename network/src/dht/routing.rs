@@ -8,7 +8,6 @@ use crate::dht::{MAX_XOR_DISTANCE, xor_distance};
 use crate::network::KnownPeerHandle;
 use crate::types::{PeerId, PeerInfo};
 
-pub(crate) type SimpleRoutingTable = RoutingTable<Arc<PeerInfo>>;
 pub(crate) type HandlesRoutingTable = RoutingTable<KnownPeerHandle>;
 
 pub(crate) struct RoutingTable<T> {
@@ -314,6 +313,8 @@ mod tests {
 
     use super::*;
     use crate::util::make_peer_info_stub;
+
+    type SimpleRoutingTable = RoutingTable<Arc<PeerInfo>>;
 
     const MAX_K: usize = 20;
 
