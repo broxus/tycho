@@ -300,6 +300,16 @@ impl InternalQueueTransaction {
 
         Ok(())
     }
+
+    /// Removes mc block id mark on which the queue was committed.
+    pub fn delete_last_committed_mc_block_id(&mut self) -> Result<()> {
+        let cf = self.db.internal_message_var.cf();
+
+        self.batch
+            .delete_cf(&cf, INT_QUEUE_LAST_COMMITTED_MC_BLOCK_ID_KEY);
+
+        Ok(())
+    }
 }
 
 pub fn delete_diff_tails_and_collect_seqno<T: ColumnFamily>(

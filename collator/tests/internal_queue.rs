@@ -1959,8 +1959,8 @@ async fn test_rollback_commit_pointers() -> anyhow::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_rollback_commit_pointers_missing_unchanged_diff_keeps_old_state() -> anyhow::Result<()>
-{
+async fn test_rollback_commit_pointers_missing_unchanged_diff_drops_shard_pointer()
+-> anyhow::Result<()> {
     let RollbackCommitPointersTestData {
         _tmp_dir,
         storage,
@@ -1968,9 +1968,7 @@ async fn test_rollback_commit_pointers_missing_unchanged_diff_keeps_old_state() 
         queue,
         shard,
         block_sc1,
-        block_sc2,
         block_mc3,
-        block_mc4,
         top_mc3,
         ..
     } = prepare_rollback_commit_pointers_test_data().await?;
@@ -1989,13 +1987,49 @@ async fn test_rollback_commit_pointers_missing_unchanged_diff_keeps_old_state() 
             .get_diff_info(&shard, block_sc1.seqno, DiffZone::Both)?
             .is_none()
     );
-    let err = queue
-        .rollback_commit_pointers(&block_mc3, &top_mc3)
-        .unwrap_err();
-    assert!(err.to_string().contains("target diff is missing"));
-    assert_eq!(queue.get_last_committed_mc_block_id()?, Some(block_mc4));
+    let removed_commit_pointer_shards = queue.rollback_commit_pointers(&block_mc3, &top_mc3)?;
+    assert_eq!(removed_commit_pointer_shards, vec![shard]);
+    assert_eq!(queue.get_last_committed_mc_block_id()?, Some(block_mc3));
     let commit_pointers = storage.make_snapshot().read_commit_pointers()?;
-    assert_eq!(commit_pointers.get(&shard).unwrap().seqno, block_sc2.seqno);
+    assert!(!commit_pointers.contains_key(&shard));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_rollback_commit_pointers_missing_updated_diff_clears_commit_state()
+-> anyhow::Result<()> {
+    let RollbackCommitPointersTestData {
+        _tmp_dir,
+        storage,
+        partitions,
+        queue,
+        shard,
+        block_mc3,
+        top_mc3,
+        ..
+    } = prepare_rollback_commit_pointers_test_data().await?;
+    let ranges: Vec<_> = partitions
+        .iter()
+        .map(|partition| QueueRange {
+            shard_ident: ShardIdent::MASTERCHAIN,
+            partition: *partition,
+            from: QueueKey::MIN,
+            to: QueueKey::MAX,
+        })
+        .collect();
+    storage.begin_transaction().delete(&ranges)?;
+    assert!(
+        queue
+            .get_diff_info(&ShardIdent::MASTERCHAIN, block_mc3.seqno, DiffZone::Both)?
+            .is_none()
+    );
+    let removed_commit_pointer_shards = queue.rollback_commit_pointers(&block_mc3, &top_mc3)?;
+    assert_eq!(removed_commit_pointer_shards.len(), 2);
+    assert!(removed_commit_pointer_shards.contains(&ShardIdent::MASTERCHAIN));
+    assert!(removed_commit_pointer_shards.contains(&shard));
+    assert!(queue.get_last_committed_mc_block_id()?.is_none());
+    let commit_pointers = storage.make_snapshot().read_commit_pointers()?;
+    assert!(commit_pointers.is_empty());
     Ok(())
 }
 
