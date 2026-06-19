@@ -124,13 +124,6 @@ where
         partitions: &FastHashSet<QueuePartitionIdx>,
     ) -> Result<()>;
 
-    /// Roll back commit pointers to the specified top blocks.
-    fn rollback_commit_pointers(
-        &self,
-        to_mc_block_id: &BlockId,
-        to_top_blocks: &[TopBlockIdUpdated],
-    ) -> Result<Vec<ShardIdent>>;
-
     /// Remove all data in uncommitted zone
     fn clear_uncommitted_state(
         &self,
@@ -439,88 +432,6 @@ where
         }
 
         Ok(())
-    }
-
-    fn rollback_commit_pointers(
-        &self,
-        to_mc_block_id: &BlockId,
-        to_top_blocks: &[TopBlockIdUpdated],
-    ) -> Result<Vec<ShardIdent>> {
-        let _global_write_guard = self.global_lock.write();
-
-        let old_commit_pointers = self.state.get_commit_pointers()?;
-        let mut new_commit_pointers = FastHashMap::default();
-
-        for item in to_top_blocks {
-            let block_id = &item.block.block_id;
-
-            let diff = self
-                .state
-                .get_diff_info(&block_id.shard, block_id.seqno, DiffZone::Both)?;
-
-            let diff = match diff {
-                None if item.updated && item.block.ref_by_mc_seqno > self.zerostate_id.seqno => {
-                    bail!(
-                        "Diff not found for block_id: {} ref {} zerostate {} during commit pointers rollback",
-                        block_id,
-                        item.block.ref_by_mc_seqno,
-                        self.zerostate_id.seqno
-                    )
-                }
-                None if !item.updated => {
-                    if let Some(old_pointer) = old_commit_pointers.get(&block_id.shard) {
-                        if old_pointer.seqno != block_id.seqno {
-                            bail!(
-                                "Cannot roll back commit pointer for unchanged shard {} to seqno {}: \
-                                target diff is missing and old pointer seqno is {}",
-                                block_id.shard,
-                                block_id.seqno,
-                                old_pointer.seqno,
-                            );
-                        }
-                        if new_commit_pointers
-                            .insert(block_id.shard, (old_pointer.queue_key, old_pointer.seqno))
-                            .is_some()
-                        {
-                            bail!(
-                                "Duplicate shard in rollback_commit_pointers: {}",
-                                block_id.shard
-                            );
-                        }
-                    }
-                    continue;
-                }
-                None => continue,
-                Some(diff) => diff,
-            };
-
-            if new_commit_pointers
-                .insert(block_id.shard, (diff.max_message, diff.seqno))
-                .is_some()
-            {
-                bail!(
-                    "Duplicate shard in rollback_commit_pointers: {}",
-                    block_id.shard
-                );
-            }
-        }
-
-        let removed_commit_pointer_shards: Vec<_> = old_commit_pointers
-            .keys()
-            .filter(|shard_id| !new_commit_pointers.contains_key(shard_id))
-            .copied()
-            .collect();
-
-        tracing::debug!(target: tracing_targets::MQ,
-            ?new_commit_pointers,
-            ?removed_commit_pointer_shards,
-            "rollback_commit_pointers",
-        );
-
-        self.state
-            .replace_commit_pointers(new_commit_pointers, to_mc_block_id)?;
-
-        Ok(removed_commit_pointer_shards)
     }
 
     fn clear_uncommitted_state(
