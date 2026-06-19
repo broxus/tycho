@@ -93,14 +93,6 @@ pub trait QueueState<V: InternalMessageValue>: Send + Sync {
         mc_block_id: &BlockId,
     ) -> Result<()>;
 
-    /// Replace commit pointers and last committed mc block id.
-    /// ATTENTION! Overrides old value without checks. Should validate the new value in the calling code.
-    fn replace_commit_pointers(
-        &self,
-        commit_pointers: FastHashMap<ShardIdent, (QueueKey, u32)>,
-        mc_block_id: &BlockId,
-    ) -> Result<()>;
-
     /// Load statistics for given partition and ranges
     fn load_diff_statistics(
         &self,
@@ -219,18 +211,8 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
     ) -> Result<()> {
         let mut tx = self.storage.begin_transaction();
         tx.commit_messages(commit_pointers)?;
-        self.write_commit_transaction(tx, mc_block_id)
-    }
-
-    fn replace_commit_pointers(
-        &self,
-        commit_pointers: FastHashMap<ShardIdent, (QueueKey, u32)>,
-        mc_block_id: &BlockId,
-    ) -> Result<()> {
-        let old_commit_pointers = self.storage.make_snapshot().read_commit_pointers()?;
-        let mut tx = self.storage.begin_transaction();
-        tx.replace_commit_pointers(&old_commit_pointers, commit_pointers)?;
-        self.write_commit_transaction(tx, mc_block_id)
+        tx.set_last_committed_mc_block_id(mc_block_id)?;
+        self.write_transaction(tx)
     }
 
     fn load_diff_statistics(
@@ -396,12 +378,7 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
 }
 
 impl QueueStateStdImpl {
-    fn write_commit_transaction(
-        &self,
-        mut tx: InternalQueueTransaction,
-        mc_block_id: &BlockId,
-    ) -> Result<()> {
-        tx.set_last_committed_mc_block_id(mc_block_id)?;
+    fn write_transaction(&self, tx: InternalQueueTransaction) -> Result<()> {
         tx.write()?;
         let db = self.storage.db();
         db.rocksdb()
