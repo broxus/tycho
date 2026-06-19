@@ -640,6 +640,8 @@ impl StarterInner {
         mc_block_id: &BlockId,
         block_id: &BlockId,
     ) -> Result<(BlockHandle, BlockStuff)> {
+        tracing::info!(%block_id, "download and import queue and shard state: started");
+
         // First download the block itself, with all its parts (proof and queue diff).
         let (handle, block) = self.download_block_data(mc_block_id, block_id).await?;
         self.storage
@@ -667,6 +669,8 @@ impl StarterInner {
             let top_update = &block.as_ref().out_msg_queue_updates;
             self.download_queue_state(&handle, top_update).await?;
         }
+
+        tracing::info!(%block_id, "download and import queue and shard state: finished");
 
         Ok((handle, block))
     }
