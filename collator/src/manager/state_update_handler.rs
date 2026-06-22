@@ -4,11 +4,10 @@ use std::sync::Arc;
 use ahash::HashMapExt;
 use anyhow::{Context, Result, anyhow};
 use tokio::sync::Notify;
-use tycho_block_util::block::{ValidatorSubsetInfo, ValidatorSubsetMode, calc_next_block_id_short};
+use tycho_block_util::block::{ValidatorSubsetInfo, calc_next_block_id_short};
 use tycho_block_util::config::BlockchainConfigExt;
 use tycho_types::models::{
-    BlockId, GlobalCapabilities, GlobalVersion, IndexedValidatorDescription, ShardIdent,
-    ValidatorSet,
+    BlockId, GlobalCapabilities, IndexedValidatorDescription, ShardIdent, ValidatorSet,
 };
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuard;
@@ -127,9 +126,7 @@ where
                     .capabilities
                     .is_subset_of(self.config.supported_capabilities)
             {
-                collator_tasks = self
-                    .refresh_collation_sessions(mc_data, mode, global)
-                    .await?;
+                collator_tasks = self.refresh_collation_sessions(mc_data, mode).await?;
             } else {
                 tracing::warn!(target: tracing_targets::COLLATION_MANAGER,
                     collator_supported_block_version = self.config.supported_block_version,
@@ -152,7 +149,6 @@ where
         &self,
         mc_data: Arc<McData>,
         mode: ProcessMcStateUpdateMode,
-        global: GlobalVersion,
     ) -> Result<Vec<CollatorJoinTask<CF::Collator>>> {
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
             "Start refresh collation sessions by mc state ({})...",
@@ -205,12 +201,6 @@ where
         let mut subset_cache = FastHashMap::new();
         let mut get_validator_subset = |shard_id| match subset_cache.entry(shard_id) {
             hash_map::Entry::Vacant(entry) => {
-                let vset_mode = ValidatorSubsetMode::from_capabilities(global.capabilities);
-                let vset_nonce = match vset_mode {
-                    ValidatorSubsetMode::Original => catchain_seqno,
-                    ValidatorSubsetMode::BySwitchRound => vset_switch_round,
-                };
-
                 let (subset, hash_short) = full_validators_set
                     .compute_mc_subset_indexed(
                         vset_switch_round,
@@ -219,7 +209,7 @@ where
                     .ok_or_else(|| {
                         anyhow!(
                             "Error calculating subset of validators for catchain session \
-                            (shard_id = {}, vset_nonce = {vset_nonce})",
+                            (shard_id = {}, vset_switch_round = {vset_switch_round})",
                             ShardIdent::MASTERCHAIN,
                         )
                     })?;
@@ -331,8 +321,8 @@ where
 
             let new_session_info = Arc::new(CollationSessionInfo::new(
                 shard_id,
-                validation_session_id.0,
-                validation_session_id.1,
+                catchain_seqno,
+                vset_switch_round,
                 ValidatorSubsetInfo {
                     validators: subset.values().cloned().collect(),
                     short_hash: hash_short,

@@ -348,7 +348,7 @@ impl BlockProofStuff {
             (validator_set, shuffle_validators)
         };
 
-        let mode = ValidatorSubsetMode::from_capabilities(block_info.gen_software.capabilities);
+        let mode = CatchainSeqnoMode::from_capabilities(block_info.gen_software.capabilities);
         self.calc_validators_subset_standard(&validator_set, mode, shuffle_validators)
     }
 
@@ -382,23 +382,32 @@ impl BlockProofStuff {
         };
 
         let caps = prev_key_block_info.gen_software.capabilities;
-        let mode = ValidatorSubsetMode::from_capabilities(caps);
+        let mode = CatchainSeqnoMode::from_capabilities(caps);
         self.calc_validators_subset_standard(&validator_set, mode, shuffle_validators)
     }
 
+    /// NOTE: Despite the `mode` the only nonce used for subsets shuffling is
+    /// `vset_switch_round`. Subset mode only controls from where we extract it.
     fn calc_validators_subset_standard(
         &self,
         validator_set: &ValidatorSet,
-        mode: ValidatorSubsetMode,
+        mode: CatchainSeqnoMode,
         shuffle_validators: bool,
     ) -> Result<ValidatorSubsetInfo> {
-        let Some(vset_nonce) = self.inner.proof.signatures.as_ref().map(|s| match mode {
-            ValidatorSubsetMode::Original => s.validator_info.catchain_seqno,
-            ValidatorSubsetMode::BySwitchRound => s.consensus_info.vset_switch_round,
+        let Some(switch_round) = self.inner.proof.signatures.as_ref().map(|s| match mode {
+            // Originally (before https://github.com/broxus/tycho/pull/1098) `catchain_seqno`
+            // was initialized with `vset_switch_round`. However, we were reading this round
+            // "indirectly" from `validator_info` and didn't notice that `consensus_info` was
+            // set from the **next** state. So for old blocks/proofs we must continue to read
+            // switch round this way.
+            CatchainSeqnoMode::Original => s.validator_info.catchain_seqno,
+            // This mode can only be enabled on a new version of the node, so `consensus_info`
+            // is the same which was used to produce this block.
+            CatchainSeqnoMode::Sequential => s.consensus_info.vset_switch_round,
         }) else {
             anyhow::bail!("no signatures info to compute subset from");
         };
-        ValidatorSubsetInfo::compute_standard(validator_set, vset_nonce, shuffle_validators)
+        ValidatorSubsetInfo::compute_standard(validator_set, switch_round, shuffle_validators)
     }
 }
 
@@ -529,11 +538,11 @@ pub struct ValidatorSubsetInfo {
 impl ValidatorSubsetInfo {
     pub fn compute_standard(
         validator_set: &ValidatorSet,
-        vset_nonce: u32,
+        vset_switch_round: u32,
         shuffle_validators: bool,
     ) -> Result<Self> {
         let Some((validators, short_hash)) =
-            validator_set.compute_mc_subset_indexed(vset_nonce, shuffle_validators)
+            validator_set.compute_mc_subset_indexed(vset_switch_round, shuffle_validators)
         else {
             anyhow::bail!("failed to compute a validator subset");
         };
@@ -546,12 +555,12 @@ impl ValidatorSubsetInfo {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ValidatorSubsetMode {
+pub enum CatchainSeqnoMode {
     Original,
-    BySwitchRound,
+    Sequential,
 }
 
-impl ValidatorSubsetMode {
+impl CatchainSeqnoMode {
     pub fn from_capabilities(caps: GlobalCapabilities) -> Self {
         // NOTE: We are using this capability because it should be disabled for
         // Tycho-based networks, but for some reason it is enabled everywhere.
@@ -560,7 +569,7 @@ impl ValidatorSubsetMode {
         if caps.contains(GlobalCapability::CapCreateStatsEnabled) {
             Self::Original
         } else {
-            Self::BySwitchRound
+            Self::Sequential
         }
     }
 }
