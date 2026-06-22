@@ -143,10 +143,20 @@ impl<R: Read> ShardStateReader<R> {
     }
 
     pub fn read_next_cell(&mut self, buffer: &mut [u8; 256]) -> std::io::Result<usize> {
-        let descriptor = {
-            let mut bytes = [0u8; 2];
-            self.reader.read_exact(&mut bytes)?;
-            CellDescriptor::new(bytes)
+        let (descriptor, descriptor_len) = {
+            let d1 = self.reader.read_byte()?;
+            buffer[0] = d1;
+
+            let check = CellDescriptor::new([d1, 0]);
+            if check.is_absent() {
+                (check, 1)
+            } else {
+                let d2 = self.reader.read_byte()?;
+                buffer[1] = d2;
+
+                let descriptor = CellDescriptor::new([d1, d2]);
+                (descriptor, 2)
+            }
         };
 
         let mut refs = descriptor.reference_count() as usize;
@@ -176,11 +186,17 @@ impl<R: Read> ShardStateReader<R> {
         }
 
         let byte_len = descriptor.byte_len() as usize;
-        let total_len = 2 + hashes_len + byte_len + refs * self.header.ref_size;
 
-        buffer[0] = descriptor.d1;
-        buffer[1] = descriptor.d2;
-        self.reader.read_exact(&mut buffer[2..total_len])?;
+        if descriptor.is_absent() && byte_len != 0 {
+            return Err(parser_error(
+                "absent cell should have no data except hashes/depths",
+            ));
+        }
+
+        let total_len = descriptor_len + hashes_len + byte_len + refs * self.header.ref_size;
+
+        self.reader
+            .read_exact(&mut buffer[descriptor_len..total_len])?;
 
         // TODO: Add full cell validation here? But what to do with indices
 

@@ -532,11 +532,21 @@ impl<'a> ShardStateWriter<'a> {
                         tracing::info!(iteration);
                     }
 
-                    let cell_size = 2 + loaded.data.len() + loaded.indices.len() * REF_SIZE;
+                    // absent cell contain only 1 descriptor byte
+                    let descriptor_len = 1 + !loaded.descriptor.is_absent() as usize;
+
+                    let cell_size =
+                        descriptor_len + loaded.data.len() + loaded.indices.len() * REF_SIZE;
                     cell_sizes.push(cell_size as u8);
                     total_size += cell_size as u64;
 
-                    temp_file_buffer.write_all(&[loaded.descriptor.d1, loaded.descriptor.d2])?;
+                    if descriptor_len > 1 {
+                        temp_file_buffer
+                            .write_all(&[loaded.descriptor.d1, loaded.descriptor.d2])?;
+                    } else {
+                        temp_file_buffer.write_all(&[loaded.descriptor.d1])?;
+                    }
+
                     temp_file_buffer.write_all(&loaded.data)?;
                     for index in loaded.indices {
                         let index = remap.get(&index).with_context(|| {
