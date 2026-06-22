@@ -182,8 +182,8 @@ impl StoreStateContext {
     }
 
     fn finalize_to_temp(&self, preprocessed: PreprocessedState) -> Result<TempState> {
-        // 2^7 bits + 1 bytes
-        const MAX_DATA_SIZE: usize = 128;
+        // absent cell may contain 4 * (hash + depth)
+        const MAX_DATA_SIZE: usize = 4 * (32 + 2);
         const CELLS_PER_BATCH: u64 = 1_000_000;
 
         let PreprocessedState { header, file } = preprocessed;
@@ -646,9 +646,16 @@ impl<'a> RawCell<'a> {
     where
         R: Read,
     {
-        let mut descriptor = [0u8; 2];
-        src.read_exact(&mut descriptor)?;
-        let descriptor = CellDescriptor::new(descriptor);
+        let descriptor = {
+            let d1 = src.read_byte()?;
+            let check = CellDescriptor::new([d1, 0]);
+            if check.is_absent() {
+                check
+            } else {
+                let d2 = src.read_byte()?;
+                CellDescriptor::new([d1, d2])
+            }
+        };
         let byte_len = descriptor.byte_len() as usize;
         let ref_count = descriptor.reference_count() as usize;
 
@@ -658,7 +665,12 @@ impl<'a> RawCell<'a> {
 
         // for absent cells read stored hashes and depth into data
         let data_len = if descriptor.is_absent() {
-            descriptor.hash_count() as usize * (32 + 2) + byte_len
+            if byte_len != 0 {
+                return Err(parser_error(
+                    "absent cell should have no data except hashes/depths",
+                ));
+            }
+            descriptor.hash_count() as usize * (32 + 2)
         } else {
             byte_len
         };
