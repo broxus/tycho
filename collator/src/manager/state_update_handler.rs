@@ -208,7 +208,7 @@ where
                 let vset_mode = ValidatorSubsetMode::from_capabilities(global.capabilities);
                 let vset_nonce = match vset_mode {
                     ValidatorSubsetMode::Original => catchain_seqno,
-                    ValidatorSubsetMode::BySwitchRound => vset_switch_round,
+                    ValidatorSubsetMode::Sequential => vset_switch_round,
                 };
 
                 let (subset, hash_short) = full_validators_set

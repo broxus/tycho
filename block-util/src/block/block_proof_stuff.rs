@@ -394,7 +394,7 @@ impl BlockProofStuff {
     ) -> Result<ValidatorSubsetInfo> {
         let Some(vset_nonce) = self.inner.proof.signatures.as_ref().map(|s| match mode {
             ValidatorSubsetMode::Original => s.validator_info.catchain_seqno,
-            ValidatorSubsetMode::BySwitchRound => s.consensus_info.vset_switch_round,
+            ValidatorSubsetMode::Sequential => s.consensus_info.vset_switch_round,
         }) else {
             anyhow::bail!("no signatures info to compute subset from");
         };
@@ -548,7 +548,7 @@ impl ValidatorSubsetInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValidatorSubsetMode {
     Original,
-    BySwitchRound,
+    Sequential,
 }
 
 impl ValidatorSubsetMode {
@@ -560,7 +560,7 @@ impl ValidatorSubsetMode {
         if caps.contains(GlobalCapability::CapCreateStatsEnabled) {
             Self::Original
         } else {
-            Self::BySwitchRound
+            Self::Sequential
         }
     }
 }
