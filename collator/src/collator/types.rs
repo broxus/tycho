@@ -320,8 +320,6 @@ pub(super) struct BlockCollationDataBuilder {
     pub shard_fees: ShardFees,
     pub min_ref_mc_seqno: u32,
     pub rand_seed: HashBytes,
-    #[cfg(feature = "block-creator-stats")]
-    pub block_create_count: FastHashMap<HashBytes, u64>,
     pub created_by: HashBytes,
     pub top_shard_blocks: Vec<TopShardBlockInfo>,
 
@@ -352,8 +350,6 @@ impl BlockCollationDataBuilder {
             shard_fees: Default::default(),
             min_ref_mc_seqno,
             rand_seed,
-            #[cfg(feature = "block-creator-stats")]
-            block_create_count: Default::default(),
             created_by,
             shards: None,
             top_shard_blocks: vec![],
@@ -394,17 +390,6 @@ impl BlockCollationDataBuilder {
             proof_funds.clone(),
             proof_funds,
         )?;
-        Ok(())
-    }
-
-    #[cfg(feature = "block-creator-stats")]
-    pub fn register_shard_block_creators(&mut self, creators: Vec<HashBytes>) -> Result<()> {
-        for creator in creators {
-            self.block_create_count
-                .entry(creator)
-                .and_modify(|count| *count += 1)
-                .or_insert(1);
-        }
         Ok(())
     }
 
@@ -450,8 +435,6 @@ impl BlockCollationDataBuilder {
             recover_create_msg: None,
             mempool_config_override: self.mempool_config_override,
             consensus_config_changed: None,
-            #[cfg(feature = "block-creator-stats")]
-            block_create_count: self.block_create_count,
             diff_tail_len: 0,
             mc_shards_processed_to_by_partitions: self.mc_shards_processed_to_by_partitions,
         }
@@ -533,8 +516,6 @@ pub(super) struct BlockCollationData {
     /// `None` - if it is a shard block or not a key master block.
     pub consensus_config_changed: Option<bool>,
 
-    #[cfg(feature = "block-creator-stats")]
-    pub block_create_count: FastHashMap<HashBytes, u64>,
     pub diff_tail_len: u32,
 }
 

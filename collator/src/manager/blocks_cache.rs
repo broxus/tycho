@@ -82,8 +82,6 @@ impl BlocksCache {
                             processed_to_anchor_id: additional_info.processed_to_anchor_id,
                             value_flow: std::mem::take(&mut shard_cache.data.value_flow),
                             proof_funds: std::mem::take(&mut shard_cache.data.proof_funds),
-                            #[cfg(feature = "block-creator-stats")]
-                            creators: std::mem::take(&mut shard_cache.data.creators),
                             processed_to_by_partitions,
                         });
                         break;
@@ -1151,8 +1149,6 @@ impl BlocksCacheData for MasterBlocksCacheData {
 struct ShardBlocksCacheData {
     value_flow: ValueFlow,
     proof_funds: ShardFeeCreated,
-    #[cfg(feature = "block-creator-stats")]
-    creators: Vec<tycho_types::cell::HashBytes>,
 }
 
 impl ShardBlocksCacheData {
@@ -1166,18 +1162,12 @@ impl ShardBlocksCacheData {
             .create
             .try_add_assign(&candidate.value_flow.created)?;
 
-        #[cfg(feature = "block-creator-stats")]
-        self.creators.push(candidate.created_by);
-
         Ok(())
     }
 
     fn reset_top_shard_block_additional_info(&mut self) {
         self.value_flow = Default::default();
         self.proof_funds = Default::default();
-
-        #[cfg(feature = "block-creator-stats")]
-        self.creators.clear();
     }
 }
 
