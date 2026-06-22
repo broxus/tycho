@@ -941,27 +941,7 @@ impl Phase<FinalizeState> {
         global_balance.try_sub_assign(&collation_data.value_flow.burned)?;
         global_balance.try_add_assign(&collation_data.shard_fees.root_extra().create)?;
 
-        // 9. update block creator stats
-        #[cfg(not(feature = "block-creator-stats"))]
-        let block_create_stats = None;
-        #[cfg(feature = "block-creator-stats")]
-        let block_create_stats = if prev_state_extra
-            .config
-            .get_global_version()?
-            .capabilities
-            .contains(GlobalCapability::CapCreateStatsEnabled)
-        {
-            let mut stats = prev_state_extra
-                .block_create_stats
-                .clone()
-                .unwrap_or_default();
-            Self::update_block_creator_stats(collation_data, &mut stats)?;
-            Some(stats)
-        } else {
-            None
-        };
-
-        // 10. pack new McStateExtra
+        // 9. pack new McStateExtra
         let mc_state_extra = McStateExtra {
             shards,
             config,
@@ -970,7 +950,7 @@ impl Phase<FinalizeState> {
             prev_blocks,
             after_key_block: is_key_block,
             last_key_block,
-            block_create_stats,
+            block_create_stats: None,
             global_balance,
         };
 
@@ -1200,72 +1180,6 @@ impl Phase<FinalizeState> {
         )?
         .build()
         .map_err(Into::into)
-    }
-
-    #[cfg(feature = "block-creator-stats")]
-    fn update_block_creator_stats(
-        collation_data: &BlockCollationData,
-        block_create_stats: &mut Dict<HashBytes, CreatorStats>,
-    ) -> Result<()> {
-        let mut mc_updated = false;
-        for (creator, count) in &collation_data.block_create_count {
-            let shard_scaled = count << 32;
-            let total_mc = if collation_data.created_by == *creator {
-                mc_updated = true;
-                1
-            } else {
-                0
-            };
-
-            block_create_stats.set(creator, CreatorStats {
-                mc_blocks: BlockCounters {
-                    updated_at: collation_data.gen_utime,
-                    total: total_mc,
-                    cnt2048: total_mc,
-                    cnt65536: total_mc,
-                },
-                shard_blocks: BlockCounters {
-                    updated_at: collation_data.gen_utime,
-                    total: *count,
-                    cnt2048: shard_scaled,
-                    cnt65536: shard_scaled,
-                },
-            })?;
-        }
-        if !mc_updated {
-            block_create_stats.set(collation_data.created_by, CreatorStats {
-                mc_blocks: BlockCounters {
-                    updated_at: collation_data.gen_utime,
-                    total: 1,
-                    cnt2048: 1,
-                    cnt65536: 1,
-                },
-                shard_blocks: BlockCounters {
-                    updated_at: collation_data.gen_utime,
-                    total: 0,
-                    cnt2048: 0,
-                    cnt65536: 0,
-                },
-            })?;
-        }
-
-        let default_shard_blocks_count = collation_data.block_create_count.values().sum();
-        block_create_stats.set(HashBytes::default(), CreatorStats {
-            mc_blocks: BlockCounters {
-                updated_at: collation_data.gen_utime,
-                total: 1,
-                cnt2048: 1,
-                cnt65536: 1,
-            },
-            shard_blocks: BlockCounters {
-                updated_at: collation_data.gen_utime,
-                total: default_shard_blocks_count,
-                cnt2048: default_shard_blocks_count << 32,
-                cnt65536: default_shard_blocks_count << 32,
-            },
-        })?;
-        // TODO: prune CreatorStats https://github.com/ton-blockchain/ton/blob/master/validator/impl/collator.cpp#L4191
-        Ok(())
     }
 
     fn check_value_flow(

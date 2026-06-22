@@ -90,7 +90,6 @@ tycho-util = { workspace = true, features = ["test"] }
 [features]
 default = []
 test = ["tycho-block-util/test", "tycho-storage/test", "tycho-core/test", "tycho-consensus/test"]
-block-creator-stats = []
 bench-helpers = []
 
 [lints]
