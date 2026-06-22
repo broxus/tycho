@@ -921,8 +921,6 @@ impl CollatorStdImpl {
                 processed_to_anchor_id,
                 value_flow,
                 proof_funds,
-                #[cfg(feature = "block-creator-stats")]
-                creators,
                 processed_to_by_partitions,
             } = top_block_descr;
 
@@ -987,9 +985,6 @@ impl CollatorStdImpl {
                     block_id,
                     processed_to_by_partitions,
                 });
-
-            #[cfg(feature = "block-creator-stats")]
-            collation_data_builder.register_shard_block_creators(creators)?;
         }
 
         // filling mc_processed_to_by_partitions

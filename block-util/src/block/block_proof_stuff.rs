@@ -348,7 +348,8 @@ impl BlockProofStuff {
             (validator_set, shuffle_validators)
         };
 
-        self.calc_validators_subset_standard(&validator_set, shuffle_validators)
+        let mode = ValidatorSubsetMode::from_capabilities(block_info.gen_software.capabilities);
+        self.calc_validators_subset_standard(&validator_set, mode, shuffle_validators)
     }
 
     fn process_prev_key_block_proof(
@@ -380,24 +381,24 @@ impl BlockProofStuff {
             (validator_set, shuffle_validators)
         };
 
-        self.calc_validators_subset_standard(&validator_set, shuffle_validators)
+        let caps = prev_key_block_info.gen_software.capabilities;
+        let mode = ValidatorSubsetMode::from_capabilities(caps);
+        self.calc_validators_subset_standard(&validator_set, mode, shuffle_validators)
     }
 
     fn calc_validators_subset_standard(
         &self,
         validator_set: &ValidatorSet,
+        mode: ValidatorSubsetMode,
         shuffle_validators: bool,
     ) -> Result<ValidatorSubsetInfo> {
-        let Some(vset_switch_round) = self
-            .inner
-            .proof
-            .signatures
-            .as_ref()
-            .map(|s| s.consensus_info.vset_switch_round)
-        else {
-            anyhow::bail!("no `consensus_info` to compute subset from");
+        let Some(vset_nonce) = self.inner.proof.signatures.as_ref().map(|s| match mode {
+            ValidatorSubsetMode::Original => s.validator_info.catchain_seqno,
+            ValidatorSubsetMode::BySwitchRound => s.consensus_info.vset_switch_round,
+        }) else {
+            anyhow::bail!("no signatures info to compute subset from");
         };
-        ValidatorSubsetInfo::compute_standard(validator_set, vset_switch_round, shuffle_validators)
+        ValidatorSubsetInfo::compute_standard(validator_set, vset_nonce, shuffle_validators)
     }
 }
 
@@ -528,11 +529,11 @@ pub struct ValidatorSubsetInfo {
 impl ValidatorSubsetInfo {
     pub fn compute_standard(
         validator_set: &ValidatorSet,
-        vset_switch_round: u32,
+        vset_nonce: u32,
         shuffle_validators: bool,
     ) -> Result<Self> {
         let Some((validators, short_hash)) =
-            validator_set.compute_mc_subset_indexed(vset_switch_round, shuffle_validators)
+            validator_set.compute_mc_subset_indexed(vset_nonce, shuffle_validators)
         else {
             anyhow::bail!("failed to compute a validator subset");
         };
@@ -541,6 +542,26 @@ impl ValidatorSubsetInfo {
             validators,
             short_hash,
         })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidatorSubsetMode {
+    Original,
+    BySwitchRound,
+}
+
+impl ValidatorSubsetMode {
+    pub fn from_capabilities(caps: GlobalCapabilities) -> Self {
+        // NOTE: We are using this capability because it should be disabled for
+        // Tycho-based networks, but for some reason it is enabled everywhere.
+        // By relying on this capability we can do two things at once during
+        // migration.
+        if caps.contains(GlobalCapability::CapCreateStatsEnabled) {
+            Self::Original
+        } else {
+            Self::BySwitchRound
+        }
     }
 }
 

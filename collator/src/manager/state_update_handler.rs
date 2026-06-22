@@ -4,10 +4,11 @@ use std::sync::Arc;
 use ahash::HashMapExt;
 use anyhow::{Context, Result, anyhow};
 use tokio::sync::Notify;
-use tycho_block_util::block::{ValidatorSubsetInfo, calc_next_block_id_short};
+use tycho_block_util::block::{ValidatorSubsetInfo, ValidatorSubsetMode, calc_next_block_id_short};
 use tycho_block_util::config::BlockchainConfigExt;
 use tycho_types::models::{
-    BlockId, GlobalCapabilities, IndexedValidatorDescription, ShardIdent, ValidatorSet,
+    BlockId, GlobalCapabilities, GlobalVersion, IndexedValidatorDescription, ShardIdent,
+    ValidatorSet,
 };
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuard;
@@ -120,19 +121,21 @@ where
         let mut collator_tasks = vec![];
 
         if !matches!(mode, ProcessMcStateUpdateMode::SkipProcess) {
-            let block_global = mc_data.config.get_global_version()?;
-            if self.config.supported_block_version >= block_global.version
-                && block_global
+            let global = mc_data.config.get_global_version()?;
+            if self.config.supported_block_version >= global.version
+                && global
                     .capabilities
                     .is_subset_of(self.config.supported_capabilities)
             {
-                collator_tasks = self.refresh_collation_sessions(mc_data, mode).await?;
+                collator_tasks = self
+                    .refresh_collation_sessions(mc_data, mode, global)
+                    .await?;
             } else {
                 tracing::warn!(target: tracing_targets::COLLATION_MANAGER,
                     collator_supported_block_version = self.config.supported_block_version,
-                    mc_block_version = block_global.version,
+                    mc_block_version = global.version,
                     collator_supported_capabilities = ?self.config.supported_capabilities,
-                    mc_block_capabilities = ?block_global.capabilities,
+                    mc_block_capabilities = ?global.capabilities,
                     "Refresh collation sessions is skipped: collator does not support mc block version or capabilities",
                 );
             }
@@ -149,6 +152,7 @@ where
         &self,
         mc_data: Arc<McData>,
         mode: ProcessMcStateUpdateMode,
+        global: GlobalVersion,
     ) -> Result<Vec<CollatorJoinTask<CF::Collator>>> {
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
             "Start refresh collation sessions by mc state ({})...",
@@ -200,23 +204,27 @@ where
         let collation_config = mc_data.config.get_collation_config()?;
         let mut subset_cache = FastHashMap::new();
         let mut get_validator_subset = |shard_id| match subset_cache.entry(shard_id) {
-            hash_map::Entry::Occupied(entry) => {
-                let (subset, hash_short): &(
-                    Arc<FastHashMap<[u8; 32], IndexedValidatorDescription>>,
-                    u32,
-                ) = entry.get();
-                Result::<_>::Ok((subset.clone(), *hash_short))
-            }
             hash_map::Entry::Vacant(entry) => {
-                let (subset, hash_short) = full_validators_set
-                    .compute_mc_subset_indexed(vset_switch_round, collation_config.shuffle_mc_validators)
-                    .ok_or_else(|| anyhow!(
-                        "Error calculating subset of validators for catchain session (shard_id = {}, seqno = {})",
-                        ShardIdent::MASTERCHAIN,
-                        vset_switch_round,
-                    ))?;
+                let vset_mode = ValidatorSubsetMode::from_capabilities(global.capabilities);
+                let vset_nonce = match vset_mode {
+                    ValidatorSubsetMode::Original => catchain_seqno,
+                    ValidatorSubsetMode::BySwitchRound => vset_switch_round,
+                };
 
-                let subset: FastHashMap<_, _> = subset
+                let (subset, hash_short) = full_validators_set
+                    .compute_mc_subset_indexed(
+                        vset_switch_round,
+                        collation_config.shuffle_mc_validators,
+                    )
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "Error calculating subset of validators for catchain session \
+                            (shard_id = {}, vset_nonce = {vset_nonce})",
+                            ShardIdent::MASTERCHAIN,
+                        )
+                    })?;
+
+                let subset: FastHashMap<[u8; 32], IndexedValidatorDescription> = subset
                     .into_iter()
                     .map(|vldr| (vldr.desc.public_key.into(), vldr))
                     .collect();
@@ -224,6 +232,10 @@ where
 
                 entry.insert((subset.clone(), hash_short));
                 Ok((subset, hash_short))
+            }
+            hash_map::Entry::Occupied(entry) => {
+                let (subset, hash_short) = entry.get();
+                Result::<_>::Ok((subset.clone(), *hash_short))
             }
         };
 

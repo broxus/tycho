@@ -442,8 +442,6 @@ pub struct TopBlockDescription {
     pub processed_to_anchor_id: u32,
     pub value_flow: ValueFlow,
     pub proof_funds: ShardFeeCreated,
-    #[cfg(feature = "block-creator-stats")]
-    pub creators: Vec<HashBytes>,
     pub processed_to_by_partitions: ProcessedToByPartitions,
 }
 
