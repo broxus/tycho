@@ -12,11 +12,13 @@ use tycho_util::FastHashMap;
 use tycho_util::fs::MappedFile;
 use tycho_util::io::ByteOrderRead;
 use tycho_util::progress_bar::*;
-use weedb::{BoundedCfHandle, rocksdb};
+use weedb::rocksdb;
 
+use super::cell_storage::raw::FinalizedTempCellsBuilder;
 use super::cell_storage::*;
 use super::db_state::{CELL_HASH_RANGE_END, CELL_HASH_RANGE_START};
 use super::entries_buffer::*;
+use super::util::{CellHashMap, HashBytesKey};
 use crate::storage::{BriefBocHeader, CellsDb, ShardStateReader};
 
 pub const MAX_DEPTH: u16 = u16::MAX - 1;
@@ -115,12 +117,15 @@ impl StoreStateContext {
             .prealloc(header.cell_count as usize * HashesEntry::LEN)
             .open_as_mapped_mut()?;
 
-        let raw = self.cells_db.rocksdb().as_ref();
         let write_options = self.cells_db.temp_cells.write_config();
 
-        let mut ctx = FinalizationContext::new(&self.cells_db);
-        raw.delete_range_cf_opt(
-            &ctx.temp_cells_cf,
+        let finalized_temp_cells = FinalizedTempCellsBuilder::new(
+            self.temp_file_storage.unnamed_file().open()?,
+            header.cell_count as usize,
+        );
+        let mut ctx = FinalizationContext::new(finalized_temp_cells);
+        self.cells_db.rocksdb().delete_range_cf_opt(
+            &self.cells_db.temp_cells.cf(),
             CELL_HASH_RANGE_START.as_slice(),
             CELL_HASH_RANGE_END.as_slice(),
             write_options,
@@ -198,7 +203,6 @@ impl StoreStateContext {
 
             if batch_len > CELLS_PER_BATCH {
                 ctx.finalize_cell_usages();
-                raw.write_opt(std::mem::take(&mut ctx.write_batch), write_options)?;
                 batch_len = 0;
             }
 
@@ -207,15 +211,17 @@ impl StoreStateContext {
 
         if batch_len > 0 {
             ctx.finalize_cell_usages();
-            raw.write_opt(std::mem::take(&mut ctx.write_batch), write_options)?;
         }
 
         // Current entry contains root cell
-        let root_hash = ctx.entries_buffer.repr_hash();
-        ctx.final_check(root_hash)?;
+        let root_hash = *ctx.entries_buffer.repr_hash();
+        ctx.final_check(&root_hash)?;
+
+        let finalized_temp_cells = ctx.finalized_temp_cells.finish()?;
 
         self.cell_storage
-            .apply_temp_cell(HashBytes::wrap(root_hash))?;
+            .apply_indexed_temp_cell(HashBytes::wrap(&root_hash), &finalized_temp_cells)?;
+
         let shard_state_key = block_id.to_vec();
         let mut finalize_batch = rocksdb::WriteBatch::default();
         finalize_batch.delete_range_cf(
@@ -240,24 +246,22 @@ impl StoreStateContext {
     }
 }
 
-struct FinalizationContext<'a> {
+struct FinalizationContext {
     pruned_branches: FastHashMap<u32, Vec<u8>>,
-    cell_usages: FastHashMap<[u8; 32], i32>,
+    cell_usages: CellHashMap<i32>,
     entries_buffer: EntriesBuffer,
     output_buffer: Vec<u8>,
-    temp_cells_cf: BoundedCfHandle<'a>,
-    write_batch: rocksdb::WriteBatch,
+    finalized_temp_cells: FinalizedTempCellsBuilder,
 }
 
-impl<'a> FinalizationContext<'a> {
-    fn new(db: &'a CellsDb) -> Self {
+impl FinalizationContext {
+    fn new(finalized_temp_cells: FinalizedTempCellsBuilder) -> Self {
         Self {
             pruned_branches: Default::default(),
-            cell_usages: FastHashMap::with_capacity_and_hasher(128, Default::default()),
+            cell_usages: CellHashMap::with_capacity_and_hasher(128, Default::default()),
             entries_buffer: EntriesBuffer::new(),
             output_buffer: Vec::with_capacity(1 << 10),
-            temp_cells_cf: db.temp_cells.cf(),
-            write_batch: rocksdb::WriteBatch::default(),
+            finalized_temp_cells,
         }
     }
 
@@ -415,7 +419,10 @@ impl<'a> FinalizationContext<'a> {
                 child.hash(LevelMask::MAX_LEVEL)
             };
 
-            *self.cell_usages.entry(*child_hash).or_default() += 1;
+            *self
+                .cell_usages
+                .entry(HashBytesKey(*child_hash))
+                .or_default() += 1;
             output_buffer.extend_from_slice(child_hash);
         }
 
@@ -429,9 +436,8 @@ impl<'a> FinalizationContext<'a> {
             current_entry.as_reader().hash(LevelMask::MAX_LEVEL)
         };
 
-        self.write_batch
-            .put_cf(&self.temp_cells_cf, repr_hash, output_buffer.as_slice());
-        self.cell_usages.insert(*repr_hash, -1);
+        self.finalized_temp_cells.append(repr_hash, output_buffer)?;
+        self.cell_usages.insert(HashBytesKey(*repr_hash), -1);
 
         // Done
         Ok(())
@@ -446,7 +452,8 @@ impl<'a> FinalizationContext<'a> {
         tracing::info!(len=?self.cell_usages.len(), "Cell usages");
 
         anyhow::ensure!(
-            self.cell_usages.len() == 1 && self.cell_usages.contains_key(root_hash),
+            self.cell_usages.len() == 1
+                && self.cell_usages.contains_key(HashBytesKey::wrap(root_hash)),
             "Invalid shard state cell"
         );
         Ok(())
@@ -536,6 +543,7 @@ enum StoreStateError {
 #[cfg(test)]
 mod test {
     use std::collections::BTreeSet;
+    use std::num::NonZeroUsize;
 
     use bytes::Bytes;
     use bytesize::ByteSize;
@@ -765,7 +773,9 @@ mod test {
     #[tokio::test]
     async fn raw_state_store_allows_existing_snapshot() -> Result<()> {
         let (ctx, _tempdir) = StorageContext::new_temp().await?;
-        let storage = CoreStorage::open(ctx.clone(), CoreStorageConfig::new_potato()).await?;
+        let mut config = CoreStorageConfig::new_potato();
+        config.cell_storage_threads = NonZeroUsize::new(1).unwrap();
+        let storage = CoreStorage::open(ctx.clone(), config).await?;
 
         let root = Boc::decode(ZEROSTATE_BOC)?;
         let state = root.parse::<ShardStateUnsplit>()?;
