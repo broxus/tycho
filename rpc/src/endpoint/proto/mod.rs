@@ -5,7 +5,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
-use tycho_block_util::message::validate_external_message;
+use tycho_block_util::message::parse_external_message;
 use tycho_types::cell::HashBytes;
 use tycho_types::models::*;
 use tycho_types::prelude::*;
@@ -107,12 +107,21 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
             }
         }
         request::Call::SendMessage(p) => {
-            if let Err(e) = validate_external_message(&p.message).await {
-                return ProtoErrorResponse {
-                    code: INVALID_BOC_CODE,
-                    message: e.to_string().into(),
+            if state.config().validate_external_messages {
+                let msg_cell = match parse_external_message(&p.message).await {
+                    Ok(cell) => cell,
+                    Err(e) => {
+                        return ProtoErrorResponse {
+                            code: INVALID_BOC_CODE,
+                            message: e.to_string().into(),
+                        }
+                        .into_response();
+                    }
+                };
+
+                if let Err(e) = state.check_external_message(msg_cell).await {
+                    return error_to_response(e);
                 }
-                .into_response();
             }
 
             state.broadcast_external_message(&p.message).await;
@@ -436,6 +445,10 @@ fn error_to_response(e: RpcStateError) -> Response {
     let (code, message) = match e {
         RpcStateError::NotReady => (NOT_READY_CODE, Cow::Borrowed("not ready")),
         RpcStateError::NotSupported => (NOT_SUPPORTED_CODE, Cow::Borrowed("method not supported")),
+        RpcStateError::NotAccepted { exit_code } => (
+            INVALID_MESSAGE_CODE,
+            format!("message not accepted, exit code: {exit_code}").into(),
+        ),
         RpcStateError::Internal(e) => (INTERNAL_ERROR_CODE, e.to_string().into()),
         RpcStateError::BadRequest(e) => (INVALID_PARAMS_CODE, e.to_string().into()),
     };
