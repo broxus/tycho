@@ -145,8 +145,13 @@ impl Query {
 
         let max_k = config.max_k;
         let timeout = config.request_timeout;
+        let local_peer_id = *network.peer_id();
 
         routing_table.visit_closest(target_id_for_full, max_k, |handle| {
+            if handle.peer_info().id == local_peer_id {
+                return;
+            }
+
             candidates.add(handle.load_peer_info(), max_k, &Duration::MAX, |_| {
                 Some(handle.clone())
             });
@@ -195,6 +200,7 @@ impl Query {
             });
 
         // Process responses and refill futures until the value is found or all peers are traversed
+        let local_peer_id = *self.network.peer_id();
         while let Some((handle, res)) = futures.next().await {
             match res {
                 // Return the value if found
@@ -221,6 +227,10 @@ impl Query {
                     // Update candidates.
                     let mut has_new = false;
                     process_only_valid(now_sec(), nodes, |peer_info| {
+                        if peer_info.id == local_peer_id {
+                            return;
+                        }
+
                         has_new |= self.candidates.add(
                             peer_info,
                             self.max_k,
@@ -294,6 +304,7 @@ impl Query {
             });
 
         // Process responses and refill futures until all peers are traversed
+        let local_peer_id = *self.network.peer_id();
         let max_depth = depth.unwrap_or(usize::MAX);
         let mut result = FastHashMap::<PeerId, Arc<PeerInfo>>::new();
         while let Some((node, res)) = futures.next().await {
@@ -309,6 +320,10 @@ impl Query {
 
                     // Update candidates.
                     process_only_valid(now_sec(), nodes, |peer_info| {
+                        if peer_info.id == local_peer_id {
+                            return;
+                        }
+
                         let discovered_depth = query_depth.saturating_add(1);
                         candidate_depths
                             .entry(peer_info.id)
