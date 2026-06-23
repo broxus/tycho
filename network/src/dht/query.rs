@@ -274,9 +274,7 @@ impl Query {
         let semaphore = Semaphore::new(MAX_PARALLEL_REQUESTS);
         let mut futures = FuturesUnordered::new();
 
-        let visit = |this: &Query, node: &KnownPeerHandle, depth: usize| {
-            use futures_util::FutureExt;
-
+        let visit = |this: &Query, node: &KnownPeerHandle| {
             Self::visit::<NodeResponse>(
                 this.network.clone(),
                 node.clone(),
@@ -284,26 +282,29 @@ impl Query {
                 &semaphore,
                 this.timeout,
             )
-            .map(move |res| (res, depth))
         };
 
         self.candidates
             .visit_closest(self.local_id(), self.max_k, |node| {
                 let peer_id = node.peer_info().id;
                 if scheduled.insert(peer_id) {
-                    candidate_depths.insert(peer_id, 0);
-                    futures.push(visit(&self, node, 0));
+                    candidate_depths.insert(peer_id, 0usize);
+                    futures.push(visit(&self, node));
                 }
             });
 
         // Process responses and refill futures until all peers are traversed
         let max_depth = depth.unwrap_or(usize::MAX);
         let mut result = FastHashMap::<PeerId, Arc<PeerInfo>>::new();
-        while let Some(((node, res), query_depth)) = futures.next().await {
+        while let Some((node, res)) = futures.next().await {
+            let peer_id = node.peer_info().id;
+            // NOTE: Futures are only spawned at known candidate depths.
+            let query_depth = candidate_depths[&peer_id];
+
             match res {
                 // Refill futures from the nodes response
                 Some(Ok(NodeResponse { nodes })) => {
-                    tracing::debug!(peer_id = %node.peer_info().id, count = nodes.len(), "received nodes");
+                    tracing::debug!(%peer_id, count = nodes.len(), "received nodes");
                     let known_peers = self.network.known_peers().clone();
 
                     // Update candidates.
@@ -337,23 +338,18 @@ impl Query {
                     self.candidates
                         .visit_closest(self.local_id(), self.max_k, |node| {
                             let peer_id = node.peer_info().id;
-                            let Some(&candidate_depth) = candidate_depths.get(&peer_id) else {
-                                return;
-                            };
-
-                            if candidate_depth <= max_depth && scheduled.insert(peer_id) {
-                                futures.push(visit(&self, node, candidate_depth));
+                            if let Some(candidate_depth) = candidate_depths.get(&peer_id)
+                                && *candidate_depth <= max_depth
+                                && scheduled.insert(peer_id)
+                            {
+                                futures.push(visit(&self, node));
                             }
                         });
                 }
                 // Do nothing on error
-                Some(Err(e)) => {
-                    tracing::warn!(peer_id = %node.peer_info().id, "failed to query nodes: {e}");
-                }
+                Some(Err(e)) => tracing::warn!(%peer_id, "failed to query nodes: {e}"),
                 // Do nothing on timeout
-                None => {
-                    tracing::warn!(peer_id = %node.peer_info().id, "failed to query nodes: timeout");
-                }
+                None => tracing::warn!(%peer_id, "failed to query nodes: timeout"),
             }
         }
 
