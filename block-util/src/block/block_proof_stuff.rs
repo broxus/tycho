@@ -355,6 +355,7 @@ impl BlockProofStuff {
     fn process_prev_key_block_proof(
         &self,
         prev_key_block_proof: &BlockProofStuff,
+        checked_block_info: &BlockInfo,
     ) -> Result<ValidatorSubsetInfo> {
         let (virt_key_block, prev_key_block_info) = prev_key_block_proof.pre_check_block_proof()?;
 
@@ -381,7 +382,10 @@ impl BlockProofStuff {
             (validator_set, shuffle_validators)
         };
 
-        let caps = prev_key_block_info.gen_software.capabilities;
+        // NOTE: `prev_key_block_info` is unused here. We only need the previous
+        // key block to get the current validator set. All other stuff, like
+        // vset switch round or gen capabilities, must be used from the current block.
+        let caps = checked_block_info.gen_software.capabilities;
         let mode = CatchainSeqnoMode::from_capabilities(caps);
         self.calc_validators_subset_standard(&validator_set, mode, shuffle_validators)
     }
@@ -474,7 +478,7 @@ pub fn check_with_prev_key_block_proof(
         proof_id.seqno,
     );
 
-    let subset = proof.process_prev_key_block_proof(prev_key_block_proof)?;
+    let subset = proof.process_prev_key_block_proof(prev_key_block_proof, virt_block_info)?;
 
     if virt_block_info.key_block {
         pre_check_key_block_proof(virt_block)?;
