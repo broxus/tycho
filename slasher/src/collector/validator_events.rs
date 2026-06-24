@@ -97,6 +97,18 @@ impl ValidatorEventsCollector {
     pub fn set_default_batch_size(&self, batch_size: NonZeroU32) {
         self.default_batch_size
             .store(batch_size.get(), Ordering::Release);
+
+        for mut session in self.sessions.iter_mut() {
+            // TODO: Split or grow the previous batch to not discard events.
+            if session.batch_size != batch_size {
+                session.batch_size = batch_size;
+                session.current_batch = BlocksBatch::new(
+                    session.align_seqno(session.next_expected_seqno),
+                    batch_size,
+                    &session.validator_indices,
+                );
+            }
+        }
     }
 
     pub fn init_session(
