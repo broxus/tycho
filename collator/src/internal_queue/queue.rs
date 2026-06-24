@@ -88,6 +88,8 @@ pub trait Queue<V>: Send
 where
     V: InternalMessageValue + Send + Sync,
 {
+    fn zerostate_id(&self) -> ZerostateId;
+
     /// Create iterator for specified shard and return it
     fn iterator(
         &self,
@@ -124,12 +126,15 @@ where
         partitions: &FastHashSet<QueuePartitionIdx>,
     ) -> Result<()>;
 
-    /// Roll back commit pointers to the specified top blocks.
+    /// Roll back commit pointers to the specified ones.
     fn rollback_commit_pointers(
         &self,
         to_mc_block_id: &BlockId,
-        to_top_blocks: &[TopBlockIdUpdated],
+        to_commit_pointers: FastHashMap<ShardIdent, (Option<QueueKey>, u32)>,
     ) -> Result<Vec<ShardIdent>>;
+
+    /// Clear commit pointers and last committed mc block id.
+    fn clear_commit_pointers(&self) -> Result<Vec<ShardIdent>>;
 
     /// Remove all data in uncommitted zone
     fn clear_uncommitted_state(
@@ -208,6 +213,10 @@ where
     P: QueueState<V> + Send + Sync + 'static,
     V: InternalMessageValue + Send + Sync,
 {
+    fn zerostate_id(&self) -> ZerostateId {
+        self.zerostate_id
+    }
+
     fn iterator(
         &self,
         partition: QueuePartitionIdx,
@@ -443,97 +452,44 @@ where
 
     fn rollback_commit_pointers(
         &self,
-        to_mc_block_id: &BlockId,
-        to_top_blocks: &[TopBlockIdUpdated],
+        mc_block_id: &BlockId,
+        to_commit_pointers: FastHashMap<ShardIdent, (Option<QueueKey>, u32)>,
     ) -> Result<Vec<ShardIdent>> {
         let _global_write_guard = self.global_lock.write();
 
         let old_commit_pointers = self.state.get_commit_pointers()?;
+
+        // build new commit pointers
         let mut new_commit_pointers = FastHashMap::default();
-        let mut clear_commit_state = false;
-
-        for item in to_top_blocks {
-            let block_id = &item.block.block_id;
-
-            let diff = self
-                .state
-                .get_diff_info(&block_id.shard, block_id.seqno, DiffZone::Both)?;
-
-            let diff = match diff {
-                None if item.updated && item.block.ref_by_mc_seqno > self.zerostate_id.seqno => {
-                    // SAFETY: In this recovery fallback, a missing updated target diff is treated as
-                    //      an already GC-collected queue boundary. Since the target MC commit may not be
-                    //      idempotently committable without its diff info, the whole queue commit state is
-                    //      reset and the following clear_uncommitted_state call removes the remaining tails.
-                    tracing::warn!(
-                        target: tracing_targets::MQ,
-                        "Clearing all commit pointers after missing updated shard {} with mc ref {} (zerostate {}) \
-                        during rollback to seqno {}: target diff is missing and old commit pointers: {:?}",
-                        block_id.shard,
-                        item.block.ref_by_mc_seqno,
-                        self.zerostate_id.seqno,
-                        block_id.seqno,
-                        old_commit_pointers,
-                    );
-                    clear_commit_state = true;
-                    break;
+        for (shard_id, (max_message, seqno)) in to_commit_pointers {
+            if let Some(max_message) = max_message {
+                if new_commit_pointers
+                    .insert(shard_id, (max_message, seqno))
+                    .is_some()
+                {
+                    bail!("Duplicate shard in rollback_commit_pointers: {}", shard_id);
                 }
-                None if !item.updated => {
-                    if let Some(old_pointer) = old_commit_pointers.get(&block_id.shard) {
-                        if old_pointer.seqno != block_id.seqno {
-                            // SAFETY: In this recovery fallback, a missing target diff is treated as an
-                            //      already GC-collected queue boundary. Dropping this shard pointer lets the
-                            //      following clear_uncommitted_state call remove the remaining ahead-of-applied
-                            //      queue suffix for this shard.
-                            tracing::warn!(
-                                target: tracing_targets::MQ,
-                                "Dropping commit pointer for unchanged shard {} during rollback to seqno {}: \
-                                target diff is missing and old pointer seqno is {}",
-                                block_id.shard,
-                                block_id.seqno,
-                                old_pointer.seqno,
-                            );
-                            continue;
-                        }
-                        if new_commit_pointers
-                            .insert(block_id.shard, (old_pointer.queue_key, old_pointer.seqno))
-                            .is_some()
-                        {
-                            bail!(
-                                "Duplicate shard in rollback_commit_pointers: {}",
-                                block_id.shard
-                            );
-                        }
+            } else {
+                // check if missed mandatory commit pointers in rollback
+                if let Some(old_pointer) = old_commit_pointers.get(&shard_id) {
+                    if old_pointer.seqno != seqno {
+                        bail!(
+                            "Cannot roll back commit pointer for shard {} on seqno {}: diff is missing",
+                            shard_id,
+                            seqno,
+                        );
                     }
-                    continue;
+                    if new_commit_pointers
+                        .insert(shard_id, (old_pointer.queue_key, old_pointer.seqno))
+                        .is_some()
+                    {
+                        bail!("Duplicate shard in rollback_commit_pointers: {}", shard_id);
+                    }
                 }
-                None => continue,
-                Some(diff) => diff,
-            };
-
-            if new_commit_pointers
-                .insert(block_id.shard, (diff.max_message, diff.seqno))
-                .is_some()
-            {
-                bail!(
-                    "Duplicate shard in rollback_commit_pointers: {}",
-                    block_id.shard
-                );
             }
         }
 
-        // fully clear commit state when unable to rollback
-        if clear_commit_state {
-            let removed_commit_pointer_shards: Vec<_> =
-                old_commit_pointers.keys().copied().collect();
-            tracing::debug!(target: tracing_targets::MQ,
-                ?removed_commit_pointer_shards,
-                "rollback_commit_pointers: clear_commit_pointers",
-            );
-            self.state.clear_commit_pointers()?;
-            return Ok(removed_commit_pointer_shards);
-        }
-
+        // detect commit pointers that will be removed
         let removed_commit_pointer_shards: Vec<_> = old_commit_pointers
             .keys()
             .filter(|shard_id| !new_commit_pointers.contains_key(shard_id))
@@ -543,11 +499,22 @@ where
         tracing::debug!(target: tracing_targets::MQ,
             ?new_commit_pointers,
             ?removed_commit_pointer_shards,
-            "rollback_commit_pointers",
+            "rollback_commit_pointers: replace_commit_pointers",
         );
 
         self.state
-            .replace_commit_pointers(new_commit_pointers, to_mc_block_id)?;
+            .replace_commit_pointers(new_commit_pointers, mc_block_id)?;
+
+        Ok(removed_commit_pointer_shards)
+    }
+
+    fn clear_commit_pointers(&self) -> Result<Vec<ShardIdent>> {
+        let _global_write_guard = self.global_lock.write();
+
+        let old_commit_pointers = self.state.get_commit_pointers()?;
+        let removed_commit_pointer_shards: Vec<_> = old_commit_pointers.keys().copied().collect();
+
+        self.state.clear_commit_pointers()?;
 
         Ok(removed_commit_pointer_shards)
     }

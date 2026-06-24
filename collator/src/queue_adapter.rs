@@ -1,4 +1,5 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
+use async_trait::async_trait;
 use tracing::instrument;
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 use tycho_block_util::state::ShardStateStuff;
@@ -18,6 +19,7 @@ use crate::internal_queue::types::router::PartitionRouter;
 use crate::internal_queue::types::stats::{
     DiffStatistics, QueueStatistics, SeparatedStatisticsByPartitions,
 };
+use crate::state_node::DiffLoader;
 use crate::storage::models::DiffInfo;
 use crate::storage::snapshot::AccountStatistics;
 use crate::tracing_targets;
@@ -77,13 +79,6 @@ where
         partitions: &FastHashSet<QueuePartitionIdx>,
     ) -> Result<()>;
 
-    /// Roll back commit pointers to the specified top blocks.
-    fn rollback_commit_pointers(
-        &self,
-        to_mc_block_id: &BlockId,
-        to_top_shard_blocks: Vec<TopBlockIdUpdated>,
-    ) -> Result<Vec<ShardIdent>>;
-
     fn clear_uncommitted_state(&self, top_shards: &[ShardIdent]) -> Result<()>;
 
     /// Get diff for the given block from committed and/or uncommitted zone
@@ -121,55 +116,6 @@ where
         diff_info: DiffInfo,
         partition: QueuePartitionIdx,
     ) -> Result<(PartitionRouter, DiffStatistics)>;
-
-    /// Recovers message queue state after restart.
-    fn recover_after_restart(&self, mc_state: &ShardStateStuff) -> Result<()> {
-        let mc_block_id = mc_state.block_id();
-        assert!(
-            mc_block_id.is_masterchain(),
-            "latest masterchain block id and state must be provided"
-        );
-
-        let mut top_shards_for_queue_clean = mc_state.get_top_shards()?;
-
-        // rollback commit pointers if committed queue is ahead of last applied mc state
-        if let Some(last_committed_mc_block_id) = self.get_last_committed_mc_block_id()? {
-            if last_committed_mc_block_id.seqno > mc_block_id.seqno {
-                let top_shard_blocks_info = mc_state
-                    .shards()?
-                    .iter()
-                    .map(|item| {
-                        let (shard_id, shard_descr) = item?;
-                        Ok(TopBlockIdUpdated {
-                            block: TopBlockId {
-                                ref_by_mc_seqno: shard_descr.reg_mc_seqno,
-                                block_id: shard_descr.get_block_id(shard_id),
-                            },
-                            updated: shard_descr.top_sc_block_updated,
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                let removed_commit_pointer_shards =
-                    self.rollback_commit_pointers(mc_block_id, top_shard_blocks_info)?;
-                for shard in removed_commit_pointer_shards {
-                    if !top_shards_for_queue_clean.contains(&shard) {
-                        top_shards_for_queue_clean.push(shard);
-                    }
-                }
-            } else {
-                anyhow::ensure!(
-                    last_committed_mc_block_id.seqno != mc_block_id.seqno
-                        || last_committed_mc_block_id == *mc_block_id,
-                    "internal messages queue is committed on different masterchain block: \
-                    queue={last_committed_mc_block_id}, applied={mc_block_id}",
-                );
-            }
-        }
-
-        // We should clear uncommitted queue state because it may contain incorrect diffs
-        // that were created before node restart. We will restore queue strictly above last committed state
-        self.clear_uncommitted_state(&top_shards_for_queue_clean)
-    }
 }
 
 impl<V: InternalMessageValue> MessageQueueAdapterStdImpl<V> {
@@ -327,38 +273,6 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         Ok(())
     }
 
-    #[instrument(skip_all, fields(%to_mc_block_id))]
-    fn rollback_commit_pointers(
-        &self,
-        to_mc_block_id: &BlockId,
-        to_top_shard_blocks: Vec<TopBlockIdUpdated>,
-    ) -> Result<Vec<ShardIdent>> {
-        let start_time = std::time::Instant::now();
-
-        let mut to_top_blocks = to_top_shard_blocks;
-        to_top_blocks.push(TopBlockIdUpdated {
-            block: crate::types::TopBlockId {
-                ref_by_mc_seqno: to_mc_block_id.seqno,
-                block_id: *to_mc_block_id,
-            },
-            updated: true,
-        });
-
-        let removed_commit_pointer_shards = self
-            .queue
-            .rollback_commit_pointers(to_mc_block_id, &to_top_blocks)?;
-
-        let elapsed = start_time.elapsed();
-        tracing::info!(target: tracing_targets::MQ_ADAPTER,
-            top_blocks = ?to_top_blocks,
-            ?removed_commit_pointer_shards,
-            elapsed = %humantime::format_duration(elapsed),
-            "rollback_commit_pointers completed"
-        );
-
-        Ok(removed_commit_pointer_shards)
-    }
-
     #[instrument(skip_all)]
     fn clear_uncommitted_state(&self, top_shards: &[ShardIdent]) -> Result<()> {
         let start_time = std::time::Instant::now();
@@ -510,5 +424,178 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         );
 
         Ok((partition_router, diff_statistics))
+    }
+}
+
+#[async_trait]
+pub trait MessageQueueAdapterAsync<V>: MessageQueueAdapter<V>
+where
+    V: InternalMessageValue + Send + Sync,
+{
+    /// Recovers message queue state after restart.
+    async fn recover_after_restart(
+        &self,
+        mc_state: &ShardStateStuff,
+        diff_loader: DiffLoader<'_>,
+    ) -> Result<()>;
+}
+
+#[async_trait]
+impl<V: InternalMessageValue> MessageQueueAdapterAsync<V> for MessageQueueAdapterStdImpl<V> {
+    async fn recover_after_restart(
+        &self,
+        mc_state: &ShardStateStuff,
+        diff_loader: DiffLoader<'_>,
+    ) -> Result<()> {
+        let mc_block_id = mc_state.block_id();
+        assert!(
+            mc_block_id.is_masterchain(),
+            "latest masterchain block id and state must be provided"
+        );
+
+        let mut top_shards_for_queue_clean = mc_state.get_top_shards()?;
+
+        // rollback commit pointers if committed queue is ahead of last applied mc state
+        if let Some(last_committed_mc_block_id) = self.get_last_committed_mc_block_id()? {
+            if last_committed_mc_block_id.seqno > mc_block_id.seqno {
+                // collect top blocks info
+                let top_shard_blocks_info = mc_state
+                    .shards()?
+                    .iter()
+                    .map(|item| {
+                        let (shard_id, shard_descr) = item?;
+                        Ok(TopBlockIdUpdated {
+                            block: TopBlockId {
+                                ref_by_mc_seqno: shard_descr.reg_mc_seqno,
+                                block_id: shard_descr.get_block_id(shard_id),
+                            },
+                            updated: shard_descr.top_sc_block_updated,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let removed_commit_pointer_shards = self
+                    .rollback_commit_pointers(mc_block_id, top_shard_blocks_info, diff_loader)
+                    .await?;
+                for shard in removed_commit_pointer_shards {
+                    if !top_shards_for_queue_clean.contains(&shard) {
+                        top_shards_for_queue_clean.push(shard);
+                    }
+                }
+            } else {
+                anyhow::ensure!(
+                    last_committed_mc_block_id.seqno != mc_block_id.seqno
+                        || last_committed_mc_block_id == *mc_block_id,
+                    "internal messages queue is committed on different masterchain block: \
+                    queue={last_committed_mc_block_id}, applied={mc_block_id}",
+                );
+            }
+        }
+
+        // We should clear uncommitted queue state because it may contain incorrect diffs
+        // that were created before node restart. We will restore queue strictly above last committed state
+        self.clear_uncommitted_state(&top_shards_for_queue_clean)
+    }
+}
+
+impl<V: InternalMessageValue> MessageQueueAdapterStdImpl<V> {
+    #[instrument(skip_all, fields(%to_mc_block_id))]
+    async fn rollback_commit_pointers(
+        &self,
+        to_mc_block_id: &BlockId,
+        to_top_shard_blocks: Vec<TopBlockIdUpdated>,
+        diff_loader: DiffLoader<'_>,
+    ) -> Result<Vec<ShardIdent>> {
+        let start_time = std::time::Instant::now();
+
+        let zerostate_id = self.queue.zerostate_id();
+
+        let mut to_top_blocks = to_top_shard_blocks;
+        to_top_blocks.push(TopBlockIdUpdated {
+            block: crate::types::TopBlockId {
+                ref_by_mc_seqno: to_mc_block_id.seqno,
+                block_id: *to_mc_block_id,
+            },
+            updated: true,
+        });
+
+        let mut clear_commit_state = false;
+
+        // build commit pointers for rollback
+        let mut to_commit_pointers = FastHashMap::default();
+        for item in &to_top_blocks {
+            let block_id = &item.block.block_id;
+
+            // try get diff max message
+            let diff_max_message = if let Some(diff) =
+                self.get_diff_info(&block_id.shard, block_id.seqno, DiffZone::Both)?
+            {
+                Some(diff.max_message)
+            } else {
+                diff_loader
+                    .load_diff(block_id)
+                    .await?
+                    .map(|d| d.diff().max_message)
+            };
+
+            // SAFETY: Queue is empty at master zerostate, while zerostate shard
+            // entries only remove their own commit pointers.
+            if diff_max_message.is_none() && item.block.ref_by_mc_seqno == zerostate_id.seqno {
+                if !block_id.is_masterchain() {
+                    tracing::warn!(
+                        target: tracing_targets::MQ,
+                        "Dropping commit pointer after missing zerostate shard diff for {} \
+                        with mc ref {} (zerostate {}) during rollback",
+                        block_id.as_short_id(),
+                        item.block.ref_by_mc_seqno,
+                        zerostate_id.seqno,
+                    );
+                    continue;
+                }
+                tracing::warn!(
+                    target: tracing_targets::MQ,
+                    "Clearing all commit pointers after missing diff for {} \
+                    with mc ref {} (zerostate {}) during rollback",
+                    block_id.as_short_id(),
+                    item.block.ref_by_mc_seqno,
+                    zerostate_id.seqno,
+                );
+                clear_commit_state = true;
+                break;
+            }
+
+            if to_commit_pointers
+                .insert(block_id.shard, (diff_max_message, block_id.seqno))
+                .is_some()
+            {
+                bail!(
+                    "Duplicate shard in rollback_commit_pointers: {}",
+                    block_id.shard
+                );
+            }
+        }
+
+        // fully clear commit state when unable to rollback
+        if clear_commit_state {
+            let removed_commit_pointer_shards = self.queue.clear_commit_pointers()?;
+            tracing::debug!(target: tracing_targets::MQ,
+                ?removed_commit_pointer_shards,
+                "rollback_commit_pointers: clear_commit_pointers",
+            );
+            return Ok(removed_commit_pointer_shards);
+        }
+
+        let removed_commit_pointer_shards = self
+            .queue
+            .rollback_commit_pointers(to_mc_block_id, to_commit_pointers)?;
+
+        let elapsed = start_time.elapsed();
+        tracing::info!(target: tracing_targets::MQ_ADAPTER,
+            top_blocks = ?to_top_blocks,
+            ?removed_commit_pointer_shards,
+            elapsed = %humantime::format_duration(elapsed),
+            "rollback_commit_pointers: completed"
+        );
+
+        Ok(removed_commit_pointer_shards)
     }
 }

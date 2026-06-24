@@ -14,8 +14,10 @@ use tycho_collator::manager::CollationManager;
 use tycho_collator::mempool::{
     MempoolAdapter, MempoolAdapterSingleNodeImpl, MempoolAdapterStdImpl,
 };
-use tycho_collator::queue_adapter::{MessageQueueAdapter, MessageQueueAdapterStdImpl};
-use tycho_collator::state_node::{CollatorSyncContext, StateNodeAdapter, StateNodeAdapterStdImpl};
+use tycho_collator::queue_adapter::{MessageQueueAdapterAsync, MessageQueueAdapterStdImpl};
+use tycho_collator::state_node::{
+    CollatorSyncContext, DiffLoader, StateNodeAdapter, StateNodeAdapterStdImpl,
+};
 use tycho_collator::types::CollatorConfig;
 use tycho_collator::validator::{
     ValidatorNetworkContext, ValidatorStdImpl, ValidatorStdImplConfig,
@@ -216,7 +218,15 @@ impl Node {
         };
         let queue = queue_factory.create()?;
         let message_queue_adapter = MessageQueueAdapterStdImpl::new(queue);
-        message_queue_adapter.recover_after_restart(&mc_state)?;
+        message_queue_adapter
+            .recover_after_restart(
+                &mc_state,
+                DiffLoader::new(
+                    base.core_storage.block_handle_storage(),
+                    base.core_storage.block_storage(),
+                ),
+            )
+            .await?;
 
         let validator = ValidatorStdImpl::new(
             ValidatorNetworkContext {

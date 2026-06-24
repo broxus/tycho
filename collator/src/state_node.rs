@@ -11,8 +11,8 @@ use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_core::global_config::ZerostateId;
 use tycho_core::storage::{
-    BlockHandle, BlockInfoForApply, CoreStorage, LoadStateHint, MaybeExistingHandle, NewBlockMeta,
-    StoreStateHint,
+    BlockHandle, BlockHandleStorage, BlockInfoForApply, BlockStorage, CoreStorage, LoadStateHint,
+    MaybeExistingHandle, NewBlockMeta, StoreStateHint,
 };
 use tycho_network::PeerId;
 use tycho_types::boc::BocRepr;
@@ -521,15 +521,12 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
 
         tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Load queue diff: {}", block_id.as_short_id());
 
-        let handle_storage = self.storage.block_handle_storage();
-        let block_storage = self.storage.block_storage();
-
-        match handle_storage.load_handle(block_id) {
-            Some(handle) if handle.has_queue_diff() => {
-                block_storage.load_queue_diff(&handle).await.map(Some)
-            }
-            _ => Ok(None),
-        }
+        DiffLoader::new(
+            self.storage.block_handle_storage(),
+            self.storage.block_storage(),
+        )
+        .load_diff(block_id)
+        .await
     }
 
     fn set_sync_context(&self, sync_context: CollatorSyncContext) {
@@ -654,6 +651,29 @@ impl StateNodeAdapterStdImpl {
         );
 
         Ok(())
+    }
+}
+
+pub struct DiffLoader<'a> {
+    handle_storage: &'a BlockHandleStorage,
+    block_storage: &'a BlockStorage,
+}
+
+impl<'a> DiffLoader<'a> {
+    pub fn new(handle_storage: &'a BlockHandleStorage, block_storage: &'a BlockStorage) -> Self {
+        Self {
+            handle_storage,
+            block_storage,
+        }
+    }
+
+    pub async fn load_diff(&self, block_id: &BlockId) -> Result<Option<QueueDiffStuff>> {
+        match self.handle_storage.load_handle(block_id) {
+            Some(handle) if handle.has_queue_diff() => {
+                self.block_storage.load_queue_diff(&handle).await.map(Some)
+            }
+            _ => Ok(None),
+        }
     }
 }
 
