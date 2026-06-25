@@ -1,5 +1,7 @@
 use anyhow::Result;
+use tycho_block_util::queue::QueuePartitionIdx;
 use tycho_types::models::BlockId;
+use tycho_util::FastHashSet;
 use tycho_util::metrics::HistogramGuard;
 
 use super::CollationManager;
@@ -75,6 +77,9 @@ where
                 let to_blocks_keys = master_block.get_top_blocks_keys()?;
                 self.blocks_cache.set_gc_to_boundary(&to_blocks_keys);
 
+                // check if mc block was not sent to sync
+                let mut mc_block_was_not_sent_to_sync = true;
+
                 // send to sync only if was not received from bc
                 if matches!(&master_block.data, BlockCacheEntryData::Collated {
                     received_after_collation: false,
@@ -83,10 +88,11 @@ where
                     let histogram =
                         HistogramGuard::begin("tycho_collator_send_blocks_to_sync_time");
 
-                    self.send_block_to_sync(master_block.data)?;
+                    mc_block_was_not_sent_to_sync =
+                        !self.send_block_to_sync(master_block.data, Some(partitions.clone()))?;
 
                     for shard_block in shard_blocks {
-                        self.send_block_to_sync(shard_block.data)?;
+                        self.send_block_to_sync(shard_block.data, None)?;
                     }
 
                     sync_elapsed = histogram.finish();
@@ -107,15 +113,21 @@ where
                     top_processed_to_anchor_to_notify = master_block.top_processed_to_anchor;
                 }
 
-                let _histogram =
-                    HistogramGuard::begin("tycho_collator_send_blocks_to_sync_commit_diffs_time");
+                // if mc block was not sent to sync by any reason then
+                // we will not receive OwnBlockApplied event,
+                // so we have to commit messages queue right now
+                if mc_block_was_not_sent_to_sync {
+                    let _histogram = HistogramGuard::begin(
+                        "tycho_collator_send_blocks_to_sync_commit_diffs_time",
+                    );
 
-                Self::commit_block_queue_diff(
-                    self.mq_adapter.clone(),
-                    &master_block.block_id,
-                    &master_block.top_shard_blocks_info,
-                    &partitions,
-                )?;
+                    Self::commit_block_queue_diff(
+                        self.mq_adapter.clone(),
+                        &master_block.block_id,
+                        &master_block.top_shard_blocks_info,
+                        &partitions,
+                    )?;
+                }
             }
             McBlockSubgraphExtract::AlreadyExtracted => {
                 tracing::debug!(
@@ -145,7 +157,11 @@ where
         Ok(collator_tasks.unwrap_or_default())
     }
 
-    fn send_block_to_sync(&self, data: BlockCacheEntryData) -> Result<()> {
+    fn send_block_to_sync(
+        &self,
+        data: BlockCacheEntryData,
+        queue_partitions: Option<FastHashSet<QueuePartitionIdx>>,
+    ) -> Result<bool> {
         let candidate_stuff = match data {
             BlockCacheEntryData::Collated {
                 candidate_stuff,
@@ -153,17 +169,19 @@ where
                 received_after_collation: false,
                 ..
             } if status != CandidateStatus::Synced => candidate_stuff,
-            _ => return Ok(()),
+            // do not try to apply block because it is already applied,
+            // more likely we have synced to some next applied mc block
+            _ => return Ok(false),
         };
 
         let block_id = *candidate_stuff.candidate.block.id();
         self.state_node_adapter
-            .accept_block(candidate_stuff.into_block_for_sync())?;
+            .accept_block(candidate_stuff.into_block_for_sync(queue_partitions))?;
         tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
             "Block was successfully sent to sync ({})",
             block_id,
         );
-        Ok(())
+        Ok(true)
     }
 }

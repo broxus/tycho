@@ -37,8 +37,8 @@ use crate::types::processed_upto::{
 };
 use crate::types::{
     BlockCollationResult, BlockIdExt, CollationSessionInfo, CollatorConfig, DebugDisplayOpt,
-    DisplayAsShortId, McData, ShardDescriptionShortExt, ShardHashesExt, TopBlockId,
-    TopBlockIdUpdated,
+    DisplayAsShortId, McData, ShardDescriptionShortExt, ShardHashesExt, ShardHashesReadExt,
+    TopBlockId, TopBlockIdUpdated,
 };
 use crate::utils::block::detect_top_processed_to_anchor;
 use crate::utils::vset_cache::ValidatorSetCache;
@@ -229,9 +229,21 @@ where
                                 break;
                             }
                             Some(event) => match event {
-                                StateEvent::OwnBlockApplied { state, processed_upto } => {
+                                StateEvent::OwnBlockApplied { state, processed_upto, queue_partitions } => {
                                     // spawn validation cancellation
                                     mgr.schedule_cancel_validation_sessions_until_block(state.clone());
+
+                                    // commit messages queue
+                                    if state.block_id().is_masterchain() {
+                                        let _histogram =
+                                            HistogramGuard::begin("tycho_collator_send_blocks_to_sync_commit_diffs_time");
+                                        Self::commit_block_queue_diff(
+                                            mgr.mq_adapter.clone(),
+                                            state.block_id(),
+                                            &state.shards()?.top_shard_blocks_info()?,
+                                            &queue_partitions.expect("should be Some for master block"),
+                                        )?;
+                                    }
 
                                     // handle applied block in mempool
                                     mgr.detect_top_processed_to_anchor_and_notify_mempool(

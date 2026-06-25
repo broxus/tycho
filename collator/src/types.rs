@@ -13,8 +13,8 @@ use tycho_crypto::ed25519::KeyPair;
 use tycho_network::PeerId;
 use tycho_types::models::*;
 use tycho_types::prelude::*;
-use tycho_util::FastHashMap;
 use tycho_util::config::PartialConfig;
+use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::collator::ForceMasterCollation;
 use crate::mempool::MempoolAnchorId;
@@ -356,6 +356,10 @@ pub struct BlockStuffForSync {
     pub top_shard_blocks_ids: Vec<BlockId>,
 
     pub consensus_info: ConsensusInfo,
+
+    /// Actual queue partitions that exist on this block.
+    /// Will be `None` for shard blocks - not required.
+    pub queue_partitions: Option<FastHashSet<QueuePartitionIdx>>,
 }
 
 /// (`ShardIdent`, seqno, subset `short_hash`)
@@ -692,6 +696,27 @@ where
             res.push((shard_id, descr.into()));
         }
         Ok(res)
+    }
+}
+
+pub trait ShardHashesReadExt {
+    /// Read top shard blocks info with updated flag.
+    fn top_shard_blocks_info(&self) -> Result<Vec<TopBlockIdUpdated>>;
+}
+impl ShardHashesReadExt for ShardHashes {
+    fn top_shard_blocks_info(&self) -> Result<Vec<TopBlockIdUpdated>> {
+        let mut top_shard_blocks_info = vec![];
+        for item in self.iter() {
+            let (shard_id, shard_descr) = item?;
+            top_shard_blocks_info.push(TopBlockIdUpdated {
+                block: TopBlockId {
+                    ref_by_mc_seqno: shard_descr.reg_mc_seqno,
+                    block_id: shard_descr.get_block_id(shard_id),
+                },
+                updated: shard_descr.top_sc_block_updated,
+            });
+        }
+        Ok(top_shard_blocks_info)
     }
 }
 
