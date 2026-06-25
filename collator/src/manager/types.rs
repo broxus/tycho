@@ -20,8 +20,8 @@ use crate::types::processed_upto::{
     BlockSeqno, ProcessedUptoInfoExtension, ProcessedUptoInfoStuff,
 };
 use crate::types::{
-    ArcSignature, BlockCandidate, BlockStuffForSync, DebugDisplayOpt, ShardDescriptionShortExt,
-    ShardHashesExt, TopBlockId, TopBlockIdUpdated,
+    ArcSignature, BlockCandidate, BlockStuffForSync, DebugDisplayOpt, ShardHashesExt,
+    ShardHashesReadExt, TopBlockIdUpdated,
 };
 use crate::utils::block::detect_top_processed_to_anchor;
 use crate::validator::ValidationStatus;
@@ -173,7 +173,10 @@ pub(super) struct BlockCandidateStuff {
 }
 
 impl BlockCandidateStuff {
-    pub fn into_block_for_sync(self) -> Arc<BlockStuffForSync> {
+    pub fn into_block_for_sync(
+        self,
+        queue_partitions: Option<FastHashSet<QueuePartitionIdx>>,
+    ) -> Arc<BlockStuffForSync> {
         let BlockCandidateStuff {
             candidate,
             signatures,
@@ -199,6 +202,7 @@ impl BlockCandidateStuff {
             prev_blocks_ids,
             top_shard_blocks_ids,
             consensus_info,
+            queue_partitions,
         })
     }
 }
@@ -363,16 +367,7 @@ impl BlockCacheEntry {
         let mut top_shard_blocks_info = vec![];
         let mut top_processed_to_anchor = None;
         let cached_state = if block_id.is_masterchain() {
-            for item in state.shards()?.iter() {
-                let (shard_id, shard_descr) = item?;
-                top_shard_blocks_info.push(TopBlockIdUpdated {
-                    block: TopBlockId {
-                        ref_by_mc_seqno: shard_descr.reg_mc_seqno,
-                        block_id: shard_descr.get_block_id(shard_id),
-                    },
-                    updated: shard_descr.top_sc_block_updated,
-                });
-            }
+            top_shard_blocks_info = state.shards()?.top_shard_blocks_info()?;
             top_processed_to_anchor = Some(detect_top_processed_to_anchor(
                 state.shards()?.as_vec()?.iter().map(|(_, d)| *d),
                 state

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -7,7 +8,8 @@ use tycho_block_util::block::{BlockStuff, BlockStuffAug};
 use tycho_block_util::queue::{QueueDiffStuff, QueueDiffStuffAug};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_collator::state_node::{
-    CollatorSyncContext, StateNodeAdapter, StateNodeAdapterStdImpl, StateNodeEventListener,
+    AcceptedBlockContext, CollatorSyncContext, StateNodeAdapter, StateNodeAdapterStdImpl,
+    StateNodeEventListener,
 };
 use tycho_collator::test_utils::{prepare_test_storage, try_init_test_tracing};
 use tycho_collator::types::BlockStuffForSync;
@@ -28,15 +30,11 @@ struct MockEventListener {
 
 #[async_trait]
 impl StateNodeEventListener for MockEventListener {
-    async fn on_block_accepted(&self, _: &BlockId, _block_id: &ShardStateStuff) -> Result<()> {
+    async fn on_block_accepted(&self, _ctx: AcceptedBlockContext) -> Result<()> {
         self.accepted_count.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
-    async fn on_block_accepted_external(
-        &self,
-        _: &BlockId,
-        _state: &ShardStateStuff,
-    ) -> Result<()> {
+    async fn on_block_accepted_external(&self, _ctx: AcceptedBlockContext) -> Result<()> {
         Ok(())
     }
 }
@@ -75,6 +73,7 @@ async fn test_add_and_get_block() {
         prev_blocks_ids: Vec::new(),
         top_shard_blocks_ids: Vec::new(),
         consensus_info: Default::default(),
+        queue_partitions: None,
     });
     adapter.accept_block(block).unwrap();
 
@@ -158,6 +157,7 @@ async fn test_add_and_get_next_block() {
         prev_blocks_ids: vec![*prev_block_id],
         top_shard_blocks_ids: Vec::new(),
         consensus_info: Default::default(),
+        queue_partitions: Some(HashSet::from_iter([0.into(), 1.into()])),
     });
     adapter.accept_block(block).unwrap();
 
@@ -200,6 +200,7 @@ async fn test_add_read_handle_1000_blocks_parallel() {
     ));
 
     let empty_block = get_empty_block();
+    let empty_block_root_hash = empty_block.id().root_hash;
 
     // Task 1: Adding 1000 blocks
     let add_blocks = {
@@ -209,7 +210,7 @@ async fn test_add_read_handle_1000_blocks_parallel() {
                 let block_id = BlockId {
                     shard: ShardIdent::new_full(0),
                     seqno: i,
-                    root_hash: empty_block.id().root_hash,
+                    root_hash: empty_block_root_hash,
                     file_hash: Default::default(),
                 };
                 let block_stuff_aug = BlockStuffAug::loaded(BlockStuff::from_block_and_root(
@@ -230,6 +231,7 @@ async fn test_add_read_handle_1000_blocks_parallel() {
                     prev_blocks_ids: Vec::new(),
                     top_shard_blocks_ids: Vec::new(),
                     consensus_info: Default::default(),
+                    queue_partitions: None,
                 });
                 let accept_result = adapter.accept_block(block);
                 assert!(accept_result.is_ok(), "Block {i} should be accepted");
@@ -247,7 +249,7 @@ async fn test_add_read_handle_1000_blocks_parallel() {
                 let block_id = BlockId {
                     shard: ShardIdent::new_full(0),
                     seqno: i,
-                    root_hash: Default::default(),
+                    root_hash: empty_block_root_hash,
                     file_hash: Default::default(),
                 };
                 let next_block = adapter.wait_for_block(&block_id).await;

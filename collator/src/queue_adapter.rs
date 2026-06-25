@@ -293,7 +293,7 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         Ok(())
     }
 
-    #[instrument(skip_all, fields(%shard_ident, seqno, ?zone))]
+    #[instrument(skip_all, fields(%shard_ident, block_seqno = seqno, ?zone))]
     fn get_diff_info(
         &self,
         shard_ident: &ShardIdent,

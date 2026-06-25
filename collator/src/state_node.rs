@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use tokio::sync::{broadcast, watch};
 use tycho_block_util::block::{BlockProofStuff, BlockStuff, BlockStuffAug};
-use tycho_block_util::queue::QueueDiffStuff;
+use tycho_block_util::queue::{QueueDiffStuff, QueuePartitionIdx};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_core::global_config::ZerostateId;
 use tycho_core::storage::{
@@ -22,7 +22,7 @@ use tycho_types::prelude::*;
 use tycho_util::mem::Reclaimer;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
-use tycho_util::{FastDashMap, FastHashMap};
+use tycho_util::{FastDashMap, FastHashMap, FastHashSet};
 
 use crate::tracing_targets;
 use crate::types::processed_upto::BlockSeqno;
@@ -48,17 +48,18 @@ where
     }
 }
 
+pub struct AcceptedBlockContext {
+    pub mc_block_id: BlockId,
+    pub state: ShardStateStuff,
+    pub queue_partitions: Option<FastHashSet<QueuePartitionIdx>>,
+}
+
 #[async_trait]
 pub trait StateNodeEventListener: Send + Sync {
     /// When our collated block was accepted and applied
-    async fn on_block_accepted(&self, mc_block_id: &BlockId, state: &ShardStateStuff)
-    -> Result<()>;
+    async fn on_block_accepted(&self, ctx: AcceptedBlockContext) -> Result<()>;
     /// When new block was received and applied from blockchain
-    async fn on_block_accepted_external(
-        &self,
-        mc_block_id: &BlockId,
-        state: &ShardStateStuff,
-    ) -> Result<()>;
+    async fn on_block_accepted_external(&self, ctx: AcceptedBlockContext) -> Result<()>;
 }
 
 #[async_trait]
@@ -426,10 +427,11 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         let shard = block_id.shard;
         let seqno = block_id.seqno;
 
-        {
-            let has_block = if let Some(shard_blocks) = self.blocks.get(&shard) {
-                let has_block = shard_blocks.contains_key(&seqno);
+        let mut has_own_block = false;
+        let mut queue_partitions = None;
 
+        {
+            if let Some(shard_blocks) = self.blocks.get(&shard) {
                 if shard.is_masterchain() {
                     let prev_mc_block = shard_blocks
                         .range(..=seqno)
@@ -444,33 +446,41 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
                     }
                 }
 
-                has_block
-            } else {
-                false
-            };
-
-            self.delayed_state_notifier
-                .send_or_delay(
-                    self.listener.clone(),
-                    mc_block_id,
-                    state.clone(),
-                    !has_block,
-                    sync_context,
-                    |sync_ctx| {
-                        let check = sync_ctx == CollatorSyncContext::Recent;
-                        if !check {
-                            tracing::debug!(
-                                target: tracing_targets::STATE_NODE_ADAPTER,
-                                block_id = %state.block_id().as_short_id(),
-                                sync_ctx = ?sync_context,
-                                "handle_state: will delay state",
-                            );
-                        }
-                        check
-                    },
-                )
-                .await?;
+                if let Some(own_block) = shard_blocks.get(&seqno) {
+                    anyhow::ensure!(
+                        state.block_id() == own_block.block_stuff_aug.id(),
+                        "if block exists in cache it was successfully validated, so we cannot handle any mismatched block"
+                    );
+                    has_own_block = true;
+                    queue_partitions = own_block.queue_partitions.clone();
+                }
+            }
         }
+
+        self.delayed_state_notifier
+            .send_or_delay(
+                self.listener.clone(),
+                DelayedStateContext {
+                    mc_block_id: *mc_block_id,
+                    state: state.clone(),
+                    queue_partitions,
+                    is_external: !has_own_block,
+                    sync_context,
+                },
+                |sync_ctx| {
+                    let check = sync_ctx == CollatorSyncContext::Recent;
+                    if !check {
+                        tracing::debug!(
+                            target: tracing_targets::STATE_NODE_ADAPTER,
+                            block_id = %state.block_id().as_short_id(),
+                            sync_ctx = ?sync_context,
+                            "handle_state: will delay state",
+                        );
+                    }
+                    check
+                },
+            )
+            .await?;
 
         let mut to_drop = Vec::new();
         for (shard, seqno) in &to_split {
@@ -670,6 +680,7 @@ struct ShardBlockData {
 struct DelayedStateContext {
     pub mc_block_id: BlockId,
     pub state: ShardStateStuff,
+    pub queue_partitions: Option<FastHashSet<QueuePartitionIdx>>,
     pub is_external: bool,
     pub sync_context: CollatorSyncContext,
 }
@@ -704,22 +715,12 @@ impl DelayedStateNotifier {
     pub async fn send_or_delay<F>(
         &self,
         listener: Arc<dyn StateNodeEventListener>,
-        mc_block_id: &BlockId,
-        state: ShardStateStuff,
-        is_external: bool,
-        sync_context: CollatorSyncContext,
+        state_cx: DelayedStateContext,
         check_should_send: F,
     ) -> Result<()>
     where
         F: Fn(CollatorSyncContext) -> bool,
     {
-        let state_cx = DelayedStateContext {
-            mc_block_id: *mc_block_id,
-            state,
-            is_external,
-            sync_context,
-        };
-
         let state_cx = {
             let mut guard = self.inner.lock();
             if check_should_send(state_cx.sync_context) {
@@ -743,6 +744,7 @@ impl DelayedStateNotifier {
         let Some(DelayedStateContext {
             mc_block_id,
             state,
+            queue_partitions,
             is_external,
             ..
         }) = state_cx
@@ -753,11 +755,21 @@ impl DelayedStateNotifier {
         if is_external {
             tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "handle_state: handled external: {}", state.block_id());
             listener
-                .on_block_accepted_external(&mc_block_id, &state)
+                .on_block_accepted_external(AcceptedBlockContext {
+                    mc_block_id,
+                    state,
+                    queue_partitions,
+                })
                 .await
         } else {
             tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "handle_state: handled own: {}", state.block_id());
-            listener.on_block_accepted(&mc_block_id, &state).await
+            listener
+                .on_block_accepted(AcceptedBlockContext {
+                    mc_block_id,
+                    state,
+                    queue_partitions,
+                })
+                .await
         }
     }
 }
