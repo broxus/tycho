@@ -195,6 +195,12 @@ fun validateBlocksBatch(batch: slice, params: ValidateBlocksBatchParams): int? {
 
     val nextSeqno = startSeqno + params.batchSize;
 
+    val start_anchor = batch.loadUint(32);
+    val end_anchor = batch.loadUint(32);
+    if (end_anchor < start_anchor) {
+        return null;
+    }
+
     batch.skipBits(params.batchSize);
     val history = batch.loadRef() as dict;
     if (!batch.isEmpty()) {
@@ -211,7 +217,10 @@ fun validateBlocksBatch(batch: slice, params: ValidateBlocksBatchParams): int? {
                 return null;
             }
 
-            val (csBits, csRefs) = cs!.remainingBitsAndRefsCount();
+            var cs = cs!;
+            cs.skipBits(16);
+
+            val (csBits, csRefs) = cs.remainingBitsAndRefsCount();
             if (csBits != params.batchSize * 2 || csRefs != 0) {
                 return null;
             }
