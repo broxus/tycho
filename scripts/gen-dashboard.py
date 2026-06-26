@@ -1,38 +1,39 @@
 #!/usr/bin/env python3
 import sys
 from dataclasses import dataclass
-from typing import Union, List, Literal
+from typing import List, Literal, Union
 
 from dashboard_builder import (
-    Layout,
-    timeseries_panel,
-    target,
-    template,
+    DATASOURCE,
     Expr,
+    Layout,
     Stat,
-    expr_sum_rate,
-    expr_sum_increase,
     expr_aggr_func,
     expr_avg,
-    heatmap_panel,
-    yaxis,
-    expr_operator,
     expr_max,
-    DATASOURCE,
+    expr_operator,
+    expr_sum_increase,
+    expr_sum_rate,
+    heatmap_panel,
+    target,
+    template,
+    timeseries_panel,
+    yaxis,
 )
-from grafanalib import formatunits as UNITS, _gen
+from grafanalib import _gen
+from grafanalib import formatunits as UNITS
 from grafanalib.core import (
-    Dashboard,
-    Templating,
-    Template,
-    Annotations,
-    RowPanel,
-    Panel,
-    HeatmapColor,
-    Tooltip,
     GRAPH_TOOLTIP_MODE_SHARED_CROSSHAIR,
-    Target,
+    Annotations,
+    Dashboard,
+    HeatmapColor,
+    Panel,
+    RowPanel,
     Table,
+    Target,
+    Template,
+    Templating,
+    Tooltip,
 )
 
 SHORT_FORMAT = "short"
@@ -1112,35 +1113,35 @@ def storage() -> RowPanel:
             title="load_cell path ratio",
             targets=[
                 target(
-                    f'100 * ({nursery_rate("tycho_storage_load_cell_cache_hit_total")}) / clamp_min({nursery_rate("tycho_storage_load_cell_total")}, 1e-9)',
+                    f"100 * ({nursery_rate('tycho_storage_load_cell_cache_hit_total')}) / clamp_min({nursery_rate('tycho_storage_load_cell_total')}, 1e-9)",
                     legend_format="{{instance}} tree cache hit",
                 ),
                 target(
-                    f'100 * ({nursery_rate("tycho_storage_load_cell_raw_cache_hit_total")}) / clamp_min({nursery_rate("tycho_storage_load_cell_total")}, 1e-9)',
+                    f"100 * ({nursery_rate('tycho_storage_load_cell_raw_cache_hit_total')}) / clamp_min({nursery_rate('tycho_storage_load_cell_total')}, 1e-9)",
                     legend_format="{{instance}} raw cache hit",
                 ),
                 target(
-                    f'100 * ({nursery_rate("tycho_storage_load_cell_raw_cache_miss_total")}) / clamp_min({nursery_rate("tycho_storage_load_cell_total")}, 1e-9)',
+                    f"100 * ({nursery_rate('tycho_storage_load_cell_raw_cache_miss_total')}) / clamp_min({nursery_rate('tycho_storage_load_cell_total')}, 1e-9)",
                     legend_format="{{instance}} raw cache miss",
                 ),
                 target(
-                    f'100 * ({nursery_rate("tycho_storage_load_cell_nursery_checked_total")}) / clamp_min({nursery_rate("tycho_storage_load_cell_total")}, 1e-9)',
+                    f"100 * ({nursery_rate('tycho_storage_load_cell_nursery_checked_total')}) / clamp_min({nursery_rate('tycho_storage_load_cell_total')}, 1e-9)",
                     legend_format="{{instance}} nursery checked",
                 ),
                 target(
-                    f'100 * ({nursery_rate("tycho_storage_load_cell_nursery_hit_total")}) / clamp_min({nursery_rate("tycho_storage_load_cell_total")}, 1e-9)',
+                    f"100 * ({nursery_rate('tycho_storage_load_cell_nursery_hit_total')}) / clamp_min({nursery_rate('tycho_storage_load_cell_total')}, 1e-9)",
                     legend_format="{{instance}} nursery hit",
                 ),
                 target(
-                    f'100 * clamp_min(({nursery_rate("tycho_storage_load_cell_nursery_checked_total")}) - ({nursery_rate("tycho_storage_load_cell_nursery_hit_total")}), 0) / clamp_min({nursery_rate("tycho_storage_load_cell_total")}, 1e-9)',
+                    f"100 * clamp_min(({nursery_rate('tycho_storage_load_cell_nursery_checked_total')}) - ({nursery_rate('tycho_storage_load_cell_nursery_hit_total')}), 0) / clamp_min({nursery_rate('tycho_storage_load_cell_total')}, 1e-9)",
                     legend_format="{{instance}} nursery miss",
                 ),
                 target(
-                    f'100 * ({nursery_rate("tycho_storage_load_cell_raw_hit_total")}) / clamp_min({nursery_rate("tycho_storage_load_cell_total")}, 1e-9)',
+                    f"100 * ({nursery_rate('tycho_storage_load_cell_raw_hit_total')}) / clamp_min({nursery_rate('tycho_storage_load_cell_total')}, 1e-9)",
                     legend_format="{{instance}} raw fallback hit",
                 ),
                 target(
-                    f'100 * ({nursery_rate("tycho_storage_load_cell_raw_miss_total")}) / clamp_min({nursery_rate("tycho_storage_load_cell_total")}, 1e-9)',
+                    f"100 * ({nursery_rate('tycho_storage_load_cell_raw_miss_total')}) / clamp_min({nursery_rate('tycho_storage_load_cell_total')}, 1e-9)",
                     legend_format="{{instance}} raw miss",
                 ),
             ],
@@ -3075,21 +3076,6 @@ def validator() -> RowPanel:
         create_counter_panel(
             "tycho_validator_invalid_signatures_cached_total",
             "Number of cached invalid signatures",
-        ),
-        create_heatmap_panel(
-            "tycho_validator_collector_get_stats_for_blocks_time",
-            "Collector: get stats for blocks",
-        ),
-        create_heatmap_panel(
-            "tycho_validator_collector_truncate_range_time", "Collector: truncate range"
-        ),
-        create_gauge_panel(
-            "tycho_validator_collector_valid_sigs_total_count",
-            "Collector: total valid signatures in stats",
-        ),
-        create_gauge_panel(
-            "tycho_validator_collector_invalid_sigs_total_count",
-            "Collector: total invalid signatures in stats",
         ),
     ]
     return create_row("Validator", metrics)
