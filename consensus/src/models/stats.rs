@@ -81,7 +81,6 @@ impl MempoolPeerStats {
 pub struct MempoolPeerCounters {
     pub last_round: u32,
     pub was_leader: CounterU16,
-    pub was_not_leader: CounterU16,
     pub skipped_rounds: CounterU16,
     pub valid_points: CounterU16,
     pub points_proved: CounterU16,
@@ -96,7 +95,6 @@ impl MempoolPeerCounters {
     fn merge(&mut self, other: &Self) {
         self.last_round = self.last_round.max(other.last_round);
         self.was_leader += other.was_leader;
-        self.was_not_leader += other.was_not_leader;
         self.skipped_rounds += other.skipped_rounds;
         self.valid_points += other.valid_points;
         self.points_proved += other.points_proved;

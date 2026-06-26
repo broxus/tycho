@@ -7,9 +7,9 @@ use tycho_crypto::ed25519::{KeyPair, SecretKey};
 use tycho_network::{OverlayId, PeerId};
 use tycho_types::models::{ConsensusConfig, GenesisInfo};
 
-use crate::dag::AnchorStage;
+use crate::dag::ProofLeader;
 use crate::engine::ConsensusConfigExt;
-use crate::models::{AnchorLink, ChainedAnchorProof, Point, PointData, Round, UnixTime};
+use crate::models::{Point, PointData, PointRole, Round, UnixTime};
 
 // replace with `ArcSwapOption` + copy on get() if need to change in runtime
 static NODE_CONFIG: OnceLock<MempoolNodeConfig> = OnceLock::new();
@@ -61,9 +61,7 @@ impl MempoolMergedConfig {
                 includes: Default::default(),
                 witness: Default::default(),
                 evidence: Default::default(),
-                chained_anchor_proof: ChainedAnchorProof::Inapplicable,
-                anchor_trigger: AnchorLink::ToSelf,
-                anchor_proof: AnchorLink::ToSelf,
+                role: PointRole::Genesis,
                 anchor_time: millis,
             },
             &self.conf,
@@ -122,7 +120,7 @@ impl MempoolConfigBuilder {
             .as_ref()
             .context("mempool consensus config is not known")?;
 
-        let genesis_round = AnchorStage::align_genesis(genesis_info.start_round);
+        let genesis_round = ProofLeader::align_genesis(genesis_info.start_round);
 
         let mempool_config = MempoolConfig {
             consensus: consensus.clone(),
@@ -138,6 +136,7 @@ impl MempoolConfigBuilder {
         hasher.update(&(genesis_info.genesis_millis as u128).to_be_bytes());
         hasher.update(&(consensus.clock_skew_millis.get() as u128).to_be_bytes());
         hasher.update(&(consensus.payload_batch_bytes.get() as u128).to_be_bytes());
+        hasher.update(&(consensus.sticky_anchors as u128).to_be_bytes());
         hasher.update(&(consensus.commit_history_rounds.get() as u128).to_be_bytes());
         hasher.update(&(consensus.deduplicate_rounds as u128).to_be_bytes());
         hasher.update(&(consensus.max_consensus_lag_rounds.get() as u128).to_be_bytes());

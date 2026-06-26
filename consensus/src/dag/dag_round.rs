@@ -1,4 +1,4 @@
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, OnceLock, Weak};
 
 use tokio::sync::mpsc;
 use tycho_crypto::ed25519::KeyPair;
@@ -6,14 +6,14 @@ use tycho_network::PeerId;
 use tycho_util::FastDashMap;
 
 use crate::dag::IllFormedReason;
-use crate::dag::anchor_stage::AnchorStage;
 use crate::dag::dag_location::DagLocation;
 use crate::dag::dag_point_future::{DagPointFuture, WeakDagPointFuture};
+use crate::dag::proof_leader::ProofLeader;
 use crate::dag::threshold::Threshold;
 use crate::effects::{AltFmt, AltFormat, Ctx, RoundCtx, ValidateCtx};
 use crate::engine::{MempoolConfig, NodeConfig};
 use crate::intercom::{Downloader, PeerSchedule};
-use crate::models::{AnchorStageRole, Digest, PeerCount, Point, PointRestore, Round, WeakCert};
+use crate::models::{Digest, PeerCount, Point, PointRestore, Round, WeakCert};
 use crate::storage::MempoolStore;
 
 #[derive(Clone)]
@@ -31,7 +31,8 @@ pub struct DagRound(Arc<DagRoundInner>);
 pub struct DagRoundInner {
     round: Round,
     peer_count: PeerCount,
-    anchor_stage: Option<AnchorStage>,
+    proof_leader: Option<PeerId>,
+    used_anchor_proof: OnceLock<PeerId>,
     locations: FastDashMap<PeerId, DagLocation>,
     threshold: Threshold,
     triggers_tx: mpsc::UnboundedSender<WeakDagPointFuture>,
@@ -95,6 +96,12 @@ impl DagRound {
                 round.0
             )
         };
+        let used_anchor_proof = OnceLock::new();
+        if round == conf.genesis_round {
+            assert_eq!(peers.len(), 1, "genesis round must have one peer");
+            let genesis_author = peers.iter().next().expect("genesis author");
+            used_anchor_proof.set(*genesis_author).ok();
+        }
 
         let prevs = match prev.upgrade() {
             None => {
@@ -116,7 +123,8 @@ impl DagRound {
         let this = Self(Arc::new(DagRoundInner {
             round,
             peer_count,
-            anchor_stage: AnchorStage::of(round, peer_schedule, conf),
+            proof_leader: ProofLeader::of(round, peer_schedule, conf),
+            used_anchor_proof,
             locations: FastDashMap::with_capacity_and_hasher(peers.len(), Default::default()),
             threshold: Threshold::new(round, peer_count, conf),
             triggers_tx: triggers_tx.clone(),
@@ -138,16 +146,12 @@ impl DagRound {
         self.0.peer_count
     }
 
-    pub fn anchor_stage(&self) -> Option<&AnchorStage> {
-        self.0.anchor_stage.as_ref()
+    pub fn leader(&self) -> Option<&PeerId> {
+        self.0.proof_leader.as_ref()
     }
 
-    fn trigger_channel(
-        &self,
-        peer_id: &PeerId,
-    ) -> Option<&mpsc::UnboundedSender<WeakDagPointFuture>> {
-        let AnchorStage { role, leader, .. } = self.0.anchor_stage.as_ref()?;
-        (*role == AnchorStageRole::Trigger && leader == peer_id).then_some(&self.0.triggers_tx)
+    pub fn used_anchor_proof(&self) -> &OnceLock<PeerId> {
+        &self.0.used_anchor_proof
     }
 
     pub fn threshold(&self) -> &Threshold {
@@ -224,7 +228,7 @@ impl DagRound {
                         point,
                         key_pair,
                         &loc.state,
-                        self.trigger_channel(point.info().author()),
+                        &self.0.triggers_tx,
                         downloader,
                         store,
                         round_ctx,
@@ -261,7 +265,7 @@ impl DagRound {
                         point,
                         reason,
                         &loc.state,
-                        self.trigger_channel(point.info().author()),
+                        &self.0.triggers_tx,
                         store,
                         round_ctx,
                     )
@@ -292,7 +296,7 @@ impl DagRound {
                         self,
                         point,
                         &loc.state,
-                        self.trigger_channel(point.info().author()),
+                        &self.0.triggers_tx,
                         downloader,
                         store,
                         round_ctx,
@@ -319,7 +323,7 @@ impl DagRound {
                     digest,
                     None,
                     &loc.state,
-                    self.trigger_channel(author),
+                    &self.0.triggers_tx,
                     downloader,
                     store,
                     round_ctx,
@@ -358,7 +362,7 @@ impl DagRound {
                         digest,
                         Some(depender),
                         &loc.state,
-                        self.trigger_channel(author),
+                        &self.0.triggers_tx,
                         downloader,
                         store,
                         validate_ctx,
@@ -392,7 +396,7 @@ impl DagRound {
                         self,
                         point_restore,
                         &loc.state,
-                        self.trigger_channel(&point_id.author),
+                        &self.0.triggers_tx,
                         downloader,
                         store,
                         round_ctx,

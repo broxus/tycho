@@ -184,6 +184,7 @@ impl Broadcaster {
             digest: *self.point.info().digest(),
             evidence: mem::take(&mut self.signatures).into_iter().collect(),
             includes: self.point.info().includes().clone(),
+            sticky_anchors: self.point.info().sticky_anchors(),
             round: self.point.info().round(),
             signers: self.signers_count,
         }))

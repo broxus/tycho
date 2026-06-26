@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::ops::RangeInclusive;
-use std::sync::atomic;
 use std::{array, mem};
 
 use ahash::HashMapExt;
@@ -14,9 +13,7 @@ use crate::dag::commit::EnqueuedAnchor;
 use crate::dag::{DagRound, HistoryConflict};
 use crate::effects::{AltFmt, AltFormat};
 use crate::engine::{EngineResult, MempoolConfig};
-use crate::models::{
-    AnchorLink, AnchorStageRole, Committable, DagPoint, Digest, PointInfo, Round, ValidPoint,
-};
+use crate::models::{AnyLink, Committable, DagPoint, Digest, PointInfo, Round, ValidPoint};
 
 #[derive(Default)]
 pub struct DagBack {
@@ -120,8 +117,7 @@ impl DagBack {
         &self,
         trigger: &PointInfo,
     ) -> EngineResult<VecDeque<EnqueuedAnchor>> {
-        let bottom_round =
-            (self.last_committed_proof).map_or(self.bottom_round(), |proof| proof.next());
+        let bottom_round = (self.last_committed_proof).map_or(self.bottom_round(), |proof| proof);
 
         let range = RangeInclusive::new(
             // exclude used or unusable proof (it may be out of range)
@@ -152,32 +148,23 @@ impl DagBack {
                 self.alt(),
             );
 
-            match proof_dag_round.anchor_stage() {
-                Some(stage) if stage.role == AnchorStageRole::Proof => {
-                    assert_eq!(
-                        lookup_proof_id.author,
-                        stage.leader,
-                        "validate() is broken: anchor proof author is not leader {:?}",
-                        lookup_proof_id.alt()
-                    );
-                    if stage.is_used.load(atomic::Ordering::Relaxed) {
-                        // this branch must be visited only with engine round change
-                        // (new call to commit), when `anchor_chain` is emptied;
-                        // during the same commit call, expect `anchor_chain` to serve its purpose
-                        assert!(
-                            bottom_round <= self.bottom_round(),
-                            "limit by round range is broken: visiting already committed proof {:?}",
-                            lookup_proof_id.alt()
-                        );
-                        // reached already committed proof, so dag is contiguous
-                        break;
-                    }
-                }
-                _ => panic!(
-                    "validate() is broken: anchor stage is not for anchor proof {:?}",
+            if let Some(committed_author) = proof_dag_round.used_anchor_proof().get() {
+                assert_eq!(
+                    lookup_proof_id.author,
+                    committed_author,
+                    "broken anchor chain: searched for {:?} but committed proof author is {}",
+                    lookup_proof_id.alt(),
+                    committed_author.alt(),
+                );
+                assert!(
+                    bottom_round <= proof_dag_round.round(),
+                    "limit by round range is broken: visiting already committed proof {:?}",
                     lookup_proof_id.alt()
-                ),
+                );
+                // reached already committed proof, so dag is contiguous
+                break;
             }
+
             let proof = Self::chained_proof(
                 proof_dag_round,
                 &lookup_proof_id.author,
@@ -188,7 +175,7 @@ impl DagBack {
                 panic!("validate() is broken: anchor proof doesn't have a prev point");
             };
 
-            let Some((_, anchor_dag_round)) = rev_iter.next() else {
+            let Some((_, anchor_dag_round)) = rev_iter.peek() else {
                 assert!(
                     anchor_id.round <= self.bottom_round(), // bottom is excluded by iter bound
                     "{} cannot retrieve anchor {:?}, bottom at {bottom_round:?}",
@@ -219,9 +206,8 @@ impl DagBack {
             .then(|| trigger.clone());
 
             lookup_proof_id = proof
-                .chained_anchor_proof()
-                .expect("verify() is broken: anchor proof doesn't have a chained one")
-                .to;
+                .chained_anchor_proof_to()
+                .expect("verify() is broken: anchor proof doesn't have a chained one");
 
             // iter is from newest to oldest, restore historical order
             result.push_front(EnqueuedAnchor {
@@ -329,7 +315,7 @@ impl DagBack {
 
         assert_eq!(
             proof.anchor_proof(),
-            &AnchorLink::ToSelf,
+            AnyLink::ToSelf,
             "validate() is broken: skipped anchor proofs are not allowed in proof chain"
         );
 

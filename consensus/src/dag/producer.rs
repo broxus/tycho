@@ -1,3 +1,4 @@
+use tycho_crypto::ed25519::KeyPair;
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
@@ -5,14 +6,15 @@ use crate::dag::{DagHead, DagRound};
 use crate::effects::{AltFormat, RoundCtx};
 use crate::engine::{InputBuffer, MempoolConfig};
 use crate::models::{
-    AnchorLink, AnchorStageRole, ChainedAnchorProof, Digest, IndirectLink, PeerCount, Point,
-    PointData, PointInfo, Round, Signature, Through, UnixTime,
+    AnchorLink, AnchorStageRole, AnyLink, Digest, IndirectLink, PeerCount, Point, PointData,
+    PointInfo, PointRole, Round, Signature, Through, UnixTime,
 };
 
 pub struct LastOwnPoint {
     pub digest: Digest,
     pub evidence: FastHashMap<PeerId, Signature>,
     pub includes: FastHashMap<PeerId, Digest>,
+    pub sticky_anchors: Option<u8>,
     pub round: Round,
     pub signers: PeerCount,
 }
@@ -48,14 +50,45 @@ impl Producer {
         head: &DagHead,
         conf: &MempoolConfig,
     ) -> Result<Point, ProduceError> {
-        let current_round = head.current();
         let finished_round = head.prev();
         let Some(key_pair) = head.keys().to_produce.as_deref() else {
             return Err(ProduceError::NotScheduled);
         };
 
+        let local_id = PeerId::from(key_pair.public_key);
+        let includes = Self::includes(finished_round);
+        let witness = Self::witness(finished_round, &local_id, last_own_point);
+
+        Self::create(
+            last_own_point,
+            input_buffer,
+            key_pair,
+            head.current().round(),
+            head.current().leader(),
+            includes,
+            witness,
+            conf,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, reason = "used in test with many peers")]
+    pub fn create(
+        last_own_point: Option<&LastOwnPoint>,
+        input_buffer: &InputBuffer,
+
+        key_pair: &KeyPair,
+        current_round: Round,
+        current_leader: Option<&PeerId>,
+
+        includes: Vec<PointInfo>,
+        witness: Vec<PointInfo>,
+
+        conf: &MempoolConfig,
+    ) -> Result<Point, ProduceError> {
+        let local_id = PeerId::from(key_pair.public_key);
+
         let proven_vertex = match last_own_point {
-            Some(prev) if prev.round == finished_round.round() => {
+            Some(prev) if prev.round == current_round.prev() => {
                 // previous round's point needs 2F signatures from peers scheduled for current round
                 if prev.evidence.len() >= prev.signers.majority_of_others() {
                     Some(&prev.digest) // prev point is used only once
@@ -65,29 +98,64 @@ impl Producer {
             }
             _ => None,
         };
-        let local_id = PeerId::from(key_pair.public_key);
-        let includes = Self::includes(finished_round);
-        let witness = Self::witness(finished_round, &local_id, last_own_point);
 
-        let anchor_proof = Self::link(
-            &local_id,
-            current_round,
-            &includes,
-            &witness,
-            proven_vertex.is_some(),
-            AnchorStageRole::Proof,
-        );
-        let anchor_trigger = Self::link(
-            &local_id,
-            current_round,
-            &includes,
-            &witness,
-            proven_vertex.is_some()
-                && last_own_point.is_some_and(|prev| prev.includes.contains_key(&local_id)),
-            AnchorStageRole::Trigger,
-        );
-        let chained_anchor_proof =
-            Self::chained_anchor_proof(current_round, &includes, &witness, &anchor_proof);
+        let anchor_proof = Self::link(current_round, &includes, &witness, AnchorStageRole::Proof);
+        let anchor_trigger =
+            Self::link(current_round, &includes, &witness, AnchorStageRole::Trigger);
+
+        let role = if proven_vertex.is_some() {
+            let last_own_point = last_own_point.as_ref().expect("guarded by `proven_vertex`");
+            let is_leader = current_leader.is_some_and(|leader| leader == local_id);
+            let is_trigger = matches!(&anchor_proof,
+                AnchorLink::Direct(Through::Includes(author))
+                if author == local_id
+            );
+            let is_proof_far_enough = match &anchor_proof {
+                AnchorLink::Indirect(link) => {
+                    let rounds_to_proof = (current_round - link.to.round.0).0;
+                    if conf.consensus.sticky_anchors == 0 {
+                        rounds_to_proof > 2
+                    } else {
+                        rounds_to_proof > 3
+                    }
+                }
+                AnchorLink::Direct(_) => false,
+            };
+
+            if let Some(sticky_anchors) = last_own_point.sticky_anchors {
+                if sticky_anchors.saturating_add(1) < conf.consensus.sticky_anchors {
+                    PointRole::Sticky {
+                        seq_no: sticky_anchors + 1,
+                    }
+                } else {
+                    PointRole::AnchorTrigger
+                }
+            } else if is_trigger {
+                if last_own_point.sticky_anchors.is_none() && 0 < conf.consensus.sticky_anchors {
+                    PointRole::Sticky { seq_no: 0 }
+                } else {
+                    PointRole::AnchorTrigger
+                }
+            } else if is_leader && is_proof_far_enough {
+                PointRole::AnchorProof {
+                    anchor_proof: match anchor_proof {
+                        AnchorLink::Indirect(link) => link,
+                        AnchorLink::Direct(_) => unreachable!("guarded by bool check"),
+                    },
+                    anchor_trigger,
+                }
+            } else {
+                PointRole::Regular {
+                    anchor_proof,
+                    anchor_trigger,
+                }
+            }
+        } else {
+            PointRole::Regular {
+                anchor_proof,
+                anchor_trigger,
+            }
+        };
 
         let payload = input_buffer.fetch(last_own_point.as_ref().is_none_or(|last| {
             // it's not necessary to resend external messages from previous round
@@ -100,7 +168,12 @@ impl Producer {
 
         Self::check_prev_point(prev_info, proven_vertex)?;
 
-        let (time, anchor_time) = Self::get_time(&anchor_proof, prev_info, &includes, &witness);
+        let (time, anchor_time) = Self::get_time(
+            &role.anchor_proof(&local_id),
+            prev_info,
+            &includes,
+            &witness,
+        );
 
         let includes = includes
             .into_iter()
@@ -119,23 +192,21 @@ impl Producer {
             .collect::<FastHashMap<_, _>>();
 
         let evidence = proven_vertex
-            .zip(last_own_point)
-            .map(|(_, p)| p.evidence.clone())
+            .and(last_own_point)
+            .map(|p| p.evidence.clone())
             .unwrap_or_default();
 
         Ok(Point::new(
             key_pair,
             local_id,
-            current_round.round(),
+            current_round,
             &payload,
             PointData {
-                time,
                 includes,
                 witness,
                 evidence,
-                chained_anchor_proof,
-                anchor_trigger,
-                anchor_proof,
+                role,
+                time,
                 anchor_time,
             },
             conf,
@@ -192,29 +263,18 @@ impl Producer {
     }
 
     fn link(
-        local_id: &PeerId,
-        current_round: &DagRound,
+        current_round: Round,
         includes: &[PointInfo],
         witness: &[PointInfo],
-        has_candidate: bool,
         link_field: AnchorStageRole,
     ) -> AnchorLink {
-        match current_round.anchor_stage() {
-            Some(stage)
-                if stage.role == link_field && stage.leader == local_id && has_candidate =>
-            {
-                return AnchorLink::ToSelf;
-            }
-            _ => {}
-        }
-
         let incl_info = includes
             .iter()
             .max_by_key(|point| point.anchor_round(link_field))
             .expect("non-empty list of includes for own point");
 
-        if incl_info.round() == current_round.round().prev()
-            && incl_info.anchor_link(link_field) == &AnchorLink::ToSelf
+        if incl_info.round() == current_round.prev()
+            && incl_info.anchor_link(link_field) == AnyLink::ToSelf
         {
             return AnchorLink::Direct(Through::Includes(*incl_info.author()));
         };
@@ -233,8 +293,8 @@ impl Producer {
             });
         };
 
-        if wit_info.round() == current_round.round().prev().prev()
-            && wit_info.anchor_link(link_field) == &AnchorLink::ToSelf
+        if wit_info.round() == current_round.prev().prev()
+            && wit_info.anchor_link(link_field) == AnyLink::ToSelf
         {
             return AnchorLink::Direct(Through::Witness(*wit_info.author()));
         }
@@ -245,60 +305,19 @@ impl Producer {
         })
     }
 
-    fn chained_anchor_proof(
-        current_round: &DagRound,
-        includes: &[PointInfo],
-        witness: &[PointInfo],
-        anchor_proof: &AnchorLink,
-    ) -> ChainedAnchorProof {
-        use AnchorStageRole::Proof;
-
-        if anchor_proof != &AnchorLink::ToSelf {
-            return ChainedAnchorProof::Inapplicable;
-        }
-
-        let incl_info = includes
-            .iter()
-            .max_by_key(|point| point.anchor_round(Proof))
-            .expect("non-empty list of includes for own point");
-
-        let newer_witness = witness
-            .iter()
-            .max_by_key(|wit_info| wit_info.anchor_round(Proof))
-            .filter(|wit_info| wit_info.anchor_round(Proof) > incl_info.anchor_round(Proof));
-
-        let indirect = match newer_witness {
-            None => IndirectLink {
-                to: incl_info.anchor_id(Proof),
-                path: Through::Includes(*incl_info.author()),
-            },
-            Some(wit_info) => IndirectLink {
-                to: wit_info.anchor_id(Proof),
-                path: Through::Witness(*wit_info.author()),
-            },
-        };
-
-        assert!(
-            indirect.to.round < current_round.round().prev().prev(),
-            "chained anchor proof cannot be a direct link"
-        );
-
-        ChainedAnchorProof::Chained(indirect)
-    }
-
     fn get_time(
-        anchor_proof: &AnchorLink,
+        anchor_proof: &AnyLink<'_>,
         prev_info: Option<&PointInfo>,
         includes: &[PointInfo],
         witness: &[PointInfo],
     ) -> (UnixTime, UnixTime) {
         let anchor_time = match anchor_proof {
-            AnchorLink::ToSelf => {
+            AnyLink::ToSelf => {
                 let info = prev_info.expect("anchor candidate should exist");
 
                 info.time()
             }
-            AnchorLink::Direct(path) | AnchorLink::Indirect(IndirectLink { path, .. }) => {
+            AnyLink::Direct(path) | AnyLink::Indirect(IndirectLink { path, .. }) => {
                 let (peer_id, through) = match path {
                     Through::Includes(peer_id) => (peer_id, &includes),
                     Through::Witness(peer_id) => (peer_id, &witness),

@@ -1,12 +1,12 @@
-pub use anchor_stage::*;
 pub use commit::*;
 pub use dag_round::*;
 pub use front::*;
 pub use head::*;
 pub use producer::*;
+pub use proof_leader::*;
 pub use verifier::*;
 
-mod anchor_stage;
+mod proof_leader;
 // parts must not know about private details of the whole
 mod commit;
 mod dag_location;

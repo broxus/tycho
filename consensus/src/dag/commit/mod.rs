@@ -1,8 +1,6 @@
 mod back;
 mod inspector;
 
-use std::sync::atomic::Ordering;
-
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
 use tokio::sync::mpsc;
@@ -17,7 +15,7 @@ use crate::effects::{AltFmt, AltFormat, Cancelled, TaskResult};
 use crate::engine::{EngineResult, MempoolConfig};
 use crate::intercom::StatsRanges;
 use crate::models::{
-    AnchorData, AnchorLink, AnchorStageRole, DagPoint, MempoolPeerStats, PointInfo, Round,
+    AnchorData, AnyLink, DagPoint, MempoolPeerStats, PointInfo, Round, ValidPoint,
 };
 use crate::moderator::JournalEvent;
 
@@ -200,19 +198,7 @@ impl Committer {
         // * * otherwise: breaks the chain, so that only its prefix can be committed
         // * in anchor history: cancels current commit and the latter anchor chain
 
-        let trigger = match trigger {
-            DagPoint::Valid(valid) => {
-                (valid.info().anchor_trigger() == &AnchorLink::ToSelf).then_some(Ok(valid))
-            }
-            DagPoint::TransInvalid(invalid) => {
-                (invalid.has_proof()).then_some(Err(HistoryConflict(invalid.info().round())))
-            }
-            not_valid => {
-                (not_valid.is_certified()).then_some(Err(HistoryConflict(not_valid.round())))
-            }
-        };
-
-        let trigger = match trigger {
+        let trigger = match filter(trigger) {
             Some(Ok(valid)) if valid.info().round() >= self.dag.bottom_round() => valid.info(),
             Some(Err(HistoryConflict(round))) if round >= self.dag.bottom_round() => {
                 return Err(HistoryConflict(round).into());
@@ -222,7 +208,7 @@ impl Committer {
 
         assert_eq!(
             trigger.anchor_trigger(),
-            &AnchorLink::ToSelf,
+            AnyLink::ToSelf,
             "passed point is not a trigger: {:?}",
             trigger.id().alt()
         );
@@ -274,23 +260,12 @@ impl Committer {
         );
         self.dag.last_committed_proof = Some(next.proof.round());
 
-        match (self.dag.get(next.proof.round())).and_then(|r| r.anchor_stage()) {
-            Some(stage) if stage.role == AnchorStageRole::Proof => {
-                stage.is_used.store(true, Ordering::Relaxed);
-            }
-            _ => panic!("expected AnchorStage::Proof"),
-        };
-
-        // Note a proof may be marked as used while it is fired by a future tigger, which
-        //   may be left unmarked at the current run until upcoming points become ready
-        match (next.direct_trigger.as_ref())
-            .map(|tr| self.dag.get(tr.round()).and_then(|r| r.anchor_stage()))
-        {
-            Some(Some(stage)) if stage.role == AnchorStageRole::Trigger => {
-                stage.is_used.store(true, Ordering::Relaxed);
-            }
-            Some(_) => panic!("expected AnchorStage::Trigger"),
-            None => {} // anchor triplet without direct trigger (not ready/valid/exists)
+        match self.dag.get(next.proof.round()) {
+            Some(dag_round) => dag_round
+                .used_anchor_proof()
+                .set(*next.anchor.author())
+                .expect("anchor proof slot already used"),
+            _ => panic!("expected anchor proof stage"),
         };
 
         // Note every iteration marks committed points before next uncommitted are gathered
@@ -326,6 +301,18 @@ impl Committer {
     }
 }
 
+pub(super) fn filter(trigger: &DagPoint) -> Option<Result<&ValidPoint, HistoryConflict>> {
+    match trigger {
+        DagPoint::Valid(valid) => {
+            (valid.info().anchor_trigger() == AnyLink::ToSelf).then_some(Ok(valid))
+        }
+        DagPoint::TransInvalid(invalid) => {
+            (invalid.has_proof()).then_some(Err(HistoryConflict(invalid.info().round())))
+        }
+        not_valid => (not_valid.is_certified()).then_some(Err(HistoryConflict(not_valid.round()))),
+    }
+}
+
 impl AltFormat for Committer {}
 impl std::fmt::Debug for AltFmt<'_, Committer> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -353,6 +340,7 @@ impl std::fmt::Display for AltFmt<'_, Committer> {
 #[cfg(test)]
 mod test {
     use std::array;
+    use std::num::NonZeroUsize;
     use std::sync::Arc;
 
     use tycho_crypto::ed25519::{KeyPair, SecretKey};
@@ -361,6 +349,7 @@ mod test {
     use super::*;
     use crate::dag::DagFront;
     use crate::effects::{AltFormat, Ctx, RoundCtx};
+    use crate::engine::InputBuffer;
     use crate::engine::lifecycle::FixHistoryFlag;
     use crate::models::{AnchorData, Round};
     use crate::storage::MempoolStore;
@@ -370,6 +359,31 @@ mod test {
 
     #[tokio::test]
     async fn test_commit_with_gap() {
+        test_impl(0, Round(25), [9, 5, 17], Round(97)).await;
+
+        test_impl(1, Round(26), [8, 6, 16], Round(95)).await;
+        test_impl(2, Round(26), [12, 8, 25], Round(96)).await;
+        test_impl(3, Round(26), [12, 6, 22], Round(94)).await;
+
+        test_impl(4, Round(26), [15, 7, 28], Round(95)).await; // N mod 3 == 1
+        test_impl(5, Round(26), [17, 9, 34], Round(96)).await; // N mod 3 == 2 is optimal
+        test_impl(6, Round(26), [14, 9, 31], Round(98)).await; // N mod 3 == 0
+
+        test_impl(7, Round(26), [16, 10, 35], Round(98)).await;
+        test_impl(8, Round(26), [18, 11, 39], Round(98)).await;
+        test_impl(9, Round(26), [18, 10, 32], Round(94)).await;
+
+        test_impl(10, Round(26), [19, 11, 36], Round(95)).await;
+        test_impl(11, Round(26), [20, 12, 40], Round(96)).await;
+        test_impl(12, Round(26), [18, 10, 37], Round(94)).await;
+    }
+
+    async fn test_impl(
+        sticky_anchors: u8,
+        dag_bottom: Round,
+        committed: [usize; 3],
+        last_proof: Round,
+    ) {
         let stub_store = MempoolStore::no_read_stub();
 
         let peers: [(PeerId, Arc<KeyPair>); PEER_COUNT] = array::from_fn(|i| {
@@ -378,9 +392,14 @@ mod test {
         });
         let local_keys = &peers[0].1;
 
+        let mut merged_conf = test_utils::default_test_config();
+        merged_conf.conf.consensus.sticky_anchors = sticky_anchors;
+
         let (peer_schedule, stub_downloader, genesis, engine_ctx) =
-            test_utils::make_engine_parts(&peers, local_keys.clone());
+            test_utils::make_engine_parts(&merged_conf, &peers, local_keys.clone());
         let conf = engine_ctx.conf();
+
+        let input_buffer = InputBuffer::new_stub(0, NonZeroUsize::MIN, &conf.consensus);
 
         let mut round_ctx = RoundCtx::new(&engine_ctx, conf.genesis_round);
 
@@ -406,18 +425,16 @@ mod test {
         let commit =
             async |committer: &mut Committer| _commit(committer, &stats_ranges, conf).await;
 
-        for round in (0..100).map(Round) {
-            println!(
-                "{round:?} back {}..={} front {}..={}",
-                committer.bottom_round().0,
-                committer.top_round().0,
-                dag.bottom_round().0,
-                dag.top().round().0
-            );
+        for round in (conf.genesis_round.next().0..100).map(Round) {
+            // println!(
+            //     "{round:?} back {}..={} front {}..={}  {:?} \n\n",
+            //     committer.bottom_round().0,
+            //     committer.top_round().0,
+            //     dag.bottom_round().0,
+            //     dag.top().round().0,
+            //     dag.top().alt()
+            // );
 
-            if round <= conf.genesis_round {
-                continue;
-            }
             round_ctx = RoundCtx::new(&engine_ctx, round);
 
             dag.fill_to_top(round, &peer_schedule, &round_ctx);
@@ -451,16 +468,15 @@ mod test {
                 &stub_downloader,
                 &stub_store,
                 &round_ctx,
-                0,
-                0,
+                &input_buffer,
             )
             .await;
 
             if round.0 == 33 {
-                assert_eq!(commit(&mut committer).await.len(), 9);
+                assert_eq!(commit(&mut committer).await.len(), committed[0]);
             }
             if round.0 == 48 {
-                assert_eq!(commit(&mut committer).await.len(), 5);
+                assert_eq!(commit(&mut committer).await.len(), committed[1]);
             }
         }
 
@@ -471,24 +487,24 @@ mod test {
 
         assert_eq!(
             committer.dag.bottom_round(),
-            Round(25),
+            dag_bottom,
             "test config changed? should update test then"
         );
 
-        assert_eq!(commit(&mut committer).await.len(), 17);
+        assert_eq!(commit(&mut committer).await.len(), committed[2]);
 
         assert_eq!(
             committer.dag.last_committed_proof,
-            Some(Round(97)),
+            Some(last_proof),
             "last proof must be set after commit"
         );
 
         // `drop_upto()` must keep `last_committed_proof` while it is in dag
 
-        assert!(committer.drop_upto(Round(97), conf));
-        assert_eq!(committer.dag.last_committed_proof, Some(Round(97)));
+        assert!(committer.drop_upto(last_proof, conf));
+        assert_eq!(committer.dag.last_committed_proof, Some(last_proof));
 
-        assert!(committer.drop_upto(Round(98), conf));
+        assert!(committer.drop_upto(last_proof.next(), conf));
         assert_eq!(committer.dag.last_committed_proof, None);
     }
 
@@ -505,10 +521,16 @@ mod test {
             let batch = committer.commit(&trigger, conf).unwrap_or_else(|err| {
                 panic!("commit on trigger @ {trigger_round:?} failed: {err}")
             });
+            // let trigger = trigger.valid().expect("cannot commit non-valid").info();
+            // for data in &batch {
+            //     println!(
+            //         "commit anchor {} @ {:?} sticky {:?}",
+            //         data.anchor.author().alt(),
+            //         data.anchor.round(),
+            //         trigger.sticky_anchors(),
+            //     );
+            // }
             committed.extend(batch);
-        }
-        for data in &committed {
-            println!("commit anchor @ {:?}", data.anchor.round());
         }
 
         if let Some(last) = committed.last() {

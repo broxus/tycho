@@ -288,7 +288,8 @@ impl MempoolAdapterStore {
             .filter_map(|(info, anchor_flags, committed_opt)| {
                 if anchor_flags.contains(AnchorFlags::Used | AnchorFlags::Anchor) {
                     anchors.insert(info.round(), info.clone());
-                } else if anchor_flags.contains(AnchorFlags::Used | AnchorFlags::Proof) {
+                }
+                if anchor_flags.contains(AnchorFlags::Used | AnchorFlags::Proof) {
                     proofs.insert(info.round(), info.clone());
                 }
                 committed_opt.map(|committed| (committed, info))
@@ -318,8 +319,7 @@ impl MempoolAdapterStore {
                 proof_key: proof.key(),
                 anchor,
                 prev_anchor: proof
-                    .chained_anchor_proof()
-                    .map(|link| link.to.round)
+                    .chained_anchor_proof_to_round()
                     .filter(|r| *r > conf.genesis_round)
                     .map(|r| r.prev()),
                 history: keyed_vec.into_iter().map(|(_, info)| info).collect(),
