@@ -13,7 +13,7 @@ use bytes::Bytes;
 use futures_util::FutureExt;
 use futures_util::future::BoxFuture;
 use tycho_block_util::block::*;
-use tycho_block_util::dict::split_aug_dict_raw;
+use tycho_block_util::dict::{split_aug_dict_raw, split_aug_dict_raw_by_shards};
 use tycho_block_util::state::*;
 use tycho_storage::fs::{Dir, TempFileStorage};
 use tycho_storage::kv::StoredValue;
@@ -35,7 +35,9 @@ use super::{
     CoreStorageConfig, tables,
 };
 use crate::storage::BlockConnection;
-use crate::storage::persistent_state::ShardStateWriter;
+use crate::storage::persistent_state::{
+    PersistentStateMeta, ShardStateWriter, check_can_reuse_shard_state_part_files,
+};
 
 mod cell_nursery;
 mod cell_storage;
@@ -141,24 +143,143 @@ impl ShardStateStorage {
         states_dir: Dir,
         block_id: BlockId,
         root_hash: HashBytes,
+        split_depth: u8,
         cancelled: Option<CancellationFlag>,
-    ) -> Result<HashBytes> {
+    ) -> Result<PersistentStateMeta> {
         let cells_db = self.cells_db.clone();
         let cell_storage = self.cell_storage.clone();
         let gc_lock = self.gc_lock.clone().lock_owned().await;
+
+        let split = if split_depth == 0 || block_id.is_masterchain() {
+            FastHashMap::default()
+        } else {
+            let root_cell = self.load_state(0, &block_id).await?.root_cell().clone();
+            split_shard_accounts_for_persistent(&block_id.shard, &root_cell, split_depth)?
+        };
+
+        let mut parts: Vec<u64> = split.values().map(|part| part.prefix).collect();
+        parts.sort_unstable();
+        let meta = PersistentStateMeta::new(if parts.is_empty() { 0 } else { split_depth }, parts);
+
+        // prepare, check for parts reuse
+        let parts_reused = tokio::task::spawn_blocking({
+            let meta = meta.clone();
+            let states_dir = states_dir.clone();
+            let is_split = !split.is_empty();
+            let span = tracing::Span::current();
+
+            move || {
+                let _span = span.enter();
+                {
+                    // Serialize with state commits just long enough to publish
+                    // nursery-only cells into RocksDB before the raw writer starts.
+                    let _gc_lock = gc_lock;
+                    cell_storage.prepare_persistent_state_save();
+                }
+
+                if is_split
+                    && check_can_reuse_shard_state_part_files(&states_dir, &block_id, &meta)?
+                {
+                    tracing::debug!("reusing split persistent shard state parts");
+                    return Ok::<_, anyhow::Error>(true);
+                }
+
+                Ok::<_, anyhow::Error>(false)
+            }
+        })
+        .await??;
+
+        // write parts in parallel if exist
+        if !split.is_empty() && !parts_reused {
+            // will use semaphore to limit parrallel io operations
+            const MAX_PARALLEL_PERSISTENT_STATE_PART_WRITES: usize = 4;
+            let semaphore = Arc::new(tokio::sync::Semaphore::new(
+                MAX_PARALLEL_PERSISTENT_STATE_PART_WRITES,
+            ));
+
+            let mut parts_writes = tokio::task::JoinSet::new();
+            for (part_root_hash, part) in &split {
+                let permit = semaphore
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .context("persistent state part write semaphore closed")?;
+                let cells_db = cells_db.clone();
+                let states_dir = states_dir.clone();
+                let part_root_hash = *part_root_hash;
+                let part_prefix = part.prefix;
+                let cancelled = cancelled.clone();
+                let span = tracing::Span::current();
+
+                parts_writes.spawn_blocking(move || {
+                    let _permit = permit;
+                    let _span = span.enter();
+
+                    ShardStateWriter::new_part(&cells_db, &states_dir, &block_id, part_prefix)
+                        .write(&part_root_hash, cancelled.as_ref())
+                        .with_context(|| {
+                            format!("failed to write persistent state part {part_prefix:016x}")
+                        })
+                });
+            }
+
+            // collect results
+            let mut write_result = Ok::<_, anyhow::Error>(());
+            while let Some(result) = parts_writes.join_next().await {
+                match result {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => {
+                        if let Some(cancelled) = &cancelled {
+                            cancelled.cancel();
+                        }
+                        if write_result.is_ok() {
+                            write_result = Err(e);
+                        }
+                    }
+                    Err(e) => {
+                        if let Some(cancelled) = &cancelled {
+                            cancelled.cancel();
+                        }
+                        if write_result.is_ok() {
+                            write_result = Err(e.into());
+                        }
+                    }
+                }
+            }
+            write_result?;
+        }
+
+        // write metadata and main file
         let span = tracing::Span::current();
 
         tokio::task::spawn_blocking(move || {
             let _span = span.enter();
-            {
-                // Serialize with state commits just long enough to publish
-                // nursery-only cells into RocksDB before the raw writer starts.
-                let _gc_lock = gc_lock;
-                cell_storage.prepare_persistent_state_save();
+
+            if !split.is_empty() {
+                if !parts_reused {
+                    // write persistent metadata
+                    meta.write(&states_dir, &block_id)?;
+                }
+
+                // write main
+                let absent_cells = split
+                    .iter()
+                    .map(|(root_hash, part)| (*root_hash, part.cell.clone()))
+                    .collect();
+                ShardStateWriter::new(&cells_db, &states_dir, &block_id).write_with_absent(
+                    &root_hash,
+                    absent_cells,
+                    cancelled.as_ref(),
+                )?;
+            } else {
+                // write persistent metadata
+                meta.write(&states_dir, &block_id)?;
+
+                ShardStateWriter::new(&cells_db, &states_dir, &block_id)
+                    .write(&root_hash, cancelled.as_ref())?;
             }
 
-            ShardStateWriter::new(&cells_db, &states_dir, &block_id)
-                .write(&root_hash, cancelled.as_ref())
+            Ok::<_, anyhow::Error>(meta)
         })
         .await?
     }
@@ -806,15 +927,31 @@ impl ShardStateStorage {
 
     // Stores shard state and returns the hash of its root cell.
     pub async fn store_state_file(&self, block_id: &BlockId, boc: File) -> Result<HashBytes> {
-        self.store_state_raw_inner(block_id, boc).await
+        self.store_state_raw_inner(block_id, boc, Vec::new()).await
+    }
+
+    // Stores shard state from parts and returns the hash of its root cell.
+    pub async fn store_state_split_files(
+        &self,
+        block_id: &BlockId,
+        main: File,
+        parts: Vec<File>,
+    ) -> Result<HashBytes> {
+        self.store_state_raw_inner(block_id, main, parts).await
     }
 
     pub async fn store_state_bytes(&self, block_id: &BlockId, boc: Bytes) -> Result<HashBytes> {
         let cursor = Cursor::new(boc);
-        self.store_state_raw_inner(block_id, cursor).await
+        self.store_state_raw_inner(block_id, cursor, Vec::new())
+            .await
     }
 
-    async fn store_state_raw_inner<R>(&self, block_id: &BlockId, boc: R) -> Result<HashBytes>
+    async fn store_state_raw_inner<R>(
+        &self,
+        block_id: &BlockId,
+        main: R,
+        parts: Vec<R>,
+    ) -> Result<HashBytes>
     where
         R: std::io::Read + Send + 'static,
     {
@@ -834,7 +971,7 @@ impl ShardStateStorage {
             // Raw import writes directly to RocksDB/counters; RawImportInProgress
             // is bootstrap-scoped, so publish nursery-only cells before storing.
             ctx.cell_storage.prepare_persistent_state_save();
-            ctx.store(&block_id, boc)
+            Ok(ctx.store_split(&block_id, main, parts)?.root_hash)
         })
         .await?
     }
@@ -1794,6 +1931,45 @@ pub fn split_shard_accounts(
         .context("failed to load shard accounts")?;
 
     split_aug_dict_raw(shard_accounts, split_depth).context("failed to split shard accounts")
+}
+
+/// Splits shard accounts dict by shards, skips empty shards,
+/// and returns map of **not empty** shard branch root cells by hashes:
+/// `{ hash: (cell, shard) }`.
+pub fn split_shard_accounts_for_persistent(
+    state_shard: &ShardIdent,
+    root_cell: impl AsRef<DynCell>,
+    split_depth: u8,
+) -> Result<FastHashMap<HashBytes, ShardAccountsSplitPart>> {
+    // Cell#0 - processed_upto
+    // Cell#1 - accounts
+    let shard_accounts = root_cell
+        .as_ref()
+        .reference_cloned(1)
+        .context("invalid shard state")?
+        .parse::<ShardAccounts>()
+        .context("failed to load shard accounts")?;
+
+    let shards = split_aug_dict_raw_by_shards(state_shard.workchain(), shard_accounts, split_depth)
+        .context("failed to split shard accounts for persistent state")?;
+
+    let mut result = FastHashMap::default();
+    for (shard, dict) in shards {
+        if let Some(cell) = dict {
+            result.insert(*cell.repr_hash(), ShardAccountsSplitPart {
+                prefix: shard.prefix(),
+                cell,
+            });
+        }
+    }
+
+    Ok(result)
+}
+
+#[derive(Debug, Clone)]
+pub struct ShardAccountsSplitPart {
+    pub prefix: u64,
+    pub cell: Cell,
 }
 
 #[derive(Debug, Clone)]

@@ -8,15 +8,19 @@ use tycho_storage::kv::StoredValue;
 use tycho_types::cell::*;
 use tycho_types::models::BlockId;
 use tycho_types::util::ArrayVec;
-use tycho_util::FastHashMap;
 use tycho_util::fs::MappedFile;
 use tycho_util::io::ByteOrderRead;
 use tycho_util::progress_bar::*;
-use weedb::{BoundedCfHandle, rocksdb};
+use tycho_util::{FastHashMap, FastHashSet};
+use weedb::rocksdb;
 
+use super::cell_storage::raw::{
+    FinalizedTempCellSource, FinalizedTempCells, FinalizedTempCellsBuilder,
+};
 use super::cell_storage::*;
 use super::db_state::{CELL_HASH_RANGE_END, CELL_HASH_RANGE_START};
 use super::entries_buffer::*;
+use super::util::{CellHashMap, HashBytesKey};
 use crate::storage::{BriefBocHeader, CellsDb, ShardStateReader};
 
 pub const MAX_DEPTH: u16 = u16::MAX - 1;
@@ -28,16 +32,93 @@ pub struct StoreStateContext {
 }
 
 impl StoreStateContext {
-    // Stores shard state and returns the hash of its root cell.
-    pub fn store<R>(&self, block_id: &BlockId, reader: R) -> Result<HashBytes>
+    pub fn store_split<R>(
+        &self,
+        block_id: &BlockId,
+        main: R,
+        parts: Vec<R>,
+    ) -> Result<StoreStateResult>
+    where
+        R: std::io::Read + Send,
+    {
+        // TODO: remove after 1 release
+        self.clear_temp_cells()?;
+
+        // import main and parts to temp in parallel
+        let (main, parts) = std::thread::scope(|scope| {
+            let main_handle = scope.spawn(move || self.import_to_temp(main, true));
+            let mut part_handles = Vec::with_capacity(parts.len());
+            for part in parts {
+                part_handles.push(scope.spawn(move || self.import_to_temp(part, false)));
+            }
+            let mut parts = Vec::with_capacity(part_handles.len());
+            for part_handle in part_handles {
+                match part_handle.join() {
+                    Ok(part) => parts.push(part?),
+                    Err(_) => anyhow::bail!("persistent state part import thread failed"),
+                }
+            }
+            let main = match main_handle.join() {
+                Ok(main) => main?,
+                Err(_) => anyhow::bail!("persistent state main import thread failed"),
+            };
+            Ok::<_, anyhow::Error>((main, parts))
+        })?;
+
+        let mut imported_part_roots = FastHashSet::default();
+        for part in &parts {
+            anyhow::ensure!(
+                part.absent_cells_hashes.is_empty(),
+                "split shard state part must not contain absent cells"
+            );
+            anyhow::ensure!(
+                imported_part_roots.insert(part.root_hash),
+                "duplicate split shard state part root: {}",
+                part.root_hash
+            );
+        }
+
+        // validate
+        anyhow::ensure!(
+            main.absent_cells_hashes == imported_part_roots,
+            "split shard state parts do not match main file absent cells: \
+            absent_count={}, parts_count={}, missing_parts={:?}, unexpected_parts={:?}",
+            main.absent_cells_hashes.len(),
+            imported_part_roots.len(),
+            main.absent_cells_hashes
+                .difference(&imported_part_roots)
+                .take(4),
+            imported_part_roots
+                .difference(&main.absent_cells_hashes)
+                .take(4)
+        );
+
+        // NOTE: we make one atomic apply for all parts to avoid possible
+        //      dangling part sub-trees (with a fake counter = 1),
+        // if a process crashed after applying parts but before applying main
+
+        self.apply_temp(block_id, main, parts)
+    }
+
+    fn clear_temp_cells(&self) -> Result<()> {
+        self.cells_db.rocksdb().delete_range_cf_opt(
+            &self.cells_db.temp_cells.cf(),
+            CELL_HASH_RANGE_START.as_slice(),
+            CELL_HASH_RANGE_END.as_slice(),
+            self.cells_db.temp_cells.write_config(),
+        )?;
+        Ok(())
+    }
+
+    fn import_to_temp<R>(&self, reader: R, allow_absent: bool) -> Result<TempState>
     where
         R: std::io::Read,
     {
-        let preprocessed = self.preprocess(reader)?;
-        self.finalize(block_id, preprocessed)
+        let preprocessed = self.preprocess(reader, allow_absent)?;
+        self.finalize_to_temp(preprocessed)
     }
 
-    fn preprocess<R>(&self, reader: R) -> Result<PreprocessedState>
+    fn preprocess<R>(&self, reader: R, allow_absent: bool) -> Result<PreprocessedState>
     where
         R: std::io::Read,
     {
@@ -48,6 +129,10 @@ impl StoreStateContext {
         let mut reader = ShardStateReader::begin(reader)?;
         let header = *reader.header();
         tracing::debug!(?header);
+
+        if header.absent_count > 0 && !allow_absent {
+            anyhow::bail!("absent cells are not supported in a single shard state file");
+        }
 
         pg.set_progress(header.cell_count);
 
@@ -96,16 +181,16 @@ impl StoreStateContext {
         }
     }
 
-    fn finalize(&self, block_id: &BlockId, preprocessed: PreprocessedState) -> Result<HashBytes> {
-        // 2^7 bits + 1 bytes
-        const MAX_DATA_SIZE: usize = 128;
+    fn finalize_to_temp(&self, preprocessed: PreprocessedState) -> Result<TempState> {
+        // absent cell may contain 4 * (hash + depth)
+        const MAX_DATA_SIZE: usize = 4 * (32 + 2);
         const CELLS_PER_BATCH: u64 = 1_000_000;
 
         let PreprocessedState { header, file } = preprocessed;
 
         let mut pg = ProgressBar::builder()
             .with_mapper(|x| bytesize::to_string(x, false))
-            .build(|msg| tracing::info!("processing state... {msg}"));
+            .build(|msg| tracing::info!("writing state to temp... {msg}"));
 
         let file = MappedFile::from_existing_file(file)?;
 
@@ -115,16 +200,11 @@ impl StoreStateContext {
             .prealloc(header.cell_count as usize * HashesEntry::LEN)
             .open_as_mapped_mut()?;
 
-        let raw = self.cells_db.rocksdb().as_ref();
-        let write_options = self.cells_db.temp_cells.write_config();
-
-        let mut ctx = FinalizationContext::new(&self.cells_db);
-        raw.delete_range_cf_opt(
-            &ctx.temp_cells_cf,
-            CELL_HASH_RANGE_START.as_slice(),
-            CELL_HASH_RANGE_END.as_slice(),
-            write_options,
-        )?;
+        let finalized_temp_cells = FinalizedTempCellsBuilder::new(
+            self.temp_file_storage.unnamed_file().open()?,
+            header.cell_count as usize,
+        );
+        let mut ctx = FinalizationContext::new(finalized_temp_cells);
 
         // Allocate on heap to prevent big future size
         let mut chunk_buffer = Vec::with_capacity(1 << 20);
@@ -136,6 +216,8 @@ impl StoreStateContext {
         let mut file_pos = total_size;
         let mut cell_index = header.cell_count;
         let mut batch_len = 0;
+        let mut absent_cells_hashes = FastHashSet::default();
+
         while file_pos >= 4 {
             file_pos -= 4;
 
@@ -183,7 +265,12 @@ impl StoreStateContext {
                     unsafe { hashes_file.read_exact_at(index as usize * HashesEntry::LEN, buffer) }
                 }
 
-                ctx.finalize_cell(cell_index as u32, cell)?;
+                // collect absent cells hashes for futher validation
+                if let FinalizeCellResult::Absent { hash } =
+                    ctx.finalize_cell(cell_index as u32, cell)?
+                {
+                    absent_cells_hashes.insert(hash);
+                }
 
                 // SAFETY: `entries_buffer` is guaranteed to be in separate memory area
                 unsafe {
@@ -198,7 +285,6 @@ impl StoreStateContext {
 
             if batch_len > CELLS_PER_BATCH {
                 ctx.finalize_cell_usages();
-                raw.write_opt(std::mem::take(&mut ctx.write_batch), write_options)?;
                 batch_len = 0;
             }
 
@@ -207,15 +293,37 @@ impl StoreStateContext {
 
         if batch_len > 0 {
             ctx.finalize_cell_usages();
-            raw.write_opt(std::mem::take(&mut ctx.write_batch), write_options)?;
         }
 
         // Current entry contains root cell
-        let root_hash = ctx.entries_buffer.repr_hash();
-        ctx.final_check(root_hash)?;
+        let root_hash = *ctx.entries_buffer.repr_hash();
+        ctx.final_check(&root_hash)?;
 
+        let finalized_temp_cells = ctx.finalized_temp_cells.finish()?;
+
+        pg.complete();
+
+        Ok(TempState {
+            root_hash: HashBytes(root_hash),
+            absent_cells_hashes,
+            finalized_temp_cells,
+        })
+    }
+
+    fn apply_temp(
+        &self,
+        block_id: &BlockId,
+        state: TempState,
+        parts: Vec<TempState>,
+    ) -> Result<StoreStateResult> {
+        tracing::info!("applying temp state {}: started", block_id.as_short_id());
+
+        let temp_cell_source = FinalizedTempCellSource::new(
+            &state.finalized_temp_cells,
+            parts.iter().map(|part| &part.finalized_temp_cells),
+        );
         self.cell_storage
-            .apply_temp_cell(HashBytes::wrap(root_hash))?;
+            .apply_indexed_temp_cell(&state.root_hash, temp_cell_source)?;
         let shard_state_key = block_id.to_vec();
         let mut finalize_batch = rocksdb::WriteBatch::default();
         finalize_batch.delete_range_cf(
@@ -226,43 +334,62 @@ impl StoreStateContext {
         finalize_batch.put_cf(
             &self.cells_db.shard_states.cf(),
             shard_state_key.as_slice(),
-            root_hash.as_slice(),
+            state.root_hash.as_slice(),
         );
         self.cells_db.rocksdb().write(finalize_batch)?;
 
-        pg.complete();
-
         // Load stored shard state
         match self.cells_db.shard_states.get(shard_state_key)? {
-            Some(root) => Ok(HashBytes::from_slice(&root[..32])),
-            None => Err(StoreStateError::NotFound.into()),
+            Some(root) => {
+                tracing::info!("applying temp state {}: finished", block_id.as_short_id());
+
+                Ok(StoreStateResult {
+                    root_hash: HashBytes::from_slice(&root[..32]),
+                })
+            }
+            None => {
+                tracing::error!(
+                    "applying temp state {}: failed - state not found",
+                    block_id.as_short_id()
+                );
+
+                Err(StoreStateError::NotFound.into())
+            }
         }
     }
 }
 
-struct FinalizationContext<'a> {
-    pruned_branches: FastHashMap<u32, Vec<u8>>,
-    cell_usages: FastHashMap<[u8; 32], i32>,
-    entries_buffer: EntriesBuffer,
-    output_buffer: Vec<u8>,
-    temp_cells_cf: BoundedCfHandle<'a>,
-    write_batch: rocksdb::WriteBatch,
+pub struct StoreStateResult {
+    pub root_hash: HashBytes,
 }
 
-impl<'a> FinalizationContext<'a> {
-    fn new(db: &'a CellsDb) -> Self {
+struct TempState {
+    root_hash: HashBytes,
+    absent_cells_hashes: FastHashSet<HashBytes>,
+    finalized_temp_cells: FinalizedTempCells,
+}
+
+struct FinalizationContext {
+    pruned_branches: FastHashMap<u32, Vec<u8>>,
+    cell_usages: CellHashMap<i32>,
+    entries_buffer: EntriesBuffer,
+    output_buffer: Vec<u8>,
+    finalized_temp_cells: FinalizedTempCellsBuilder,
+}
+
+impl FinalizationContext {
+    fn new(finalized_temp_cells: FinalizedTempCellsBuilder) -> Self {
         Self {
             pruned_branches: Default::default(),
-            cell_usages: FastHashMap::with_capacity_and_hasher(128, Default::default()),
+            cell_usages: CellHashMap::with_capacity_and_hasher(128, Default::default()),
             entries_buffer: EntriesBuffer::new(),
             output_buffer: Vec::with_capacity(1 << 10),
-            temp_cells_cf: db.temp_cells.cf(),
-            write_batch: rocksdb::WriteBatch::default(),
+            finalized_temp_cells,
         }
     }
 
     // TODO: Somehow reuse `tycho_types::cell::CellParts`.
-    fn finalize_cell(&mut self, cell_index: u32, cell: RawCell<'_>) -> Result<()> {
+    fn finalize_cell(&mut self, cell_index: u32, cell: RawCell<'_>) -> Result<FinalizeCellResult> {
         use sha2::{Digest, Sha256};
 
         let (mut current_entry, children) = self
@@ -280,7 +407,13 @@ impl<'a> FinalizationContext<'a> {
 
         let mut is_merkle_cell = false;
         let mut is_pruned_cell = false;
+        let mut is_absent_cell = false;
+
         let level_mask = match cell.descriptor.cell_type() {
+            CellType::Ordinary if cell.descriptor.is_absent() => {
+                is_absent_cell = true;
+                cell.descriptor.level_mask()
+            }
             CellType::Ordinary => children_mask,
             CellType::PrunedBranch => {
                 is_pruned_cell = true;
@@ -300,6 +433,7 @@ impl<'a> FinalizationContext<'a> {
         // Save mask and counters
         current_entry.set_level_mask(level_mask);
         current_entry.set_cell_type(cell.descriptor.cell_type());
+        current_entry.set_is_absent(is_absent_cell);
 
         // Calculate hashes
         let hash_count = if is_pruned_cell {
@@ -315,6 +449,20 @@ impl<'a> FinalizationContext<'a> {
             if level != 0 && (is_pruned_cell || !level_mask.contains(level)) {
                 continue;
             }
+
+            // for absent cell read depth and hash from data
+            if is_absent_cell {
+                let depth = read_stored_depth(level_mask, level, cell.data, 0);
+                current_entry.set_depth(hash_idx, depth);
+
+                let hash = read_stored_hash(level_mask, level, cell.data, 0)
+                    .context("invalid absent cell")?;
+                current_entry.set_hash(hash_idx, hash);
+
+                hash_idx += 1;
+                continue;
+            }
+
             let mut hasher = Sha256::new();
 
             let level_mask = if is_pruned_cell {
@@ -384,6 +532,23 @@ impl<'a> FinalizationContext<'a> {
             self.pruned_branches.insert(cell_index, cell.data.to_vec());
         }
 
+        // get cell hash
+        let repr_hash = if is_pruned_cell {
+            *current_entry
+                .as_reader()
+                .pruned_branch_hash(LevelMask::MAX_LEVEL, cell.data)
+                .context("Invalid pruned branch")?
+        } else {
+            *current_entry.as_reader().hash(LevelMask::MAX_LEVEL)
+        };
+
+        // do not store absent cell to storage
+        if is_absent_cell {
+            return Ok(FinalizeCellResult::Absent {
+                hash: HashBytes(repr_hash),
+            });
+        }
+
         // Write cell data
         let output_buffer = &mut self.output_buffer;
         output_buffer.clear();
@@ -415,26 +580,25 @@ impl<'a> FinalizationContext<'a> {
                 child.hash(LevelMask::MAX_LEVEL)
             };
 
-            *self.cell_usages.entry(*child_hash).or_default() += 1;
+            // update cell usages only when child is not absent
+            // because we won't store absent cells
+            // this is for the local BOC check after import to temp
+            if !child.is_absent() {
+                *self
+                    .cell_usages
+                    .entry(HashBytesKey(*child_hash))
+                    .or_default() += 1;
+            }
             output_buffer.extend_from_slice(child_hash);
         }
 
         // Save serialized data
-        let repr_hash = if is_pruned_cell {
-            current_entry
-                .as_reader()
-                .pruned_branch_hash(LevelMask::MAX_LEVEL, cell.data)
-                .context("Invalid pruned branch")?
-        } else {
-            current_entry.as_reader().hash(LevelMask::MAX_LEVEL)
-        };
-
-        self.write_batch
-            .put_cf(&self.temp_cells_cf, repr_hash, output_buffer.as_slice());
-        self.cell_usages.insert(*repr_hash, -1);
+        self.finalized_temp_cells
+            .append(&repr_hash, output_buffer)?;
+        self.cell_usages.insert(HashBytesKey(repr_hash), -1);
 
         // Done
-        Ok(())
+        Ok(FinalizeCellResult::Other)
     }
 
     fn finalize_cell_usages(&mut self) {
@@ -446,11 +610,17 @@ impl<'a> FinalizationContext<'a> {
         tracing::info!(len=?self.cell_usages.len(), "Cell usages");
 
         anyhow::ensure!(
-            self.cell_usages.len() == 1 && self.cell_usages.contains_key(root_hash),
+            self.cell_usages.len() == 1
+                && self.cell_usages.contains_key(HashBytesKey::wrap(root_hash)),
             "Invalid shard state cell"
         );
         Ok(())
     }
+}
+
+enum FinalizeCellResult {
+    Absent { hash: HashBytes },
+    Other,
 }
 
 struct PreprocessedState {
@@ -476,27 +646,50 @@ impl<'a> RawCell<'a> {
     where
         R: Read,
     {
-        let mut descriptor = [0u8; 2];
-        src.read_exact(&mut descriptor)?;
-        let descriptor = CellDescriptor::new(descriptor);
+        let descriptor = {
+            let d1 = src.read_byte()?;
+            let check = CellDescriptor::new([d1, 0]);
+            if check.is_absent() {
+                check
+            } else {
+                let d2 = src.read_byte()?;
+                CellDescriptor::new([d1, d2])
+            }
+        };
         let byte_len = descriptor.byte_len() as usize;
         let ref_count = descriptor.reference_count() as usize;
 
-        if descriptor.is_absent() || ref_count > 4 {
+        if ref_count > 4 && !descriptor.is_absent() {
             return Err(parser_error("invalid preprocessed cell descriptor"));
         }
 
-        let data = &mut data_buffer[0..byte_len];
+        // for absent cells read stored hashes and depth into data
+        let data_len = if descriptor.is_absent() {
+            if byte_len != 0 {
+                return Err(parser_error(
+                    "absent cell should have no data except hashes/depths",
+                ));
+            }
+            descriptor.hash_count() as usize * (32 + 2)
+        } else {
+            byte_len
+        };
+
+        let data = &mut data_buffer[0..data_len];
         src.read_exact(data)?;
 
         let mut reference_indices = ArrayVec::new();
-        for _ in 0..ref_count {
-            let index = src.read_be_uint(ref_size)? as usize;
-            if index > cell_count || index <= cell_index {
-                return Err(parser_error("reference index out of range"));
-            } else {
-                // SAFETY: `ref_count` is in range 0..=4
-                unsafe { reference_indices.push(index as u32) };
+
+        // skip refs for absent cells
+        if !descriptor.is_absent() {
+            for _ in 0..ref_count {
+                let index = src.read_be_uint(ref_size)? as usize;
+                if index > cell_count || index <= cell_index {
+                    return Err(parser_error("reference index out of range"));
+                } else {
+                    // SAFETY: `ref_count` is in range 0..=4
+                    unsafe { reference_indices.push(index as u32) };
+                }
             }
         }
 
@@ -536,6 +729,7 @@ enum StoreStateError {
 #[cfg(test)]
 mod test {
     use std::collections::BTreeSet;
+    use std::num::NonZeroUsize;
 
     use bytes::Bytes;
     use bytesize::ByteSize;
@@ -608,7 +802,7 @@ mod test {
             #[allow(clippy::disallowed_methods)]
             let file = File::open(file.path())?;
 
-            store_ctx.store(&block_id, file)?;
+            store_ctx.store_split(&block_id, file, Vec::new())?;
         }
         tracing::info!("Finished processing all states");
         tracing::info!("Starting gc");
@@ -765,7 +959,9 @@ mod test {
     #[tokio::test]
     async fn raw_state_store_allows_existing_snapshot() -> Result<()> {
         let (ctx, _tempdir) = StorageContext::new_temp().await?;
-        let storage = CoreStorage::open(ctx.clone(), CoreStorageConfig::new_potato()).await?;
+        let mut config = CoreStorageConfig::new_potato();
+        config.cell_storage_threads = NonZeroUsize::new(1).unwrap();
+        let storage = CoreStorage::open(ctx.clone(), config).await?;
 
         let root = Boc::decode(ZEROSTATE_BOC)?;
         let state = root.parse::<ShardStateUnsplit>()?;

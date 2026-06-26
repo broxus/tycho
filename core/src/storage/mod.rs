@@ -23,7 +23,7 @@ pub use self::db::{CellsDb, CoreDb, CoreDbExt};
 pub use self::gc::ManualGcTrigger;
 pub use self::node_state::{NodeStateStorage, NodeSyncState};
 pub use self::persistent_state::{
-    BriefBocHeader, PersistentState, PersistentStateInfo, PersistentStateKind,
+    BriefBocHeader, PersistentState, PersistentStateInfo, PersistentStateKind, PersistentStateMeta,
     PersistentStateStorage, QueueDiffReader, QueueStateReader, QueueStateWriter, ShardStateReader,
     ShardStateWriter,
 };
@@ -158,6 +158,7 @@ impl CoreStorage {
             block_handle_storage.clone(),
             block_storage.clone(),
             shard_state_storage.clone(),
+            config.persistent_state_split_depth,
         )?;
 
         persistent_state_storage.preload().await?;

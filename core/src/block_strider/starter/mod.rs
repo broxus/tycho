@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -245,10 +245,20 @@ impl ZerostateProvider for FileZerostateProvider {
 
 fn load_zerostate(path: &PathBuf) -> Result<Bytes> {
     tracing::info!(path = %path.display(), "loading zerostate");
+    anyhow::ensure!(
+        !is_split_persistent_bundle_path(path),
+        "zerostate import supports only single persistent files without split parts"
+    );
     #[allow(clippy::disallowed_methods)]
     let mf = MappedFile::from_existing_file(File::open(path)?)?;
     let bytes = Bytes::from_owner(mf);
     Ok(bytes)
+}
+
+fn is_split_persistent_bundle_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|file_name| file_name.to_str())
+        .is_some_and(|file_name| file_name.ends_with(".meta.json") || file_name.contains("_part_"))
 }
 
 #[async_trait::async_trait]
@@ -282,6 +292,24 @@ impl<T: QueueStateHandler + ?Sized> QueueStateHandler for Box<T> {
         block_id: &BlockId,
     ) -> Result<()> {
         T::import_from_file(self, top_update, file, block_id).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_persistent_bundle_paths_are_rejected_for_zerostate_import() {
+        assert!(!is_split_persistent_bundle_path(&PathBuf::from(
+            "state.boc"
+        )));
+        assert!(is_split_persistent_bundle_path(&PathBuf::from(
+            "state.meta.json"
+        )));
+        assert!(is_split_persistent_bundle_path(&PathBuf::from(
+            "state_part_8000000000000000.boc"
+        )));
     }
 }
 

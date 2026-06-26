@@ -30,6 +30,11 @@ pub struct CoreStorageConfig {
     /// Default: `5` (= 32 virtual shards).
     pub shard_split_depth: u8,
 
+    /// Persistent shard state split depth.
+    ///
+    /// Default: `0` (= no persistent state file split).
+    pub persistent_state_split_depth: u8,
+
     /// Store every Nth shard state to storage
     ///
     /// Default: 5
@@ -104,6 +109,7 @@ impl Default for CoreStorageConfig {
             drop_interval: 3,
             store_archives: true,
             shard_split_depth: 5,
+            persistent_state_split_depth: 0,
             store_shard_state_step: NonZeroU32::new(5).unwrap(),
             max_new_cells_threshold: 500_000,
             cell_storage_threads: NonZeroUsize::new(4).unwrap(),
