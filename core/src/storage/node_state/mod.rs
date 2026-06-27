@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
 use bytes::Bytes;
+use tokio::sync::watch;
 use tycho_storage::kv::InstanceId;
 use tycho_types::models::*;
 use tycho_types::prelude::*;
@@ -20,6 +21,9 @@ pub struct NodeStateStorage {
     zerostate_id: ArcSwapOption<ZerostateId>,
     zerostate_proof: ArcSwapOption<Cell>,
     zerostate_proof_bytes: ArcSwapOption<Bytes>,
+
+    last_mc_block_id_tx: watch::Sender<Option<BlockId>>,
+    last_mc_block_id_rx: watch::Receiver<Option<BlockId>>,
 }
 
 pub enum NodeSyncState {
@@ -29,6 +33,9 @@ pub enum NodeSyncState {
 
 impl NodeStateStorage {
     pub fn new(db: CoreDb) -> Self {
+        // init last mc block watch
+        let (last_mc_block_id_tx, last_mc_block_id_rx) = watch::channel(None);
+
         let this = Self {
             db,
             last_mc_block_id: (Default::default(), LAST_MC_BLOCK_ID),
@@ -36,6 +43,9 @@ impl NodeStateStorage {
             zerostate_id: Default::default(),
             zerostate_proof: Default::default(),
             zerostate_proof_bytes: Default::default(),
+
+            last_mc_block_id_tx,
+            last_mc_block_id_rx,
         };
 
         let state = &this.db.state;
@@ -44,6 +54,10 @@ impl NodeStateStorage {
                 .insert(INSTANCE_ID, rand::random::<InstanceId>())
                 .unwrap();
         }
+
+        // init last mc block id watch
+        let last_mc_block_id = this.load_last_mc_block_id();
+        this.last_mc_block_id_tx.send_replace(last_mc_block_id);
 
         this
     }
@@ -61,10 +75,15 @@ impl NodeStateStorage {
 
     pub fn store_last_mc_block_id(&self, id: &BlockId) {
         self.store_block_id(&self.last_mc_block_id, id);
+        self.last_mc_block_id_tx.send_replace(Some(*id));
     }
 
     pub fn load_last_mc_block_id(&self) -> Option<BlockId> {
         self.load_block_id(&self.last_mc_block_id)
+    }
+
+    pub fn last_mc_block_id_rx(&self) -> &watch::Receiver<Option<BlockId>> {
+        &self.last_mc_block_id_rx
     }
 
     pub fn store_init_mc_block_id(&self, id: &BlockId) {

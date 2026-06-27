@@ -238,11 +238,12 @@ where
                                         let _histogram =
                                             HistogramGuard::begin("tycho_collator_send_blocks_to_sync_commit_diffs_time");
                                         Self::commit_block_queue_diff(
+                                            mgr.state_node_adapter.clone(),
                                             mgr.mq_adapter.clone(),
                                             state.block_id(),
                                             &state.shards()?.top_shard_blocks_info()?,
                                             &queue_partitions.expect("should be Some for master block"),
-                                        )?;
+                                        ).await?;
                                     }
 
                                     // handle applied block in mempool
