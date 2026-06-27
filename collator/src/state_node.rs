@@ -66,6 +66,8 @@ pub trait StateNodeEventListener: Send + Sync {
 pub trait StateNodeAdapter: Send + Sync + 'static {
     /// Return id of last master block that was applied to node local state
     fn load_last_applied_mc_block_id(&self) -> Result<BlockId>;
+    /// Get watch to observe last mc block id changes
+    fn last_applied_mc_block_id_rx(&self) -> &watch::Receiver<Option<BlockId>>;
     /// Return master or shard state on specified block from node local state
     async fn load_state(
         &self,
@@ -213,6 +215,10 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         );
 
         Ok(las_applied_mc_block_id)
+    }
+
+    fn last_applied_mc_block_id_rx(&self) -> &watch::Receiver<Option<BlockId>> {
+        self.storage.node_state().last_mc_block_id_rx()
     }
 
     async fn load_state(

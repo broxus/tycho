@@ -673,11 +673,13 @@ where
             if is_last {
                 let partitions = subgraph.get_partitions();
                 Self::commit_block_queue_diff(
+                    state_node_adapter,
                     mq_adapter.clone(),
                     &mc_block_entry.block_id,
                     &mc_block_entry.top_shard_blocks_info,
                     &partitions,
-                )?;
+                )
+                .await?;
 
                 // when we run sync by any reason we should drop uncommitted queue updates
                 // after restoring the required state
@@ -784,15 +786,36 @@ where
         Ok(Some(block_id))
     }
 
-    #[tracing::instrument(skip_all, fields(block_id = %block_id))]
-    pub(super) fn commit_block_queue_diff(
+    /// Commits applied messages queue diffs upto provided top blocks.
+    /// ATTENTION! Waits until provided top mc block is committed in the node state,
+    /// so MUST NOT be called inside the `StateSubscriber::handle_state` flow.
+    #[tracing::instrument(skip_all, fields(%mc_block_id))]
+    pub(super) async fn commit_block_queue_diff(
+        state_node_adapter: Arc<dyn StateNodeAdapter>,
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
-        block_id: &BlockId,
+        mc_block_id: &BlockId,
         top_shard_blocks_info: &[TopBlockIdUpdated],
         partitions: &FastHashSet<QueuePartitionIdx>,
     ) -> Result<()> {
-        if !block_id.is_masterchain() {
+        if !mc_block_id.is_masterchain() {
             return Ok(());
+        }
+
+        // SAFETY: it is okay if collator will stuck here
+        //      because we should not commit messages queue
+        //      until block is committed to secure consistency
+
+        // await until block is committed in the node state
+        let mut last_applied_mc_block_id_rx =
+            state_node_adapter.last_applied_mc_block_id_rx().clone();
+        loop {
+            if let Some(last_applied_mc_block_id) = *last_applied_mc_block_id_rx.borrow()
+                && (mc_block_id.seqno < last_applied_mc_block_id.seqno
+                    || *mc_block_id == last_applied_mc_block_id)
+            {
+                break;
+            }
+            last_applied_mc_block_id_rx.changed().await?;
         }
 
         let _histogram = HistogramGuard::begin("tycho_collator_commit_queue_diffs_time");
@@ -800,19 +823,20 @@ where
         let mut top_blocks = top_shard_blocks_info.to_vec();
         top_blocks.push(TopBlockIdUpdated {
             block: TopBlockId {
-                ref_by_mc_seqno: block_id.seqno,
-                block_id: *block_id,
+                ref_by_mc_seqno: mc_block_id.seqno,
+                block_id: *mc_block_id,
             },
             updated: true,
         });
 
-        if let Err(err) = mq_adapter.commit_diff(top_blocks, partitions) {
-            bail!(
-                "Error committing message queue diff of block ({}): {:?}",
-                block_id,
-                err,
-            )
-        }
+        mq_adapter
+            .commit_diff(top_blocks, partitions)
+            .with_context(|| {
+                format!(
+                    "Error committing message queue diffs on mc block: {}",
+                    mc_block_id,
+                )
+            })?;
 
         tracing::info!(target: tracing_targets::COLLATION_MANAGER,
             "message queue diff was committed",

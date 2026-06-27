@@ -4,6 +4,7 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use parking_lot::Mutex;
+use tokio::sync::watch;
 use tracing::level_filters::LevelFilter;
 use tycho_block_util::archive::WithArchiveData;
 use tycho_block_util::block::{BlockStuff, BlockStuffAug};
@@ -4382,14 +4383,20 @@ struct TestStateNodeAdapter {
     >,
     mcstate_tracker: MinRefMcStateTracker,
     zerostate_id: ZerostateId,
+
+    last_mc_block_id_tx: watch::Sender<Option<BlockId>>,
+    last_mc_block_id_rx: watch::Receiver<Option<BlockId>>,
 }
 
 impl Default for TestStateNodeAdapter {
     fn default() -> Self {
+        let (last_mc_block_id_tx, last_mc_block_id_rx) = watch::channel(None);
         Self {
             storage: Default::default(),
             mcstate_tracker: MinRefMcStateTracker::new(),
             zerostate_id: ZerostateId::default(),
+            last_mc_block_id_tx,
+            last_mc_block_id_rx,
         }
     }
 }
@@ -4651,7 +4658,7 @@ impl TestStateNodeAdapter {
         shard_descr.top_sc_block_updated = top_sc_block_updated;
         let shards_descr = [(shard_block_id.shard, shard_descr)].into_iter().collect();
 
-        self.create_and_store_block_and_queue_diff(
+        let res = self.create_and_store_block_and_queue_diff(
             shard,
             seqno,
             start_lt,
@@ -4664,12 +4671,20 @@ impl TestStateNodeAdapter {
             Some(shards_descr),
             mc_is_key_block,
             processed_upto,
-        )
+        )?;
+
+        self.last_mc_block_id_tx.send(Some(*res.block_stuff.id()))?;
+
+        Ok(res)
     }
 }
 
 #[async_trait]
 impl StateNodeAdapter for TestStateNodeAdapter {
+    fn last_applied_mc_block_id_rx(&self) -> &watch::Receiver<Option<BlockId>> {
+        &self.last_mc_block_id_rx
+    }
+
     fn load_init_block_id(&self) -> Option<BlockId> {
         Some(BlockId {
             shard: ShardIdent::MASTERCHAIN,
