@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
 use bytes::Bytes;
+use tokio::sync::watch;
 use tycho_storage::kv::InstanceId;
 use tycho_types::models::*;
 use tycho_types::prelude::*;
@@ -20,6 +21,8 @@ pub struct NodeStateStorage {
     zerostate_id: ArcSwapOption<ZerostateId>,
     zerostate_proof: ArcSwapOption<Cell>,
     zerostate_proof_bytes: ArcSwapOption<Bytes>,
+
+    watch_last_mc_block_id: watch::Sender<Option<BlockId>>,
 }
 
 pub enum NodeSyncState {
@@ -36,6 +39,8 @@ impl NodeStateStorage {
             zerostate_id: Default::default(),
             zerostate_proof: Default::default(),
             zerostate_proof_bytes: Default::default(),
+
+            watch_last_mc_block_id: watch::channel(None).0,
         };
 
         let state = &this.db.state;
@@ -44,6 +49,10 @@ impl NodeStateStorage {
                 .insert(INSTANCE_ID, rand::random::<InstanceId>())
                 .unwrap();
         }
+
+        // init last mc block id watch
+        let last_mc_block_id = this.load_last_mc_block_id();
+        this.watch_last_mc_block_id.send_replace(last_mc_block_id);
 
         this
     }
@@ -61,10 +70,15 @@ impl NodeStateStorage {
 
     pub fn store_last_mc_block_id(&self, id: &BlockId) {
         self.store_block_id(&self.last_mc_block_id, id);
+        self.watch_last_mc_block_id.send_replace(Some(*id));
     }
 
     pub fn load_last_mc_block_id(&self) -> Option<BlockId> {
         self.load_block_id(&self.last_mc_block_id)
+    }
+
+    pub fn watch_last_mc_block_id(&self) -> watch::Receiver<Option<BlockId>> {
+        self.watch_last_mc_block_id.subscribe()
     }
 
     pub fn store_init_mc_block_id(&self, id: &BlockId) {
