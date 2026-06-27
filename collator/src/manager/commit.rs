@@ -122,11 +122,13 @@ where
                     );
 
                     Self::commit_block_queue_diff(
+                        self.state_node_adapter.clone(),
                         self.mq_adapter.clone(),
                         &master_block.block_id,
                         &master_block.top_shard_blocks_info,
                         &partitions,
-                    )?;
+                    )
+                    .await?;
                 }
             }
             McBlockSubgraphExtract::AlreadyExtracted => {
