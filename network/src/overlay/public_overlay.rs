@@ -281,7 +281,7 @@ impl PublicOverlay {
     /// Adds the given entries to the overlay.
     ///
     /// NOTE: Will deadlock if called while `PublicOverlayEntriesReadGuard` is held.
-    pub(crate) fn add_untrusted_entries(
+    pub(crate) async fn add_untrusted_entries(
         &self,
         local_id: &PeerId,
         entries: &[Arc<PublicEntry>],
@@ -315,6 +315,12 @@ impl PublicOverlay {
             }
         };
 
+        // Rollback entries that were not inserted if the future is dropped
+        // before the final insertion.
+        let capacity_guard = scopeguard::guard(this, |this| {
+            this.entry_count.fetch_sub(to_add, Ordering::Release);
+        });
+
         // Prepare validation state
         let mut is_valid = vec![false; entries.len()];
         let mut has_valid = false;
@@ -334,6 +340,7 @@ impl PublicOverlay {
                 continue;
             };
 
+            tokio::task::yield_now().await;
             if !pubkey.verify_tl(
                 PublicEntryToSign {
                     overlay_id: this.overlay_id.as_bytes(),
@@ -351,6 +358,11 @@ impl PublicOverlay {
             *is_valid = true;
             has_valid = true;
         }
+
+        tokio::task::yield_now().await;
+
+        // NOTE: After this point the future cannot be interrupted so we defuse the guard.
+        scopeguard::ScopeGuard::into_inner(capacity_guard);
 
         // Second pass: insert all valid entries (if any)
         //
@@ -748,8 +760,8 @@ mod tests {
             }))
     }
 
-    #[test]
-    fn min_capacity_works_with_single_thread() {
+    #[tokio::test]
+    async fn min_capacity_works_with_single_thread() {
         let now = now_sec();
         let local_id: PeerId = rand::random();
 
@@ -758,10 +770,14 @@ mod tests {
             let overlay = make_overlay_with_min_capacity(10);
             let entries = generate_public_entries(&overlay, now, 10);
 
-            overlay.add_untrusted_entries(&local_id, &entries[..5], now);
+            overlay
+                .add_untrusted_entries(&local_id, &entries[..5], now)
+                .await;
             assert_eq!(count_entries(&overlay), 5);
 
-            overlay.add_untrusted_entries(&local_id, &entries[5..], now);
+            overlay
+                .add_untrusted_entries(&local_id, &entries[5..], now)
+                .await;
             assert_eq!(count_entries(&overlay), 10);
         }
 
@@ -769,7 +785,9 @@ mod tests {
         {
             let overlay = make_overlay_with_min_capacity(10);
             let entries = generate_public_entries(&overlay, now, 10);
-            overlay.add_untrusted_entries(&local_id, &entries, now);
+            overlay
+                .add_untrusted_entries(&local_id, &entries, now)
+                .await;
             assert_eq!(count_entries(&overlay), 10);
         }
 
@@ -777,7 +795,9 @@ mod tests {
         {
             let overlay = make_overlay_with_min_capacity(10);
             let entries = generate_public_entries(&overlay, now, 20);
-            overlay.add_untrusted_entries(&local_id, &entries, now);
+            overlay
+                .add_untrusted_entries(&local_id, &entries, now)
+                .await;
             assert_eq!(count_entries(&overlay), 10);
         }
 
@@ -785,7 +805,9 @@ mod tests {
         {
             let overlay = make_overlay_with_min_capacity(0);
             let entries = generate_public_entries(&overlay, now, 10);
-            overlay.add_untrusted_entries(&local_id, &entries, now);
+            overlay
+                .add_untrusted_entries(&local_id, &entries, now)
+                .await;
             assert_eq!(count_entries(&overlay), 0);
         }
 
@@ -795,7 +817,9 @@ mod tests {
             let entries = (0..10)
                 .map(|_| generate_invalid_public_entry(now))
                 .collect::<Vec<_>>();
-            overlay.add_untrusted_entries(&local_id, &entries, now);
+            overlay
+                .add_untrusted_entries(&local_id, &entries, now)
+                .await;
             assert_eq!(count_entries(&overlay), 0);
         }
 
@@ -814,7 +838,9 @@ mod tests {
                 generate_invalid_public_entry(now),
                 generate_public_entry(&overlay, now),
             ];
-            overlay.add_untrusted_entries(&local_id, &entries, now);
+            overlay
+                .add_untrusted_entries(&local_id, &entries, now)
+                .await;
             assert_eq!(count_entries(&overlay), 5);
         }
 
@@ -833,28 +859,33 @@ mod tests {
                 generate_public_entry(&overlay, now),
                 generate_public_entry(&overlay, now),
             ];
-            overlay.add_untrusted_entries(&local_id, &entries, now);
+            overlay
+                .add_untrusted_entries(&local_id, &entries, now)
+                .await;
             assert_eq!(count_entries(&overlay), 3);
         }
     }
 
-    #[test]
-    fn min_capacity_works_with_multi_thread() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn min_capacity_works_with_multi_thread() {
         let now = now_sec();
         let local_id: PeerId = rand::random();
 
         let overlay = make_overlay_with_min_capacity(201);
         let entries = generate_public_entries(&overlay, now, 7 * 3 * 10);
 
-        std::thread::scope(|s| {
-            for entries in entries.chunks_exact(7 * 3) {
-                s.spawn(|| {
-                    for entries in entries.chunks_exact(7) {
-                        overlay.add_untrusted_entries(&local_id, entries, now);
-                    }
-                });
-            }
-        });
+        let tracker = tokio_util::task::TaskTracker::new();
+        for entries in entries.chunks_exact(7 * 3) {
+            let overlay = overlay.clone();
+            let entries = entries.to_vec();
+            tracker.spawn(async move {
+                for entries in entries.chunks_exact(7) {
+                    overlay.add_untrusted_entries(&local_id, entries, now).await;
+                }
+            });
+        }
+        tracker.close();
+        tracker.wait().await;
 
         assert_eq!(count_entries(&overlay), 201);
     }
