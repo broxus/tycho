@@ -28,6 +28,13 @@ pub struct PeerScheduleStateless {
     empty_set: Arc<FastHashSet<PeerId>>,
 }
 
+/// if any `KeyPair` is not empty, then the node may use it at current round
+pub struct KeyGroup {
+    pub to_produce: Option<Arc<KeyPair>>,
+    pub to_include: Option<Arc<KeyPair>>,
+    pub to_witness: Option<Arc<KeyPair>>,
+}
+
 impl PeerScheduleStateless {
     pub fn new(local_keys: Arc<KeyPair>) -> Self {
         Self {
@@ -64,7 +71,19 @@ impl PeerScheduleStateless {
     ///
     /// Consensus progress is not guaranteed without witness (because of evidence requirement),
     /// but we don't care if the consensus of an ending epoch stalls at its last round.
-    pub fn local_keys(&self, round: Round) -> Option<Arc<KeyPair>> {
+    pub fn key_group(&self, current: Round) -> KeyGroup {
+        let to_include = self.local_keys(current.next());
+        let to_produce = self.local_keys(current);
+        let to_witness = to_include.as_ref().and_then(|_| to_produce.clone());
+
+        KeyGroup {
+            to_produce,
+            to_include,
+            to_witness,
+        }
+    }
+
+    fn local_keys(&self, round: Round) -> Option<Arc<KeyPair>> {
         let local_id = PeerId::from(self.local_keys.public_key);
         if self.peers_for(round).contains(&local_id) {
             Some(self.local_keys.clone())

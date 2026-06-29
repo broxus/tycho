@@ -130,7 +130,7 @@ impl_tl_read_bare_ref! { Digest, Signature }
 pub struct Round(pub u32);
 
 impl Round {
-    pub const MAX_TL_SIZE: usize = 4;
+    pub const MAX_TL_BYTES: usize = 4;
 }
 
 impl Round {

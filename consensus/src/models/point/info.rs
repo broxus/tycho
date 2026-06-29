@@ -61,7 +61,7 @@ pub struct PointId {
 
 impl PointId {
     pub const MAX_TL_BYTES: usize =
-        4 + PeerId::MAX_TL_BYTES + Round::MAX_TL_SIZE + Digest::MAX_TL_BYTES;
+        4 + PeerId::MAX_TL_BYTES + Round::MAX_TL_BYTES + Digest::MAX_TL_BYTES;
 
     pub fn key(&self) -> PointKey {
         PointKey::new(self.round, self.digest)

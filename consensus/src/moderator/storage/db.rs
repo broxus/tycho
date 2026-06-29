@@ -75,7 +75,7 @@ impl ModeratorDb {
             max_round = max_round.next(); // make exclusive
             min_round = min_round.min(max_round); // in case iter was empty
             let (min_round, max_round) = (min_round.0.to_be_bytes(), max_round.0.to_be_bytes());
-            min_max::<{ PointKey::MAX_TL_BYTES }>(Round::MAX_TL_SIZE, &min_round, &max_round)
+            min_max::<{ PointKey::MAX_TL_BYTES }>(Round::MAX_TL_BYTES, &min_round, &max_round)
         };
 
         let j_points_cf = self.db.tables().journal_points.cf();

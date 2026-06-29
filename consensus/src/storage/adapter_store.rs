@@ -127,7 +127,7 @@ impl MempoolAdapterStore {
                 .with_context(|| PointKey::format_loose(&key_buf))
                 .context("key was searched in db but was not found")?;
             for msg in payload {
-                result.push(msg);
+                result.push(*msg);
             }
         }
 

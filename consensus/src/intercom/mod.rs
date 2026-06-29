@@ -4,7 +4,7 @@ pub use core::responder::Responder;
 
 pub use broadcast::*;
 pub use dependency::*;
-pub use peer_schedule::{InitPeers, PeerSchedule, StatsRanges, WeakPeerSchedule};
+pub use peer_schedule::{InitPeers, KeyGroup, PeerSchedule, StatsRanges, WeakPeerSchedule};
 
 mod broadcast;
 mod core;
