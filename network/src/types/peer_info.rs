@@ -46,7 +46,7 @@ impl PeerInfo {
     pub fn verify_ext(&self, at: u32, signature_checked: &mut bool) -> bool {
         const CLOCK_THRESHOLD: u32 = 1;
 
-        let timings_ok = self.created_at <= at + CLOCK_THRESHOLD
+        let timings_ok = self.created_at <= at.saturating_add(CLOCK_THRESHOLD)
             && self.expires_at >= at
             && !self.address_list.is_empty();
 

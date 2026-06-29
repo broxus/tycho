@@ -420,6 +420,10 @@ impl BlobStorage {
     }
 
     pub async fn find_mc_block_data(&self, mc_seqno: u32) -> Result<Option<Block>> {
+        if mc_seqno == u32::MAX {
+            return Ok(None);
+        }
+
         let lower_bound = BlockId {
             shard: ShardIdent::MASTERCHAIN,
             seqno: mc_seqno,
