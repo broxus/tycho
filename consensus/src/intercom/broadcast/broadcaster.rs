@@ -368,7 +368,7 @@ impl Broadcaster {
                 match response {
                     SignatureResponse::Signature(signature) => {
                         if self.signers.contains(&out.peer_id) {
-                            if signature.verifies(&out.peer_id, self.point.info().digest()) {
+                            if signature.verify(&out.peer_id, self.point.info().id()) {
                                 self.signatures.insert(out.peer_id, signature);
                                 BroadcastCtx::sig_collected();
                             } else {

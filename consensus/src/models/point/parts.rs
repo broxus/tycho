@@ -7,6 +7,8 @@ use tycho_crypto::ed25519::KeyPair;
 use tycho_network::PeerId;
 use tycho_util::serde_helpers;
 
+use crate::models::PointId;
+
 #[derive(Clone, Copy, TlWrite, TlRead, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 pub struct Digest([u8; 32]);
@@ -83,24 +85,58 @@ impl Debug for Signature {
     }
 }
 
+/// signature visits round and author twice - both explicitly and as a part of digest:
+/// * explicit id forbids mangling of point's evidence,
+///   so that evidence taken from some other point can be detected at verification time
+/// * opaque digest includes round and author to become unique across different points
+///   so it can be used as a stored point key
 impl Signature {
     pub const MAX_TL_BYTES: usize = 64;
 
     pub(super) const ZERO: Self = Self([0; 64]);
 
-    pub fn new(local_keypair: &KeyPair, digest: &Digest) -> Self {
-        Self(local_keypair.sign_raw(digest.0.as_slice()))
+    pub fn sign(local_keypair: &KeyPair, point_id: &PointId) -> Self {
+        Self::signs(
+            local_keypair,
+            point_id.round,
+            &point_id.author,
+            &point_id.digest,
+        )
+    }
+
+    pub fn signs(local_keypair: &KeyPair, round: Round, author: &PeerId, digest: &Digest) -> Self {
+        let bytes = Self::point_raw_bytes(round, author, digest);
+        Self(local_keypair.sign_raw(&bytes))
     }
 
     pub(super) fn inner(&self) -> &[u8; 64] {
         &self.0
     }
 
-    pub fn verifies(&self, signer: &PeerId, digest: &Digest) -> bool {
+    pub fn verify(&self, signer: &PeerId, point_id: &PointId) -> bool {
+        self.verifies(signer, point_id.round, &point_id.author, &point_id.digest)
+    }
+
+    pub fn verifies(
+        &self,
+        signer: &PeerId,
+        round: Round,
+        author: &PeerId,
+        digest: &Digest,
+    ) -> bool {
+        let bytes = Self::point_raw_bytes(round, author, digest);
         match signer.as_public_key() {
-            Some(pub_key) => pub_key.verify_raw(digest.0.as_slice(), &self.0),
+            Some(pub_key) => pub_key.verify_raw(&bytes, &self.0),
             None => false,
         }
+    }
+
+    pub fn point_raw_bytes(round: Round, author: &PeerId, digest: &Digest) -> [u8; 4 + 32 + 32] {
+        let mut bytes = [0; _];
+        bytes[..4].copy_from_slice(&round.0.to_be_bytes());
+        bytes[4..4 + 32].copy_from_slice(author.as_bytes());
+        bytes[4 + 32..].copy_from_slice(digest.inner());
+        bytes
     }
 
     fn wrap(bytes: &[u8; 64]) -> &Self {
