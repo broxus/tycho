@@ -12,20 +12,20 @@ pub struct PointKey {
 }
 
 impl PointKey {
-    pub const MAX_TL_BYTES: usize = Round::MAX_TL_SIZE + Digest::MAX_TL_BYTES;
+    pub const MAX_TL_BYTES: usize = Round::MAX_TL_BYTES + Digest::MAX_TL_BYTES;
 
     pub fn new(round: Round, digest: Digest) -> Self {
         Self { round, digest }
     }
 
     pub fn fill(&self, key: &mut [u8; PointKey::MAX_TL_BYTES]) {
-        key[..Round::MAX_TL_SIZE].copy_from_slice(&self.round.0.to_be_bytes()[..]);
-        key[Round::MAX_TL_SIZE..].copy_from_slice(self.digest.inner());
+        key[..Round::MAX_TL_BYTES].copy_from_slice(&self.round.0.to_be_bytes()[..]);
+        key[Round::MAX_TL_BYTES..].copy_from_slice(self.digest.inner());
     }
 
     pub fn fill_prefix(round: Round, key: &mut [u8; PointKey::MAX_TL_BYTES]) {
-        key[..Round::MAX_TL_SIZE].copy_from_slice(&round.0.to_be_bytes()[..]);
-        key[Round::MAX_TL_SIZE..].fill(0);
+        key[..Round::MAX_TL_BYTES].copy_from_slice(&round.0.to_be_bytes()[..]);
+        key[Round::MAX_TL_BYTES..].fill(0);
     }
 
     /// function of limited usage: zero round does not exist by application logic

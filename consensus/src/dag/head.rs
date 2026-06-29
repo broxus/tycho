@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
-use tycho_crypto::ed25519::KeyPair;
-
 use crate::dag::DagRound;
-use crate::intercom::PeerSchedule;
+use crate::intercom::{KeyGroup, PeerSchedule};
 use crate::models::Round;
 
 #[derive(Clone)]
@@ -18,7 +16,7 @@ struct DagHeadInner {
 }
 
 impl DagHead {
-    pub(super) fn new(
+    pub fn new(
         peer_schedule: &PeerSchedule,
         top_round: &DagRound,
         last_back_bottom: Round,
@@ -32,8 +30,10 @@ impl DagHead {
             .upgrade()
             .expect("prev to engine round must be always in dag");
 
+        let key_group = peer_schedule.atomic().key_group(current.round());
+
         Self(Arc::new(DagHeadInner {
-            key_group: KeyGroup::new(current.round(), peer_schedule),
+            key_group,
             prev,
             current,
             next: top_round.clone(),
@@ -59,28 +59,5 @@ impl DagHead {
 
     pub fn last_back_bottom(&self) -> Round {
         self.0.last_back_bottom
-    }
-}
-
-/// if any `KeyPair` is not empty, then the node may use it at current round
-pub struct KeyGroup {
-    pub to_produce: Option<Arc<KeyPair>>,
-    pub to_include: Option<Arc<KeyPair>>,
-    pub to_witness: Option<Arc<KeyPair>>,
-}
-
-impl KeyGroup {
-    pub fn new(current: Round, peer_schedule: &PeerSchedule) -> Self {
-        let guard = peer_schedule.atomic();
-
-        let to_include = guard.local_keys(current.next());
-        let to_produce = guard.local_keys(current);
-        let to_witness = to_include.as_ref().and_then(|_| to_produce.clone());
-
-        Self {
-            to_produce,
-            to_include,
-            to_witness,
-        }
     }
 }

@@ -115,51 +115,14 @@ impl Point {
         }
     }
 
-    pub fn from_bytes(serialized: Vec<u8>) -> Result<Self, TlError> {
-        const ROUND_RANGE: std::ops::Range<Round> = {
-            let min = ProofLeader::align_genesis(0);
-            let max = Round(u32::MAX - min.0);
-            min..max
-        };
-
-        let slice = &mut &serialized[..];
-        let read = PointRead::read_from(slice)?;
-
-        if !ROUND_RANGE.contains(&read.body.round) {
-            return Err(TlError::InvalidData);
-        }
-
-        let payload_len = u32::try_from(read.body.payload.len()).or(Err(TlError::InvalidData))?;
-
-        let payload_bytes = u32::try_from(read.body.payload.iter().fold(0, |acc, b| acc + b.len()))
-            .or(Err(TlError::InvalidData))?;
-
-        let id = PointId {
-            digest: read.digest,
-            author: read.body.author,
-            round: read.body.round,
-        };
-
-        let info = PointInfo::new(
-            id,
-            read.signature,
-            payload_len,
-            payload_bytes,
-            read.body.data,
-        );
-
-        Ok(Self {
-            serialized: Arc::new(serialized),
-            info,
-        })
-    }
-
     pub fn parse(serialized: Vec<u8>) -> ParseResult {
         let _duration = HistogramGuard::begin("tycho_mempool_point_parse_verify_time");
 
         let raw = PointRawRead::<'_>::read_from(&mut &serialized[..])?;
 
-        if !(raw.signature).verifies(raw.author()?, raw.digest) {
+        let body = raw.read_body()?;
+
+        if !(raw.signature).verifies(body.author, raw.digest) {
             return Ok(Err(PointIntegrityError::BadSig));
         };
 
@@ -167,7 +130,7 @@ impl Point {
             return Ok(Err(PointIntegrityError::BadHash));
         };
 
-        if raw.point_bytes()? as usize != serialized.len() {
+        if body.point_bytes as usize != serialized.len() {
             return Ok(Err(PointIntegrityError::BadLen));
         }
 
@@ -179,6 +142,47 @@ impl Point {
         }))
     }
 
+    pub fn from_bytes(serialized: Vec<u8>) -> Result<Self, TlError> {
+        const ROUND_RANGE: std::ops::Range<Round> = {
+            let min = ProofLeader::align_genesis(0);
+            let max = Round(u32::MAX - min.0);
+            min..max
+        };
+
+        let read = PointRead::read_from(&mut &serialized[..])?;
+
+        if !ROUND_RANGE.contains(&read.body.round) {
+            return Err(TlError::InvalidData);
+        }
+
+        let payload_and_data = &mut read.body.payload_and_data.as_ref();
+        let (payload_len, payload_bytes) = {
+            let payload_len = u32::read_from(payload_and_data)?;
+            let mut payload_bytes: usize = 0;
+            for _ in 0..payload_len {
+                payload_bytes += <&[u8]>::read_from(payload_and_data)?.len();
+            }
+            let Ok(payload_bytes) = u32::try_from(payload_bytes) else {
+                return Err(TlError::InvalidData);
+            };
+            (payload_len, payload_bytes)
+        };
+        let data = <_>::read_from(payload_and_data)?;
+
+        let id = PointId {
+            digest: *read.digest,
+            author: *read.body.author,
+            round: read.body.round,
+        };
+
+        let info = PointInfo::new(id, read.signature.clone(), payload_len, payload_bytes, data);
+
+        Ok(Self {
+            serialized: Arc::new(serialized),
+            info,
+        })
+    }
+
     pub fn serialized(&self) -> &[u8] {
         &self.serialized
     }
@@ -188,15 +192,17 @@ impl Point {
     }
 
     // Note: resulting slice has lifetime of bump that is elided
-    pub fn read_payload_from_tl_bytes<T>(data: T, bump: &Bump) -> Result<Vec<&[u8]>, TlError>
-    where
-        T: AsRef<[u8]>,
-    {
-        let raw = PointRawRead::read_from(&mut data.as_ref())?;
-        Ok((raw.payload()?)
-            .into_iter()
-            .map(|item| &*bump.alloc_slice_copy(item))
-            .collect())
+    pub fn read_payload_from_tl_bytes<'a, 'b>(
+        mut data: &'a [u8],
+        bump: &'b Bump,
+    ) -> Result<&'b [&'b [u8]], TlError> {
+        let read: PointRead<'a> = <_>::read_from(&mut data)?;
+        let slice: &mut &'a [u8] = &mut read.body.payload_and_data.into_inner();
+        let payload_length = u32::read_from(slice)?;
+        let result = bump.alloc_slice_try_fill_with(payload_length as usize, |_| {
+            <&[u8]>::read_from(slice).map(|a| &*bump.alloc_slice_copy(a))
+        })?;
+        Ok(result)
     }
 }
 

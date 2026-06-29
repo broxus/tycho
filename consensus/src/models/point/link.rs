@@ -74,7 +74,7 @@ impl IndirectLink {
 
         fill_next(4, &Self::TL_ID.to_le_bytes());
         fill_next(4, &PointId::TL_ID.to_le_bytes());
-        fill_next(Round::MAX_TL_SIZE, &self.to.round.0.to_le_bytes());
+        fill_next(Round::MAX_TL_BYTES, &self.to.round.0.to_le_bytes());
         fill_next(Digest::MAX_TL_BYTES, self.to.digest.inner());
         fill_next(4, &PeerId::TL_ID.to_le_bytes());
         fill_next(PeerId::MAX_TL_BYTES - 4, &self.to.author.0);

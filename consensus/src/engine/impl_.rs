@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use tycho_network::PeerId;
 use tycho_util::metrics::HistogramGuard;
 
-use crate::dag::{DagFront, HistoryConflict, KeyGroup, UninitVset, Verifier, VerifyError};
+use crate::dag::{DagFront, HistoryConflict, UninitVset, Verifier, VerifyError};
 use crate::effects::{
     AltFormat, Cancelled, Ctx, EngineCtx, RoundCtx, Task, TaskResult, TaskTracker,
 };
@@ -210,7 +210,7 @@ impl Engine {
         let head_min_round = dag_top_round.prev().prev(); // 3 DagHead rounds inclusive
         for round in (head_min_round.0..=dag_top_round.0).map(Round) {
             let dag_round = self.dag.top().scan(round).expect("must exist");
-            let keys = KeyGroup::new(round, &self.round_task.state.peer_schedule);
+            let keys = (self.round_task.state.peer_schedule.atomic()).key_group(round);
             let versions = keys
                 .to_produce
                 .as_deref()
