@@ -98,7 +98,7 @@ impl Point {
             round,
         };
 
-        let signature = Signature::new(local_keypair, &id.digest);
+        let signature = Signature::sign(local_keypair, &id);
 
         serialized[4..4 + Digest::MAX_TL_BYTES].copy_from_slice(id.digest.inner());
         serialized[4 + Digest::MAX_TL_BYTES..body_offset].copy_from_slice(signature.inner());
@@ -122,7 +122,7 @@ impl Point {
 
         let body = raw.read_body()?;
 
-        if !(raw.signature).verifies(body.author, raw.digest) {
+        if !(raw.signature).verifies(body.author, body.round, body.author, raw.digest) {
             return Ok(Err(PointIntegrityError::BadSig));
         };
 
@@ -236,16 +236,16 @@ pub mod test_point {
         payload
     }
 
-    pub fn prev_point_data() -> (Digest, Vec<(PeerId, Signature)>) {
-        let digest = Digest::random();
+    pub fn prev_point_data() -> (PointId, Vec<(PeerId, Signature)>) {
+        let prev_id = PointId::random();
         let mut evidence = Vec::with_capacity(PEERS);
         for _ in 0..PEERS {
             let key_pair = new_key_pair();
-            let sig = Signature::new(&key_pair, &digest);
+            let sig = Signature::sign(&key_pair, &prev_id);
             let peer_id = PeerId::from(key_pair.public_key);
             evidence.push((peer_id, sig));
         }
-        (digest, evidence)
+        (prev_id, evidence)
     }
 
     pub fn point(key_pair: &KeyPair, payload: &[Bytes], conf: &MempoolConfig) -> Point {
@@ -257,16 +257,19 @@ pub mod test_point {
         let mut includes = FastHashMap::default();
         let mut evidence = FastHashMap::default();
 
-        let prev_digest = Digest::random();
-        includes.insert(author, prev_digest);
+        let prev_id = PointId {
+            author,
+            round: Round(rand::random_range(10..u32::MAX - 10)),
+            digest: Digest::random(),
+        };
+        includes.insert(author, prev_id.digest);
 
         for peer_kp in &peers {
             let peer_id = PeerId::from(peer_kp.public_key);
             includes.insert(peer_id, Digest::random());
-            evidence.insert(peer_id, Signature::new(peer_kp, &prev_digest));
+            evidence.insert(peer_id, Signature::sign(peer_kp, &prev_id));
         }
 
-        let round = Round(rand::random_range(10..u32::MAX - 10));
         let anchor_time = UnixTime::now();
 
         let indirect_link = |round: Round| IndirectLink {
@@ -285,14 +288,14 @@ pub mod test_point {
             })),
             evidence,
             role: PointRole::Regular {
-                anchor_proof: AnchorLink::Indirect(indirect_link(round - 7_u32)),
-                anchor_trigger: AnchorLink::Indirect(indirect_link(round - 6_u32)),
+                anchor_proof: AnchorLink::Indirect(indirect_link(prev_id.round - 7_u32)),
+                anchor_trigger: AnchorLink::Indirect(indirect_link(prev_id.round - 6_u32)),
             },
             time: anchor_time.next(),
             anchor_time,
         };
 
-        Point::new(key_pair, author, round, payload, data, conf)
+        Point::new(key_pair, author, prev_id.round.next(), payload, data, conf)
     }
 }
 
@@ -330,11 +333,11 @@ mod tests {
     pub fn check_sig() {
         let _conf = default_test_config().conf;
 
-        let (digest, data) = prev_point_data();
+        let (point_id, data) = prev_point_data();
 
         let timer = Instant::now();
         for (peer_id, sig) in &data {
-            sig.verifies(peer_id, &digest);
+            sig.verify(peer_id, &point_id);
         }
         let elapsed = timer.elapsed();
         println!(
@@ -344,8 +347,7 @@ mod tests {
 
         let timer = Instant::now();
         assert!(
-            data.par_iter()
-                .all(|(peer_id, sig)| sig.verifies(peer_id, &digest)),
+            (data.par_iter()).all(|(peer_id, sig)| sig.verify(peer_id, &point_id)),
             "invalid signature"
         );
         let elapsed = timer.elapsed();
@@ -359,7 +361,7 @@ mod tests {
     pub async fn check_sig_on_rayon() {
         let _conf = default_test_config().conf;
 
-        let (digest, data) = prev_point_data();
+        let (point_id, data) = prev_point_data();
 
         let timer = Instant::now();
         tycho_util::sync::rayon_run(|| ()).await;
@@ -369,8 +371,7 @@ mod tests {
         let timer = Instant::now();
         tycho_util::sync::rayon_run(move || {
             assert!(
-                data.iter()
-                    .all(|(peer_id, sig)| sig.verifies(peer_id, &digest)),
+                (data.iter()).all(|(peer_id, sig)| sig.verify(peer_id, &point_id)),
                 "invalid signature"
             );
         })
@@ -422,7 +423,7 @@ mod tests {
         println!("hash took {}", humantime::format_duration(sha_elapsed));
 
         let timer = Instant::now();
-        let sig = Signature::new(&point_key_pair, &digest);
+        let sig = Signature::sign(&point_key_pair, info.id());
         let sig_elapsed = timer.elapsed();
         assert_eq!(&sig, info.signature(), "point signature");
         println!("sig took {}", humantime::format_duration(sig_elapsed));

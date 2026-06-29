@@ -388,7 +388,7 @@ impl Signable {
                                 metrics::counter!("tycho_mempool_signing_prev_round_count")
                                     .increment(1);
                             }
-                            Ok(Signature::new(key_pair, self.valid.info().digest()))
+                            Ok(Signature::sign(key_pair, self.valid.info().id()))
                         } else {
                             metrics::counter!(REJECTED, "kind" => "round").increment(1);
                             Err(()) // too old round

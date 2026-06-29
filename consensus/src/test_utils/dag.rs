@@ -160,7 +160,7 @@ fn point<const PEER_COUNT: usize>(
                 if *i == idx {
                     continue;
                 }
-                evidence.insert(peers[*i].0, Signature::new(&peers[*i].1, info.digest()));
+                evidence.insert(peers[*i].0, Signature::sign(&peers[*i].1, info.id()));
             }
             evidence
         },

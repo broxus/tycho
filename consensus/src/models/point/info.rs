@@ -156,8 +156,8 @@ impl PointInfo {
     }
 
     pub fn check_evidence(&self) -> Result<(), EvidenceSigError> {
-        let is_ok = self.prev_digest().is_none_or(|prev_proof| {
-            (self.evidence().iter()).all(|(peer, sig)| sig.verifies(peer, prev_proof))
+        let is_ok = self.prev_id().is_none_or(|prev_id| {
+            (self.evidence().iter()).all(|(peer, sig)| sig.verify(peer, &prev_id))
         });
         if is_ok { Ok(()) } else { Err(EvidenceSigError) }
     }
