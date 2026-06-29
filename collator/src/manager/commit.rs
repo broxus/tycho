@@ -77,19 +77,18 @@ where
                 let to_blocks_keys = master_block.get_top_blocks_keys()?;
                 self.blocks_cache.set_gc_to_boundary(&to_blocks_keys);
 
-                // check if mc block was not sent to sync
-                let mut mc_block_was_not_sent_to_sync = true;
+                let mut should_commit_queue_diff = false;
 
-                // send to sync only if was not received from bc
+                // send to sync only if the collated master block was validated
                 if matches!(&master_block.data, BlockCacheEntryData::Collated {
+                    status: CandidateStatus::Validated,
                     received_after_collation: false,
                     ..
                 }) {
                     let histogram =
                         HistogramGuard::begin("tycho_collator_send_blocks_to_sync_time");
 
-                    mc_block_was_not_sent_to_sync =
-                        !self.send_block_to_sync(master_block.data, Some(partitions.clone()))?;
+                    self.send_block_to_sync(master_block.data, Some(partitions.clone()))?;
 
                     for shard_block in shard_blocks {
                         self.send_block_to_sync(shard_block.data, None)?;
@@ -106,17 +105,33 @@ where
                     // because we are not sure that block will be applied
                     // and should wait until block_accepted event is received
                     top_processed_to_anchor_to_notify = None;
+                } else if matches!(&master_block.data, BlockCacheEntryData::Collated {
+                    status: CandidateStatus::ValidationSkipped | CandidateStatus::Collated,
+                    ..
+                }) {
+                    tracing::debug!(
+                        target: tracing_targets::COLLATION_MANAGER,
+                        "Skip sync and queue commit for non-validated master block",
+                    );
+
+                    // if current master block was not validated
+                    // then we should not notify top processed to anchor to mempool now
+                    // because we are not sure that block is correct
+                    top_processed_to_anchor_to_notify = None;
                 } else {
+                    // if mc block was already synced from bc
+                    // then we will not receive OwnBlockApplied event,
+                    // so we have to commit messages queue right now
+                    should_commit_queue_diff = true;
+
                     // if current block was committed by received one
                     // then `on_block_accepted` will not be called further
                     // so we need to notify `top_processed_to_anchor` to mempool here
                     top_processed_to_anchor_to_notify = master_block.top_processed_to_anchor;
                 }
 
-                // if mc block was not sent to sync by any reason then
-                // we will not receive OwnBlockApplied event,
-                // so we have to commit messages queue right now
-                if mc_block_was_not_sent_to_sync {
+                // commit messages queue right now
+                if should_commit_queue_diff {
                     let _histogram = HistogramGuard::begin(
                         "tycho_collator_send_blocks_to_sync_commit_diffs_time",
                     );
@@ -170,8 +185,14 @@ where
                 status,
                 received_after_collation: false,
                 ..
-            } if status != CandidateStatus::Synced => candidate_stuff,
-            // do not try to apply block because it is already applied,
+            } if !matches!(
+                status,
+                CandidateStatus::Synced | CandidateStatus::ValidationSkipped
+            ) =>
+            {
+                candidate_stuff
+            }
+            // do not try to apply block if it is already applied or not validated,
             // more likely we have synced to some next applied mc block
             _ => return Ok(false),
         };

@@ -211,6 +211,7 @@ impl BlockCandidateStuff {
 pub(super) enum CandidateStatus {
     Collated,
     Validated,
+    ValidationSkipped,
     Synced,
 }
 

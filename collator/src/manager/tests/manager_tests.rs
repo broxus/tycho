@@ -40,7 +40,8 @@ use crate::manager::msgs_queue::RestoreQueueContext;
 use crate::manager::state_update_handler::GlobalCapabilitiesExt;
 use crate::manager::sync::ShouldSyncToAppliedMcBlock;
 use crate::manager::types::{
-    BlockCacheStoreResult, CollationSyncState, McBlockSubgraphExtract, NextCollationStep,
+    BlockCacheEntryData, BlockCacheStoreResult, CandidateStatus, CollationSyncState,
+    McBlockSubgraphExtract, NextCollationStep,
 };
 use crate::manager::{CollatedBlockInfo, CollationStatus};
 use crate::mempool::MempoolAdapterStubImpl;
@@ -2151,15 +2152,18 @@ async fn test_queue_restore_on_sync() {
     assert_eq!(top_sc_block_seqno, Some(&3));
 
     // commit master block 02 first emulating faster validation for it
-    test_adapter
-        .blocks_cache
-        .store_master_block_validation_result(
-            &test_adapter.last_mc_block_id,
-            ValidationStatus::Complete(ValidationComplete {
-                signatures: Default::default(),
-                total_weight: 100,
-            }),
-        );
+    assert_eq!(
+        test_adapter
+            .blocks_cache
+            .store_master_block_validation_result(
+                &test_adapter.last_mc_block_id,
+                ValidationStatus::Complete(ValidationComplete {
+                    signatures: Default::default(),
+                    total_weight: 100,
+                }),
+            ),
+        Some(CandidateStatus::Validated)
+    );
     let extracted_subgraph = test_adapter
         .blocks_cache
         .extract_mc_block_subgraph_for_sync(&test_adapter.last_mc_block_id);
@@ -2194,15 +2198,18 @@ async fn test_queue_restore_on_sync() {
         .unwrap();
 
     // commit master block 01 after 02
-    test_adapter
-        .blocks_cache
-        .store_master_block_validation_result(
-            &mc_block_id_1,
-            ValidationStatus::Complete(ValidationComplete {
-                signatures: Default::default(),
-                total_weight: 100,
-            }),
-        );
+    assert_eq!(
+        test_adapter
+            .blocks_cache
+            .store_master_block_validation_result(
+                &mc_block_id_1,
+                ValidationStatus::Complete(ValidationComplete {
+                    signatures: Default::default(),
+                    total_weight: 100,
+                }),
+            ),
+        Some(CandidateStatus::Validated)
+    );
     let extracted_subgraph = test_adapter
         .blocks_cache
         .extract_mc_block_subgraph_for_sync(&mc_block_id_1);
@@ -3665,6 +3672,128 @@ impl Validator for NoopValidator {
 }
 
 type CleanupTestCollationManager = CollationManager<CollatorStdImplFactory, NoopValidator>;
+
+#[tokio::test]
+async fn test_skipped_validation_does_not_commit_collated_master() {
+    try_init_test_tracing(tracing_subscriber::filter::LevelFilter::TRACE);
+
+    // create queue, message factory, state adapter, and block cache fixtures
+    let (mq_adapter, _tmp_dir) = create_test_queue_adapter::<EnqueuedMessage>()
+        .await
+        .unwrap();
+    let msgs_factory =
+        TestMessageFactory::new(BTreeMap::new(), |info, cell| EnqueuedMessage { info, cell });
+    let state_adapter = Arc::new(TestStateNodeAdapter::default());
+    let blocks_cache = BlocksCache::new(&Default::default());
+
+    // prepare wallets and initial adapter state for one shard
+    let shard = ShardIdent::new_full(0);
+    let mut transfers_wallets = BTreeMap::<u8, IntAddr>::new();
+    for i in 100..110 {
+        transfers_wallets.insert(i, IntAddr::Std(StdAddr::new(0, HashBytes([i; 32]))));
+    }
+    for i in 110..120 {
+        transfers_wallets.insert(i, IntAddr::Std(StdAddr::new(-1, HashBytes([i; 32]))));
+    }
+
+    let mut test_adapter = TestAdapter {
+        state_adapter: state_adapter.clone(),
+        mq_adapter: mq_adapter.clone(),
+        msgs_factory,
+        blocks_cache,
+        account_lt: 0,
+        transfers_wallets,
+        processed_to_stuff: TestProcessedToStuff::new(shard),
+        last_sc_block_id: BlockId {
+            shard,
+            seqno: 0,
+            root_hash: HashBytes::default(),
+            file_hash: HashBytes::default(),
+        },
+        last_mc_block_id: BlockId {
+            shard: ShardIdent::MASTERCHAIN,
+            seqno: 0,
+            root_hash: HashBytes::default(),
+            file_hash: HashBytes::default(),
+        },
+        last_sc_blocks: BTreeMap::new(),
+        last_mc_blocks: BTreeMap::new(),
+    };
+
+    // create a collated shard candidate that will be referenced by master
+    let generated_block_info = test_adapter.gen_shard_block(
+        shard,
+        1,
+        (test_adapter.last_sc_block_id, 0),
+        (test_adapter.last_mc_block_id, 0),
+        10,
+    );
+    let StoreBlockResult {
+        block_stuff: last_sc_block_stuff,
+        ..
+    } = test_adapter.store_as_candidate(generated_block_info);
+
+    // mark shard progress so master collation can include the shard candidate
+    test_adapter.processed_to_stuff.set_processed_to(
+        ShardIdent::MASTERCHAIN,
+        test_adapter.last_sc_blocks.get(&1).unwrap(),
+    );
+
+    // create a collated master candidate that will receive skipped validation
+    let generated_block_info = test_adapter.gen_master_block(
+        1,
+        (test_adapter.last_mc_block_id, 0),
+        &last_sc_block_stuff.data,
+        true,
+        false,
+        5,
+    );
+    let mc_block_id = *generated_block_info.block_stuff.id();
+    test_adapter.store_as_candidate(generated_block_info);
+
+    // build a manager that shares the prepared cache and queue fixtures
+    let manager = CleanupTestCollationManager {
+        keypair: Arc::new(KeyPair::from(&SecretKey::from_bytes([7; 32]))),
+        config: Arc::new(CollatorConfig::default()),
+        state_node_adapter: state_adapter,
+        state_event_receiver: Mutex::new(None),
+        mpool_adapter: MempoolAdapterStubImpl::with_stub_externals(None),
+        mq_adapter,
+        collator_factory: CollatorStdImplFactory {
+            wu_tuner_event_sender: None,
+        },
+        validator: Arc::new(NoopValidator),
+        cancel_validation_runner: Default::default(),
+        active_collation_sessions: Default::default(),
+        active_collators: Default::default(),
+        blocks_cache: test_adapter.blocks_cache.clone(),
+        last_processed_mc_block_id: Default::default(),
+        collation_sync_state: Default::default(),
+        validator_set_cache: Default::default(),
+        mempool_config_override: None,
+        delayed_mc_state_update: Default::default(),
+    };
+
+    // handle skipped validation and verify it does not start commit flow
+    let collator_tasks = manager
+        .handle_validated_master_block(mc_block_id, ValidationStatus::Skipped, false)
+        .await
+        .unwrap();
+    assert!(collator_tasks.is_empty());
+
+    // verify the candidate stays cached as validation-skipped, not synced
+    let extracted_subgraph = test_adapter
+        .blocks_cache
+        .extract_mc_block_subgraph_for_sync(&mc_block_id);
+    let McBlockSubgraphExtract::Extracted(subgraph) = extracted_subgraph else {
+        panic!("skipped validation must keep the collated candidate in cache");
+    };
+    let BlockCacheEntryData::Collated { status, .. } = subgraph.master_block.data else {
+        panic!("skipped validation must keep the candidate collated");
+    };
+    assert_eq!(status, CandidateStatus::ValidationSkipped);
+    assert_ne!(status, CandidateStatus::Synced);
+}
 
 #[tokio::test]
 async fn test_cache_gc_on_skipped_sync() {

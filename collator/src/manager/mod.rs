@@ -19,9 +19,9 @@ use self::state_event_listener::{ChannelStateEventListener, StateEvent};
 use self::state_update_handler::ProcessMcStateUpdateMode;
 use self::sync::ShouldSyncToAppliedMcBlock;
 use self::types::{
-    ActiveCollator, CollatedBlockInfo, CollationState, CollationStatus, CollationSyncState,
-    CollatorJoinTask, CollatorState, HandledBlockFromBcCtx, ImportedAnchorEvent, NextCollationStep,
-    ValidatorJoinTask,
+    ActiveCollator, CandidateStatus, CollatedBlockInfo, CollationState, CollationStatus,
+    CollationSyncState, CollatorJoinTask, CollatorState, HandledBlockFromBcCtx,
+    ImportedAnchorEvent, NextCollationStep, ValidatorJoinTask,
 };
 use crate::collator::{
     CollationAbortReason, Collator, CollatorFactory, CollatorResult, DebugCollatorResult,
@@ -1715,17 +1715,31 @@ where
         let _histogram = HistogramGuard::begin("tycho_collator_handle_validated_master_block_time");
 
         // update block validation status
-        let updated = self
+        let updated_status = self
             .blocks_cache
             .store_master_block_validation_result(&block_id, status);
-        if !updated {
-            return Ok(vec![]);
-        }
-
-        // process valid block
-        let collator_tasks = self
-            .commit_valid_master_block(&block_id, skip_process_delayed_mc_state_update)
-            .await?;
+        let collator_tasks = match updated_status {
+            Some(CandidateStatus::Validated) => {
+                self.commit_valid_master_block(&block_id, skip_process_delayed_mc_state_update)
+                    .await?
+            }
+            Some(CandidateStatus::ValidationSkipped) => {
+                tracing::debug!(
+                    target: tracing_targets::COLLATION_MANAGER,
+                    "Skip committing master block because validation was skipped",
+                );
+                vec![]
+            }
+            Some(status) => {
+                tracing::debug!(
+                    target: tracing_targets::COLLATION_MANAGER,
+                    ?status,
+                    "Skip committing master block for non-validated status",
+                );
+                vec![]
+            }
+            None => return Ok(vec![]),
+        };
 
         Ok(collator_tasks)
     }
