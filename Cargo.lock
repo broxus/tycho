@@ -4404,6 +4404,7 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "rustls-webpki",
+ "scopeguard",
  "serde",
  "serde_json",
  "socket2",

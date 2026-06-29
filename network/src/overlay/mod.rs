@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
 use bytes::Buf;
+use futures_util::FutureExt;
+use futures_util::future::Either;
 use tl_proto::{TlError, TlRead};
 use tokio::sync::Notify;
 use tycho_util::futures::BoxFutureOrNoop;
@@ -166,10 +168,8 @@ impl Service<ServiceRequest> for OverlayService {
                     };
                     tracing::debug!("exchange_random_public_entries");
 
-                    let res = self.0.handle_exchange_public_entries(&req);
-                    return BoxFutureOrNoop::future(futures_util::future::ready(Some(
-                        Response::from_tl(res),
-                    )));
+                    let f = self.0.handle_exchange_public_entries(req);
+                    return BoxFutureOrNoop::future(f.map(|res| Some(Response::from_tl(res))));
                 }
                 rpc::GetPublicEntry::TL_ID => {
                     let req = match tl_proto::deserialize::<rpc::GetPublicEntry>(&req.body) {
@@ -192,10 +192,14 @@ impl Service<ServiceRequest> for OverlayService {
             }
             let offset = req.body.len() - req_body.len();
 
-            if let Some(private_overlay) = self.0.private_overlays.get(overlay_id) {
+            if let Some(private_overlay) =
+                self.0.private_overlays.get(overlay_id).map(|o| o.clone())
+            {
                 req.body.advance(offset);
                 return private_overlay.handle_query(req);
-            } else if let Some(public_overlay) = self.0.public_overlays.get(overlay_id) {
+            } else if let Some(public_overlay) =
+                self.0.public_overlays.get(overlay_id).map(|o| o.clone())
+            {
                 req.body.advance(offset);
                 return public_overlay.handle_query(req);
             }
@@ -240,10 +244,14 @@ impl Service<ServiceRequest> for OverlayService {
             }
             let offset = req.body.len() - req_body.len();
 
-            if let Some(private_overlay) = self.0.private_overlays.get(overlay_id) {
+            if let Some(private_overlay) =
+                self.0.private_overlays.get(overlay_id).map(|o| o.clone())
+            {
                 req.body.advance(offset);
                 return private_overlay.handle_message(req);
-            } else if let Some(public_overlay) = self.0.public_overlays.get(overlay_id) {
+            } else if let Some(public_overlay) =
+                self.0.public_overlays.get(overlay_id).map(|o| o.clone())
+            {
                 req.body.advance(offset);
                 return public_overlay.handle_message(req);
             }
@@ -335,43 +343,52 @@ impl OverlayServiceInner {
 
     fn handle_exchange_public_entries(
         &self,
-        req: &rpc::ExchangeRandomPublicEntries,
-    ) -> PublicEntriesResponse {
+        req: rpc::ExchangeRandomPublicEntries,
+    ) -> impl Future<Output = PublicEntriesResponse> + Send + 'static {
         // NOTE: validation is done in the TL parser.
         debug_assert!(req.entries.len() <= 20);
 
         // Find the overlay
         let overlay = match self.public_overlays.get(&req.overlay_id) {
-            Some(overlay) => overlay,
-            None => return PublicEntriesResponse::OverlayNotFound,
+            Some(overlay) => overlay.clone(),
+            None => {
+                return Either::Left(futures_util::future::ready(
+                    PublicEntriesResponse::OverlayNotFound,
+                ));
+            }
         };
 
-        // Add proposed entries to the overlay
-        overlay.add_untrusted_entries(&self.local_id, &req.entries, now_sec());
+        let local_id = self.local_id;
+        let n = self.config.exchange_public_entries_batch;
+        Either::Right(async move {
+            // Add proposed entries to the overlay
+            overlay
+                .add_untrusted_entries(&local_id, &req.entries, now_sec())
+                .await;
 
-        // Collect proposed entries to exclude from the response
-        let requested_ids = req
-            .entries
-            .iter()
-            .map(|id| id.peer_id)
-            .collect::<FastHashSet<_>>();
+            // Collect proposed entries to exclude from the response
+            let requested_ids = req
+                .entries
+                .iter()
+                .map(|id| id.peer_id)
+                .collect::<FastHashSet<_>>();
 
-        let entries = {
-            let entries = overlay.read_entries();
+            let entries = {
+                let entries = overlay.read_entries();
 
-            // Choose additional random entries to ensure we have enough new entries to send back
-            let n = self.config.exchange_public_entries_batch;
-            entries
-                .choose_multiple(&mut rand::rng(), n + requested_ids.len())
-                .filter_map(|item| {
-                    let is_new = !requested_ids.contains(&item.entry.peer_id);
-                    is_new.then(|| item.entry.clone())
-                })
-                .take(n)
-                .collect::<Vec<_>>()
-        };
+                // Choose additional random entries to ensure we have enough new entries to send back
+                entries
+                    .choose_multiple(&mut rand::rng(), n + requested_ids.len())
+                    .filter_map(|item| {
+                        let is_new = !requested_ids.contains(&item.entry.peer_id);
+                        is_new.then(|| item.entry.clone())
+                    })
+                    .take(n)
+                    .collect::<Vec<_>>()
+            };
 
-        PublicEntriesResponse::PublicEntries(entries)
+            PublicEntriesResponse::PublicEntries(entries)
+        })
     }
 
     fn handle_get_public_entry(&self, req: &rpc::GetPublicEntry) -> PublicEntryResponse {

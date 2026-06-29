@@ -5,8 +5,10 @@ use anyhow::Result;
 use futures_util::StreamExt;
 use indexmap::IndexSet;
 use rand::Rng;
+use tl_proto::TlRead;
 use tycho_util::futures::JoinTask;
 use tycho_util::time::{now_sec, shifted_interval, shifted_interval_immediate};
+use tycho_util::tl::VecWithMaxLen;
 
 use crate::dht::{DhtClient, DhtQueryMode, DhtService};
 use crate::network::{KnownPeerHandle, Network, WeakNetwork};
@@ -356,7 +358,9 @@ impl OverlayServiceInner {
                     count = entries.len(),
                     "received public entries"
                 );
-                overlay.add_untrusted_entries(&self.local_id, &entries, now_sec());
+                overlay
+                    .add_untrusted_entries(&self.local_id, &entries, now_sec())
+                    .await;
             }
             PublicEntriesResponse::OverlayNotFound => {
                 tracing::debug!(
@@ -394,11 +398,12 @@ impl OverlayServiceInner {
         let res = dht_client.find_value(&key_hash, DhtQueryMode::Random).await;
         let is_empty = overlay.read_entries().is_empty();
 
-        let entries = match res {
+        #[derive(TlRead)]
+        struct LimitedEntries(#[tl(with = "VecWithMaxLen::<100>")] Vec<Arc<PublicEntry>>);
+
+        let LimitedEntries(mut entries) = match res {
             Some(value) => match &*value {
-                Value::Merged(value) => {
-                    tl_proto::deserialize::<Vec<Arc<PublicEntry>>>(&value.data)?
-                }
+                Value::Merged(value) => tl_proto::deserialize(&value.data)?,
                 Value::Peer(_) => {
                     tracing::warn!("expected a `Value::Merged`, but got a `Value::Peer`");
                     return Ok(DiscoveryStatus::Unchanged { is_empty });
@@ -409,10 +414,22 @@ impl OverlayServiceInner {
                 return Ok(DiscoveryStatus::Unchanged { is_empty });
             }
         };
+        let max_count = self.config.public_overlay_peer_store_max_entries;
+        if entries.len() > max_count {
+            tracing::warn!(
+                discovered = entries.len(),
+                max_count,
+                "truncating discovered entries",
+            );
+            entries.truncate(max_count);
+        }
+        let count = entries.len();
 
-        let updated = overlay.add_untrusted_entries(&self.local_id, &entries, now_sec());
+        let updated = overlay
+            .add_untrusted_entries(&self.local_id, &entries, now_sec())
+            .await;
 
-        tracing::debug!(count = entries.len(), updated, "discovered public entries");
+        tracing::debug!(count, updated, "discovered public entries");
         Ok(if updated {
             DiscoveryStatus::Changed
         } else {
@@ -492,16 +509,13 @@ impl OverlayServiceInner {
                 Ok(entry) => {
                     tracing::debug!(%peer_id, "received public entry");
 
-                    let any_added = overlay.add_untrusted_entries(
-                        &self.local_id,
-                        std::slice::from_ref(&entry),
-                        now_sec(),
-                    );
-
-                    if any_added {
-                        // Give some space for the executor between signature checks.
-                        tokio::task::yield_now().await;
-                    }
+                    overlay
+                        .add_untrusted_entries(
+                            &self.local_id,
+                            std::slice::from_ref(&entry),
+                            now_sec(),
+                        )
+                        .await;
                 }
                 Err(e) => tracing::debug!(%peer_id, "failed to get peer public overlay entry: {e}"),
             }
