@@ -477,12 +477,14 @@ impl BlocksCache {
         &self,
         block_id: &BlockId,
         validation_result: ValidationStatus,
-    ) -> bool {
+    ) -> Option<CandidateStatus> {
         let (new_status, signatures, total_weight) = match validation_result {
             ValidationStatus::Complete(res) => {
                 (CandidateStatus::Validated, res.signatures, res.total_weight)
             }
-            ValidationStatus::Skipped => (CandidateStatus::Synced, Default::default(), 0),
+            ValidationStatus::Skipped => {
+                (CandidateStatus::ValidationSkipped, Default::default(), 0)
+            }
         };
 
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
@@ -496,7 +498,7 @@ impl BlocksCache {
                 target: tracing_targets::COLLATION_MANAGER,
                 "Block does not exist in cache - skip validation result",
             );
-            return false;
+            return None;
         };
 
         match &mut entry.data {
@@ -506,17 +508,25 @@ impl BlocksCache {
                 status,
                 ..
             } => {
+                if *status == CandidateStatus::Synced {
+                    tracing::debug!(
+                        target: tracing_targets::COLLATION_MANAGER,
+                        "Block is Synced, validation status was not updated - skip validation result",
+                    );
+                    return None;
+                }
                 let changed = *status != new_status;
-                candidate_stuff.signatures = signatures;
-                candidate_stuff.total_signature_weight = total_weight;
-                *status = new_status;
                 if !changed {
                     tracing::debug!(
                         target: tracing_targets::COLLATION_MANAGER,
                         "Block is Collated, validation status was not updated - skip validation result",
                     );
+                    return None;
                 }
-                changed
+                candidate_stuff.signatures = signatures;
+                candidate_stuff.total_signature_weight = total_weight;
+                *status = new_status;
+                Some(new_status)
             }
             // We have already received a block from bc, discard validation result
             BlockCacheEntryData::Received { .. } => {
@@ -524,7 +534,7 @@ impl BlocksCache {
                     target: tracing_targets::COLLATION_MANAGER,
                     "Block is Received, validation status was not updated - skip validation result",
                 );
-                false
+                None
             }
         }
     }
