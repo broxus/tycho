@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use tycho_block_util::message::ExtMsgRepr;
-use tycho_types::boc::Boc;
 use tycho_types::models::MsgInfo;
 use tycho_types::prelude::Load;
 use tycho_util::metrics::HistogramGuard;
@@ -79,10 +78,10 @@ impl Parser {
     }
 
     fn parse_message_bytes(message: &[u8]) -> Option<Arc<ExternalMessage>> {
-        let cell = Boc::decode(message).ok()?;
-        if cell.is_exotic() || cell.level() != 0 || cell.repr_depth() > ExtMsgRepr::MAX_REPR_DEPTH {
-            return None;
-        }
+        // NOTE: Brief message validation, other checks will be run in executor.
+        // We can't use `ExtMsgRepr::validate` because it uses some hardcoded limits,
+        // and the executor knows these limits better.
+        let cell = ExtMsgRepr::pre_validate_boc(message).ok()?;
 
         let mut cs = cell.as_slice_allow_exotic();
         let MsgInfo::ExtIn(info) = MsgInfo::load_from(&mut cs).ok()? else {
