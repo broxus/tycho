@@ -620,12 +620,24 @@ impl StarterInner {
         let (handle, state) = self
             .download_shard_state(&zerostate_id, &zerostate_id, true)
             .await?;
+        anyhow::ensure!(
+            state.root_cell().repr_hash() == &zerostate_id.root_hash,
+            "downloaded zerostate hash mismatch: expected={}, got={}",
+            zerostate_id.root_hash,
+            state.root_cell().repr_hash(),
+        );
 
         for item in state.shards()?.latest_blocks() {
             let block_id = item?;
-            let (handle, _) = self
+            let (handle, state) = self
                 .download_shard_state(&zerostate_id, &block_id, true)
                 .await?;
+            anyhow::ensure!(
+                state.root_cell().repr_hash() == &block_id.root_hash,
+                "downloaded zerostate hash mismatch: expected={}, got={}",
+                block_id.root_hash,
+                state.root_cell().repr_hash(),
+            );
 
             handle_storage.set_block_committed(&handle);
         }
@@ -656,7 +668,8 @@ impl StarterInner {
             let state_hash = *shard_state.root_cell().repr_hash();
             anyhow::ensure!(
                 state_update.new_hash == state_hash,
-                "downloaded shard state hash mismatch"
+                "downloaded shard state hash mismatch: expected={}, got={state_hash}",
+                state_update.new_hash,
             );
         }
 
