@@ -131,11 +131,12 @@ impl MappedFile {
             return Err(std::io::Error::last_os_error());
         }
 
+        let this = Self { length, ptr };
         if unsafe { libc::madvise(ptr, length, libc::MADV_RANDOM) } != 0 {
             return Err(std::io::Error::last_os_error());
         }
 
-        Ok(Self { length, ptr })
+        Ok(this)
     }
 
     /// Mapped buffer length in bytes

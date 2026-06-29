@@ -40,6 +40,10 @@ impl<T> Drop for OnceTake<T> {
     }
 }
 
+// NOTE: `OnceTake` can be shared between threads and some other thread
+// can call `take` "sending" the value between threads.
+unsafe impl<T: Send> Sync for OnceTake<T> {}
+
 #[cfg(test)]
 mod test {
     use std::sync::{Arc, Mutex};

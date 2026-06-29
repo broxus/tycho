@@ -714,7 +714,10 @@ impl<B> Inner<B> {
 
         let block = BlockData {
             data,
-            size: NonZeroU32::new(data_size).expect("shouldn't happen"),
+            size: match NonZeroU32::new(data_size) {
+                Some(size) => size,
+                None => return Ok(BlockFull::NotFound),
+            },
             chunk_size: NonZeroU32::new(BLOCK_DATA_CHUNK_SIZE).expect("shouldn't happen"),
         };
 

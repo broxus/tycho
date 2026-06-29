@@ -435,12 +435,16 @@ impl Drop for Inner {
         if let Some(handle) = self.ping_task.take() {
             handle.abort();
         }
-
         if let Some(handle) = self.update_task.take() {
             handle.abort();
         }
-
+        if let Some(handle) = self.score_task.take() {
+            handle.abort();
+        }
         if let Some(handle) = self.cleanup_task.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.metrics_task.take() {
             handle.abort();
         }
     }
