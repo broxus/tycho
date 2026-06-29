@@ -494,7 +494,7 @@ impl<'a> RawCell<'a> {
         let mut reference_indices = ArrayVec::new();
         for _ in 0..ref_count {
             let index = src.read_be_uint(ref_size)? as usize;
-            if index > cell_count || index <= cell_index {
+            if index >= cell_count || index <= cell_index {
                 return Err(parser_error("reference index out of range"));
             } else {
                 // SAFETY: `ref_count` is in range 0..=4
