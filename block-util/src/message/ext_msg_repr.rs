@@ -90,7 +90,8 @@ impl ExtMsgRepr {
 
     // === General methods ===
 
-    pub fn validate<T: AsRef<[u8]>>(bytes: T) -> Result<Cell, InvalidExtMsg> {
+    // Only validates BOC structure without checking the full message size or structure.
+    pub fn pre_validate_boc<T: AsRef<[u8]>>(bytes: T) -> Result<Cell, InvalidExtMsg> {
         // Apply limits to the encoded BOC.
         if bytes.as_ref().len() > Self::MAX_BOC_SIZE {
             return Err(InvalidExtMsg::BocSizeExceeded);
@@ -113,6 +114,12 @@ impl ExtMsgRepr {
         if msg_root.is_exotic() {
             return Err(InvalidExtMsg::InvalidMessage(Error::InvalidData));
         }
+
+        Ok(msg_root)
+    }
+
+    pub fn validate<T: AsRef<[u8]>>(bytes: T) -> Result<Cell, InvalidExtMsg> {
+        let msg_root = Self::pre_validate_boc(bytes)?;
 
         // Start parsing the message (we are sure now that it is an ordinary cell).
         let mut cs = msg_root.as_slice_allow_exotic();
