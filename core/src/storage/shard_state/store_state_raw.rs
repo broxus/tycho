@@ -341,7 +341,9 @@ impl<'a> FinalizationContext<'a> {
                         .get(index)
                         .ok_or(StoreStateError::InvalidCell)
                         .context("Pruned branch data not found")?;
-                    child.pruned_branch_depth(hash_idx + is_merkle_cell as u8, child_data)
+                    child
+                        .pruned_branch_depth(hash_idx + is_merkle_cell as u8, child_data)
+                        .context("Invalid pruned branch")?
                 } else {
                     child.depth(hash_idx + is_merkle_cell as u8)
                 };

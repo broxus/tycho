@@ -144,17 +144,20 @@ impl<'a> HashesEntry<'a> {
         })
     }
 
-    pub fn pruned_branch_depth(&self, n: u8, data: &[u8]) -> u16 {
+    pub fn pruned_branch_depth(&self, n: u8, data: &[u8]) -> Option<u16> {
         let level_mask = self.level_mask();
         let index = level_mask.hash_index(n) as usize;
         let level = level_mask.level() as usize;
 
-        if index == level {
+        Some(if index == level {
             let offset = Self::DEPTHS_OFFSET;
             u16::from_le_bytes([self.0[offset], self.0[offset + 1]])
         } else {
             let offset = 1 + 1 + level * 32 + index * 2;
+            if data.len() < offset + 2 {
+                return None;
+            }
             u16::from_be_bytes([data[offset], data[offset + 1]])
-        }
+        })
     }
 }
