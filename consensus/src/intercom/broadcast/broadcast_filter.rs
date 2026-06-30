@@ -141,27 +141,28 @@ impl BroadcastFilter {
         // have to cache every point when the node lags behind consensus;
         let prune_after = head.next().round() + NodeConfig::get().cache_future_broadcasts_rounds;
 
-        let checked = if let Some(issue) = maybe_issue {
-            let reason = IllFormedReason::EvidenceSigError(issue);
-            Ok(if id.round > prune_after {
+        let merged = Verifier::verify(point.info(), peer_schedule, round_ctx.conf()).and(
+            match maybe_issue {
+                None => Ok(()),
+                Some(issue) => Err(VerifyError::IllFormed(IllFormedReason::EvidenceSigError(
+                    issue,
+                ))),
+            },
+        );
+
+        let checked = match merged {
+            Err(VerifyError::IllFormed(IllFormedReason::UnknownAuthor)) => return false,
+            Ok(()) => Ok(if id.round > prune_after {
+                CachedItem::OkPruned(id.digest)
+            } else {
+                CachedItem::Ok(point.clone())
+            }),
+            Err(VerifyError::IllFormed(reason)) => Ok(if id.round > prune_after {
                 CachedItem::IllFormedPruned(id.digest, reason)
             } else {
                 CachedItem::IllFormed(point.clone(), reason)
-            })
-        } else {
-            match Verifier::verify(point.info(), peer_schedule, round_ctx.conf()) {
-                Ok(()) => Ok(if id.round > prune_after {
-                    CachedItem::OkPruned(id.digest)
-                } else {
-                    CachedItem::Ok(point.clone())
-                }),
-                Err(VerifyError::IllFormed(reason)) => Ok(if id.round > prune_after {
-                    CachedItem::IllFormedPruned(id.digest, reason)
-                } else {
-                    CachedItem::IllFormed(point.clone(), reason)
-                }),
-                Err(VerifyError::Fail(reason)) => Err(reason),
-            }
+            }),
+            Err(VerifyError::Fail(reason)) => Err(reason),
         };
 
         let cache_info = self.cache(
@@ -264,6 +265,17 @@ impl BroadcastFilter {
         } = &*round_item_read;
 
         let mut cached_info = CacheInfo::default();
+
+        let mut set_reached_threshold = || {
+            // count only successfully verified
+            if verified.ill_formed_reason().is_none() {
+                cached_info.reached_threshold = by_author_len
+                .fetch_add(1, atomic::Ordering::Relaxed) // wraps
+                .wrapping_add(1) as usize // won't exceed u8, just don't panic holding lock
+                == peer_count.reliable_minority();
+            }
+        };
+
         // ban the author, if we detect equivocation now; we won't be able to prove it
         // if some signatures are invalid (it's another reason for a local ban)
         (by_author.entry(id.author))
@@ -285,6 +297,9 @@ impl BroadcastFilter {
                             }
                         }
                         None => {
+                            if existing.first.item.ill_formed_reason().is_some() {
+                                set_reached_threshold(); // was not counted on first insert
+                            }
                             existing.fork = Some(Cached {
                                 item: verified.clone(),
                                 duplicates: 0,
@@ -296,10 +311,7 @@ impl BroadcastFilter {
                 };
             })
             .or_insert_with(|| {
-                cached_info.reached_threshold = by_author_len
-                    .fetch_add(1, atomic::Ordering::Relaxed) // wraps
-                    .wrapping_add(1) as usize // won't exceed u8, just don't panic holding lock
-                    == peer_count.reliable_minority();
+                set_reached_threshold();
                 ByAuthor {
                     first: Cached {
                         item: verified.clone(),

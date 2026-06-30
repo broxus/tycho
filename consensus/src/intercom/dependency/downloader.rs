@@ -373,16 +373,9 @@ impl DownloadTask {
                 ));
                 None
             }
-            LastResponse::IllFormed(point, issue) => {
-                tracing::error!(
-                    error = display(&issue),
-                    point = debug(&point),
-                    "downloaded ill-formed"
-                );
-                let error = VerifyError::IllFormed(IllFormedReason::EvidenceSigError(issue));
-                Some(DownloadResult::IllFormed(point, error))
-            }
-            LastResponse::Point(point) if point.info().id() != self.query.point_id() => {
+            LastResponse::IllFormed(point, _) | LastResponse::Point(point)
+                if point.info().id() != self.query.point_id() =>
+            {
                 on_not_found();
                 DownloadCtx::meter_unreliable();
                 let wrong_id = point.info().id();
@@ -399,6 +392,15 @@ impl DownloadTask {
                     received: *wrong_id,
                 });
                 None
+            }
+            LastResponse::IllFormed(point, issue) => {
+                tracing::error!(
+                    error = display(&issue),
+                    point = debug(&point),
+                    "downloaded ill-formed"
+                );
+                let error = VerifyError::IllFormed(IllFormedReason::EvidenceSigError(issue));
+                Some(DownloadResult::IllFormed(point, error))
             }
             LastResponse::Point(point) => {
                 match Verifier::verify(point.info(), peer_schedule, ctx.conf()) {
