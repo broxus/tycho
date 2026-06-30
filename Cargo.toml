@@ -154,7 +154,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 triomphe = "0.1.15"
 tycho-crypto = { version = "0.4", features = ["tl-proto", "serde", "rand9"] }
 tycho-executor = "0.3.6"
-tycho-types = { version = "0.3.4", features = ["tycho", "stats"] }
+tycho-types = { version = "0.3.5", features = ["tycho", "stats"] }
 tycho-vm = "0.3.6"
 uuid = "1.22.0"
 walkdir = "2.5.0"
@@ -182,7 +182,6 @@ tycho-wu-tuner = { path = "./wu-tuner", version = "0.3.10" }
 
 [patch.crates-io]
 # patches here
-tycho-types = { git = "https://github.com/broxus/tycho-types.git", rev = "3ff0cacbce582a18505fe0828f3081684c34b9dc" }
 
 [workspace.lints.rust]
 future_incompatible = "warn"
