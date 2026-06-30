@@ -25,6 +25,7 @@ pub struct StoreStateContext {
     pub cells_db: CellsDb,
     pub cell_storage: Arc<CellStorage>,
     pub temp_file_storage: TempFileStorage,
+    pub expected_root_hash: Option<HashBytes>,
 }
 
 impl StoreStateContext {
@@ -212,6 +213,13 @@ impl StoreStateContext {
 
         // Current entry contains root cell
         let root_hash = ctx.entries_buffer.repr_hash();
+        if let Some(expected_root_hash) = &self.expected_root_hash {
+            anyhow::ensure!(
+                root_hash == expected_root_hash,
+                "shard state root hash mismatch: expected={expected_root_hash}, got={}",
+                HashBytes::wrap(root_hash)
+            );
+        }
         ctx.final_check(root_hash)?;
 
         self.cell_storage
@@ -445,7 +453,7 @@ impl<'a> FinalizationContext<'a> {
 
     fn final_check(&self, root_hash: &[u8; 32]) -> Result<()> {
         tracing::info!(root_hash = %HashBytes::wrap(root_hash), "Final check");
-        tracing::info!(len=?self.cell_usages.len(), "Cell usages");
+        tracing::info!(len = ?self.cell_usages.len(), "Cell usages");
 
         anyhow::ensure!(
             self.cell_usages.len() == 1 && self.cell_usages.contains_key(root_hash),
@@ -599,6 +607,7 @@ mod test {
             cells_db: cells_db.clone(),
             cell_storage: cell_storage.clone(),
             temp_file_storage: storage.context().temp_files().clone(),
+            expected_root_hash: None,
         };
 
         for file in std::fs::read_dir(current_test_path.join("states"))? {
@@ -784,7 +793,11 @@ mod test {
 
         let root_hash = storage
             .shard_state_storage()
-            .store_state_bytes(&block_id, Bytes::from_static(ZEROSTATE_BOC))
+            .store_state_bytes(
+                &block_id,
+                Bytes::from_static(ZEROSTATE_BOC),
+                Some(&block_id.root_hash),
+            )
             .await?;
         assert_eq!(root_hash, block_id.root_hash);
 
@@ -799,7 +812,11 @@ mod test {
         // existing counters.
         let root_hash = storage
             .shard_state_storage()
-            .store_state_bytes(&next_block_id, Bytes::from_static(ZEROSTATE_BOC))
+            .store_state_bytes(
+                &next_block_id,
+                Bytes::from_static(ZEROSTATE_BOC),
+                Some(&block_id.root_hash),
+            )
             .await?;
         assert_eq!(root_hash, next_block_id.root_hash);
 

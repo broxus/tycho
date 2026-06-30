@@ -476,13 +476,9 @@ impl StarterInner {
 
         let mc_block_id = self.zerostate.as_block_id();
         tracing::info!(%mc_block_id, "importing masterchain zerostate");
-        let root_hash = state_storage
-            .store_state_bytes(&mc_block_id, mc_zerostate)
+        state_storage
+            .store_state_bytes(&mc_block_id, mc_zerostate, Some(&self.zerostate.root_hash))
             .await?;
-        anyhow::ensure!(
-            root_hash == self.zerostate.root_hash,
-            "imported zerostate root hash mismatch"
-        );
 
         let mc_zerostate = state_storage
             .load_state(mc_block_id.seqno, &mc_block_id)
@@ -529,13 +525,9 @@ impl StarterInner {
             };
 
             tracing::info!(%block_id, "importing shard zerostate");
-            let root_hash = state_storage
-                .store_state_bytes(&block_id, state_bytes)
+            state_storage
+                .store_state_bytes(&block_id, state_bytes, Some(&block_id.root_hash))
                 .await?;
-            anyhow::ensure!(
-                root_hash == block_id.root_hash,
-                "imported zerostate root hash mismatch"
-            );
         }
 
         anyhow::ensure!(
@@ -618,27 +610,14 @@ impl StarterInner {
         let handle_storage = self.storage.block_handle_storage();
 
         let (handle, state) = self
-            .download_shard_state(&zerostate_id, &zerostate_id, true)
+            .download_shard_state(&zerostate_id, &zerostate_id, true, &zerostate_id.root_hash)
             .await?;
-        anyhow::ensure!(
-            state.root_cell().repr_hash() == &zerostate_id.root_hash,
-            "downloaded zerostate hash mismatch: expected={}, got={}",
-            zerostate_id.root_hash,
-            state.root_cell().repr_hash(),
-        );
 
         for item in state.shards()?.latest_blocks() {
             let block_id = item?;
-            let (handle, state) = self
-                .download_shard_state(&zerostate_id, &block_id, true)
+            let (handle, _) = self
+                .download_shard_state(&zerostate_id, &block_id, true, &block_id.root_hash)
                 .await?;
-            anyhow::ensure!(
-                state.root_cell().repr_hash() == &block_id.root_hash,
-                "downloaded zerostate hash mismatch: expected={}, got={}",
-                block_id.root_hash,
-                state.root_cell().repr_hash(),
-            );
-
             handle_storage.set_block_committed(&handle);
         }
 
@@ -663,13 +642,12 @@ impl StarterInner {
             let state_update = block.as_ref().load_state_update()?;
 
             let (_, shard_state) = self
-                .download_shard_state(mc_block_id, block_id, false)
+                .download_shard_state(mc_block_id, block_id, false, &state_update.new_hash)
                 .await?;
             let state_hash = *shard_state.root_cell().repr_hash();
-            anyhow::ensure!(
-                state_update.new_hash == state_hash,
-                "downloaded shard state hash mismatch: expected={}, got={state_hash}",
-                state_update.new_hash,
+            assert_eq!(
+                state_update.new_hash, state_hash,
+                "storage must verify expected root hash"
             );
         }
 
@@ -795,6 +773,7 @@ impl StarterInner {
         mc_block_id: &BlockId,
         block_id: &BlockId,
         is_zerostate: bool,
+        expected_state_root: &HashBytes,
     ) -> Result<(BlockHandle, ShardStateStuff)> {
         enum StoreZeroStateFrom {
             File(FileBuilder),
@@ -811,7 +790,7 @@ impl StarterInner {
         let state_file_path = state_file.path().to_owned();
 
         // NOTE: Intentionally dont spawn yet
-        let remove_state_file = async move {
+        let remove_state_file = async move || {
             if let Err(e) = tokio::fs::remove_file(&state_file_path).await {
                 tracing::warn!(
                     path = %state_file_path.display(),
@@ -857,6 +836,11 @@ impl StarterInner {
                 .load_state(mc_seqno, block_id)
                 .await
                 .context("failed to load state on downloaded shard state")?;
+            anyhow::ensure!(
+                state.root_cell().repr_hash() == expected_state_root,
+                "stored state root hash mismatch: expected={expected_state_root}, got={}",
+                state.root_cell().repr_hash()
+            );
 
             if !handle.has_persistent_shard_state() {
                 let from = if state_file.exists() {
@@ -870,7 +854,7 @@ impl StarterInner {
                     .context("failed to store persistent shard state")?;
             }
 
-            remove_state_file.await;
+            remove_state_file().await;
 
             tracing::info!("using the stored shard state");
             return Ok((handle.clone(), state));
@@ -885,6 +869,7 @@ impl StarterInner {
                 Ok(file) => file,
                 Err(e) => {
                     tracing::error!(attempt, "failed to download persistent shard state: {e:?}");
+                    remove_state_file().await;
                     continue;
                 }
             };
@@ -892,11 +877,23 @@ impl StarterInner {
             // NOTE: `store_state_file` error is mostly unrecoverable since the operation
             //       context is too large to be atomic. This downloaded-state path is
             //       rebuild-only on interruption, unlike bootstrap raw import marker cleanup.
-            // TODO: Make this operation recoverable to allow an infinite number of attempts.
-            shard_states
-                .store_state_file(block_id, file)
+            // TODO: mark all errors before `apply_temp_cell` as recoverable.
+            match shard_states
+                .store_state_file(block_id, file, Some(expected_state_root))
                 .await
-                .context("failed to store shard state file")?;
+            {
+                Ok(root_hash) => {
+                    assert_eq!(
+                        &root_hash, expected_state_root,
+                        "storage must verify expected root hash"
+                    );
+                }
+                Err(e) => {
+                    tracing::error!("failed to store shard state file: {e:?}");
+                    remove_state_file().await;
+                    continue;
+                }
+            }
 
             let state = shard_states
                 .load_state(mc_seqno, block_id)
@@ -926,7 +923,7 @@ impl StarterInner {
                 .await
                 .context("failed to store persistent shard state")?;
 
-            remove_state_file.await;
+            remove_state_file().await;
 
             tracing::info!("using the downloaded shard state");
             return Ok((block_handle, state));
