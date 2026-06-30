@@ -267,11 +267,11 @@ impl PointData {
         let IndirectLink { to, path } = indirect;
         match path {
             Through::Includes(peer) => (!self.includes.contains_key(peer)
-                || to.round.next() >= round)
-                .then_some(PointMap::Includes),
+                || to.round >= round.prev())
+            .then_some(PointMap::Includes),
             Through::Witness(peer) => (!self.witness.contains_key(peer)
-                || to.round.next().next() >= round)
-                .then_some(PointMap::Witness),
+                || to.round >= round.prev().prev())
+            .then_some(PointMap::Witness),
         }
     }
 

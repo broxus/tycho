@@ -13,6 +13,9 @@ use crate::effects::AltFormat;
 use crate::engine::MempoolConfig;
 use crate::models::{PeerCount, PointInfo, Round, UnixTime, ValidPoint};
 
+const TOO_FAR_FUTURE: UnixTime =
+    UnixTime::from_millis(Duration::from_hours(365 * 24).as_millis() as u64);
+
 /// NOTE see [`Threshold::reached()`] for comments on limited usability
 pub struct Threshold {
     round: Round,
@@ -101,6 +104,10 @@ impl Threshold {
             let (info, is_from_channel) = tokio::select! {
                 Some(info) = receiver.recv() => {
                     let mut to_delay = info.time() - max_time;
+                    if to_delay > TOO_FAR_FUTURE {
+                        ThresholdCount::set_decrease(&self.count, ready, delayed, true as u8);
+                        continue; // discard: don't allow timer wheel to panic
+                    }
                     if to_delay.millis() > 0 {
                         max_time = UnixTime::now() + self.clock_skew;
                         to_delay = info.time() - max_time;
@@ -156,6 +163,9 @@ impl Threshold {
                 .checked_add(1)
                 .expect("cannot overflow");
             let to_delay = info.time() - max_time;
+            if to_delay > TOO_FAR_FUTURE {
+                continue; // discard: don't allow timer wheel to panic
+            }
             if to_delay.millis() > 0 {
                 work.delayed
                     .insert(info, Duration::from_millis(to_delay.millis()));
