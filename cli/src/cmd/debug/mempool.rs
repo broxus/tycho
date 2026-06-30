@@ -379,7 +379,11 @@ async fn load_mc_zerostate(
     tracing::info!("loading zerostate {:?}", zerostate_block_id);
     let root_hash = storage
         .shard_state_storage()
-        .store_state_bytes(&zerostate_block_id, masterchain_zerostate)
+        .store_state_bytes(
+            &zerostate_block_id,
+            masterchain_zerostate,
+            Some(&mc_zerostate_id.root_hash),
+        )
         .await?;
     assert_eq!(root_hash, mc_zerostate_id.root_hash);
 

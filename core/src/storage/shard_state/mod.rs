@@ -805,16 +805,33 @@ impl ShardStateStorage {
     }
 
     // Stores shard state and returns the hash of its root cell.
-    pub async fn store_state_file(&self, block_id: &BlockId, boc: File) -> Result<HashBytes> {
-        self.store_state_raw_inner(block_id, boc).await
+    pub async fn store_state_file(
+        &self,
+        block_id: &BlockId,
+        boc: File,
+        expected_root_hash: Option<&HashBytes>,
+    ) -> Result<HashBytes> {
+        self.store_state_raw_inner(block_id, boc, expected_root_hash)
+            .await
     }
 
-    pub async fn store_state_bytes(&self, block_id: &BlockId, boc: Bytes) -> Result<HashBytes> {
+    pub async fn store_state_bytes(
+        &self,
+        block_id: &BlockId,
+        boc: Bytes,
+        expected_root_hash: Option<&HashBytes>,
+    ) -> Result<HashBytes> {
         let cursor = Cursor::new(boc);
-        self.store_state_raw_inner(block_id, cursor).await
+        self.store_state_raw_inner(block_id, cursor, expected_root_hash)
+            .await
     }
 
-    async fn store_state_raw_inner<R>(&self, block_id: &BlockId, boc: R) -> Result<HashBytes>
+    async fn store_state_raw_inner<R>(
+        &self,
+        block_id: &BlockId,
+        boc: R,
+        expected_root_hash: Option<&HashBytes>,
+    ) -> Result<HashBytes>
     where
         R: std::io::Read + Send + 'static,
     {
@@ -822,6 +839,7 @@ impl ShardStateStorage {
             cells_db: self.cells_db.clone(),
             cell_storage: self.cell_storage.clone(),
             temp_file_storage: self.temp_file_storage.clone(),
+            expected_root_hash: expected_root_hash.copied(),
         };
 
         let block_id = *block_id;
