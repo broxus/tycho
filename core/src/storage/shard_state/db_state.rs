@@ -11,7 +11,7 @@ use crate::storage::db::is_table_empty;
 
 pub(super) const CELL_HASH_RANGE_START: [u8; 32] = [0x00; 32];
 // RocksDB range deletion has an exclusive end bound. 33 bytes keeps [0xff; 32]
-// inside the fixed-size hash keyspace cleanup.
+// inside the fixed-size hash keyspace.
 pub(super) const CELL_HASH_RANGE_END: [u8; 33] = [0xff; 33];
 
 const COUNTER_SNAPSHOT_LATEST_KEY: &[u8] = b"counter_snapshot/latest";
@@ -101,51 +101,18 @@ impl CountersStore {
         Ok(())
     }
 
-    // Raw zerostate import is only complete after the marker is cleared. If we
-    // crash before that, imported cell rows, temp rows, shard roots and counter
-    // snapshots are suspect and must be hidden before normal shard-state
-    // storage is constructed. The marker is bootstrap-scoped; it is not a
-    // complete cross-DB rollback for block handles or persistent-state files.
-    pub fn cleanup_interrupted_raw_import(&mut self) -> Result<(), CellsDbStateError> {
-        let Some(_) = self
+    // Raw state import is only complete after the marker is cleared.
+    pub fn check_no_interrupted_raw_import(&mut self) -> Result<(), CellsDbStateError> {
+        if self
             .cells_db
             .state
             .get(CellsDbStateKey::RawImportInProgress)?
-        else {
-            return Ok(());
-        };
-
-        tracing::warn!("cleaning interrupted bootstrap raw import state");
-
-        let mut batch = WriteBatch::default();
-        batch.delete_range_cf(
-            &self.cells_db.cells.cf(),
-            CELL_HASH_RANGE_START.as_slice(),
-            CELL_HASH_RANGE_END.as_slice(),
-        );
-        batch.delete_range_cf(
-            &self.cells_db.temp_cells.cf(),
-            CELL_HASH_RANGE_START.as_slice(),
-            CELL_HASH_RANGE_END.as_slice(),
-        );
-        // `BlockId` keys are encoded as 80 bytes.
-        let from = [0x00; 80];
-        let to = [0xff; 81];
-        batch.delete_range_cf(
-            &self.cells_db.shard_states.cf(),
-            from.as_slice(),
-            to.as_slice(),
-        );
-
-        batch.delete_cf(
-            &self.cells_db.state.cf(),
-            CellsDbStateKey::CounterSnapshotLatest,
-        );
-        batch.delete_cf(
-            &self.cells_db.state.cf(),
-            CellsDbStateKey::RawImportInProgress,
-        );
-        self.cells_db.rocksdb().write(batch)?;
+            .is_some()
+        {
+            return Err(CellsDbStateError::Custom(
+                "raw state import was interrupted; local storage is poisoned and requires a full re-sync".to_owned(),
+            ));
+        }
         Ok(())
     }
 }
