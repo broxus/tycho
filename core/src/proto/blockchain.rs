@@ -67,8 +67,22 @@ pub enum PersistentStateInfo {
         size: NonZeroU64,
         chunk_size: NonZeroU32,
     },
+    #[tl(id = "blockchain.persistentStateInfo.foundWithParts")]
+    FoundWithParts {
+        size: NonZeroU64,
+        chunk_size: NonZeroU32,
+        split_depth: u32,
+        parts: Vec<PersistentStatePartInfo>,
+    },
     #[tl(id = "blockchain.persistentStateInfo.notFound")]
     NotFound,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
+#[tl(boxed, id = "blockchain.persistentStatePartInfo", scheme = "proto.tl")]
+pub struct PersistentStatePartInfo {
+    pub prefix: u64,
+    pub size: NonZeroU64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
@@ -188,6 +202,19 @@ pub mod rpc {
     pub struct GetPersistentShardStateChunk {
         #[tl(with = "tl_block_id")]
         pub block_id: tycho_types::models::BlockId,
+        pub offset: u64,
+    }
+
+    #[derive(Debug, Clone, TlRead, TlWrite)]
+    #[tl(
+        boxed,
+        id = "blockchain.getPersistentShardStatePartChunk",
+        scheme = "proto.tl"
+    )]
+    pub struct GetPersistentShardStatePartChunk {
+        #[tl(with = "tl_block_id")]
+        pub block_id: tycho_types::models::BlockId,
+        pub prefix: u64,
         pub offset: u64,
     }
 

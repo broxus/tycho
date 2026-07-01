@@ -35,6 +35,8 @@ use crate::storage::{CellsDb, CoreStorageConfig};
 const PERSISTED_CELL_FILTER_MAX_CAPACITY: u64 = 2_000_000_000;
 const PERSISTED_CELL_FILTER_FP_RATE: f64 = 0.001;
 
+pub mod raw;
+
 pub struct CellStorage {
     cells_db: CellsDb,
     cell_counters: Mutex<CountersStore>,
@@ -97,6 +99,27 @@ impl CellStorage {
 
     pub fn db(&self) -> &CellsDb {
         &self.cells_db
+    }
+
+    #[cfg(test)]
+    pub(crate) fn get_counter_value(
+        &self,
+        key: &HashBytes,
+    ) -> Result<Option<u64>, CellStorageError> {
+        let Some(value) = self
+            .cells_db
+            .cells
+            .get(key)
+            .map_err(CellStorageError::Internal)?
+        else {
+            return Ok(None);
+        };
+        let Some((idx, _)) = decode_indexed_value(value.as_ref()) else {
+            return Err(CellStorageError::InvalidCell);
+        };
+
+        let cell_counters = self.cell_counters.lock().unwrap();
+        Ok(Some(cell_counters.counters.get(idx)))
     }
 
     pub(super) fn prepare_persistent_state_save(&self) {
@@ -1451,6 +1474,8 @@ fn owned_hash_key(hash: &HashBytes) -> HashBytesKey {
 pub enum CellStorageError {
     #[error("Cell not found in cell db")]
     CellNotFound,
+    #[error("Raw import writer stopped")]
+    RawImportWriterStopped,
     #[error("Invalid cell")]
     InvalidCell,
     #[error("Cell counter mismatch: expected refcount {expected}, got {actual} removes")]
