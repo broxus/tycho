@@ -329,7 +329,7 @@ impl ShardStateStorage {
     }
 
     pub fn begin_raw_import(&self) -> Result<()> {
-        // Any restart before this marker is cleared must drop partial raw import state.
+        // Any restart before this marker is cleared must require a full re-sync.
         self.cells_db
             .state
             .insert(db_state::CellsDbStateKey::RawImportInProgress, [1u8])?;
@@ -337,8 +337,7 @@ impl ShardStateStorage {
     }
 
     pub fn finish_raw_import(&self) -> Result<()> {
-        // Keep the marker until metadata and persistent states are done so restart
-        // cleanup drops any partial raw import state.
+        // Keep the marker until metadata and persistent states are done.
         self.cells_db
             .state
             .remove(db_state::CellsDbStateKey::RawImportInProgress)?;
