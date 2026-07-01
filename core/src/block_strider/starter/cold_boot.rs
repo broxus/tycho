@@ -588,8 +588,6 @@ impl StarterInner {
         handle_storage.set_has_shard_state(&handle);
         handle_storage.set_block_committed(&handle);
 
-        state_storage.finish_raw_import()?;
-
         let _mc_handle = mc_zerostate.ref_mc_state_handle().clone();
 
         // TODO: Somehow save the original file.
@@ -598,6 +596,8 @@ impl StarterInner {
         persistent_states
             .store_shard_state(mc_block_id.seqno, &handle)
             .await?;
+
+        state_storage.finish_raw_import()?;
 
         tracing::info!("imported zerostates");
 
@@ -609,6 +609,9 @@ impl StarterInner {
         tracing::info!(zerostate_id = %zerostate_id, "download zerostates");
 
         let handle_storage = self.storage.block_handle_storage();
+
+        let state_storage = self.storage.shard_state_storage();
+        state_storage.begin_raw_import()?;
 
         let (handle, state) = self
             .download_shard_state(&zerostate_id, &zerostate_id, true, &zerostate_id.root_hash)
@@ -623,6 +626,8 @@ impl StarterInner {
         }
 
         handle_storage.set_block_committed(&handle);
+
+        state_storage.finish_raw_import()?;
 
         Ok((handle, state))
     }
@@ -644,6 +649,9 @@ impl StarterInner {
         if !self.ignore_states {
             let state_update = block.as_ref().load_state_update()?;
 
+            let state_storage = self.storage.shard_state_storage();
+            state_storage.begin_raw_import()?;
+
             let (_, shard_state) = self
                 .download_shard_state(mc_block_id, block_id, false, &state_update.new_hash)
                 .await?;
@@ -652,6 +660,8 @@ impl StarterInner {
                 state_update.new_hash, state_hash,
                 "storage must verify expected root hash"
             );
+
+            state_storage.finish_raw_import()?;
         }
 
         // Download persistent queue state

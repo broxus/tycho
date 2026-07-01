@@ -116,9 +116,10 @@ impl CoreStorage {
             cell_storage_worker_pool.clone(),
         );
         cells_db.normalize_version()?;
-        // WARNING: Raw import cleanup must run before migrations and counter loading so
-        // partial raw-import cells, counters, temp rows, and shard roots stay hidden.
-        cell_counters.cleanup_interrupted_raw_import()?;
+
+        // WARNING: An interrupted raw import poisons local storage.
+        cell_counters.check_no_interrupted_raw_import()?;
+
         let mut cell_counters = apply_cells_migrations(cells_db.clone(), cell_counters).await?;
         cell_counters.load_latest_or_empty()?;
 

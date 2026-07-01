@@ -169,6 +169,49 @@ async fn cache_rejects_split_sidecars_without_metadata() -> Result<()> {
 }
 
 #[tokio::test]
+async fn storage_open_rejects_existing_raw_import_marker() -> Result<()> {
+    // setup
+    let (ctx, tmp_dir) = StorageContext::new_temp().await?;
+    let storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
+
+    // marker creation
+    storage.shard_state_storage().begin_raw_import()?;
+    drop(storage);
+
+    // restart/open attempt
+    let ctx = StorageContext::new(StorageConfig::new_potato(tmp_dir.path())).await?;
+    let err = match CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await {
+        Ok(_) => panic!("storage open must reject an existing raw import marker"),
+        Err(err) => err,
+    };
+
+    // final assertions
+    assert!(err.to_string().contains("re-sync"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn finished_raw_import_marker_allows_storage_open() -> Result<()> {
+    // setup
+    let (ctx, tmp_dir) = StorageContext::new_temp().await?;
+    let storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
+
+    // import action
+    let shard_states = storage.shard_state_storage();
+    shard_states.begin_raw_import()?;
+    shard_states.finish_raw_import()?;
+    drop(storage);
+
+    // restart/open attempt
+    let ctx = StorageContext::new(StorageConfig::new_potato(tmp_dir.path())).await?;
+    let storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
+
+    // final assertions
+    assert!(storage.node_state().load_init_mc_block_id().is_none());
+    Ok(())
+}
+
+#[tokio::test]
 async fn persistent_state_writer_rejects_missing_absent_cell() -> Result<()> {
     // Store a real shard state first so the DB-backed writer can load the root by hash.
     let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
