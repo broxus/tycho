@@ -24,8 +24,8 @@ use tycho_util::serde_helpers;
 
 use self::bc::SlasherParams;
 pub use self::bc::{
-    BlocksBatch, ContractSubscription, EncodeBlocksBatchMessage, MessageDelivered,
-    SignatureHistory, SignedMessage, SlasherContract, StdSlasherContract,
+    BlocksBatch, ContractSubscription, EncodeBlocksBatchMessage, MessageDelivered, SignedMessage,
+    SlasherContract, StdSlasherContract,
 };
 use self::collector::{ValidatorEventsCollector, ValidatorSessionInfo};
 use self::storage::SlasherStorage;

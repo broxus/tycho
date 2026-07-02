@@ -58,7 +58,7 @@ pub fn analyze_vset(
         let mut malformed = false;
 
         // Count weight of valid signatures per committed column (block).
-        for history in &batch.signatures_history {
+        for history in &batch.observed {
             let other = history.validator_idx as usize;
             if other >= n {
                 malformed = true;
@@ -104,7 +104,7 @@ pub fn analyze_vset(
         }
 
         // Update scores.
-        for history in &batch.signatures_history {
+        for history in &batch.observed {
             let other = history.validator_idx as usize;
             if other >= n || other == observer {
                 continue;

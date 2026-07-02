@@ -9,7 +9,7 @@ use tycho_types::models::{
 use tycho_types::prelude::*;
 
 use super::{
-    BlocksBatch, SignatureHistory, SignedMessage, SlasherContract, SlasherContractEvent,
+    BlocksBatch, ObservedHistory, SignedMessage, SlasherContract, SlasherContractEvent,
     SlasherParams, SubmitBlocksBatch,
 };
 use crate::util::BitSet;
@@ -160,30 +160,32 @@ impl BlocksBatchBc {
 impl<'a> Load<'a> for BlocksBatchBc {
     fn load_from(slice: &mut CellSlice<'a>) -> Result<Self, tycho_types::error::Error> {
         let start_seqno = slice.load_u32()?;
+        let anchor_range =
+            Some(slice.load_u32()?..=slice.load_u32()?).filter(|range| *range.end() > 0);
 
         let block_count = slice.size_bits() as usize;
         let committed_blocks = BitSet::load_from_cs(block_count, slice)?;
 
-        let mut signatures_history = Vec::new();
+        let mut observed = Vec::new();
 
         let dict = Dict::<u16, CellSlice<'_>>::from_raw(Some(slice.load_reference_cloned()?));
         for entry in dict.iter() {
             let (validator_idx, mut cs) = entry?;
-            let bits = BitSet::load_from_cs(block_count * 2, &mut cs)?;
+            observed.push(ObservedHistory {
+                validator_idx,
+                points_proven: cs.load_u16()?,
+                bits: BitSet::load_from_cs(block_count * 2, &mut cs)?,
+            });
             if !cs.is_empty() {
                 return Err(tycho_types::error::Error::CellOverflow);
             }
-
-            signatures_history.push(SignatureHistory {
-                validator_idx,
-                bits,
-            });
         }
 
         Ok(Self(BlocksBatch {
             start_seqno,
+            anchor_range,
             committed_blocks,
-            signatures_history: signatures_history.into_boxed_slice(),
+            observed: observed.into_boxed_slice(),
         }))
     }
 }
@@ -197,18 +199,30 @@ impl Store for BlocksBatchBc {
         let batch = &self.0;
 
         builder.store_u32(batch.start_seqno)?;
+        if let Some(anchor_range) = self.0.anchor_range.as_ref() {
+            builder.store_u32(*anchor_range.start())?;
+            builder.store_u32(*anchor_range.end())?;
+        } else {
+            builder.store_u32(0)?;
+            builder.store_u32(0)?;
+        };
+
         batch.committed_blocks.store_into(builder, context)?;
 
         // A subset contains items in no particular order,
         // so we need to sort by them to simplify remapping to vset.
-        let mut entries = batch
-            .signatures_history
-            .iter()
-            .map(|item| (item.validator_idx, &item.bits))
-            .collect::<Vec<_>>();
-        entries.sort_unstable_by_key(|(a, _)| *a);
+        debug_assert!(
+            batch.observed.is_sorted_by_key(|a| a.validator_idx),
+            "batch entries must be sorted by validator_idx"
+        );
 
-        let Some(dict_root) = dict::build_dict_from_sorted_iter(entries, context)? else {
+        let history = batch
+            .observed
+            .iter()
+            .map(|item| (item.validator_idx, (item.points_proven, &item.bits)))
+            .collect::<Vec<_>>();
+
+        let Some(dict_root) = dict::build_dict_from_sorted_iter(history, context)? else {
             // Subset must not be empty.
             return Err(tycho_types::error::Error::InvalidData);
         };
