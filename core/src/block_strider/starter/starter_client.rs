@@ -31,7 +31,6 @@ impl StarterClient for BlockchainRpcClient {
         kind: PersistentStateKind,
     ) -> Result<FoundState<'a>> {
         let pending_state = self.find_persistent_state(block_id, kind).await?;
-        let this = self.clone();
 
         let split_depth = pending_state.split_depth;
         let parts = pending_state
@@ -42,14 +41,13 @@ impl StarterClient for BlockchainRpcClient {
             })
             .collect::<Vec<_>>();
         let pending_state_for_part = pending_state.clone();
-        let this_for_part = self.clone();
 
         Ok(FoundState {
             split_depth,
             parts,
             download: Box::new(move |output| {
                 Box::pin(async move {
-                    let output = this
+                    let output = self
                         .download_persistent_state(pending_state, None, output)
                         .await?;
                     Ok(output)
@@ -57,9 +55,8 @@ impl StarterClient for BlockchainRpcClient {
             }),
             download_part: Some(Box::new(move |part, output| {
                 let pending_state = pending_state_for_part.clone();
-                let this = this_for_part.clone();
                 Box::pin(async move {
-                    let output = this
+                    let output = self
                         .download_persistent_state(pending_state, Some(part.prefix), output)
                         .await?;
                     Ok(output)
