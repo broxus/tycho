@@ -40,7 +40,7 @@ impl StdSlasherContract {
 
 impl SlasherContract for StdSlasherContract {
     fn default_batch_size(&self) -> NonZeroU32 {
-        NonZeroU32::new(10).unwrap()
+        NonZeroU32::new(100).unwrap()
     }
 
     fn find_params(&self, config: &BlockchainConfigParams) -> Result<Option<SlasherParams>> {

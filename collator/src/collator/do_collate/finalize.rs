@@ -379,12 +379,7 @@ impl Phase<FinalizeState> {
         // info.want_merge = false;
 
         let bc_global_version = self.state.mc_data.config.get_global_version()?;
-        if bc_global_version
-            .capabilities
-            .contains(GlobalCapability::CapReportVersion)
-        {
-            new_block_info.set_gen_software(Some(bc_global_version));
-        }
+        new_block_info.set_gen_software(Some(bc_global_version));
 
         let new_state_root;
         let total_validator_fees;
