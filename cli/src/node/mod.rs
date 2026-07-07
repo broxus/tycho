@@ -242,6 +242,7 @@ impl Node {
             self.slasher_config,
             &mc_state,
         )
+        .await
         .context("failed to create slasher")?;
 
         let validator = ValidatorStdImpl::new(

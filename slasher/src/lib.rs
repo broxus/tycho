@@ -119,7 +119,7 @@ pub struct Slasher {
 }
 
 impl Slasher {
-    pub fn new<C: SlasherContract>(
+    pub async fn new<C: SlasherContract>(
         node_keys: Arc<ed25519::KeyPair>,
         contract: C,
         blockchain_rpc_client: BlockchainRpcClient,
@@ -138,8 +138,9 @@ impl Slasher {
         let known_session_id = tycho_slasher_traits::ValidationSessionId::from(state_extra);
         let blockchain_config = &state_extra.config;
 
-        let storage =
-            SlasherStorage::open(storage_context).context("failed to open slasher storage")?;
+        let storage = SlasherStorage::open(storage_context)
+            .await
+            .context("failed to open slasher storage")?;
 
         let current_vset = Arc::new(ParsedVset::from_raw(
             blockchain_config.get_current_validator_set_raw()?,
