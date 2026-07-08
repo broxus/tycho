@@ -1,3 +1,4 @@
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -82,10 +83,15 @@ pub struct SlasherConfig {
     /// Default: `1000`
     pub vset_len_threshold: u32,
 
-    // At least this number of block samples must be collected to accuse someone.
-    //
-    // Default: `100`
-    pub block_samples_threshold: u64,
+    /// At least this number of block samples must be collected to accuse someone.
+    ///
+    /// Default: `100`
+    pub block_samples_threshold: NonZeroU64,
+
+    /// At least this number of rounds must be filled to accuse someone.
+    ///
+    /// Default: `1000`
+    pub filled_rounds_threshold: NonZeroU64,
 
     /// At least this number of malformed batches must be collected to accuse someone.
     ///
@@ -96,6 +102,12 @@ pub struct SlasherConfig {
     ///
     /// Default: `0.5`
     pub slow_node_factor: f64,
+
+    /// We treat the node as low-proven if its proven-point rate is this times
+    /// the median rate.
+    ///
+    /// Default: `0.67`
+    pub proven_node_factor: f64,
 }
 
 impl Default for SlasherConfig {
@@ -105,9 +117,11 @@ impl Default for SlasherConfig {
             message_retry_interval: Duration::from_secs(1),
             prev_delivery_timeout: Some(Duration::from_secs(5)),
             vset_len_threshold: 1000,
-            block_samples_threshold: 100,
+            block_samples_threshold: 100.try_into().unwrap(),
+            filled_rounds_threshold: 1000.try_into().unwrap(),
             malformed_samples_threshold: 5,
             slow_node_factor: 0.5,
+            proven_node_factor: 0.67,
         }
     }
 }
