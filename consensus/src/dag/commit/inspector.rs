@@ -98,7 +98,7 @@ impl RoundInspector {
             .collect()
     }
 
-    pub fn inspect(&mut self, r_0: &DagRound, emit_stats: bool) -> TaskResult<()> {
+    pub fn inspect(&mut self, r_0: &DagRound) -> TaskResult<()> {
         let leader_used = r_0.used_anchor_proof().get();
 
         // map has full peer set for this round, but maybe with empty value
@@ -114,7 +114,7 @@ impl RoundInspector {
             let mut has_valid = false;
 
             for version in authored {
-                if emit_stats && version.has_proof() {
+                if version.has_proof() {
                     // not more than one version can have a proving point
                     author_counters.points_proved += 1;
                 }

@@ -30,6 +30,13 @@ impl EpochStarts {
         self.started[2]
     }
 
+    pub fn epoch_start(&self, round: Round) -> Option<Round> {
+        match self.arr_idx(round)? {
+            3 => self.next,
+            idx => Some(self.started[idx]),
+        }
+    }
+
     pub fn arr_idx(&self, round: Round) -> Option<usize> {
         if self.next.is_some_and(|r| round >= r) {
             Some(3)

@@ -159,14 +159,17 @@ impl Committer {
         let drained =
             (self.dag).drain_upto(anchor_round - conf.consensus.commit_history_rounds.get());
         let last_non_executable = self.first_executable.prev().max(conf.genesis_round);
+        let stats_since = stats_ranges.stats_since(anchor_round, conf);
         for r_0 in &drained {
             if r_0.round() >= last_non_executable {
-                let emit_stats = stats_ranges.can_emit_stats(r_0.round(), anchor_round);
-                self.inspector.inspect(r_0, emit_stats)?;
+                self.inspector.inspect(r_0)?;
             }
             if r_0.round() == last_non_executable {
                 self.inspector.take_stats(); // was used only to refill state
                 self.inspector.take_events();
+            }
+            if stats_since.is_none_or(|stats_since| r_0.round() < stats_since) {
+                self.inspector.take_stats(); // suppression: drop every unsuitable
             }
         }
         let drained = drained
