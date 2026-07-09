@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
+use crate::engine::MempoolConfig;
 use crate::intercom::peer_schedule::epoch_starts::EpochStarts;
 use crate::models::Round;
 
@@ -12,26 +13,28 @@ pub struct StatsRanges {
 }
 
 impl StatsRanges {
-    /// Slasher stats cannot be merged at epoch switch bounds because the same stats slot
-    /// may be reused by different peers:
-    /// * at vset change, peers may have the same `validator_idx`
-    /// * at subset change, peers have different `validator_idx`
+    /// Slasher stats cannot be merged at epoch switch bounds because:
+    /// * at vset change, different peers may have the same `validator_idx`
+    /// * at subset change, the same peer may have different `validator_idx`
     ///
-    /// We suppress stats of an older epoch in the anchors of a newer epoch
-    pub fn can_emit_stats(&self, stats_round: Round, anchor_round: Round) -> bool {
-        // pre-GC'ed stats round is always less than its anchor round
-        assert!(stats_round < anchor_round, "method params in wrong order");
-
-        let Some(stats_idx) = self.epoch_starts.arr_idx(stats_round) else {
-            return false; // too old to guarantee subset equality
-        };
-        let Some(anchor_idx) = self.epoch_starts.arr_idx(anchor_round) else {
-            unreachable!("stats_round < anchor_round"); // we've returned false already
-        };
+    /// We suppress stats of an older epoch in the anchors of a newer epoch:
+    /// * last `max_consensus_lag_rounds` round stats in ending epoch are suppressed
+    ///   because anchor data will be attributed to the next validator|slasher session
+    /// * stats and achor must belong to the same epoch - that way we suppress
+    ///   trailing stats from the previous epoch for a newer epoch anchor
+    /// * stats for too old (removed from schedule) epoch are suppressed too
+    ///
+    /// Returns `None` if anchor stats are suppressed
+    pub fn stats_since(&self, anchor_round: Round, conf: &MempoolConfig) -> Option<Round> {
         // anchors are expected at least every `max_consensus_lag_rounds` or consensus stalls,
         // so it's the longest tail of rounds to GC or (in this case) of stats to skip;
         // that's the rounds offset for `vset_switch_round` reserved by collator up to pause bound
-        stats_idx == anchor_idx
+
+        let a = self.epoch_starts.epoch_start(anchor_round);
+        let b = (self.epoch_starts)
+            .epoch_start(anchor_round + conf.consensus.max_consensus_lag_rounds.get());
+
+        if a == b { a } else { None }
     }
 
     #[allow(dead_code, reason = "will be used soon")]
