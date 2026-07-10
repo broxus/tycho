@@ -30,7 +30,7 @@ use crate::overlay_client::PunishReason;
 use crate::proto::blockchain::{KeyBlockProof, ZerostateProof};
 use crate::storage::{
     BlockHandle, CoreStorage, KeyBlocksDirection, MaybeExistingHandle, NewBlockMeta,
-    PersistentStateKind, PersistentStateMeta,
+    PersistentStateKind, PersistentStateMeta, validate_persistent_state_split_metadata,
 };
 
 impl StarterInner {
@@ -1220,6 +1220,13 @@ impl StarterInner {
                     .context("invalid persistent split depth")?,
                 pending_state.parts.iter().map(|part| part.prefix).collect(),
             );
+            // the starter client is trait-based, so keep this boundary check for non-RPC providers
+            validate_persistent_state_split_metadata(
+                &block_id.shard,
+                kind,
+                remote_meta.split_depth.into(),
+                remote_meta.parts.iter().copied(),
+            )?;
 
             if local_meta.as_ref() != Some(&remote_meta) {
                 let old_prefixes = local_meta

@@ -23,7 +23,7 @@ use crate::overlay_client::{
 };
 use crate::proto::blockchain::*;
 use crate::proto::overlay::BroadcastPrefix;
-use crate::storage::PersistentStateKind;
+use crate::storage::{PersistentStateKind, validate_persistent_state_split_metadata};
 use crate::util::downloader::{DownloaderError, DownloaderResponseHandle, download_and_decompress};
 
 /// A listener for self-broadcasted messages.
@@ -432,6 +432,37 @@ impl BlockchainRpcClient {
                     split_depth,
                     parts,
                 } => {
+                    // split not supported for persistent queue state
+                    if kind != PersistentStateKind::Shard {
+                        let neighbour = handle.reject();
+                        let e = anyhow::anyhow!(
+                            "split persistent state info is not supported for {kind:?}"
+                        );
+                        tracing::warn!(
+                            peer_id = %neighbour.peer_id(),
+                            ?kind,
+                            "rejected invalid persistent state split metadata: {e:?}",
+                        );
+                        err = Some(Error::Internal(e));
+                        continue;
+                    }
+
+                    if let Err(e) = validate_persistent_state_split_metadata(
+                        &block_id.shard,
+                        kind,
+                        split_depth,
+                        parts.iter().map(|part| part.prefix),
+                    ) {
+                        let neighbour = handle.reject();
+                        tracing::warn!(
+                            peer_id = %neighbour.peer_id(),
+                            ?kind,
+                            "rejected invalid persistent state split metadata: {e:?}",
+                        );
+                        err = Some(Error::Internal(e));
+                        continue;
+                    }
+
                     let neighbour = handle.accept();
                     tracing::debug!(
                         peer_id = %neighbour.peer_id(),
