@@ -25,7 +25,7 @@ pub use self::node_state::{NodeStateStorage, NodeSyncState};
 pub use self::persistent_state::{
     BriefBocHeader, PersistentState, PersistentStateInfo, PersistentStateKind, PersistentStateMeta,
     PersistentStateStorage, QueueDiffReader, QueueStateReader, QueueStateWriter, ShardStateReader,
-    ShardStateWriter,
+    ShardStateWriter, validate_persistent_state_split_metadata,
 };
 pub use self::shard_state::{
     BlockInfoForApply, InitiatedStoreState, LoadStateHint, ShardStateStorage,
@@ -99,6 +99,14 @@ impl CoreStorage {
     }
 
     pub async fn open(ctx: StorageContext, config: CoreStorageConfig) -> Result<Self> {
+        anyhow::ensure!(
+            config.persistent_state_split_depth
+                <= CoreStorageConfig::MAX_PERSISTENT_STATE_SPLIT_DEPTH,
+            "persistent_state_split_depth exceeds maximum: value={}, max={}",
+            config.persistent_state_split_depth,
+            CoreStorageConfig::MAX_PERSISTENT_STATE_SPLIT_DEPTH
+        );
+
         let db: CoreDb = ctx.open_preconfigured(CORE_DB_SUBDIR)?;
         db.normalize_version()?;
         db.apply_migrations().await?;

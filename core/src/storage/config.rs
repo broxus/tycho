@@ -80,6 +80,8 @@ pub struct CoreStorageConfig {
 }
 
 impl CoreStorageConfig {
+    pub const MAX_PERSISTENT_STATE_SPLIT_DEPTH: u8 = 6;
+
     #[cfg(any(test, feature = "test"))]
     pub fn new_potato() -> Self {
         Self {

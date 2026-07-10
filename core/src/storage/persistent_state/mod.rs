@@ -23,7 +23,9 @@ use tycho_util::{FastHashMap, FastHashSet};
 pub use self::queue_state::reader::{QueueDiffReader, QueueStateReader};
 pub use self::queue_state::writer::QueueStateWriter;
 pub use self::shard_state::reader::{BriefBocHeader, ShardStateReader};
-pub use self::shard_state::writer::{PersistentStateMeta, ShardStateWriter};
+pub use self::shard_state::writer::{
+    PersistentStateMeta, ShardStateWriter, validate_persistent_state_split_metadata,
+};
 use super::{
     BlockHandle, BlockHandleStorage, BlockStorage, CellsDb, KeyBlocksDirection, NodeStateStorage,
     ShardStateStorage,

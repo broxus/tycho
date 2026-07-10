@@ -7,16 +7,18 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
+use tycho_block_util::block::collect_shard_split_prefixes;
 use tycho_storage::fs::Dir;
 use tycho_types::cell::{Cell, CellDescriptor, HashBytes};
 use tycho_types::models::*;
-use tycho_util::FastHashMap;
 use tycho_util::compression::ZstdCompressedFile;
 use tycho_util::progress_bar::ProgressBar;
 use tycho_util::sync::CancellationFlag;
+use tycho_util::{FastHashMap, FastHashSet};
 
-use crate::storage::CellsDb;
+use super::super::PersistentStateKind;
 use crate::storage::shard_state::decode_indexed_value;
+use crate::storage::{CellsDb, CoreStorageConfig};
 
 pub struct ShardStateWriter<'a> {
     db: &'a CellsDb,
@@ -647,6 +649,70 @@ impl PersistentStateMeta {
 
         Ok(Some(Self::new(raw.split_depth, parts)))
     }
+}
+
+pub fn validate_persistent_state_split_metadata(
+    shard_id: &ShardIdent,
+    kind: PersistentStateKind,
+    split_depth: u32,
+    part_prefixes: impl IntoIterator<Item = u64>,
+) -> Result<()> {
+    let part_prefixes = part_prefixes.into_iter().collect::<Vec<_>>();
+    anyhow::ensure!(
+        split_depth <= u32::from(CoreStorageConfig::MAX_PERSISTENT_STATE_SPLIT_DEPTH),
+        "persistent state split depth exceeds maximum: split_depth={}, max={}",
+        split_depth,
+        CoreStorageConfig::MAX_PERSISTENT_STATE_SPLIT_DEPTH
+    );
+
+    if part_prefixes.is_empty() {
+        anyhow::ensure!(
+            split_depth == 0,
+            "persistent state split depth without parts: split_depth={split_depth}"
+        );
+        return Ok(());
+    }
+
+    anyhow::ensure!(
+        kind == PersistentStateKind::Shard,
+        "split persistent state parts are not supported for {kind:?}"
+    );
+    anyhow::ensure!(
+        !shard_id.is_masterchain(),
+        "split persistent state parts are not supported for masterchain state"
+    );
+    anyhow::ensure!(
+        split_depth > 0,
+        "persistent state split depth must be positive when parts are present"
+    );
+
+    let max_parts = 1usize
+        .checked_shl(split_depth)
+        .context("invalid persistent state split depth")?;
+    anyhow::ensure!(
+        part_prefixes.len() <= max_parts,
+        "too many persistent state parts: parts={}, max={max_parts}",
+        part_prefixes.len()
+    );
+
+    let mut unique_prefixes = FastHashSet::default();
+    for prefix in &part_prefixes {
+        anyhow::ensure!(
+            unique_prefixes.insert(*prefix),
+            "duplicate persistent state part prefix: {prefix:016x}"
+        );
+    }
+
+    let mut expected_prefixes = FastHashSet::default();
+    collect_shard_split_prefixes(shard_id, split_depth as u8, &mut expected_prefixes)?;
+    for prefix in part_prefixes {
+        anyhow::ensure!(
+            expected_prefixes.contains(&prefix),
+            "invalid persistent state part prefix for split depth {split_depth}: {prefix:016x}"
+        );
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
