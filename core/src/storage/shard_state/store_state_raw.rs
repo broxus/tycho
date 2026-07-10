@@ -1,6 +1,7 @@
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufWriter, Read, Seek, Write};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use tycho_storage::fs::TempFileStorage;
@@ -46,24 +47,70 @@ impl StoreStateContext {
         self.clear_temp_cells()?;
 
         // import main and parts to temp in parallel
+        const MAX_PARALLEL_PART_IMPORTS: usize = 4;
+        let parts_count = parts.len();
+        let workers_count = std::cmp::min(MAX_PARALLEL_PART_IMPORTS, parts_count);
+        let part_jobs = Mutex::new(parts.into_iter().collect::<VecDeque<_>>());
         let (main, parts) = std::thread::scope(|scope| {
             let main_handle = scope.spawn(move || self.import_to_temp(main, true));
-            let mut part_handles = Vec::with_capacity(parts.len());
-            for part in parts {
-                part_handles.push(scope.spawn(move || self.import_to_temp(part, false)));
+
+            // no workers are spawned when there are no parts
+            let mut workers = Vec::with_capacity(workers_count);
+            for _ in 0..workers_count {
+                let jobs = &part_jobs;
+                workers.push(scope.spawn(move || -> Result<Vec<TempState>> {
+                    let mut results = Vec::new();
+                    loop {
+                        let job = jobs
+                            .lock()
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "persistent state import queue lock poisoned: {e:?}"
+                                )
+                            })?
+                            .pop_front();
+                        let Some(reader) = job else {
+                            break;
+                        };
+                        results.push(self.import_to_temp(reader, false)?);
+                    }
+                    Ok(results)
+                }));
             }
-            let mut parts = Vec::with_capacity(part_handles.len());
-            for part_handle in part_handles {
-                match part_handle.join() {
-                    Ok(part) => parts.push(part?),
-                    Err(_) => anyhow::bail!("persistent state part import thread failed"),
+
+            // join main result
+            let main = match main_handle.join() {
+                Ok(main) => main,
+                Err(_) => Err(anyhow::anyhow!(
+                    "persistent state main import thread panicked"
+                )),
+            };
+
+            // join parts results
+            let mut parts = Vec::with_capacity(parts_count);
+            let mut worker_error = None;
+            for worker in workers {
+                let error = match worker.join() {
+                    Ok(Ok(results)) => {
+                        parts.extend(results);
+                        None
+                    }
+                    Ok(Err(e)) => Some(e),
+                    Err(_) => Some(anyhow::anyhow!(
+                        "persistent state import worker thread panicked"
+                    )),
+                };
+                if worker_error.is_none() {
+                    worker_error = error;
                 }
             }
-            let main = match main_handle.join() {
-                Ok(main) => main?,
-                Err(_) => anyhow::bail!("persistent state main import thread failed"),
-            };
-            Ok::<_, anyhow::Error>((main, parts))
+
+            // join all workers before throwing any error
+            if let Some(e) = worker_error {
+                return Err(e);
+            }
+
+            Ok::<_, anyhow::Error>((main?, parts))
         })?;
 
         let mut imported_part_roots = FastHashSet::default();
