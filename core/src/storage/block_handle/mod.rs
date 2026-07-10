@@ -358,11 +358,13 @@ impl BlockHandleStorage {
             let is_masterchain = block_id.is_masterchain();
 
             if block_id.seqno == 0
+                || value.is_persistent()
+                || value.skip_blocks_gc()
                 || is_masterchain && (block_id.seqno >= mc_seqno || value.is_key_block())
                 || !is_masterchain
                     && shard_heights.contains_shard_seqno(&block_id.shard, block_id.seqno)
             {
-                // Keep zero state, key blocks and latest blocks
+                // Keep zero state, GC-protected handles, key blocks and latest blocks
                 true
             } else {
                 // Remove all outdated
@@ -430,6 +432,7 @@ impl Iterator for KeyBlocksIterator<'_> {
 #[cfg(test)]
 mod tests {
     use tycho_storage::StorageContext;
+    use tycho_types::cell::HashBytes;
     use tycho_types::models::ShardIdent;
 
     use super::*;
@@ -491,6 +494,98 @@ mod tests {
 
         // Ensure that the handle is dropped
         assert!(!block_handles.cache.contains_key(&block_id));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn gc_handles_cache_keeps_protected_handles() -> anyhow::Result<()> {
+        let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
+        let storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
+
+        let block_handles = storage.block_handle_storage();
+        let meta = NewBlockMeta {
+            is_key_block: false,
+            gen_utime: 123,
+            ref_by_mc_seqno: 456,
+        };
+
+        let persistent_id = BlockId {
+            shard: ShardIdent::BASECHAIN,
+            seqno: 100,
+            root_hash: HashBytes([1; 32]),
+            file_hash: HashBytes([2; 32]),
+        };
+        let (persistent, _) = block_handles.create_or_load_handle(&persistent_id, meta);
+        persistent.meta().add_flags(BlockFlags::HAS_DATA);
+        block_handles.store_handle(&persistent, false);
+        block_handles.set_block_persistent(&persistent);
+
+        let unfinished_skip_id = BlockId {
+            shard: ShardIdent::BASECHAIN,
+            seqno: 101,
+            root_hash: HashBytes([3; 32]),
+            file_hash: HashBytes([4; 32]),
+        };
+        let (unfinished_skip, _) = block_handles.create_or_load_handle(&unfinished_skip_id, meta);
+        unfinished_skip.meta().add_flags(BlockFlags::HAS_DATA);
+        block_handles.store_handle(&unfinished_skip, false);
+        block_handles.set_skip_blocks_gc(&unfinished_skip);
+
+        let finished_skip_id = BlockId {
+            shard: ShardIdent::BASECHAIN,
+            seqno: 102,
+            root_hash: HashBytes([5; 32]),
+            file_hash: HashBytes([6; 32]),
+        };
+        let (finished_skip, _) = block_handles.create_or_load_handle(&finished_skip_id, meta);
+        finished_skip.meta().add_flags(BlockFlags::HAS_DATA);
+        block_handles.store_handle(&finished_skip, false);
+        block_handles.set_skip_blocks_gc(&finished_skip);
+        block_handles.set_skip_blocks_gc_finished(&finished_skip);
+
+        assert_eq!(
+            block_handles.gc_handles_cache(200, &ShardHeights::default()),
+            1
+        );
+        assert!(block_handles.cache.contains_key(&persistent_id));
+        assert!(block_handles.cache.contains_key(&unfinished_skip_id));
+        assert!(!block_handles.cache.contains_key(&finished_skip_id));
+        assert!(!persistent.meta().flags().contains(BlockFlags::IS_REMOVED));
+        assert!(
+            !unfinished_skip
+                .meta()
+                .flags()
+                .contains(BlockFlags::IS_REMOVED)
+        );
+        assert!(
+            finished_skip
+                .meta()
+                .flags()
+                .contains(BlockFlags::IS_REMOVED)
+        );
+
+        assert!(block_handles.set_has_persistent_shard_state(&persistent));
+        assert!(block_handles.set_has_persistent_queue_state(&unfinished_skip));
+        drop(persistent);
+        drop(unfinished_skip);
+        drop(finished_skip);
+        assert!(!block_handles.cache.contains_key(&persistent_id));
+        assert!(!block_handles.cache.contains_key(&unfinished_skip_id));
+
+        let persistent = block_handles.load_handle(&persistent_id).unwrap();
+        let unfinished_skip = block_handles.load_handle(&unfinished_skip_id).unwrap();
+        assert!(persistent.has_data());
+        assert!(persistent.has_persistent_shard_state());
+        assert!(unfinished_skip.has_data());
+        assert!(unfinished_skip.has_persistent_queue_state());
+        assert!(!persistent.meta().flags().contains(BlockFlags::IS_REMOVED));
+        assert!(
+            !unfinished_skip
+                .meta()
+                .flags()
+                .contains(BlockFlags::IS_REMOVED)
+        );
 
         Ok(())
     }
