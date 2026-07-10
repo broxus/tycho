@@ -25,6 +25,7 @@ use crate::ZEROSTATE_BOC;
 use crate::storage::persistent_state::{
     CacheKey, PersistentStateKind, PersistentStateMeta, QueueStateReader, QueueStateWriter,
     ShardStateWriter, check_can_reuse_shard_state_part_files, parse_shard_state_part_file_name,
+    validate_persistent_state_split_metadata,
 };
 use crate::storage::{CoreStorage, CoreStorageConfig, NewBlockMeta};
 
@@ -44,6 +45,81 @@ fn persistent_state_meta_roundtrip() -> Result<()> {
     let loaded = PersistentStateMeta::read(&dir, &block_id)?.unwrap();
 
     assert_eq!(loaded, meta);
+    Ok(())
+}
+
+#[test]
+fn persistent_state_split_metadata_validation() -> Result<()> {
+    let assert_invalid =
+        |kind: PersistentStateKind, split_depth: u32, prefixes: Vec<u64>, expected: &str| {
+            let err = validate_persistent_state_split_metadata(
+                &ShardIdent::BASECHAIN,
+                kind,
+                split_depth,
+                prefixes,
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string().contains(expected),
+                "unexpected error: {err:?}"
+            );
+        };
+
+    validate_persistent_state_split_metadata(
+        &ShardIdent::BASECHAIN,
+        PersistentStateKind::Shard,
+        0,
+        Vec::<u64>::new(),
+    )?;
+    validate_persistent_state_split_metadata(
+        &ShardIdent::BASECHAIN,
+        PersistentStateKind::Shard,
+        2,
+        vec![0x2000000000000000, 0xa000000000000000],
+    )?;
+
+    assert_invalid(
+        PersistentStateKind::Queue,
+        1,
+        vec![0x4000000000000000],
+        "not supported for Queue",
+    );
+    assert_invalid(
+        PersistentStateKind::Shard,
+        1,
+        Vec::new(),
+        "split depth without parts",
+    );
+    assert_invalid(
+        PersistentStateKind::Shard,
+        0,
+        vec![0x8000000000000000],
+        "must be positive",
+    );
+    assert_invalid(
+        PersistentStateKind::Shard,
+        u32::from(CoreStorageConfig::MAX_PERSISTENT_STATE_SPLIT_DEPTH) + 1,
+        Vec::new(),
+        "exceeds maximum",
+    );
+    assert_invalid(
+        PersistentStateKind::Shard,
+        1,
+        vec![0x4000000000000000, 0xc000000000000000, 0x4000000000000000],
+        "too many persistent state parts",
+    );
+    assert_invalid(
+        PersistentStateKind::Shard,
+        2,
+        vec![0x2000000000000000, 0x2000000000000000],
+        "duplicate persistent state part prefix",
+    );
+    assert_invalid(
+        PersistentStateKind::Shard,
+        2,
+        vec![0x4000000000000000],
+        "invalid persistent state part prefix",
+    );
     Ok(())
 }
 

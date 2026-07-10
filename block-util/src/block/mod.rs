@@ -1,3 +1,4 @@
+use anyhow::{Context, Result};
 use tycho_types::cell::HashBytes;
 use tycho_types::models::ShardIdent;
 
@@ -29,6 +30,23 @@ pub fn shard_ident_at_depth(workchain: i32, account: &HashBytes, depth: u8) -> S
     let tag = (mask | (mask >> 1)) ^ mask;
 
     ShardIdent::new(workchain, (prefix & mask) | tag).expect("computed prefix should be valid")
+}
+
+pub fn collect_shard_split_prefixes(
+    shard: &ShardIdent,
+    split_depth: u8,
+    prefixes: &mut impl Extend<u64>,
+) -> Result<()> {
+    if split_depth == 0 {
+        prefixes.extend(std::iter::once(shard.prefix()));
+        return Ok(());
+    }
+
+    let (left, right) = shard
+        .split()
+        .context("shard split depth exceeds shard limit")?;
+    collect_shard_split_prefixes(&left, split_depth - 1, prefixes)?;
+    collect_shard_split_prefixes(&right, split_depth - 1, prefixes)
 }
 
 #[cfg(test)]
