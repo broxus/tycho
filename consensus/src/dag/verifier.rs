@@ -107,8 +107,12 @@ pub enum InvalidReason {
     NewerAnchorInDependency((AnchorStageRole, PointId)),
     #[error("anchor link doesn't point to {0:?}")]
     AnchorLink((AnchorStageRole, PointId)),
+    #[error("anchor {0:?} links to other role")]
+    AnchorLinkRole((AnchorStageRole, PointId)),
     #[error("anchor {:?} link leads to other destination through {:?}", .0.0, .0.1.alt())]
     AnchorLinkBadPath((AnchorStageRole, PointId)),
+    #[error("chained proof links to other role")]
+    ChainedProofRole(PointId),
     #[error("chained proof link leads to other destination through {:?}", .0.alt())]
     ChainedProofBadPath(PointId),
     #[error("bad sticky sequence after {:?}: previous {:?}, current {}", .0.0.alt(), .0.1, .0.2)]
@@ -509,12 +513,13 @@ impl Verifier {
 
             if let Some((to, through)) = chained_proof_to_through {
                 let dep_anchor_proof_id = dep.anchor_id(AnchorStageRole::Proof);
+                if dep_anchor_proof_id.round > to.round {
+                    invalid_reason = Some(InvalidReason::NewerProofToChainInDependency(dep_id));
+                }
+
                 if let Some(through) = through {
                     if dep_id == through && dep_anchor_proof_id != to {
                         invalid_reason = Some(InvalidReason::ChainedProofBadPath(dep_id));
-                    }
-                    if dep_anchor_proof_id.round > to.round {
-                        invalid_reason = Some(InvalidReason::NewerProofToChainInDependency(dep_id));
                     }
                 } else if dep_id == to {
                     if dep.anchor_proof() != AnyLink::ToSelf {
@@ -534,10 +539,6 @@ impl Verifier {
                             let tuple = (dep_id, dep.sticky_anchors(), sticky_anchors);
                             invalid_reason = Some(InvalidReason::BadStickySequence(tuple));
                         }
-                    }
-                } else {
-                    if dep.anchor_round(AnchorStageRole::Proof) > to.round {
-                        invalid_reason = Some(InvalidReason::NewerProofToChainInDependency(dep_id));
                     }
                 }
             }
@@ -625,10 +626,21 @@ impl Verifier {
 
             if let Some(anchor_proof_link) = anchor_proof_link
                 && dep_id == anchor_proof_link.to
-                && dep.anchor_time() != info.anchor_time()
             {
-                // anchor candidate's time is not inherited from its proof
-                invalid_reason = Some(InvalidReason::AnchorTimeNotInheritedFromProof(dep_id));
+                if dep.anchor_proof() != AnyLink::ToSelf {
+                    let tuple = (AnchorStageRole::Proof, dep_id);
+                    invalid_reason = Some(InvalidReason::AnchorLinkRole(tuple));
+                } else if dep.anchor_time() != info.anchor_time() {
+                    // anchor candidate's time is not inherited from its proof
+                    invalid_reason = Some(InvalidReason::AnchorTimeNotInheritedFromProof(dep_id));
+                }
+            }
+
+            if let Some(chained_proof_link) = chained_proof_link
+                && dep_id == chained_proof_link.to
+                && dep.anchor_proof() != AnyLink::ToSelf
+            {
+                invalid_reason = Some(InvalidReason::ChainedProofRole(dep_id));
             }
         }
 
