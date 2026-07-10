@@ -180,7 +180,7 @@ fn read_stored_hash_by_index(index: usize, data: &[u8], hashes_offset: usize) ->
     Some(unsafe { &*data.as_ptr().add(offset).cast() })
 }
 
-pub fn read_stored_depth(
+pub fn read_stored_depth_from_absent(
     level_mask: LevelMask,
     n: u8,
     data: &[u8],
@@ -188,16 +188,16 @@ pub fn read_stored_depth(
 ) -> Option<u16> {
     let index = level_mask.hash_index(n) as usize;
     let level = level_mask.level() as usize;
-    read_stored_depth_by_index(level, index, data, hashes_offset)
+    read_stored_depth_by_index(level + 1, index, data, hashes_offset)
 }
 
 fn read_stored_depth_by_index(
-    level: usize,
+    stored_hashes_count: usize,
     index: usize,
     data: &[u8],
     hashes_offset: usize,
 ) -> Option<u16> {
-    let offset = hashes_offset + (level + 1) * 32 + index * 2;
+    let offset = hashes_offset + stored_hashes_count * 32 + index * 2;
     if data.len() < offset + 2 {
         return None;
     }
