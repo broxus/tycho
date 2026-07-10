@@ -464,7 +464,7 @@ impl FinalizationContext {
 
             // for absent cell read depth and hash from data
             if is_absent_cell {
-                let depth = read_stored_depth(level_mask, level, cell.data, 0)
+                let depth = read_stored_depth_from_absent(level_mask, level, cell.data, 0)
                     .context("invalid absent cell")?;
                 current_entry.set_depth(hash_idx, depth);
 
@@ -752,6 +752,7 @@ mod test {
     use rand::{Rng, SeedableRng};
     use tycho_storage::{StorageConfig, StorageContext};
     use tycho_types::boc::Boc;
+    use tycho_types::merkle::make_pruned_branch;
     use tycho_types::models::{BlockId, ShardIdent, ShardStateUnsplit};
     use tycho_types::prelude::Dict;
     use tycho_util::project_root;
@@ -969,6 +970,31 @@ mod test {
         let cells_left = cells_db.cells.iterator(IteratorMode::Start).count();
         tracing::info!("States GC finished. Cells left: {cells_left}");
         assert_eq!(cells_left, 0, "Gc is broken. Press F to pay respect");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn raw_state_store_accepts_level1_pruned_child() -> Result<()> {
+        let (ctx, _tempdir) = StorageContext::new_temp().await?;
+        let storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
+
+        let original_child = CellBuilder::build_from((0xaa_u8, Cell::empty_cell()))?;
+        let pruned_child = make_pruned_branch(original_child.as_ref(), 0, Cell::empty_context())?;
+        let root = CellBuilder::build_from((0xbb_u8, pruned_child))?;
+        let boc = Boc::encode(&root);
+        let block_id = BlockId {
+            shard: ShardIdent::BASECHAIN,
+            seqno: 1,
+            root_hash: *root.repr_hash(),
+            file_hash: Boc::file_hash_blake(&boc),
+        };
+
+        let root_hash = storage
+            .shard_state_storage()
+            .store_state_bytes(&block_id, Bytes::from(boc), Some(&block_id.root_hash))
+            .await?;
+        assert_eq!(root_hash, block_id.root_hash);
+
         Ok(())
     }
 
