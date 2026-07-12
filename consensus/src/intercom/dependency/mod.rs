@@ -5,4 +5,3 @@ mod downloader;
 mod limiter;
 mod peer_queue;
 mod uploader;
-mod value_ordered_map;

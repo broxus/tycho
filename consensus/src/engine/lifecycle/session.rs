@@ -39,7 +39,7 @@ impl EngineSession {
             peer_schedule: peer_schedule.clone(),
             #[cfg(feature = "mock-feedback")]
             mock_feedback: {
-                use crate::mock_feedback::MockFeedbackSender;
+                use crate::utils::MockFeedbackSender;
                 let sender = MockFeedbackSender::new(
                     net.dispatcher.clone(),
                     peer_schedule,
