@@ -77,7 +77,7 @@ pub struct MockFeedbackMessage {
 #[cfg(feature = "mock-feedback")]
 impl MockFeedbackMessage {
     pub fn new(dispatcher: Dispatcher, round: crate::models::Round) -> Self {
-        let request = dispatcher.request_from_tl(crate::mock_feedback::RoundBoxed { round });
+        let request = dispatcher.request_from_tl(crate::utils::RoundBoxed { round });
         Self {
             dispatcher,
             request,

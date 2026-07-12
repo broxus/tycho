@@ -145,7 +145,7 @@ impl EngineRecoverLoop {
 
                 #[cfg(feature = "mock-feedback")]
                 {
-                    use crate::mock_feedback::MockFeedbackSender;
+                    use crate::utils::MockFeedbackSender;
                     let sender = MockFeedbackSender::new(
                         net.dispatcher.clone(),
                         guard.peer_schedule.clone(),

@@ -129,7 +129,7 @@ impl Service<ServiceRequest> for Responder {
     fn on_message(&self, _req: ServiceRequest) -> Self::OnMessageFuture {
         #[cfg(feature = "mock-feedback")]
         {
-            use crate::mock_feedback::RoundBoxed;
+            use crate::utils::RoundBoxed;
             if let Ok(data) = _req.parse_tl::<RoundBoxed>()
                 && let Some(inner) = self.0.load_full()
             {
