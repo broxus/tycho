@@ -238,7 +238,7 @@ async fn load_states_from_dump(storage: &CoreStorage, dump_path: &Path) -> Resul
             let tempfile = std::fs::File::open(&temp_path)?;
             storage
                 .shard_state_storage()
-                .store_state_file(&block_id, tempfile, None)
+                .store_state_file_without_session(&block_id, tempfile, None)
                 .await?;
 
             if let Some(handle) = storage.block_handle_storage().load_handle(&block_id) {

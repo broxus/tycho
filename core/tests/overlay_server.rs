@@ -399,19 +399,20 @@ async fn overlay_server_split_persistent_state() -> Result<()> {
     let shard_states = storage.shard_state_storage();
 
     // import the full state into shard storage before writing the persistent bundle
-    shard_states.begin_raw_import()?;
+    let raw_import = shard_states.create_raw_import_session();
     let root_hash = shard_states
         .store_state_bytes(
             &block_id,
             bytes::Bytes::from(full_boc),
             Some(&expected_state_root_hash),
+            &raw_import,
         )
         .await?;
     anyhow::ensure!(
         root_hash == expected_state_root_hash,
         "dump state root hash mismatch"
     );
-    shard_states.finish_raw_import()?;
+    raw_import.finish()?;
 
     // create a block handle that can be used by the persistent-state writer
     let loaded_state = shard_states.load_state(block_id.seqno, &block_id).await?;

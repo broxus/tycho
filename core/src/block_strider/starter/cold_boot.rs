@@ -28,7 +28,7 @@ use crate::block_strider::{CheckProof, ProofChecker};
 use crate::blockchain_rpc::BlockchainRpcClient;
 use crate::overlay_client::PunishReason;
 use crate::proto::blockchain::{KeyBlockProof, ZerostateProof};
-use crate::storage::shard_state::StoreStateRawError;
+use crate::storage::shard_state::{RawImportSession, StoreStateRawError};
 use crate::storage::{
     BlockHandle, CoreStorage, KeyBlocksDirection, MaybeExistingHandle, NewBlockMeta,
     PersistentStateKind, PersistentStateMeta, validate_persistent_state_split_metadata,
@@ -474,12 +474,17 @@ impl StarterInner {
             );
         };
 
-        state_storage.begin_raw_import()?;
+        let raw_import = state_storage.create_raw_import_session();
 
         let mc_block_id = self.zerostate.as_block_id();
         tracing::info!(%mc_block_id, "importing masterchain zerostate");
         state_storage
-            .store_state_bytes(&mc_block_id, mc_zerostate, Some(&self.zerostate.root_hash))
+            .store_state_bytes(
+                &mc_block_id,
+                mc_zerostate,
+                Some(&self.zerostate.root_hash),
+                &raw_import,
+            )
             .await?;
 
         let mc_zerostate = state_storage
@@ -528,7 +533,12 @@ impl StarterInner {
 
             tracing::info!(%block_id, "importing shard zerostate");
             state_storage
-                .store_state_bytes(&block_id, state_bytes, Some(&block_id.root_hash))
+                .store_state_bytes(
+                    &block_id,
+                    state_bytes,
+                    Some(&block_id.root_hash),
+                    &raw_import,
+                )
                 .await?;
         }
 
@@ -598,7 +608,7 @@ impl StarterInner {
             .store_shard_state(mc_block_id.seqno, &handle)
             .await?;
 
-        state_storage.finish_raw_import()?;
+        raw_import.finish()?;
 
         tracing::info!("imported zerostates");
 
@@ -612,23 +622,35 @@ impl StarterInner {
         let handle_storage = self.storage.block_handle_storage();
 
         let state_storage = self.storage.shard_state_storage();
-        state_storage.begin_raw_import()?;
+        let raw_import = state_storage.create_raw_import_session();
 
         let (handle, state) = self
-            .download_shard_state(&zerostate_id, &zerostate_id, true, &zerostate_id.root_hash)
+            .download_shard_state(
+                &zerostate_id,
+                &zerostate_id,
+                true,
+                &zerostate_id.root_hash,
+                &raw_import,
+            )
             .await?;
 
         for item in state.shards()?.latest_blocks() {
             let block_id = item?;
             let (handle, _) = self
-                .download_shard_state(&zerostate_id, &block_id, true, &block_id.root_hash)
+                .download_shard_state(
+                    &zerostate_id,
+                    &block_id,
+                    true,
+                    &block_id.root_hash,
+                    &raw_import,
+                )
                 .await?;
             handle_storage.set_block_committed(&handle);
         }
 
         handle_storage.set_block_committed(&handle);
 
-        state_storage.finish_raw_import()?;
+        raw_import.finish()?;
 
         Ok((handle, state))
     }
@@ -651,10 +673,16 @@ impl StarterInner {
             let state_update = block.as_ref().load_state_update()?;
 
             let state_storage = self.storage.shard_state_storage();
-            state_storage.begin_raw_import()?;
+            let raw_import = state_storage.create_raw_import_session();
 
             let (_, shard_state) = self
-                .download_shard_state(mc_block_id, block_id, false, &state_update.new_hash)
+                .download_shard_state(
+                    mc_block_id,
+                    block_id,
+                    false,
+                    &state_update.new_hash,
+                    &raw_import,
+                )
                 .await?;
             let state_hash = *shard_state.root_cell().repr_hash();
             assert_eq!(
@@ -662,7 +690,7 @@ impl StarterInner {
                 "storage must verify expected root hash"
             );
 
-            state_storage.finish_raw_import()?;
+            raw_import.finish()?;
         }
 
         // Download persistent queue state
@@ -790,6 +818,7 @@ impl StarterInner {
         block_id: &BlockId,
         is_zerostate: bool,
         expected_state_root: &HashBytes,
+        raw_import: &RawImportSession,
     ) -> Result<(BlockHandle, ShardStateStuff)> {
         enum StoreZeroStateFrom {
             File(DownloadedPersistentStateBundle),
@@ -919,9 +948,9 @@ impl StarterInner {
                 }
             };
 
-            // NOTE: `store_state_file` error is mostly unrecoverable since the operation
-            //       context is too large to be atomic. This downloaded-state path is
-            //       rebuild-only on interruption, unlike bootstrap raw import marker cleanup.
+            // NOTE: An error after raw apply starts is unrecoverable because the operation
+            //       context is too large to be atomic. The active session is intentionally
+            //       left unfinished so restart requires a full re-sync.
             let part_files = bundle
                 .parts
                 .iter_mut()
@@ -933,6 +962,7 @@ impl StarterInner {
                     bundle.main.read(true).open()?,
                     part_files,
                     Some(expected_state_root),
+                    raw_import,
                 )
                 .await
             {
