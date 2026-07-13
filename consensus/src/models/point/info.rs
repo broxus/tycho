@@ -249,6 +249,12 @@ impl PointInfo {
         }
     }
 
+    /// Returns `Some(anchor proof id)` that must be defined by trigger link (its prev point).
+    pub fn trigger_bound_proof_id(&self) -> Option<PointId> {
+        let proof_id = self.data().inherited_anchor_proof_id(self.round())?;
+        (proof_id.round < self.anchor_round(AnchorStageRole::Trigger)).then_some(proof_id)
+    }
+
     /// Well-formed point may return `None` if attribute belongs to another point
     pub fn through_id(&self, through: &Through) -> Option<PointId> {
         self.0.data.through_id(through, self.round())

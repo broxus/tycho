@@ -119,6 +119,8 @@ pub enum InvalidReason {
     BadStickySequence((PointId, Option<u8>, u8)),
     #[error("newer proof to chain in dependency {:?}", .0.alt())]
     NewerProofToChainInDependency(PointId),
+    #[error("anchor_proof not inherited from {}{:?}", if .0.1 {"trigger "} else {""}, .0.0.alt())]
+    TriggerProofMismatch((PointId, bool)), // `true` if trigger is a direct dependency
     #[error("dependency ill-formed {:?}: {}", .0.0.alt(), .0.1)]
     DepIllFormed((PointId, IllFormedReason)),
     #[error("dependency not found {:?}", .0.alt())]
@@ -396,6 +398,7 @@ impl Verifier {
         let anchor_proof_id = info.anchor_id(AnchorStageRole::Proof);
         let anchor_trigger_through = info.anchor_link_through(AnchorStageRole::Trigger);
         let anchor_proof_through = info.anchor_link_through(AnchorStageRole::Proof);
+        let trigger_bound_proof_id = info.trigger_bound_proof_id();
         let chained_proof_to_through = info.chained_anchor_proof_to_through();
         let max_allowed_dep_time =
             info.time() + UnixTime::from_millis(conf.consensus.clock_skew_millis.get() as _);
@@ -485,16 +488,22 @@ impl Verifier {
                 let tuple = (AnchorStageRole::Proof, dep_id);
                 invalid_reason = Some(InvalidReason::AnchorLink(tuple));
             }
-            if dep_id == anchor_trigger_id && dep.anchor_trigger() != AnyLink::ToSelf {
-                let tuple = (AnchorStageRole::Trigger, dep_id);
-                invalid_reason = Some(InvalidReason::AnchorLink(tuple));
+            if dep_id == anchor_trigger_id
+                && let Some(reason) = Self::check_trigger_target(info, dep)
+            {
+                invalid_reason = Some(reason);
             }
 
-            if dep_id == anchor_trigger_through
-                && dep.anchor_id(AnchorStageRole::Trigger) != anchor_trigger_id
-            {
-                let tuple = (AnchorStageRole::Trigger, dep_id);
-                invalid_reason = Some(InvalidReason::AnchorLinkBadPath(tuple));
+            if dep_id == anchor_trigger_through {
+                if dep.anchor_id(AnchorStageRole::Trigger) != anchor_trigger_id {
+                    let tuple = (AnchorStageRole::Trigger, dep_id);
+                    invalid_reason = Some(InvalidReason::AnchorLinkBadPath(tuple));
+                } else if anchor_trigger_through != anchor_trigger_id
+                    && trigger_bound_proof_id
+                        .is_some_and(|proof_id| proof_id != dep.anchor_id(AnchorStageRole::Proof))
+                {
+                    invalid_reason = Some(InvalidReason::TriggerProofMismatch((dep_id, false)));
+                }
             }
 
             if dep_id == anchor_proof_through {
@@ -624,6 +633,13 @@ impl Verifier {
                 invalid_reason = Some(InvalidReason::DependencyTimeTooFarInFuture(dep_id));
             }
 
+            if let Some(anchor_trigger_link) = anchor_trigger_link
+                && dep_id == anchor_trigger_link.to
+                && let Some(reason) = Self::check_trigger_target(info, dep)
+            {
+                invalid_reason = Some(reason);
+            }
+
             if let Some(anchor_proof_link) = anchor_proof_link
                 && dep_id == anchor_proof_link.to
             {
@@ -645,6 +661,17 @@ impl Verifier {
         }
 
         Ok(invalid_reason)
+    }
+
+    fn check_trigger_target(info: &PointInfo, anchor_trigger: &PointInfo) -> Option<InvalidReason> {
+        if anchor_trigger.anchor_trigger() != AnyLink::ToSelf {
+            let tuple = (AnchorStageRole::Trigger, *anchor_trigger.id());
+            return Some(InvalidReason::AnchorLink(tuple));
+        }
+
+        info.trigger_bound_proof_id()
+            .is_some_and(|proof_id| proof_id != anchor_trigger.anchor_id(AnchorStageRole::Proof))
+            .then(|| InvalidReason::TriggerProofMismatch((*anchor_trigger.id(), true)))
     }
 
     /// an equivalent to [`DagPoint::trusted`] that also breaks a chain of trans invalid points

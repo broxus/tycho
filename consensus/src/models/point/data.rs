@@ -335,6 +335,22 @@ impl PointData {
         Some(point_id)
     }
 
+    /// Target of `Regular`'s inherited proof or `AnchorProof`'s chained proof.
+    /// I.e. returns `None` for all trigger points that have obvious proof link targets.
+    pub(super) fn inherited_anchor_proof_id(&self, round: Round) -> Option<PointId> {
+        match &self.role {
+            PointRole::AnchorTrigger | PointRole::Sticky { .. } | PointRole::Genesis => None,
+            PointRole::Regular { anchor_proof, .. } => match anchor_proof {
+                AnchorLink::Direct(through) => Some(
+                    self.through_id(through, round)
+                        .expect("Coding error: usage of ill-formed point"),
+                ),
+                AnchorLink::Indirect(link) => Some(link.to),
+            },
+            PointRole::AnchorProof { anchor_proof, .. } => Some(anchor_proof.to),
+        }
+    }
+
     pub(super) fn through_id(&self, through: &Through, round: Round) -> Option<PointId> {
         let (map, author, round) = match through {
             Through::Includes(peer) => (&self.includes, *peer, round.prev()),

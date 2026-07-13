@@ -99,9 +99,7 @@ impl Producer {
             _ => None,
         };
 
-        let anchor_proof = Self::link(current_round, &includes, &witness, AnchorStageRole::Proof);
-        let anchor_trigger =
-            Self::link(current_round, &includes, &witness, AnchorStageRole::Trigger);
+        let (anchor_proof, anchor_trigger) = link::anchor_links(current_round, &includes, &witness);
 
         let role = if proven_vertex.is_some() {
             let last_own_point = last_own_point.as_ref().expect("guarded by `proven_vertex`");
@@ -262,49 +260,6 @@ impl Producer {
             .collect::<Vec<_>>()
     }
 
-    fn link(
-        current_round: Round,
-        includes: &[PointInfo],
-        witness: &[PointInfo],
-        link_field: AnchorStageRole,
-    ) -> AnchorLink {
-        let incl_info = includes
-            .iter()
-            .max_by_key(|point| point.anchor_round(link_field))
-            .expect("non-empty list of includes for own point");
-
-        if incl_info.round() == current_round.prev()
-            && incl_info.anchor_link(link_field) == AnyLink::ToSelf
-        {
-            return AnchorLink::Direct(Through::Includes(*incl_info.author()));
-        };
-
-        let newer_witness = witness
-            .iter()
-            .max_by_key(|wit_info| wit_info.anchor_round(link_field))
-            .filter(|wit_info| {
-                wit_info.anchor_round(link_field) > incl_info.anchor_round(link_field)
-            });
-
-        let Some(wit_info) = newer_witness else {
-            return AnchorLink::Indirect(IndirectLink {
-                to: incl_info.anchor_id(link_field),
-                path: Through::Includes(*incl_info.author()),
-            });
-        };
-
-        if wit_info.round() == current_round.prev().prev()
-            && wit_info.anchor_link(link_field) == AnyLink::ToSelf
-        {
-            return AnchorLink::Direct(Through::Witness(*wit_info.author()));
-        }
-
-        AnchorLink::Indirect(IndirectLink {
-            to: wit_info.anchor_id(link_field),
-            path: Through::Witness(*wit_info.author()),
-        })
-    }
-
     fn get_time(
         anchor_proof: &AnyLink<'_>,
         prev_info: Option<&PointInfo>,
@@ -374,6 +329,88 @@ impl Producer {
                     broadcasted.alt()
                 );
             }
+        }
+    }
+}
+
+mod link {
+    use super::*;
+
+    pub fn anchor_links(
+        current_round: Round,
+        includes: &[PointInfo],
+        witness: &[PointInfo],
+    ) -> (AnchorLink, AnchorLink) {
+        let trigger_source = link_source(includes, witness, AnchorStageRole::Trigger);
+        let max_proof_source = link_source(includes, witness, AnchorStageRole::Proof);
+
+        let proof_source = if trigger_source.info.anchor_round(AnchorStageRole::Trigger)
+            > max_proof_source.info.anchor_round(AnchorStageRole::Proof)
+        {
+            trigger_source
+        } else {
+            max_proof_source
+        };
+
+        let anchor_proof = link(current_round, proof_source, AnchorStageRole::Proof);
+        let anchor_trigger = link(current_round, trigger_source, AnchorStageRole::Trigger);
+        (anchor_proof, anchor_trigger)
+    }
+
+    #[derive(Clone, Copy)]
+    struct LinkSource<'a> {
+        info: &'a PointInfo,
+        path: Through,
+    }
+
+    fn link_source<'a>(
+        includes: &'a [PointInfo],
+        witness: &'a [PointInfo],
+        link_field: AnchorStageRole,
+    ) -> LinkSource<'a> {
+        let incl_info = includes
+            .iter()
+            .max_by_key(|point| point.anchor_round(link_field))
+            .expect("non-empty list of includes for own point");
+
+        let newer_witness = witness
+            .iter()
+            .max_by_key(|wit_info| wit_info.anchor_round(link_field))
+            .filter(|wit_info| {
+                wit_info.anchor_round(link_field) > incl_info.anchor_round(link_field)
+            });
+
+        match newer_witness {
+            Some(info) => LinkSource {
+                info,
+                path: Through::Witness(*info.author()),
+            },
+            None => LinkSource {
+                info: incl_info,
+                path: Through::Includes(*incl_info.author()),
+            },
+        }
+    }
+
+    fn link(
+        current_round: Round,
+        source: LinkSource<'_>,
+        link_field: AnchorStageRole,
+    ) -> AnchorLink {
+        let direct_round = match source.path {
+            Through::Includes(_) => current_round.prev(),
+            Through::Witness(_) => current_round.prev().prev(),
+        };
+
+        if source.info.round() == direct_round
+            && source.info.anchor_link(link_field) == AnyLink::ToSelf
+        {
+            AnchorLink::Direct(source.path)
+        } else {
+            AnchorLink::Indirect(IndirectLink {
+                to: source.info.anchor_id(link_field),
+                path: source.path,
+            })
         }
     }
 }
