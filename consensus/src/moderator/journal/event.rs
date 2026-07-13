@@ -181,6 +181,7 @@ impl JournalEvent {
             | InvalidReason::ChainedProofBadPath(point_id)
             | InvalidReason::BadStickySequence((point_id, _, _))
             | InvalidReason::NewerProofToChainInDependency(point_id)
+            | InvalidReason::TriggerProofMismatch((point_id, _))
             | InvalidReason::DepIllFormed((point_id, _)) => {
                 point_keys.push(point_id.key());
             }
