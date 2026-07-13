@@ -28,6 +28,7 @@ use crate::block_strider::{CheckProof, ProofChecker};
 use crate::blockchain_rpc::BlockchainRpcClient;
 use crate::overlay_client::PunishReason;
 use crate::proto::blockchain::{KeyBlockProof, ZerostateProof};
+use crate::storage::shard_state::StoreStateRawError;
 use crate::storage::{
     BlockHandle, CoreStorage, KeyBlocksDirection, MaybeExistingHandle, NewBlockMeta,
     PersistentStateKind, PersistentStateMeta, validate_persistent_state_split_metadata,
@@ -926,7 +927,6 @@ impl StarterInner {
                 .iter_mut()
                 .map(|(_, file)| file.read(true).open())
                 .collect::<Result<Vec<_>, _>>()?;
-            // TODO: mark all errors before `apply_temp_cell` as recoverable.
             match shard_states
                 .store_state_split_files(
                     block_id,
@@ -944,8 +944,16 @@ impl StarterInner {
                 }
                 Err(e) => {
                     tracing::error!("failed to store shard state file: {e:?}");
-                    remove_downloaded_state_files().await;
-                    continue;
+                    match e.downcast_ref::<StoreStateRawError>() {
+                        Some(StoreStateRawError::BeforeApply(_)) => {
+                            remove_downloaded_state_files().await;
+                            continue;
+                        }
+                        _ => {
+                            // potentially unrecoverable failure, keep poisoned marker
+                            return Err(e).context("shard state storage may be partially modified");
+                        }
+                    }
                 }
             };
 

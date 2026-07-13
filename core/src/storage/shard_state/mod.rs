@@ -50,6 +50,7 @@ mod store_state_raw;
 mod util;
 
 pub use self::row_format::{decode_indexed_value, encode_indexed_value};
+pub(crate) use self::store_state_raw::StoreStateRawError;
 
 pub struct ShardStateStorage {
     cells_db: CellsDb,
@@ -330,6 +331,14 @@ impl ShardStateStorage {
 
     pub fn begin_raw_import(&self) -> Result<()> {
         // Any restart before this marker is cleared must require a full re-sync.
+        anyhow::ensure!(
+            self.cells_db
+                .state
+                .get(db_state::CellsDbStateKey::RawImportInProgress)?
+                .is_none(),
+            "raw state import is already in progress, \
+            local storage is poisoned and requires a full re-sync",
+        );
         self.cells_db
             .state
             .insert(db_state::CellsDbStateKey::RawImportInProgress, [1u8])?;
