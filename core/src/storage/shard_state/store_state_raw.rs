@@ -15,6 +15,7 @@ use tycho_util::progress_bar::*;
 use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb;
 
+use super::RawImportSession;
 use super::cell_storage::raw::{
     FinalizedTempCellSource, FinalizedTempCells, FinalizedTempCellsBuilder,
 };
@@ -39,6 +40,7 @@ impl StoreStateContext {
         block_id: &BlockId,
         main: R,
         parts: Vec<R>,
+        raw_import: Option<&RawImportSession>,
     ) -> Result<StoreStateResult>
     where
         R: std::io::Read + Send,
@@ -50,6 +52,12 @@ impl StoreStateContext {
         // NOTE: we make one atomic apply for all parts to avoid possible
         //      dangling part sub-trees (with a fake counter = 1),
         //      if a process crashed after applying parts but before applying main
+
+        if let Some(raw_import) = raw_import {
+            raw_import
+                .begin()
+                .map_err(StoreStateRawError::BeforeApply)?;
+        }
 
         let result = self
             .apply_temp(block_id, main, parts)
@@ -889,7 +897,7 @@ mod test {
             #[allow(clippy::disallowed_methods)]
             let file = File::open(file.path())?;
 
-            store_ctx.store_split(&block_id, file, Vec::new())?;
+            store_ctx.store_split(&block_id, file, Vec::new(), None)?;
         }
         tracing::info!("Finished processing all states");
         tracing::info!("Starting gc");
@@ -1061,7 +1069,11 @@ mod test {
 
         let root_hash = storage
             .shard_state_storage()
-            .store_state_bytes(&block_id, Bytes::from(boc), Some(&block_id.root_hash))
+            .store_state_bytes_without_session(
+                &block_id,
+                Bytes::from(boc),
+                Some(&block_id.root_hash),
+            )
             .await?;
         assert_eq!(root_hash, block_id.root_hash);
 
@@ -1090,7 +1102,7 @@ mod test {
 
         let root_hash = storage
             .shard_state_storage()
-            .store_state_bytes(
+            .store_state_bytes_without_session(
                 &block_id,
                 Bytes::from_static(ZEROSTATE_BOC),
                 Some(&block_id.root_hash),
@@ -1117,7 +1129,7 @@ mod test {
 
         let err = storage
             .shard_state_storage()
-            .store_state_bytes(
+            .store_state_bytes_without_session(
                 &next_block_id,
                 Bytes::from_static(ZEROSTATE_BOC),
                 Some(&block_id.root_hash),
@@ -1145,7 +1157,7 @@ mod test {
         // existing counters.
         let root_hash = storage
             .shard_state_storage()
-            .store_state_bytes(
+            .store_state_bytes_without_session(
                 &next_block_id,
                 Bytes::from_static(ZEROSTATE_BOC),
                 Some(&block_id.root_hash),

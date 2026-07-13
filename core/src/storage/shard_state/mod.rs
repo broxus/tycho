@@ -45,10 +45,12 @@ pub mod counters;
 pub mod db_state;
 mod entries_buffer;
 mod nursery_persistence;
+mod raw_import_session;
 mod row_format;
 mod store_state_raw;
 mod util;
 
+pub(crate) use self::raw_import_session::RawImportSession;
 pub use self::row_format::{decode_indexed_value, encode_indexed_value};
 pub(crate) use self::store_state_raw::StoreStateRawError;
 
@@ -329,28 +331,8 @@ impl ShardStateStorage {
         .await?
     }
 
-    pub fn begin_raw_import(&self) -> Result<()> {
-        // Any restart before this marker is cleared must require a full re-sync.
-        anyhow::ensure!(
-            self.cells_db
-                .state
-                .get(db_state::CellsDbStateKey::RawImportInProgress)?
-                .is_none(),
-            "raw state import is already in progress, \
-            local storage is poisoned and requires a full re-sync",
-        );
-        self.cells_db
-            .state
-            .insert(db_state::CellsDbStateKey::RawImportInProgress, [1u8])?;
-        Ok(())
-    }
-
-    pub fn finish_raw_import(&self) -> Result<()> {
-        // Keep the marker until metadata and persistent states are done.
-        self.cells_db
-            .state
-            .remove(db_state::CellsDbStateKey::RawImportInProgress)?;
-        Ok(())
+    pub fn create_raw_import_session(&self) -> RawImportSession {
+        RawImportSession::new(self.cells_db.clone())
     }
 
     /// Find mc block id from db snapshot
@@ -934,26 +916,33 @@ impl ShardStateStorage {
     }
 
     // Stores shard state and returns the hash of its root cell.
-    pub async fn store_state_file(
+    pub async fn store_state_file_without_session(
         &self,
         block_id: &BlockId,
         boc: File,
         expected_root_hash: Option<&HashBytes>,
     ) -> Result<HashBytes> {
-        self.store_state_raw_inner(block_id, boc, Vec::new(), expected_root_hash)
+        self.store_state_raw_inner(block_id, boc, Vec::new(), expected_root_hash, None)
             .await
     }
 
     // Stores shard state from parts and returns the hash of its root cell.
-    pub async fn store_state_split_files(
+    pub(crate) async fn store_state_split_files(
         &self,
         block_id: &BlockId,
         main: File,
         parts: Vec<File>,
         expected_root_hash: Option<&HashBytes>,
+        raw_import: &RawImportSession,
     ) -> Result<HashBytes> {
-        self.store_state_raw_inner(block_id, main, parts, expected_root_hash)
-            .await
+        self.store_state_raw_inner(
+            block_id,
+            main,
+            parts,
+            expected_root_hash,
+            Some(raw_import.clone()),
+        )
+        .await
     }
 
     pub async fn store_state_bytes(
@@ -961,9 +950,28 @@ impl ShardStateStorage {
         block_id: &BlockId,
         boc: Bytes,
         expected_root_hash: Option<&HashBytes>,
+        raw_import: &RawImportSession,
     ) -> Result<HashBytes> {
         let cursor = Cursor::new(boc);
-        self.store_state_raw_inner(block_id, cursor, Vec::new(), expected_root_hash)
+        self.store_state_raw_inner(
+            block_id,
+            cursor,
+            Vec::new(),
+            expected_root_hash,
+            Some(raw_import.clone()),
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn store_state_bytes_without_session(
+        &self,
+        block_id: &BlockId,
+        boc: Bytes,
+        expected_root_hash: Option<&HashBytes>,
+    ) -> Result<HashBytes> {
+        let cursor = Cursor::new(boc);
+        self.store_state_raw_inner(block_id, cursor, Vec::new(), expected_root_hash, None)
             .await
     }
 
@@ -973,6 +981,7 @@ impl ShardStateStorage {
         main: R,
         parts: Vec<R>,
         expected_root_hash: Option<&HashBytes>,
+        raw_import: Option<RawImportSession>,
     ) -> Result<HashBytes>
     where
         R: std::io::Read + Send + 'static,
@@ -994,7 +1003,9 @@ impl ShardStateStorage {
             // Raw import writes directly to RocksDB/counters; RawImportInProgress
             // is bootstrap-scoped, so publish nursery-only cells before storing.
             ctx.cell_storage.prepare_persistent_state_save();
-            Ok(ctx.store_split(&block_id, main, parts)?.root_hash)
+            Ok(ctx
+                .store_split(&block_id, main, parts, raw_import.as_ref())?
+                .root_hash)
         })
         .await?
     }
