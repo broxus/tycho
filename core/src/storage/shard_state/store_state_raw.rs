@@ -43,6 +43,25 @@ impl StoreStateContext {
     where
         R: std::io::Read + Send,
     {
+        let (main, parts) = self
+            .import_and_validate(main, parts)
+            .map_err(StoreStateRawError::BeforeApply)?;
+
+        // NOTE: we make one atomic apply for all parts to avoid possible
+        //      dangling part sub-trees (with a fake counter = 1),
+        //      if a process crashed after applying parts but before applying main
+
+        let result = self
+            .apply_temp(block_id, main, parts)
+            .map_err(StoreStateRawError::Unrecoverable)?;
+
+        Ok(result)
+    }
+
+    fn import_and_validate<R>(&self, main: R, parts: Vec<R>) -> Result<(TempState, Vec<TempState>)>
+    where
+        R: std::io::Read + Send,
+    {
         // TODO: remove after 1 release
         self.clear_temp_cells()?;
 
@@ -141,11 +160,7 @@ impl StoreStateContext {
                 .take(4)
         );
 
-        // NOTE: we make one atomic apply for all parts to avoid possible
-        //      dangling part sub-trees (with a fake counter = 1),
-        //      if a process crashed after applying parts but before applying main
-
-        self.apply_temp(block_id, main, parts)
+        Ok((main, parts))
     }
 
     fn clear_temp_cells(&self) -> Result<()> {
@@ -781,6 +796,14 @@ where
 }
 
 #[derive(thiserror::Error, Debug)]
+pub(crate) enum StoreStateRawError {
+    #[error("state import failed before apply: {0:#}")]
+    BeforeApply(#[source] anyhow::Error),
+    #[error("state import failed during apply: {0:#}")]
+    Unrecoverable(#[source] anyhow::Error),
+}
+
+#[derive(thiserror::Error, Debug)]
 enum StoreStateError {
     #[error("Not found")]
     NotFound,
@@ -1080,6 +1103,42 @@ mod test {
             is_table_empty(&cells_db.temp_cells)?,
             "temp cells were not cleared"
         );
+
+        // corrupt an existing canonical cell to force an apply failure
+        let root_cell = cells_db
+            .cells
+            .get(&block_id.root_hash)?
+            .expect("root cell must be stored")
+            .as_ref()
+            .to_vec();
+        let mut batch = WriteBatch::default();
+        batch.put_cf(&cells_db.cells.cf(), block_id.root_hash.as_slice(), []);
+        cells_db.rocksdb().write(batch)?;
+
+        let err = storage
+            .shard_state_storage()
+            .store_state_bytes(
+                &next_block_id,
+                Bytes::from_static(ZEROSTATE_BOC),
+                Some(&block_id.root_hash),
+            )
+            .await
+            .unwrap_err();
+
+        // an apply failure must be classified as unrecoverable
+        assert!(matches!(
+            err.downcast_ref::<StoreStateRawError>(),
+            Some(StoreStateRawError::Unrecoverable(_))
+        ));
+
+        // restore the valid cell before testing existing snapshot reuse
+        let mut batch = WriteBatch::default();
+        batch.put_cf(
+            &cells_db.cells.cf(),
+            block_id.root_hash.as_slice(),
+            root_cell.as_slice(),
+        );
+        cells_db.rocksdb().write(batch)?;
 
         // The first raw store creates CounterSnapshotLatest. Store the same
         // cell set again under another block id to ensure raw store can reuse
