@@ -27,6 +27,7 @@ use crate::storage::persistent_state::{
     ShardStateWriter, check_can_reuse_shard_state_part_files, parse_shard_state_part_file_name,
     validate_persistent_state_split_metadata,
 };
+use crate::storage::shard_state::StoreStateRawError;
 use crate::storage::{CoreStorage, CoreStorageConfig, NewBlockMeta};
 
 #[test]
@@ -252,6 +253,11 @@ async fn storage_open_rejects_existing_raw_import_marker() -> Result<()> {
 
     // marker creation
     storage.shard_state_storage().begin_raw_import()?;
+    let err = storage
+        .shard_state_storage()
+        .begin_raw_import()
+        .expect_err("second raw import must be rejected");
+    assert!(err.to_string().contains("already in progress"));
     drop(storage);
 
     // restart/open attempt
@@ -699,6 +705,10 @@ async fn split_persistent_shard_state_import_from_dump() -> Result<()> {
         err.to_string()
             .contains("split shard state parts do not match main file absent cells")
     );
+    assert!(matches!(
+        err.downcast_ref::<StoreStateRawError>(),
+        Some(StoreStateRawError::BeforeApply(_))
+    ));
 
     Ok(())
 }
