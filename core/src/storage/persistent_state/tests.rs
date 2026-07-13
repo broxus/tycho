@@ -246,50 +246,60 @@ async fn cache_rejects_split_sidecars_without_metadata() -> Result<()> {
 }
 
 #[tokio::test]
-async fn storage_open_rejects_existing_raw_import_marker() -> Result<()> {
-    // setup
-    let (ctx, tmp_dir) = StorageContext::new_temp().await?;
-    let storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
-
-    // marker creation
-    storage.shard_state_storage().begin_raw_import()?;
-    let err = storage
-        .shard_state_storage()
-        .begin_raw_import()
-        .expect_err("second raw import must be rejected");
-    assert!(err.to_string().contains("already in progress"));
-    drop(storage);
-
-    // restart/open attempt
-    let ctx = StorageContext::new(StorageConfig::new_potato(tmp_dir.path())).await?;
-    let err = match CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await {
-        Ok(_) => panic!("storage open must reject an existing raw import marker"),
-        Err(err) => err,
+async fn raw_import_session_for_state_bytes_activates_only_before_apply() -> Result<()> {
+    let zerostate_root = Boc::decode(ZEROSTATE_BOC)?;
+    let block_id = BlockId {
+        shard: ShardIdent::MASTERCHAIN,
+        seqno: 0,
+        root_hash: *zerostate_root.repr_hash(),
+        file_hash: Boc::file_hash_blake(ZEROSTATE_BOC),
     };
 
-    // final assertions
-    assert!(err.to_string().contains("re-sync"));
-    Ok(())
-}
-
-#[tokio::test]
-async fn finished_raw_import_marker_allows_storage_open() -> Result<()> {
-    // setup
-    let (ctx, tmp_dir) = StorageContext::new_temp().await?;
+    // invalid byte import
+    let (ctx, failed_tmp_dir) = StorageContext::new_temp().await?;
     let storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
-
-    // import action
     let shard_states = storage.shard_state_storage();
-    shard_states.begin_raw_import()?;
-    shard_states.finish_raw_import()?;
+    let raw_import = shard_states.create_raw_import_session();
+    let err = shard_states
+        .store_state_bytes(
+            &block_id,
+            Bytes::from_static(b"invalid boc"),
+            Some(&block_id.root_hash),
+            &raw_import,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err.downcast_ref::<StoreStateRawError>(),
+        Some(StoreStateRawError::BeforeApply(_))
+    ));
+    drop(raw_import);
     drop(storage);
 
-    // restart/open attempt
-    let ctx = StorageContext::new(StorageConfig::new_potato(tmp_dir.path())).await?;
-    let storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
+    // restart after pre-apply failure
+    let ctx = StorageContext::new(StorageConfig::new_potato(failed_tmp_dir.path())).await?;
+    let _reloaded_failed_storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
 
-    // final assertions
-    assert!(storage.node_state().load_init_mc_block_id().is_none());
+    // successful byte import
+    let (ctx, success_tmp_dir) = StorageContext::new_temp().await?;
+    let storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
+    let shard_states = storage.shard_state_storage();
+    let raw_import = shard_states.create_raw_import_session();
+    let root_hash = shard_states
+        .store_state_bytes(
+            &block_id,
+            Bytes::from_static(ZEROSTATE_BOC),
+            Some(&block_id.root_hash),
+            &raw_import,
+        )
+        .await?;
+    assert_eq!(root_hash, block_id.root_hash);
+    raw_import.finish()?;
+    drop(storage);
+
+    // restart after successful finish
+    let ctx = StorageContext::new(StorageConfig::new_potato(success_tmp_dir.path())).await?;
+    let _reloaded_success_storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
     Ok(())
 }
 
@@ -567,19 +577,21 @@ async fn split_persistent_shard_state_import_from_dump() -> Result<()> {
     let storage = CoreStorage::open(ctx, config).await?;
     let shard_states = storage.shard_state_storage();
 
-    shard_states.begin_raw_import()?;
+    let raw_import = shard_states.create_raw_import_session();
     let root_hash = shard_states
         .store_state_bytes(
             &block_id,
             Bytes::from(full_boc.clone()),
             Some(&expected_state_root_hash),
+            &raw_import,
         )
         .await?;
     anyhow::ensure!(
         root_hash == expected_state_root_hash,
         "dump state root hash mismatch"
     );
-    shard_states.finish_raw_import()?;
+    raw_import.finish()?;
+
     let full_import_counters = collect_cell_counters(&storage)?;
 
     let loaded_state = shard_states.load_state(block_id.seqno, &block_id).await?;
@@ -648,7 +660,7 @@ async fn split_persistent_shard_state_import_from_dump() -> Result<()> {
     assert_eq!(reloaded_state_info.parts.len(), meta.parts.len());
 
     // Import the split bundle into a fresh storage and verify it reconstructs the same state.
-    let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
+    let (ctx, imported_tmp_dir) = StorageContext::new_temp().await?;
     let imported_storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
     let imported_shard_states = imported_storage.shard_state_storage();
     let part_files = part_bocs
@@ -656,20 +668,21 @@ async fn split_persistent_shard_state_import_from_dump() -> Result<()> {
         .map(|part| tempfile_from_bytes(part))
         .collect::<Result<Vec<_>>>()?;
 
-    imported_shard_states.begin_raw_import()?;
+    let raw_import = imported_shard_states.create_raw_import_session();
     let imported_root_hash = imported_shard_states
         .store_state_split_files(
             &block_id,
             tempfile_from_bytes(&main_boc)?,
             part_files,
             Some(&expected_state_root_hash),
+            &raw_import,
         )
         .await?;
     anyhow::ensure!(
         imported_root_hash == expected_state_root_hash,
         "split import root hash mismatch"
     );
-    imported_shard_states.finish_raw_import()?;
+    raw_import.finish()?;
     let split_import_counters = collect_cell_counters(&imported_storage)?;
     assert_eq!(split_import_counters, full_import_counters);
 
@@ -681,12 +694,17 @@ async fn split_persistent_shard_state_import_from_dump() -> Result<()> {
         imported_state.root_cell().repr_hash(),
         &expected_state_root_hash
     );
+    drop(imported_state);
+    drop(imported_storage);
+    let ctx = StorageContext::new(StorageConfig::new_potato(imported_tmp_dir.path())).await?;
+    let _reloaded_imported_storage =
+        CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
 
     // Dropping a required part must fail before the split bundle is accepted.
-    let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
+    let (ctx, broken_tmp_dir) = StorageContext::new_temp().await?;
     let broken_storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
     let broken_shard_states = broken_storage.shard_state_storage();
-    broken_shard_states.begin_raw_import()?;
+    let raw_import = broken_shard_states.create_raw_import_session();
     let missing_parts = part_bocs
         .iter()
         .skip(1)
@@ -698,6 +716,7 @@ async fn split_persistent_shard_state_import_from_dump() -> Result<()> {
             tempfile_from_bytes(&main_boc)?,
             missing_parts,
             Some(&expected_state_root_hash),
+            &raw_import,
         )
         .await
         .unwrap_err();
@@ -709,6 +728,10 @@ async fn split_persistent_shard_state_import_from_dump() -> Result<()> {
         err.downcast_ref::<StoreStateRawError>(),
         Some(StoreStateRawError::BeforeApply(_))
     ));
+    drop(raw_import);
+    drop(broken_storage);
+    let ctx = StorageContext::new(StorageConfig::new_potato(broken_tmp_dir.path())).await?;
+    let _reloaded_broken_storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
 
     Ok(())
 }
