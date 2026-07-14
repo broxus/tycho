@@ -1119,7 +1119,7 @@ mod test {
         // corrupt an existing canonical cell to force an apply failure
         let root_cell = cells_db
             .cells
-            .get(&block_id.root_hash)?
+            .get(block_id.root_hash)?
             .expect("root cell must be stored")
             .as_ref()
             .to_vec();
