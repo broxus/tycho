@@ -46,9 +46,9 @@ impl Display for AltFmt<'_, [PeerId]> {
         write!(f, "len={} [", self.0.len())?;
         if let Some((last, others)) = self.0.split_last() {
             for el in others {
-                write!(f, " {},", &el.alt())?;
+                write!(f, " {},", el.alt())?;
             }
-            write!(f, " {} ", &last.alt())?;
+            write!(f, " {} ", last.alt())?;
         }
         f.write_str("]")
     }

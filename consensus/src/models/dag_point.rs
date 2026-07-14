@@ -400,7 +400,7 @@ impl Display for AltFmt<'_, InvalidPoint> {
         if invalid.0.cert.is_certified() {
             tuple.field(&"certified");
         }
-        tuple.field(&format!("{}", &invalid.0.reason));
+        tuple.field(&format!("{}", invalid.0.reason));
         tuple.finish()
     }
 }
@@ -416,7 +416,7 @@ impl Display for AltFmt<'_, IllFormedPoint> {
         if ill.0.cert.is_certified() {
             tuple.field(&"certified");
         }
-        tuple.field(&format!("{}", &ill.0.reason));
+        tuple.field(&format!("{}", ill.0.reason));
         tuple.finish()
     }
 }

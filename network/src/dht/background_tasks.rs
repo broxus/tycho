@@ -169,7 +169,7 @@ impl DhtInner {
 
             // Filter out expired nodes
             let now = now_sec();
-            for (_, bucket) in routing_table.buckets.iter_mut() {
+            for bucket in routing_table.buckets.values_mut() {
                 bucket.retain_nodes(|node| !node.is_expired(now, &self.config.max_peer_info_ttl));
             }
 

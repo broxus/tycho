@@ -64,7 +64,7 @@ impl Display for JournalItem {
                 write!(f, "ban until {human_time} {}", data.origin)
             }
             Self::Unbanned(data) => {
-                write!(f, "ban removed {}", &data.origin)
+                write!(f, "ban removed {}", data.origin)
             }
             Self::Event(event) => Display::fmt(event, f),
         }

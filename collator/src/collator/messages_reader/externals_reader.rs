@@ -859,7 +859,7 @@ fn should_skip_external_account<V: InternalMessageValue>(
     }
 
     // // check by previous externals ranges (those with seqno < current seqno)
-    for (_, state) in prev_states.iter() {
+    for state in prev_states.values() {
         let buffer = &state.get_state_by_partition(par_id).unwrap().buffer;
 
         // check buffer

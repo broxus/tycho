@@ -195,9 +195,9 @@ impl BlockHandleStorage {
         }
 
         // Load meta from storage
-        let meta = match block_handles.get(block_id.root_hash.as_slice()).unwrap() {
-            Some(data) => BlockMeta::from_slice(data.as_ref()),
-            None => return None,
+        let meta = {
+            let data = block_handles.get(block_id.root_hash.as_slice()).unwrap()?;
+            BlockMeta::from_slice(data.as_ref())
         };
 
         // Fill the cache with a new handle
@@ -250,9 +250,9 @@ impl BlockHandleStorage {
 
     pub fn load_key_block_handle(&self, seqno: u32) -> Option<BlockHandle> {
         let key_blocks = &self.db.key_blocks;
-        let key_block_id = match key_blocks.get(seqno.to_be_bytes()).unwrap() {
-            Some(data) => BlockId::from_slice(data.as_ref()),
-            None => return None,
+        let key_block_id = {
+            let data = key_blocks.get(seqno.to_be_bytes()).unwrap()?;
+            BlockId::from_slice(data.as_ref())
         };
         self.load_handle(&key_block_id)
     }
