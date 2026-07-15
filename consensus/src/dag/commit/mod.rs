@@ -404,7 +404,7 @@ mod test {
         let mut round_ctx = RoundCtx::new(&engine_ctx, conf.genesis_round);
 
         let (mut dag, mut committer) = DagFront::new(
-            conf.genesis_round,
+            genesis.info().id(),
             FixHistoryFlag(false),
             &peer_schedule,
             conf,
@@ -464,7 +464,7 @@ mod test {
                 dag.top(),
                 &peers,
                 local_keys,
-                &peer_schedule,
+                &peer_schedule.atomic().clone(),
                 &stub_downloader,
                 &stub_store,
                 &round_ctx,

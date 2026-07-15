@@ -1,5 +1,5 @@
 pub use impl_::*;
-pub use stateless::KeyGroup;
+pub use stateless::*;
 pub use stats_ranges::*;
 
 // parts must not know about private details of the whole

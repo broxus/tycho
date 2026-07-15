@@ -12,8 +12,8 @@ use tycho_util::sync::OnceTake;
 
 use crate::dag::dag_location::InclusionState;
 use crate::dag::{
-    DagRound, IllFormedReason, InvalidDependency, InvalidReason, UninitVset, ValidateResult,
-    Verifier, VerifyError,
+    BasicVerifier, DagRound, IllFormedReason, InvalidDependency, InvalidReason, UninitVset,
+    ValidateResult, Verifier, VerifyError,
 };
 use crate::effects::{
     AltFormat, Cancelled, Ctx, DownloadCtx, RoundCtx, SpawnLimit, Task, TaskResult, ValidateCtx,
@@ -99,8 +99,12 @@ impl DagPointFuture {
         let (self_weak_tx, self_weak_rx) = oneshot::channel();
 
         let task = round_ctx.task().spawn(async move {
-            let peer_schedule = downloader.peer_schedule();
-            if let Err(error) = Verifier::verify(&info, peer_schedule, validate_ctx.conf()) {
+            let bv = BasicVerifier::new(
+                &info,
+                &downloader.peer_schedule().atomic(),
+                validate_ctx.conf(),
+            );
+            if let Err(error) = bv.verify() {
                 let _span = validate_ctx.span().enter();
                 panic!("Failed to verify own point: {error}, {info:?}")
             }

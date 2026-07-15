@@ -84,17 +84,15 @@ impl<T: Source> RoundWatch<T> {
         self.set_max(Round(value));
     }
 
-    pub fn set_max(&self, value: Round) {
+    pub fn set_max(&self, value: Round) -> bool {
         self.tx.send_if_modified(|old| {
-            let old_is_lesser = *old < value;
-            if old_is_lesser {
-                // let mut type_name = std::any::type_name::<T>();
-                // type_name = type_name.split(":").last().unwrap_or(type_name);
-                // tracing::warn!("{type_name} {} -> {}", old.0, value.0);
+            if *old < value {
                 *old = value;
+                true
+            } else {
+                false
             }
-            old_is_lesser
-        });
+        })
     }
 
     // not available to collator or adapter

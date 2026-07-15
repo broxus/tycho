@@ -7,7 +7,7 @@ use tycho_network::PeerId;
 use tycho_util::FastDashMap;
 use tycho_util::metrics::HistogramGuard;
 
-use crate::dag::{DagHead, DagRound, IllFormedReason, UninitVset, Verifier, VerifyError};
+use crate::dag::{BasicVerifier, DagHead, DagRound, IllFormedReason, VerifyError};
 use crate::dyn_event;
 use crate::effects::{AltFormat, Ctx, RoundCtx};
 use crate::engine::{ConsensusConfigExt, NodeConfig};
@@ -127,7 +127,7 @@ impl BroadcastFilter {
     #[allow(clippy::too_many_arguments)]
     pub fn add_check_threshold(
         &self,
-        point: &Point,
+        point: Point,
         maybe_issue: Option<EvidenceSigError>,
         store: &MempoolStore,
         peer_schedule: &PeerSchedule,
@@ -141,14 +141,24 @@ impl BroadcastFilter {
         // have to cache every point when the node lags behind consensus;
         let prune_after = head.next().round() + NodeConfig::get().cache_future_broadcasts_rounds;
 
-        let merged = Verifier::verify(point.info(), peer_schedule, round_ctx.conf()).and(
-            match maybe_issue {
-                None => Ok(()),
-                Some(issue) => Err(VerifyError::IllFormed(IllFormedReason::EvidenceSigError(
-                    issue,
-                ))),
-            },
-        );
+        let (peer_count, bv) = {
+            let ps_guard = peer_schedule.atomic();
+            // if v_set is not initialized then nothing to do.
+            // actually such point cannot be successfully verified,
+            // but we neither have log debounce nor should panic here
+            let Ok(peer_count) = PeerCount::try_from(ps_guard.peers_for(id.round).len()) else {
+                return false;
+            };
+            let bv = BasicVerifier::new(point.info(), &ps_guard, round_ctx.conf());
+            (peer_count, bv)
+        };
+
+        let merged = bv.verify().and(match maybe_issue {
+            None => Ok(()),
+            Some(issue) => Err(VerifyError::IllFormed(IllFormedReason::EvidenceSigError(
+                issue,
+            ))),
+        });
 
         let checked = match merged {
             Err(VerifyError::IllFormed(IllFormedReason::UnknownAuthor)) => return false,
@@ -165,15 +175,20 @@ impl BroadcastFilter {
             Err(VerifyError::Fail(reason)) => Err(reason),
         };
 
-        let cache_info = self.cache(
-            id,
-            &checked,
-            store,
-            peer_schedule,
-            downloader,
-            head,
-            round_ctx,
-        );
+        let cache_info = if let Ok(verified) = &checked {
+            self.cache(
+                id,
+                !point.info().evidence().is_empty(),
+                verified,
+                peer_count,
+                store,
+                downloader,
+                head,
+                round_ctx,
+            )
+        } else {
+            CacheInfo::default()
+        };
 
         let ill_formed_reason = (checked.as_ref().ok()).and_then(|item| item.ill_formed_reason());
         let level = if checked.is_err()
@@ -207,17 +222,14 @@ impl BroadcastFilter {
     fn cache(
         &self,
         id: &PointId,
-        checked: &Result<CachedItem, UninitVset>,
+        has_evidence: bool,
+        verified: &CachedItem,
+        peer_count: PeerCount,
         store: &MempoolStore,
-        peer_schedule: &PeerSchedule,
         downloader: &Downloader,
         head: &DagHead,
         round_ctx: &RoundCtx,
     ) -> CacheInfo {
-        let Ok(verified) = checked else {
-            return CacheInfo::default();
-        };
-
         if id.round < head.last_back_bottom() {
             return CacheInfo::default(); // too old and totally useless now
         }
@@ -232,29 +244,22 @@ impl BroadcastFilter {
                 }
                 return CacheInfo::default();
             }
-            None => {
-                // try to create new future round: take write lock later, v_set may be uninit
-                let v_set_len = peer_schedule.atomic().peers_for(id.round).len();
-                match PeerCount::try_from(v_set_len) {
-                    Ok(peer_count) => (self.by_round.entry(id.round))
-                        .or_insert_with(|| ByRoundItem {
-                            flush_dag_round: None,
-                            peer_count,
-                            by_author: Arc::new(FastDashMap::with_capacity_and_hasher(
-                                peer_count.full(),
-                                Default::default(),
-                            )),
-                            by_author_len: AtomicU16::default(),
-                        })
-                        .downgrade(),
-                    Err(_) => {
-                        // v_set is not initialized, nothing to do.
-                        // actually such point cannot be successfully verified,
-                        // but we neither have log debounce nor should panic here
-                        return CacheInfo::default();
-                    }
-                }
-            }
+            // try to create new future round: take write lock later, v_set may be uninit
+            None => match self.by_round.get(&id.round) {
+                Some(read_guard) => read_guard,
+                // try to create new future round
+                None => (self.by_round.entry(id.round))
+                    .or_insert_with(|| ByRoundItem {
+                        flush_dag_round: None,
+                        peer_count,
+                        by_author: Arc::new(FastDashMap::with_capacity_and_hasher(
+                            peer_count.full(),
+                            Default::default(),
+                        )),
+                        by_author_len: AtomicU16::default(),
+                    })
+                    .downgrade(),
+            },
         };
 
         let ByRoundItem {
@@ -269,11 +274,22 @@ impl BroadcastFilter {
         let mut set_reached_threshold = || {
             // count only successfully verified
             if verified.ill_formed_reason().is_none() {
-                cached_info.reached_threshold = by_author_len
-                .fetch_add(1, atomic::Ordering::Relaxed) // wraps
-                .wrapping_add(1) as usize // won't exceed u8, just don't panic holding lock
-                == peer_count.reliable_minority();
-            }
+                let author_len = by_author_len
+                    .fetch_add(1, atomic::Ordering::Relaxed) // wraps
+                    .wrapping_add(1) as usize; // won't exceed u8, just don't panic holding lock
+
+                // filter to not update `RoundWatch<Consensus>` too often, and also show in BF logs
+                if id.round > head.next().round() {
+                    cached_info.reached_threshold =
+                        match author_len.cmp(&peer_count.reliable_minority()) {
+                            // in case point round R is applied as a new top consensus round, engine will jump
+                            // to R-1 as a current round and clone dependencies from the proven vertex @ R-1
+                            cmp::Ordering::Less => has_evidence,
+                            cmp::Ordering::Equal => true,
+                            cmp::Ordering::Greater => false, // already reached
+                        }
+                }
+            };
         };
 
         // ban the author, if we detect equivocation now; we won't be able to prove it
@@ -351,6 +367,7 @@ impl BroadcastFilter {
         let mut current_kept = CleanCounter::default();
         let mut future_removed = CleanCounter::default();
 
+        // concurrent runs result into intersection of `history_bottom ..= prune_after` windows
         self.by_round.retain(|&round, round_item| {
             // don't explicitly delete rounds with defined flush round here, will remove them later
             if round < history_bottom {

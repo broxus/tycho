@@ -89,12 +89,7 @@ impl RoundTaskReady {
             self.state.peer_schedule.clone(),
             round_ctx,
         );
-        let task_ctx = round_ctx.task();
-        let round_ctx = round_ctx.clone();
-        self.prev_broadcast = Some(task_ctx.spawn(async move {
-            broadcaster.run_continue(&round_ctx).await?;
-            Ok(())
-        }));
+        self.prev_broadcast = Some(round_ctx.task().spawn(broadcaster.run_continue()));
     }
 
     async fn own_point_task(
@@ -225,10 +220,8 @@ impl RoundTaskReady {
                         .run(bcaster_ready_tx, collector_status_rx)
                         .await?;
                     drop(prev_bcast); // aborts after current broadcast finishes
-                    let task_ctx = round_ctx.task();
-                    let round_ctx = round_ctx.clone();
-                    let new_prev_bcast =
-                        task_ctx.spawn(async move { broadcaster.run_continue(&round_ctx).await });
+                    broadcaster.update(&round_ctx);
+                    let new_prev_bcast = round_ctx.task().spawn(broadcaster.run_continue());
                     Ok(Some((new_prev_bcast, new_last_own_point)))
                 } else {
                     bcaster_ready_tx.send(BroadcasterSignal::Ok).ok();

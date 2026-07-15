@@ -1,41 +1,54 @@
+use std::sync::Arc;
+
 use rand::{Rng, SeedableRng};
 use tycho_network::PeerId;
+use tycho_util::FastHashSet;
 
 use crate::engine::MempoolConfig;
-use crate::intercom::PeerSchedule;
+use crate::intercom::PeerScheduleStateless;
 use crate::models::{AnchorStageRole, Round};
 
 /// How often the new leader is selected
 pub const WAVE_ROUNDS: u32 = 3;
 
 #[derive(Debug)]
-pub struct ProofLeader;
+pub struct ProofLeader {
+    round: Round,
+    anchor_candidate: Round,
+    ordered_peers: Arc<Vec<PeerId>>,
+    current_peers: Arc<FastHashSet<PeerId>>,
+}
 
 impl ProofLeader {
-    pub fn of(round: Round, peer_schedule: &PeerSchedule, conf: &MempoolConfig) -> Option<PeerId> {
+    pub fn new(round: Round, peer_schedule: &PeerScheduleStateless, conf: &MempoolConfig) -> Self {
         // Genesis point appears as a Proof in anchor chain during commit,
         // so it has to be at a round with Proof role
-        let anchor_candidate_round =
-            ((round.0 / WAVE_ROUNDS) * WAVE_ROUNDS).max(conf.genesis_round.0);
+        let anchor_candidate =
+            Round(((round.0 / WAVE_ROUNDS) * WAVE_ROUNDS).max(conf.genesis_round.0));
+        Self {
+            round,
+            anchor_candidate,
+            ordered_peers: peer_schedule.peers_ordered_for(anchor_candidate).clone(),
+            current_peers: peer_schedule.peers_for(round).clone(),
+        }
+    }
 
-        let (ordered_peers, current_peers) = {
-            let guard = peer_schedule.atomic();
-            let ordered_peers = guard.peers_ordered_for(Round(anchor_candidate_round));
-            let current_peers = guard.peers_for(round);
-            (ordered_peers.clone(), current_peers.clone())
-        };
-        assert!(!ordered_peers.is_empty(), "leader from empty validator set");
+    pub fn finish(self) -> Option<PeerId> {
+        assert!(
+            !self.ordered_peers.is_empty(),
+            "leader from empty validator set"
+        );
         // reproducible global coin
-        let leader_index = rand_pcg::Pcg32::seed_from_u64(anchor_candidate_round as u64)
-            .random_range(0..ordered_peers.len());
-        let leader = ordered_peers[leader_index];
+        let leader_index = rand_pcg::Pcg32::seed_from_u64(self.anchor_candidate.0 as u64)
+            .random_range(0..self.ordered_peers.len());
+        let leader = self.ordered_peers[leader_index];
         // the leader cannot produce three points in a row, so we have an undefined leader,
         // rather than an intentional leaderless support round - all represented by `None`
-        if !current_peers.contains(&leader) {
+        if !self.current_peers.contains(&leader) {
             return None;
         };
 
-        if Self::role(round)? != AnchorStageRole::Proof {
+        if Self::role(self.round)? != AnchorStageRole::Proof {
             return None;
         }
         Some(leader)
@@ -90,7 +103,7 @@ mod tests {
             anyhow::ensure!(
                 genesis_round > Round::BOTTOM.0 + 1,
                 "aligned genesis {genesis_round:?} is too low, first genesis cannot be used in \
-                 Verifier::verify() and to set first working v_set in PeerSchedule"
+                 BasicVerifier::verify() and to set first working v_set in PeerSchedule"
             );
 
             let role = ProofLeader::role(Round(genesis_round));

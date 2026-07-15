@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use tycho_network::PeerId;
 use tycho_util::metrics::HistogramGuard;
 
-use crate::dag::{DagFront, HistoryConflict, UninitVset, Verifier, VerifyError};
+use crate::dag::{BasicVerifier, DagFront, HistoryConflict, UninitVset, VerifyError};
 use crate::effects::{
     AltFormat, Cancelled, Ctx, EngineCtx, RoundCtx, Task, TaskResult, TaskTracker,
 };
@@ -54,7 +54,8 @@ impl Engine {
             .expect("parse genesis: point tl serde is broken")
             .expect("parse genesis: integrity check is broken")
             .expect("parse genesis: evidence check failed");
-        Verifier::verify(genesis.info(), &net.peer_schedule, conf)
+        BasicVerifier::new(genesis.info(), &net.peer_schedule.atomic(), conf)
+            .verify()
             .expect("failed to verify genesis");
 
         let consensus_round = RoundWatch::default();
@@ -76,12 +77,8 @@ impl Engine {
         // (in case last broadcast is within it) without data,
         // and may shrink to its medium len (in case broadcast or consensus are further)
         // before being filled with data
-        let (mut dag, mut committer) = DagFront::new(
-            conf.genesis_round.prev(),
-            fix_history,
-            &net.peer_schedule,
-            conf,
-        );
+        let (mut dag, mut committer) =
+            DagFront::new(genesis.info().id(), fix_history, &net.peer_schedule, conf);
         dag.fill_to_top(conf.genesis_round, &net.peer_schedule, &round_ctx);
         dag.sync_back(&mut committer, &round_ctx);
         let committer_run = CommitterTask::new(
@@ -296,10 +293,12 @@ impl Engine {
                         PointRestore::Found(info, status) => Either::Left((info, status)),
                         ready => Either::Right(ready),
                     });
+                let peer_schedule_atomic = peer_schedule.atomic().clone();
                 let verified = need_verify
                     .into_par_iter()
                     .map(|(info, status)| {
-                        match Verifier::verify(&info, &peer_schedule, round_ctx.conf()) {
+                        let bv = BasicVerifier::new(&info, &peer_schedule_atomic, round_ctx.conf());
+                        match bv.verify() {
                             Ok(()) => Ok(PointRestore::Found(info, status)),
                             Err(VerifyError::IllFormed(reason)) => {
                                 let ill_status = PointStatusIllFormed {
