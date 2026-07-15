@@ -40,28 +40,14 @@ pub fn remove_blocks(
 
     let block_handles_readopts = db.block_handles.new_read_config();
     let skip_blocks_gc = |root_hash: &[u8; 32]| -> Result<bool> {
-        const FLAGS: u64 = ((BlockFlags::IS_KEY_BLOCK.bits()
-            | BlockFlags::IS_PERSISTENT.bits()
-            | BlockFlags::IS_ZEROSTATE.bits()) as u64)
-            << 32;
-
-        const SKIP_BLOCKS_GC: u64 = (BlockFlags::SKIP_BLOCKS_GC.bits() as u64) << 32;
-        const SKIP_BLOCKS_GC_FINISHED: u64 =
-            (BlockFlags::SKIP_BLOCKS_GC_FINISHED.bits() as u64) << 32;
-
         let Some(value) =
             raw.get_pinned_cf_opt(&block_handles_cf, root_hash, &block_handles_readopts)?
         else {
             return Ok(false);
         };
 
-        let flags = value.as_ref().get_u64_le();
-
-        let skip_keyblocks = flags & FLAGS != 0;
-        let skip_pending_during_gc =
-            flags & SKIP_BLOCKS_GC != 0 && flags & SKIP_BLOCKS_GC_FINISHED == 0;
-
-        Ok(skip_keyblocks || skip_pending_during_gc)
+        let flags = BlockFlags::from_bits_retain((value.as_ref().get_u64_le() >> 32) as u32);
+        Ok(flags.retain_during_gc())
     };
 
     let mut key_buffer = [0u8; PackageEntryKey::SIZE_HINT];

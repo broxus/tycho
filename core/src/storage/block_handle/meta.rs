@@ -148,6 +148,28 @@ bitflags::bitflags! {
     }
 }
 
+impl BlockFlags {
+    pub fn retain_during_gc(&self) -> bool {
+        self.is_important() || self.skip_blocks_gc() || self.skip_states_gc()
+    }
+
+    pub fn is_important(&self) -> bool {
+        const IMPORTANT: BlockFlags = BlockFlags::IS_KEY_BLOCK
+            .union(BlockFlags::IS_PERSISTENT)
+            .union(BlockFlags::IS_ZEROSTATE);
+
+        self.intersects(IMPORTANT)
+    }
+
+    pub fn skip_blocks_gc(&self) -> bool {
+        self.contains(Self::SKIP_BLOCKS_GC) && !self.contains(Self::SKIP_BLOCKS_GC_FINISHED)
+    }
+
+    pub fn skip_states_gc(&self) -> bool {
+        self.contains(Self::SKIP_STATES_GC) && !self.contains(Self::SKIP_STATES_GC_FINISHED)
+    }
+}
+
 const BLOCK_FLAGS_OFFSET: usize = 32;
 
 #[cfg(test)]

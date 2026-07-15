@@ -81,15 +81,11 @@ impl BlockHandle {
     }
 
     pub fn skip_states_gc(&self) -> bool {
-        let flags = self.inner.meta.flags();
-        flags.contains(BlockFlags::SKIP_STATES_GC)
-            && !flags.contains(BlockFlags::SKIP_STATES_GC_FINISHED)
+        self.inner.meta.flags().skip_states_gc()
     }
 
     pub fn skip_blocks_gc(&self) -> bool {
-        let flags = self.inner.meta.flags();
-        flags.contains(BlockFlags::SKIP_BLOCKS_GC)
-            && !flags.contains(BlockFlags::SKIP_BLOCKS_GC_FINISHED)
+        self.inner.meta.flags().skip_blocks_gc()
     }
 
     pub fn has_data(&self) -> bool {
