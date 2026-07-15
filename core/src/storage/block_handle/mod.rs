@@ -358,9 +358,8 @@ impl BlockHandleStorage {
             let is_masterchain = block_id.is_masterchain();
 
             if block_id.seqno == 0
-                || value.is_persistent()
-                || value.skip_blocks_gc()
-                || is_masterchain && (block_id.seqno >= mc_seqno || value.is_key_block())
+                || value.meta().flags().retain_during_gc()
+                || is_masterchain && (block_id.seqno >= mc_seqno)
                 || !is_masterchain
                     && shard_heights.contains_shard_seqno(&block_id.shard, block_id.seqno)
             {
