@@ -9,10 +9,12 @@ use tycho_crypto::ed25519::KeyPair;
 use tycho_network::{Network, OverlayId, PeerId, PrivateOverlay, Router};
 use tycho_util::FastHashMap;
 
-use crate::dag::{DagRound, LastOwnPoint, Producer, ValidateResult, Verifier};
+use crate::dag::{BasicVerifier, DagRound, LastOwnPoint, Producer, ValidateResult, Verifier};
 use crate::effects::{Ctx, EngineCtx, MempoolRayon, RoundCtx, TaskTracker, ValidateCtx};
 use crate::engine::{InputBuffer, MempoolConfig, MempoolMergedConfig};
-use crate::intercom::{Dispatcher, Downloader, InitPeers, PeerSchedule, Responder};
+use crate::intercom::{
+    Dispatcher, Downloader, InitPeers, PeerSchedule, PeerScheduleStateless, Responder,
+};
 use crate::models::{Cert, PeerCount, Point, PointInfo, Round, Signature};
 use crate::moderator::Moderator;
 use crate::storage::MempoolStore;
@@ -57,7 +59,7 @@ pub async fn populate_points<const PEER_COUNT: usize>(
     dag_round: &DagRound,
     peers: &[(PeerId, Arc<KeyPair>); PEER_COUNT],
     local_keys: &Arc<KeyPair>,
-    peer_schedule: &PeerSchedule,
+    peer_schedule_stateless: &PeerScheduleStateless,
     downloader: &Downloader,
     store: &MempoolStore,
     round_ctx: &RoundCtx,
@@ -94,7 +96,9 @@ pub async fn populate_points<const PEER_COUNT: usize>(
             .expect("point tl serde is broken")
             .expect("point integrity check is broken")
             .expect("structure check is broken");
-        Verifier::verify(point.info(), peer_schedule, round_ctx.conf()).expect("well-formed point");
+        BasicVerifier::new(point.info(), peer_schedule_stateless, round_ctx.conf())
+            .verify()
+            .expect("well-formed point");
         let validate_ctx = ValidateCtx::new(round_ctx, point.info());
         let validated = Verifier::validate(
             point.info().clone(),

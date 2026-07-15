@@ -6,7 +6,7 @@ use crate::effects::{AltFmt, AltFormat, Ctx, EngineCtx, RoundCtx};
 use crate::engine::lifecycle::FixHistoryFlag;
 use crate::engine::{ConsensusConfigExt, MempoolConfig};
 use crate::intercom::PeerSchedule;
-use crate::models::Round;
+use crate::models::{PointId, Round};
 
 pub struct DagFront {
     triggers_tx: mpsc::UnboundedSender<WeakDagPointFuture>,
@@ -18,21 +18,25 @@ pub struct DagFront {
 
 impl DagFront {
     pub fn new(
-        round: Round,
+        genesis_id: &PointId,
         fix_history: FixHistoryFlag,
         peer_schedule: &PeerSchedule,
         conf: &MempoolConfig,
     ) -> (Self, Committer) {
         let (triggers_tx, triggers_rx) = mpsc::unbounded_channel();
-        let dag_bottom_round = DagRound::new_bottom(round, &triggers_tx, peer_schedule, conf);
+        let pre_genesis_round =
+            DagRound::new_bottom(genesis_id.round.prev(), &triggers_tx, peer_schedule, conf);
+
+        let genesis_round = pre_genesis_round.new_next(&triggers_tx, peer_schedule, conf);
+        (genesis_round.used_anchor_proof().set(genesis_id.author)).expect("set genesis committed");
 
         let mut committer = Committer::new(triggers_rx);
-        committer.init(&dag_bottom_round, fix_history.0, conf);
+        committer.init(&genesis_round, fix_history.0, conf);
 
         let this = Self {
             triggers_tx,
-            last_back_bottom: dag_bottom_round.round(),
-            rounds: vec![dag_bottom_round],
+            last_back_bottom: committer.bottom_round(),
+            rounds: vec![pre_genesis_round, genesis_round],
         };
         (this, committer)
     }

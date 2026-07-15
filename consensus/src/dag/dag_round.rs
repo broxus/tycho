@@ -84,11 +84,16 @@ impl DagRound {
         peer_schedule: &PeerSchedule,
         conf: &MempoolConfig,
     ) -> Self {
-        let peers = peer_schedule.atomic().peers_for(round).clone();
+        let (peers, proof_leader) = {
+            let guard = peer_schedule.atomic();
+            let peers = guard.peers_for(round).clone();
+            (peers, ProofLeader::new(round, &guard, conf))
+        };
 
         let peer_count = if round > conf.genesis_round {
             PeerCount::try_from(peers.len()).unwrap_or_else(|e| panic!("{e} for {round:?}"))
         } else if round >= conf.genesis_round.prev() {
+            assert_eq!(peers.len(), 1, "genesis round must have one peer");
             PeerCount::GENESIS
         } else {
             panic!(
@@ -96,12 +101,6 @@ impl DagRound {
                 round.0
             )
         };
-        let used_anchor_proof = OnceLock::new();
-        if round == conf.genesis_round {
-            assert_eq!(peers.len(), 1, "genesis round must have one peer");
-            let genesis_author = peers.iter().next().expect("genesis author");
-            used_anchor_proof.set(*genesis_author).ok();
-        }
 
         let prevs = match prev.upgrade() {
             None => {
@@ -123,8 +122,8 @@ impl DagRound {
         let this = Self(Arc::new(DagRoundInner {
             round,
             peer_count,
-            proof_leader: ProofLeader::of(round, peer_schedule, conf),
-            used_anchor_proof,
+            proof_leader: proof_leader.finish(),
+            used_anchor_proof: OnceLock::new(),
             locations: FastDashMap::with_capacity_and_hasher(peers.len(), Default::default()),
             threshold: Threshold::new(round, peer_count, conf),
             triggers_tx: triggers_tx.clone(),

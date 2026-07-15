@@ -190,8 +190,11 @@ impl Broadcaster {
         }))
     }
 
-    pub async fn run_continue(mut self, round_ctx: &RoundCtx) -> TaskResult<()> {
+    pub fn update(&mut self, round_ctx: &RoundCtx) {
         self.ctx = BroadcastCtx::new(round_ctx, &self.point);
+    }
+
+    pub async fn run_continue(mut self) -> TaskResult<()> {
         let mut attempt: u8 = 1; // we do nothing at attempt==1 that Collector fires immediately
         // `self.bcast_peers` is not re-populated, so will add work only if none was added earlier
         for peer in mem::take(&mut self.bcast_peers) {

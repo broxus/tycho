@@ -16,7 +16,7 @@ use tycho_util::FastHashSet;
 use tycho_util::mem::Reclaimer;
 use tycho_util::metrics::HistogramGuard;
 
-use crate::dag::{IllFormedReason, Verifier, VerifyError};
+use crate::dag::{BasicVerifier, IllFormedReason, VerifyError};
 use crate::effects::{AltFormat, Cancelled, Ctx, DownloadCtx, MempoolRayon, TaskResult};
 use crate::engine::{MempoolConfig, NodeConfig};
 use crate::intercom::core::query::response::DownloadResponse;
@@ -403,7 +403,8 @@ impl DownloadTask {
                 Some(DownloadResult::IllFormed(point, error))
             }
             LastResponse::Point(point) => {
-                match Verifier::verify(point.info(), peer_schedule, ctx.conf()) {
+                let bv = BasicVerifier::new(point.info(), &peer_schedule.atomic(), ctx.conf());
+                match bv.verify() {
                     Ok(()) => Some(DownloadResult::Verified(point)), // `Some` breaks outer loop
                     Err(error) => {
                         tracing::error!(

@@ -1,9 +1,11 @@
 use std::cmp;
+use std::sync::Arc;
 
 use futures_util::stream::FuturesUnordered;
 use futures_util::{FutureExt, StreamExt};
 use tracing::Instrument;
 use tycho_network::PeerId;
+use tycho_util::FastHashSet;
 use tycho_util::metrics::HistogramGuard;
 
 use crate::dag::dag_location::DagLocation;
@@ -11,7 +13,7 @@ use crate::dag::dag_point_future::WeakDagPointFuture;
 use crate::dag::{DagRound, ProofLeader, WeakDagRound};
 use crate::effects::{AltFormat, Ctx, TaskResult, ValidateCtx};
 use crate::engine::MempoolConfig;
-use crate::intercom::{Downloader, PeerSchedule};
+use crate::intercom::{Downloader, PeerSchedule, PeerScheduleStateless};
 use crate::models::{
     AnchorStageRole, AnyLink, Cert, CertDirectDeps, DagPoint, Digest, EvidenceSigError,
     IndirectLink, PeerCount, PointId, PointInfo, PointMap, Round, StructureIssue, Through,
@@ -169,19 +171,7 @@ impl std::fmt::Debug for InvalidDependency {
 // Any point @ r+0 will be committed, only if it has valid proof @ r+1
 // included into valid anchor chain, i.e. validated by consensus.
 impl Verifier {
-    /// the first and mandatory check of any Point received no matter where from
-    pub fn verify(
-        info: &PointInfo,
-        peer_schedule: &PeerSchedule,
-        conf: &MempoolConfig,
-    ) -> Result<(), VerifyError> {
-        let result = Self::verify_impl(info, peer_schedule, conf);
-
-        ValidateCtx::verified(&result);
-        result
-    }
-
-    /// must be called iff [`Self::verify`] succeeded
+    /// must be called iff [`BasicVerifier::verify`] succeeded
     ///
     /// We do not require the whole `Point` to avoid OOM as during sync Dag can grow large.
     pub async fn validate(
@@ -303,7 +293,7 @@ impl Verifier {
         conf: &MempoolConfig,
     ) -> Option<IllFormedReason> {
         let is_leader = point_round
-            .ok_or_else(|| ProofLeader::of(info.round(), peer_schedule, conf))
+            .ok_or_else(|| ProofLeader::new(info.round(), &peer_schedule.atomic(), conf).finish())
             .as_ref()
             .map_or_else(|fallback| fallback.as_ref(), |round| round.leader())
             .is_some_and(|leader| leader == info.author());
@@ -739,216 +729,6 @@ impl Verifier {
     }
 
     /// blame author and every dependent point's author
-    fn verify_impl(
-        info: &PointInfo, // @ r+0
-        peer_schedule: &PeerSchedule,
-        conf: &MempoolConfig,
-    ) -> Result<(), VerifyError> {
-        fn peer_count_genesis(
-            len: usize,
-            round: Round,
-            point_map: PointMap,
-        ) -> Result<PeerCount, VerifyError> {
-            if len == PeerCount::GENESIS.full() {
-                Ok(PeerCount::GENESIS)
-            } else {
-                Err(VerifyError::Fail(UninitVset((len, round, point_map))))
-            }
-        }
-
-        fn peer_count(
-            len: usize,
-            round: Round,
-            point_map: PointMap,
-        ) -> Result<PeerCount, VerifyError> {
-            PeerCount::try_from(len)
-                .map_err(|_e| VerifyError::Fail(UninitVset((len, round, point_map))))
-        }
-
-        let peer_schedule_stateless = peer_schedule.atomic();
-
-        let (
-            same_round_peers, // @ r+0
-            includes_peers,   // @ r-1
-            witness_peers,    // @ r-2
-        ) = match (info.round() - conf.genesis_round.prev().0).0 {
-            0 => return Err(VerifyError::IllFormed(IllFormedReason::BeforeGenesis)),
-            1 => {
-                let a = peer_schedule_stateless.peers_for(info.round()).clone();
-                let peer_count_a = peer_count_genesis(a.len(), info.round(), PointMap::Evidence)?;
-                ((peer_count_a, a), None, None)
-            }
-            2 => {
-                let rounds = [info.round(), info.round().prev()];
-                let [a, b] = peer_schedule_stateless.peers_for_array(rounds);
-                let peer_count_a = peer_count(a.len(), rounds[0], PointMap::Evidence)?;
-                let peer_count_b = peer_count_genesis(b.len(), rounds[1], PointMap::Includes)?;
-                ((peer_count_a, a), Some((peer_count_b, b)), None)
-            }
-            more => {
-                let rounds = [
-                    info.round(),
-                    info.round().prev(),
-                    info.round().prev().prev(),
-                ];
-                let [a, b, c] = peer_schedule_stateless.peers_for_array(rounds);
-                let peer_count_c = if more == 3 {
-                    peer_count_genesis(c.len(), rounds[2], PointMap::Witness)?
-                } else {
-                    peer_count(c.len(), rounds[2], PointMap::Witness)?
-                };
-                (
-                    (peer_count(a.len(), rounds[0], PointMap::Evidence)?, a),
-                    Some((peer_count(b.len(), rounds[1], PointMap::Includes)?, b)),
-                    Some((peer_count_c, c)),
-                )
-            }
-        };
-
-        // short checks to not clone the arcs
-
-        if let Some(link) = info.indirect_anchor_proof()
-            && !(peer_schedule_stateless.peers_for(link.to.round)).contains(&link.to.author)
-        {
-            let reason = IllFormedReason::UnknownPeerInChainedProof;
-            return Err(VerifyError::IllFormed(reason));
-        }
-
-        if let AnyLink::Indirect(link) = info.anchor_proof()
-            && !(peer_schedule_stateless.peers_for(link.to.round)).contains(&link.to.author)
-        {
-            let reason = IllFormedReason::UnknownPeerInAnchorLink(AnchorStageRole::Proof);
-            return Err(VerifyError::IllFormed(reason));
-        }
-
-        if let AnyLink::Indirect(link) = info.anchor_trigger()
-            && !(peer_schedule_stateless.peers_for(link.to.round)).contains(&link.to.author)
-        {
-            let reason = IllFormedReason::UnknownPeerInAnchorLink(AnchorStageRole::Trigger);
-            return Err(VerifyError::IllFormed(reason));
-        }
-
-        drop(peer_schedule_stateless);
-
-        // now it's safe to call `round().prev()`
-        Self::check_well_formed(info, conf).map_err(VerifyError::IllFormed)?;
-
-        // Every point producer @ r-1 must prove its delivery to 2/3 signers @ r+0
-        // inside proving point @ r+0.
-        {
-            let (total, scheduled) = same_round_peers;
-            if !scheduled.contains(info.author()) {
-                let reason = IllFormedReason::UnknownAuthor;
-                return Err(VerifyError::IllFormed(reason));
-            }
-            let evidence = &info.evidence();
-            if !evidence.is_empty() {
-                if total == PeerCount::GENESIS {
-                    let reason = IllFormedReason::MustBeEmpty(PointMap::Evidence);
-                    return Err(VerifyError::IllFormed(reason));
-                }
-                let unknown = evidence
-                    .keys()
-                    .filter(|id| !scheduled.contains(id))
-                    .copied()
-                    .collect::<Vec<_>>();
-                if !unknown.is_empty() {
-                    let reason = IllFormedReason::UnknownPeers((unknown, PointMap::Evidence));
-                    return Err(VerifyError::IllFormed(reason));
-                }
-                let len = evidence.len();
-                if len < total.majority_of_others() {
-                    let reason = IllFormedReason::LackOfPeers((len, total, PointMap::Evidence));
-                    return Err(VerifyError::IllFormed(reason));
-                }
-            }
-        }
-
-        match includes_peers {
-            None => {
-                if !info.includes().is_empty() {
-                    let reason = IllFormedReason::MustBeEmpty(PointMap::Includes);
-                    return Err(VerifyError::IllFormed(reason));
-                }
-            }
-            Some((total, scheduled)) => {
-                let includes = &info.includes();
-                let unknown = includes
-                    .keys()
-                    .filter(|id| !scheduled.contains(id))
-                    .copied()
-                    .collect::<Vec<_>>();
-                if !unknown.is_empty() {
-                    let reason = IllFormedReason::UnknownPeers((unknown, PointMap::Includes));
-                    return Err(VerifyError::IllFormed(reason));
-                }
-                let len = includes.len();
-                if len < total.majority() {
-                    let reason = IllFormedReason::LackOfPeers((len, total, PointMap::Includes));
-                    return Err(VerifyError::IllFormed(reason));
-                }
-            }
-        }
-
-        match witness_peers {
-            None => {
-                if !info.witness().is_empty() {
-                    let reason = IllFormedReason::MustBeEmpty(PointMap::Witness);
-                    return Err(VerifyError::IllFormed(reason));
-                }
-            }
-            Some((_, scheduled)) => {
-                if !info.witness().is_empty() {
-                    let peers = info.witness().keys();
-                    let unknown = peers
-                        .filter(|peer| !scheduled.contains(peer))
-                        .copied()
-                        .collect::<Vec<_>>();
-                    if !unknown.is_empty() {
-                        let reason = IllFormedReason::UnknownPeers((unknown, PointMap::Witness));
-                        return Err(VerifyError::IllFormed(reason));
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// allows to link this [`PointInfo`] with its dependencies for validation and commit;
-    /// its decided later in [`Self::check_proof_link`] whether current point belongs to leader
-    fn check_well_formed(info: &PointInfo, conf: &MempoolConfig) -> Result<(), IllFormedReason> {
-        if info.round() == conf.genesis_round {
-            if info.payload_len() > 0 {
-                return Err(IllFormedReason::TooLargePayload(info.payload_bytes()));
-            }
-            // calling method checks maps to throw `MustBeEmpty` and also checks author
-            return (info.check_structure(true)).map_err(IllFormedReason::Structure);
-        }
-
-        if info.payload_bytes() > conf.consensus.payload_batch_bytes.get() {
-            return Err(IllFormedReason::TooLargePayload(info.payload_bytes()));
-        }
-
-        (info.check_structure(false)).map_err(IllFormedReason::Structure)?;
-
-        if let Some(sticky_anchors) = info.sticky_anchors()
-            && sticky_anchors >= conf.consensus.sticky_anchors
-        {
-            return Err(IllFormedReason::TooManyStickyAnchors(sticky_anchors));
-        }
-
-        if info.anchor_round(AnchorStageRole::Proof) < conf.genesis_round
-            || info.anchor_round(AnchorStageRole::Trigger) < conf.genesis_round
-            || (info.chained_anchor_proof_to_round()).is_some_and(|to| to < conf.genesis_round)
-        {
-            return Err(IllFormedReason::LinksAcrossGenesis);
-        }
-
-        Ok(())
-    }
-
-    /// blame author and every dependent point's author
     fn is_proof_ok(
         info: &PointInfo,   // @ r+0
         proven: &PointInfo, // @ r-1
@@ -986,6 +766,252 @@ impl Verifier {
             ));
         }
         None
+    }
+}
+
+/// [`Self::verify`] the first and mandatory check of any Point received no matter where from
+#[must_use = "call BasicVerifier::verify() to get result"]
+pub struct BasicVerifier<'a>(Result<BasicVerifierInner<'a>, VerifyError>);
+impl<'a> BasicVerifier<'a> {
+    pub fn new(
+        info: &'a PointInfo,
+        peer_schedule_stateless: &PeerScheduleStateless,
+        conf: &'a MempoolConfig,
+    ) -> Self {
+        Self(BasicVerifierInner::new(info, peer_schedule_stateless, conf))
+    }
+
+    pub fn verify(self) -> Result<(), VerifyError> {
+        // must check for well-formedness before PeerChecked uses `round.prev()`
+        let result = (self.0).and_then(|inner| {
+            (inner.check_well_formed())
+                .and_then(BasicVerifierInner::check_peers)
+                .map_err(VerifyError::IllFormed)
+        });
+        ValidateCtx::verified(&result);
+        result
+    }
+}
+
+struct BasicVerifierInner<'a> {
+    info: &'a PointInfo,                                           // @ r+0
+    same_round_peers: (PeerCount, Arc<FastHashSet<PeerId>>),       // @ r+0
+    includes_peers: Option<(PeerCount, Arc<FastHashSet<PeerId>>)>, // @ r-1
+    witness_peers: Option<(PeerCount, Arc<FastHashSet<PeerId>>)>,  // @ r-2
+    conf: &'a MempoolConfig,
+}
+
+impl<'a> BasicVerifierInner<'a> {
+    fn new(
+        info: &'a PointInfo, // @ r+0
+        peer_schedule_stateless: &PeerScheduleStateless,
+        conf: &'a MempoolConfig,
+    ) -> Result<Self, VerifyError> {
+        fn peer_count_genesis(
+            len: usize,
+            round: Round,
+            point_map: PointMap,
+        ) -> Result<PeerCount, VerifyError> {
+            if len == PeerCount::GENESIS.full() {
+                Ok(PeerCount::GENESIS)
+            } else {
+                Err(VerifyError::Fail(UninitVset((len, round, point_map))))
+            }
+        }
+
+        fn peer_count(
+            len: usize,
+            round: Round,
+            point_map: PointMap,
+        ) -> Result<PeerCount, VerifyError> {
+            PeerCount::try_from(len)
+                .map_err(|_e| VerifyError::Fail(UninitVset((len, round, point_map))))
+        }
+
+        let this = match (info.round() - conf.genesis_round.prev().0).0 {
+            0 => return Err(VerifyError::IllFormed(IllFormedReason::BeforeGenesis)),
+            1 => {
+                let a = peer_schedule_stateless.peers_for(info.round()).clone();
+                let peer_count_a = peer_count_genesis(a.len(), info.round(), PointMap::Evidence)?;
+                Self {
+                    info,
+                    same_round_peers: (peer_count_a, a),
+                    includes_peers: None,
+                    witness_peers: None,
+                    conf,
+                }
+            }
+            2 => {
+                let rounds = [info.round(), info.round().prev()];
+                let [a, b] = peer_schedule_stateless.peers_for_array(rounds);
+                let peer_count_a = peer_count(a.len(), rounds[0], PointMap::Evidence)?;
+                let peer_count_b = peer_count_genesis(b.len(), rounds[1], PointMap::Includes)?;
+                Self {
+                    info,
+                    same_round_peers: (peer_count_a, a),
+                    includes_peers: Some((peer_count_b, b)),
+                    witness_peers: None,
+                    conf,
+                }
+            }
+            more => {
+                let rounds = [
+                    info.round(),
+                    info.round().prev(),
+                    info.round().prev().prev(),
+                ];
+                let [a, b, c] = peer_schedule_stateless.peers_for_array(rounds);
+                let peer_count_c = if more == 3 {
+                    peer_count_genesis(c.len(), rounds[2], PointMap::Witness)?
+                } else {
+                    peer_count(c.len(), rounds[2], PointMap::Witness)?
+                };
+                Self {
+                    info,
+                    same_round_peers: (peer_count(a.len(), rounds[0], PointMap::Evidence)?, a),
+                    includes_peers: Some((peer_count(b.len(), rounds[1], PointMap::Includes)?, b)),
+                    witness_peers: Some((peer_count_c, c)),
+                    conf,
+                }
+            }
+        };
+
+        // short checks to not clone the arcs
+
+        if let Some(link) = info.indirect_anchor_proof()
+            && !(peer_schedule_stateless.peers_for(link.to.round)).contains(&link.to.author)
+        {
+            let reason = IllFormedReason::UnknownPeerInChainedProof;
+            return Err(VerifyError::IllFormed(reason));
+        }
+
+        if let AnyLink::Indirect(link) = info.anchor_proof()
+            && !(peer_schedule_stateless.peers_for(link.to.round)).contains(&link.to.author)
+        {
+            let reason = IllFormedReason::UnknownPeerInAnchorLink(AnchorStageRole::Proof);
+            return Err(VerifyError::IllFormed(reason));
+        }
+
+        if let AnyLink::Indirect(link) = info.anchor_trigger()
+            && !(peer_schedule_stateless.peers_for(link.to.round)).contains(&link.to.author)
+        {
+            let reason = IllFormedReason::UnknownPeerInAnchorLink(AnchorStageRole::Trigger);
+            return Err(VerifyError::IllFormed(reason));
+        }
+
+        Ok(this)
+    }
+
+    /// allows to link this [`PointInfo`] with its dependencies for validation and commit;
+    /// its decided later in [`Self::check_proof_link`] whether current point belongs to leader
+    fn check_well_formed(self) -> Result<Self, IllFormedReason> {
+        if self.info.round() == self.conf.genesis_round {
+            if self.info.payload_len() > 0 {
+                return Err(IllFormedReason::TooLargePayload(self.info.payload_bytes()));
+            }
+            // calling method checks maps to throw `MustBeEmpty` and also checks author
+            return (self.info.check_structure(true))
+                .map_or_else(|e| Err(IllFormedReason::Structure(e)), |()| Ok(self));
+        }
+
+        if self.info.payload_bytes() > self.conf.consensus.payload_batch_bytes.get() {
+            return Err(IllFormedReason::TooLargePayload(self.info.payload_bytes()));
+        }
+
+        (self.info.check_structure(false)).map_err(IllFormedReason::Structure)?;
+
+        if let Some(sticky_anchors) = self.info.sticky_anchors()
+            && sticky_anchors >= self.conf.consensus.sticky_anchors
+        {
+            return Err(IllFormedReason::TooManyStickyAnchors(sticky_anchors));
+        }
+
+        if self.info.anchor_round(AnchorStageRole::Proof) < self.conf.genesis_round
+            || self.info.anchor_round(AnchorStageRole::Trigger) < self.conf.genesis_round
+            || (self.info.chained_anchor_proof_to_round())
+                .is_some_and(|to| to < self.conf.genesis_round)
+        {
+            return Err(IllFormedReason::LinksAcrossGenesis);
+        }
+
+        Ok(self)
+    }
+
+    /// blame author and every dependent point's author
+    fn check_peers(self) -> Result<(), IllFormedReason> {
+        // Every point producer @ r-1 must prove its delivery to 2/3 signers @ r+0
+        // inside proving point @ r+0.
+        {
+            let (total, scheduled) = &self.same_round_peers;
+            if !scheduled.contains(self.info.author()) {
+                return Err(IllFormedReason::UnknownAuthor);
+            }
+            let evidence = &self.info.evidence();
+            if !evidence.is_empty() {
+                if *total == PeerCount::GENESIS {
+                    return Err(IllFormedReason::MustBeEmpty(PointMap::Evidence));
+                }
+                let unknown = evidence
+                    .keys()
+                    .filter(|id| !scheduled.contains(id))
+                    .copied()
+                    .collect::<Vec<_>>();
+                if !unknown.is_empty() {
+                    return Err(IllFormedReason::UnknownPeers((unknown, PointMap::Evidence)));
+                }
+                let len = evidence.len();
+                if len < total.majority_of_others() {
+                    let reason = IllFormedReason::LackOfPeers((len, *total, PointMap::Evidence));
+                    return Err(reason);
+                }
+            }
+        }
+
+        match &self.includes_peers {
+            None => {
+                if !self.info.includes().is_empty() {
+                    return Err(IllFormedReason::MustBeEmpty(PointMap::Includes));
+                }
+            }
+            Some((total, scheduled)) => {
+                let includes = &self.info.includes();
+                let unknown = includes
+                    .keys()
+                    .filter(|id| !scheduled.contains(id))
+                    .copied()
+                    .collect::<Vec<_>>();
+                if !unknown.is_empty() {
+                    return Err(IllFormedReason::UnknownPeers((unknown, PointMap::Includes)));
+                }
+                let len = includes.len();
+                if len < total.majority() {
+                    let reason = IllFormedReason::LackOfPeers((len, *total, PointMap::Includes));
+                    return Err(reason);
+                }
+            }
+        }
+
+        match &self.witness_peers {
+            None => {
+                if !self.info.witness().is_empty() {
+                    return Err(IllFormedReason::MustBeEmpty(PointMap::Witness));
+                }
+            }
+            Some((_, scheduled)) => {
+                if !self.info.witness().is_empty() {
+                    let peers = self.info.witness().keys();
+                    let unknown = peers
+                        .filter(|peer| !scheduled.contains(peer))
+                        .copied()
+                        .collect::<Vec<_>>();
+                    if !unknown.is_empty() {
+                        return Err(IllFormedReason::UnknownPeers((unknown, PointMap::Witness)));
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 

@@ -269,8 +269,9 @@ impl ResponderInner {
 
         Some(match query {
             QueryRequest::Broadcast(point, maybe_issue) => {
+                let round = point.info().round();
                 let reached_threshold = state.broadcast_filter.add_check_threshold(
-                    &point,
+                    point,
                     maybe_issue,
                     &state.store,
                     &state.peer_schedule,
@@ -278,14 +279,11 @@ impl ResponderInner {
                     head,
                     round_ctx,
                 );
-                if reached_threshold {
-                    // notify Collector after max consensus round is updated
-                    state.consensus_round.set_max(point.info().round());
+                // notify Collector after max consensus round is updated
+                if reached_threshold && state.consensus_round.set_max(round) {
                     // round is determined, so clean history;
                     // do not flush to DAG as it may have no needed rounds yet
-                    if state.consensus_round.get() == point.info().round() {
-                        (state.broadcast_filter).clean(point.info().round(), head, round_ctx);
-                    } // else: engine is not paused, let it do its work
+                    (state.broadcast_filter).clean(round, head, round_ctx);
                 }
                 response.broadcast()
             }

@@ -196,7 +196,7 @@ impl PointData {
         }
     }
 
-    /// counterpart of [`crate::dag::Verifier::verify`] that must be called earlier,
+    /// counterpart of [`crate::dag::BasicVerifier::verify`] that must be called earlier,
     /// does not require config and allows to use [`crate::models::Point`] methods
     pub(super) fn check_non_genesis_structure(
         &self,
