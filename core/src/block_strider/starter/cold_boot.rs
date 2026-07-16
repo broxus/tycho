@@ -944,6 +944,8 @@ impl StarterInner {
             });
 
             let ZerostateProof::Found { proof } = guard.data() else {
+                // NOTE: All nodes should serve zerostate proof so we `reject`
+                // the response in case the node returned `NotFound`.
                 anyhow::bail!("zerostate proof not found");
             };
 
@@ -1138,7 +1140,7 @@ async fn download_block_proof_task(
                 let (handle, data) = res.split();
                 let KeyBlockProof::Found { proof: data } = data else {
                     tracing::debug!(%block_id, "block proof not found");
-                    handle.accept();
+                    handle.ignore();
                     break 'validate;
                 };
 

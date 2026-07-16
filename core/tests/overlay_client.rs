@@ -56,10 +56,10 @@ pub async fn test() {
             let answer = indices[index].sample(&mut rng);
             if answer == 0 {
                 println!("Success request to peer: {}", n.peer_id());
-                n.track_request(&Duration::from_millis(200), true);
+                n.track_request(&Duration::from_millis(200), Some(true));
             } else {
                 println!("Failed request to peer: {}", n.peer_id());
-                n.track_request(&Duration::from_millis(200), false);
+                n.track_request(&Duration::from_millis(200), Some(false));
             }
 
             neighbours.try_apply_score(0);

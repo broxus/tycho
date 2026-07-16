@@ -424,7 +424,9 @@ impl BlockchainRpcClient {
                         neighbour,
                     });
                 }
-                PersistentStateInfo::NotFound => {}
+                PersistentStateInfo::NotFound => {
+                    handle.ignore();
+                }
             }
         }
 
@@ -539,10 +541,10 @@ impl BlockchainRpcClient {
                     ArchiveInfo::TooNew => {
                         new_archive_count += 1;
 
-                        handle.accept();
+                        handle.ignore();
                     }
                     ArchiveInfo::NotFound => {
-                        handle.accept();
+                        handle.ignore();
                     }
                 }
             }
@@ -710,7 +712,7 @@ async fn download_block_inner(
     else {
         match requirement {
             DataRequirement::Optional => {
-                handle.accept();
+                handle.ignore();
             }
             DataRequirement::Expected => {
                 handle.reject();

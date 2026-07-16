@@ -65,7 +65,7 @@ impl Neighbour {
         Some(Duration::from_millis(roundtrip as u64))
     }
 
-    pub fn track_request(&self, roundtrip: &Duration, success: bool) {
+    pub fn track_request(&self, roundtrip: &Duration, success: Option<bool>) {
         let roundtrip = truncate_time(roundtrip);
         self.inner.stats.write().update(roundtrip, success);
     }
@@ -172,21 +172,24 @@ impl TrackedStats {
         (score >= Self::SCORE_THRESHOLD).then_some(score)
     }
 
-    fn update(&mut self, roundtrip: u16, success: bool) {
+    fn update(&mut self, roundtrip: u16, success: Option<bool>) {
         const SUCCESS_REQUEST_SCORE: u8 = 8;
         const FAILED_REQUEST_PENALTY: u8 = 8;
 
-        self.failed_requests_history <<= 1;
-        if success {
-            self.score = std::cmp::min(
-                self.score.saturating_add(SUCCESS_REQUEST_SCORE),
-                Self::MAX_SCORE,
-            );
-        } else {
-            self.score = self.score.saturating_sub(FAILED_REQUEST_PENALTY);
-            self.failed += 1;
-            self.failed_requests_history |= 1;
+        if let Some(success) = success {
+            self.failed_requests_history <<= 1;
+            if success {
+                self.score = std::cmp::min(
+                    self.score.saturating_add(SUCCESS_REQUEST_SCORE),
+                    Self::MAX_SCORE,
+                );
+            } else {
+                self.score = self.score.saturating_sub(FAILED_REQUEST_PENALTY);
+                self.failed += 1;
+                self.failed_requests_history |= 1;
+            }
         }
+
         self.total += 1;
 
         let roundtrip_buffer = &mut self.roundtrip;
