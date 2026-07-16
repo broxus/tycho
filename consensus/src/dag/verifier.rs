@@ -74,6 +74,10 @@ pub enum IllFormedReason {
     MustBeEmpty(PointMap),
     #[error("unknown peers in {:?} map: {}", .0.1, .0.0.as_slice().alt())]
     UnknownPeers((Vec<PeerId>, PointMap)),
+    #[error("unknown peers in anchor {0:?} link target")]
+    UnknownPeerInAnchorLink(AnchorStageRole),
+    #[error("unknown peers in chained proof target")]
+    UnknownPeerInChainedProof,
     #[error("{} peers is not enough in {:?} map for 3F+1={}", .0.0, .0.2, .0.1.full())]
     LackOfPeers((usize, PeerCount, PointMap)),
     // Errors below are thrown from `validate()` because they require DagRound
@@ -761,6 +765,8 @@ impl Verifier {
                 .map_err(|_e| VerifyError::Fail(UninitVset((len, round, point_map))))
         }
 
+        let peer_schedule_stateless = peer_schedule.atomic();
+
         let (
             same_round_peers, // @ r+0
             includes_peers,   // @ r-1
@@ -768,13 +774,13 @@ impl Verifier {
         ) = match (info.round() - conf.genesis_round.prev().0).0 {
             0 => return Err(VerifyError::IllFormed(IllFormedReason::BeforeGenesis)),
             1 => {
-                let a = peer_schedule.atomic().peers_for(info.round()).clone();
+                let a = peer_schedule_stateless.peers_for(info.round()).clone();
                 let peer_count_a = peer_count_genesis(a.len(), info.round(), PointMap::Evidence)?;
                 ((peer_count_a, a), None, None)
             }
             2 => {
                 let rounds = [info.round(), info.round().prev()];
-                let [a, b] = peer_schedule.atomic().peers_for_array(rounds);
+                let [a, b] = peer_schedule_stateless.peers_for_array(rounds);
                 let peer_count_a = peer_count(a.len(), rounds[0], PointMap::Evidence)?;
                 let peer_count_b = peer_count_genesis(b.len(), rounds[1], PointMap::Includes)?;
                 ((peer_count_a, a), Some((peer_count_b, b)), None)
@@ -785,7 +791,7 @@ impl Verifier {
                     info.round().prev(),
                     info.round().prev().prev(),
                 ];
-                let [a, b, c] = peer_schedule.atomic().peers_for_array(rounds);
+                let [a, b, c] = peer_schedule_stateless.peers_for_array(rounds);
                 let peer_count_c = if more == 3 {
                     peer_count_genesis(c.len(), rounds[2], PointMap::Witness)?
                 } else {
@@ -798,6 +804,31 @@ impl Verifier {
                 )
             }
         };
+
+        // short checks to not clone the arcs
+
+        if let Some(link) = info.indirect_anchor_proof()
+            && !(peer_schedule_stateless.peers_for(link.to.round)).contains(&link.to.author)
+        {
+            let reason = IllFormedReason::UnknownPeerInChainedProof;
+            return Err(VerifyError::IllFormed(reason));
+        }
+
+        if let AnyLink::Indirect(link) = info.anchor_proof()
+            && !(peer_schedule_stateless.peers_for(link.to.round)).contains(&link.to.author)
+        {
+            let reason = IllFormedReason::UnknownPeerInAnchorLink(AnchorStageRole::Proof);
+            return Err(VerifyError::IllFormed(reason));
+        }
+
+        if let AnyLink::Indirect(link) = info.anchor_trigger()
+            && !(peer_schedule_stateless.peers_for(link.to.round)).contains(&link.to.author)
+        {
+            let reason = IllFormedReason::UnknownPeerInAnchorLink(AnchorStageRole::Trigger);
+            return Err(VerifyError::IllFormed(reason));
+        }
+
+        drop(peer_schedule_stateless);
 
         // now it's safe to call `round().prev()`
         Self::check_well_formed(info, conf).map_err(VerifyError::IllFormed)?;
