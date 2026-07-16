@@ -379,7 +379,7 @@ impl Inner {
 
         match res {
             Ok(response) => {
-                neighbour.track_request(&roundtrip, response.is_ok());
+                neighbour.track_request(&roundtrip, Some(response.is_ok()));
 
                 if let Err(e) = &response {
                     apply_network_error(e, &neighbour);
@@ -388,7 +388,7 @@ impl Inner {
                 response.map_err(Error::NetworkError)
             }
             Err(_) => {
-                neighbour.track_request(&roundtrip, false);
+                neighbour.track_request(&roundtrip, Some(false));
                 neighbour.punish(PunishReason::Slow);
                 Err(Error::Timeout)
             }
@@ -417,12 +417,12 @@ impl Inner {
                 neighbour,
             }),
             Ok(Err(e)) => {
-                neighbour.track_request(&roundtrip, false);
+                neighbour.track_request(&roundtrip, Some(false));
                 apply_network_error(&e, &neighbour);
                 Err(Error::NetworkError(e))
             }
             Err(_) => {
-                neighbour.track_request(&roundtrip, false);
+                neighbour.track_request(&roundtrip, Some(false));
                 neighbour.punish(PunishReason::Slow);
                 Err(Error::Timeout)
             }
@@ -467,16 +467,21 @@ impl<A> QueryResponse<A> {
     }
 
     pub fn accept(self) -> (Neighbour, A) {
-        self.track_request(true);
+        self.track_request(Some(true));
         (self.neighbour, self.data)
     }
 
     pub fn reject(self) -> (Neighbour, A) {
-        self.track_request(false);
+        self.track_request(Some(false));
         (self.neighbour, self.data)
     }
 
-    fn track_request(&self, success: bool) {
+    pub fn ignore(self) -> (Neighbour, A) {
+        self.track_request(None);
+        (self.neighbour, self.data)
+    }
+
+    fn track_request(&self, success: Option<bool>) {
         self.neighbour
             .track_request(&Duration::from_millis(self.roundtrip_ms), success);
     }
@@ -523,16 +528,21 @@ impl QueryResponseHandle {
     }
 
     pub fn accept(self) -> Neighbour {
-        self.track_request(true);
+        self.track_request(Some(true));
         self.neighbour
     }
 
     pub fn reject(self) -> Neighbour {
-        self.track_request(false);
+        self.track_request(Some(false));
         self.neighbour
     }
 
-    fn track_request(&self, success: bool) {
+    pub fn ignore(self) -> Neighbour {
+        self.track_request(None);
+        self.neighbour
+    }
+
+    fn track_request(&self, success: Option<bool>) {
         self.neighbour
             .track_request(&Duration::from_millis(self.roundtrip_ms), success);
     }
