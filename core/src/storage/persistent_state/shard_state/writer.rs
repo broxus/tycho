@@ -704,10 +704,18 @@ pub fn validate_persistent_state_split_metadata(
     }
 
     let mut expected_prefixes = FastHashSet::default();
-    collect_shard_split_prefixes(shard_id, split_depth as u8, &mut expected_prefixes)?;
+    collect_shard_split_prefixes(
+        &ShardIdent::new_full(shard_id.workchain()),
+        split_depth as u8,
+        &mut expected_prefixes,
+    )?;
     for prefix in part_prefixes {
+        // persistent state parts use absolute workchain prefixes,
+        // so ensure each one intersects with the block shard (will be actual on split and merge)
+        let is_related_to_block_shard = ShardIdent::new(shard_id.workchain(), prefix)
+            .is_some_and(|part_shard| part_shard.intersects(shard_id));
         anyhow::ensure!(
-            expected_prefixes.contains(&prefix),
+            expected_prefixes.contains(&prefix) && is_related_to_block_shard,
             "invalid persistent state part prefix for split depth {split_depth}: {prefix:016x}"
         );
     }

@@ -489,6 +489,13 @@ impl PersistentStateStorage {
         parts: Vec<(u64, File)>,
         split_depth: u8,
     ) -> Result<()> {
+        // prevent from storing persistent state with invalid meta
+        validate_persistent_state_split_metadata(
+            &handle.id().shard,
+            PersistentStateKind::Shard,
+            (if parts.is_empty() { 0 } else { split_depth }).into(),
+            parts.iter().map(|(prefix, _)| *prefix),
+        )?;
         if self
             .try_reuse_persistent_state(mc_seqno, handle, PersistentStateKind::Shard)
             .await?
@@ -1042,6 +1049,13 @@ impl Inner {
                 }
                 None => PersistentStateMeta::default(),
             };
+            // fail on invalid persistent state meta
+            validate_persistent_state_split_metadata(
+                &block_id.shard,
+                PersistentStateKind::Shard,
+                meta.split_depth.into(),
+                meta.parts.iter().copied(),
+            )?;
             let mut parts = Vec::with_capacity(meta.parts.len());
             for &prefix in &meta.parts {
                 let file_name = ShardStateWriter::file_name_ext(block_id, Some(prefix));

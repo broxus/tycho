@@ -918,7 +918,22 @@ impl StarterInner {
                 let from = if let Some(meta) = &meta
                     && is_downloaded_persistent_state_ready(&state_file, meta)
                 {
-                    StoreZeroStateFrom::File(downloaded_persistent_state_bundle(&state_file, meta))
+                    // omit invalid downloaded bundle
+                    match validate_persistent_state_split_metadata(
+                        &block_id.shard,
+                        PersistentStateKind::Shard,
+                        meta.split_depth.into(),
+                        meta.parts.iter().copied(),
+                    ) {
+                        Ok(()) => StoreZeroStateFrom::File(downloaded_persistent_state_bundle(
+                            &state_file,
+                            meta,
+                        )),
+                        Err(e) => {
+                            tracing::warn!("ignoring invalid downloaded persistent state: {e:?}");
+                            StoreZeroStateFrom::State(state.ref_mc_state_handle().clone())
+                        }
+                    }
                 } else {
                     // FIXME: Ensure that `state` is stored as direct.
                     StoreZeroStateFrom::State(state.ref_mc_state_handle().clone())
@@ -1247,7 +1262,24 @@ impl StarterInner {
             if let Some(meta) = &local_meta
                 && is_downloaded_persistent_state_ready(state_file, meta)
             {
-                return Ok(downloaded_persistent_state_bundle(state_file, meta));
+                // omit and remove invalid downloaded bundle
+                match validate_persistent_state_split_metadata(
+                    &block_id.shard,
+                    kind,
+                    meta.split_depth.into(),
+                    meta.parts.iter().copied(),
+                ) {
+                    Ok(()) => return Ok(downloaded_persistent_state_bundle(state_file, meta)),
+                    Err(e) => {
+                        tracing::warn!("removing invalid downloaded persistent state files: {e:?}");
+                        remove_downloaded_persistent_state_files(
+                            state_file.path(),
+                            meta_file.path(),
+                            &meta.parts,
+                        )
+                        .await;
+                    }
+                }
             }
 
             let mut pending_state = client.find_persistent_state(block_id, kind).await?;

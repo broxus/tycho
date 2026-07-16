@@ -78,6 +78,28 @@ fn persistent_state_split_metadata_validation() -> Result<()> {
         2,
         vec![0x2000000000000000, 0xa000000000000000],
     )?;
+    let non_full_shard = ShardIdent::new(0, 0x4000000000000000).unwrap();
+    validate_persistent_state_split_metadata(
+        &non_full_shard,
+        PersistentStateKind::Shard,
+        2,
+        vec![0x2000000000000000, 0x6000000000000000],
+    )?;
+    let err = validate_persistent_state_split_metadata(
+        &non_full_shard,
+        PersistentStateKind::Shard,
+        2,
+        vec![0xa000000000000000],
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("invalid persistent state part prefix")
+    );
+    let deep_shard = ShardIdent::new(0, 0x1000000000000000).unwrap();
+    validate_persistent_state_split_metadata(&deep_shard, PersistentStateKind::Shard, 2, vec![
+        0x2000000000000000,
+    ])?;
 
     assert_invalid(
         PersistentStateKind::Queue,
@@ -658,6 +680,18 @@ async fn split_persistent_shard_state_import_from_dump() -> Result<()> {
         .unwrap();
     assert_eq!(reloaded_state_info.split_depth, 2);
     assert_eq!(reloaded_state_info.parts.len(), meta.parts.len());
+    drop(reloaded_storage);
+
+    PersistentStateMeta::new(2, vec![0x4000000000000000]).write(&states_dir, &block_id)?;
+    let ctx = StorageContext::new(StorageConfig::new_potato(tmp_dir.path())).await?;
+    let err = match CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await {
+        Ok(_) => panic!("invalid split metadata must prevent preload"),
+        Err(e) => e,
+    };
+    assert!(
+        err.to_string()
+            .contains("invalid persistent state part prefix")
+    );
 
     // Import the split bundle into a fresh storage and verify it reconstructs the same state.
     let (ctx, imported_tmp_dir) = StorageContext::new_temp().await?;
