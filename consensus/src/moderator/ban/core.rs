@@ -21,7 +21,10 @@ use crate::moderator::journal::item::{
     BanItem, BanOrigin, JournalItem, JournalItemFull, UnbanItem, UnbanOrigin,
 };
 use crate::moderator::journal::record_key::RecordKeyFactory;
-use crate::moderator::{BanConfig, DelayedDbTask, JournalEvent, RecordKey, RecordValueShort};
+use crate::moderator::{
+    BanConfig, DelayedDbTask, JournalDagEventIndex, JournalEvent, RecordKey, RecordValueShort,
+};
+use crate::utils::{UpsertResult, ValueOrderedMap};
 
 #[derive(Clone)]
 pub struct BanCore(Arc<BanCoreInner>);
@@ -37,6 +40,7 @@ struct BanCoreInner {
 impl BanCore {
     pub fn new(
         config: BanConfig,
+        dedup_dag_events: usize,
         record_key_factory: RecordKeyFactory,
         delayed_db_tasks_tx: mpsc::UnboundedSender<DelayedDbTask>,
     ) -> Self {
@@ -48,7 +52,7 @@ impl BanCore {
             delayed_db_tasks_tx,
             _updater: JoinTask::new({
                 let weak = weak.clone();
-                let task = UnbanScheduler::default().run(weak, updates_rx);
+                let task = UnbanScheduler::new(dedup_dag_events).run(weak, updates_rx);
                 async move { task.await.expect("moderator unban scheduler") }
             }),
         }))
@@ -144,13 +148,21 @@ impl BanCore {
     }
 }
 
-#[derive(Default)]
 struct UnbanScheduler {
     last_bans: FastHashMap<PeerId, (delay_queue::Key, CurrentBan)>,
     auto_unbans: DelayQueue<PeerId>,
+    deduplication: ValueOrderedMap<JournalDagEventIndex, UnixTime>,
 }
 
 impl UnbanScheduler {
+    fn new(dedup_dag_events: usize) -> Self {
+        Self {
+            last_bans: Default::default(),
+            auto_unbans: Default::default(),
+            deduplication: ValueOrderedMap::with_max_len(dedup_dag_events),
+        }
+    }
+
     async fn run(
         mut self,
         weak: Weak<BanCoreInner>,
@@ -186,15 +198,30 @@ impl UnbanScheduler {
         }
     }
 
-    #[allow(clippy::unused_self, reason = "style + may use later")]
-    fn on_event(&self, inner: &BanCoreInner, event: JournalEvent) -> TaskResult<()> {
+    fn on_event(&mut self, inner: &BanCoreInner, event: JournalEvent) -> TaskResult<()> {
+        let time = UnixTime::now();
+
+        if event.action().store()
+            && let JournalEvent::Dag(event) = &event
+        {
+            // always update time for LRU fashion
+            match self.deduplication.upsert(event.index(), time, |_, _| true) {
+                UpsertResult::OkInserted | UpsertResult::OkEvicted(_, _) => {}
+                UpsertResult::OkUpdated(_) => return Ok(()), // duplicate
+                UpsertResult::ErrRejected => unreachable!(),
+                UpsertResult::ErrTooLow => {
+                    tracing::error!("too large burst of events like {event}");
+                }
+            }
+        }
+
         let mut state = inner.state.lock().unwrap();
 
         let mut event_item = None;
         let mut maybe_ban = None;
 
         if event.action().store() {
-            let key = state.kf.new_key();
+            let key = state.kf.new_millis(time.millis());
 
             maybe_ban = (event.action().is_ban_related())
                 .then(|| state.maybe_ban(event.peer_id(), &key, event.tag(), &inner.config))

@@ -28,7 +28,7 @@ use crate::intercom::{Dispatcher, PeerSchedule, QueryRequestTag};
 use crate::models::{
     EvidenceSigError, ParseResult, PeerCount, Point, PointId, PointIntegrityError,
 };
-use crate::moderator::JournalEvent;
+use crate::moderator::JournalNetworkEvent;
 
 #[derive(Clone)]
 pub struct Downloader {
@@ -350,7 +350,7 @@ impl DownloadTask {
                     peer = display(out.peer_id.alt()),
                     "bad response",
                 );
-                self.query.report(JournalEvent::BadResponse(
+                self.query.report(JournalNetworkEvent::BadResponse(
                     out.peer_id,
                     QueryRequestTag::Download,
                     tl_error,
@@ -366,7 +366,7 @@ impl DownloadTask {
                     peer = display(out.peer_id.alt()),
                     "bad point",
                 );
-                self.query.report(JournalEvent::PointIntegrityError(
+                self.query.report(JournalNetworkEvent::PointIntegrityError(
                     out.peer_id,
                     QueryRequestTag::Download,
                     bad_point,
@@ -386,7 +386,7 @@ impl DownloadTask {
                     digest = display(wrong_id.digest.alt()),
                     "returned wrong point",
                 );
-                self.query.report(JournalEvent::ReplacedPoint {
+                self.query.report(JournalNetworkEvent::ReplacedPoint {
                     peer_id: out.peer_id,
                     requested: *self.query.point_id(),
                     received: *wrong_id,

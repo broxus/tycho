@@ -11,7 +11,7 @@ use crate::models::{
     CounterU16, DagPoint, Digest, IllFormedPoint, InvalidPoint, MempoolPeerCounters,
     MempoolPeerStats, PointId, PointInfo, Round, TransInvalidPoint,
 };
-use crate::moderator::JournalEvent;
+use crate::moderator::JournalDagEvent;
 
 type RoundDataMap = FastHashMap<PeerId, PeerRoundData>;
 struct PeerRoundData {
@@ -70,21 +70,21 @@ impl RoundInspector {
         mem::replace(&mut self.stats, FastHashMap::with_capacity(capacity))
     }
 
-    pub fn take_events(&mut self) -> Vec<JournalEvent> {
+    pub fn take_events(&mut self) -> Vec<JournalDagEvent> {
         let trans_invalid = mem::take(&mut self.trans_invalid)
             .into_iter()
-            .map(JournalEvent::TransInvalid);
+            .map(JournalDagEvent::TransInvalid);
         let invalid = mem::take(&mut self.invalid)
             .into_iter()
-            .map(JournalEvent::Invalid);
+            .map(JournalDagEvent::Invalid);
         let ill_formed = mem::take(&mut self.ill_formed)
             .into_iter()
-            .map(JournalEvent::IllFormed);
+            .map(JournalDagEvent::IllFormed);
         let forks = mem::take(&mut self.forks)
             .into_iter()
-            .map(|fork| JournalEvent::Equivocated(fork.author, fork.round, fork.items));
+            .map(|fork| JournalDagEvent::Equivocated(fork.author, fork.round, fork.items));
         let not_referenced = mem::take(&mut self.not_referenced).into_iter().map(|nr| {
-            JournalEvent::EvidenceNoInclusion {
+            JournalDagEvent::EvidenceNoInclusion {
                 signer: nr.signer,
                 blamed: nr.blamed,
                 proofs: nr.proofs,

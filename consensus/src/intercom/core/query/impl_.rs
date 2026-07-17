@@ -12,7 +12,7 @@ use crate::intercom::core::query::response::{
 };
 use crate::intercom::{Dispatcher, QueryRequestTag};
 use crate::models::{Point, PointId, Round};
-use crate::moderator::JournalEvent;
+use crate::moderator::JournalNetworkEvent;
 
 pub enum QueryError {
     Network(anyhow::Error),
@@ -54,7 +54,7 @@ impl BroadcastQuery {
         QueryResponse::parse_broadcast(&response).map_err(QueryError::TlError)
     }
     pub fn report(&self, peer_id: &PeerId, error: TlError) {
-        let event = JournalEvent::BadResponse(*peer_id, QueryRequestTag::Broadcast, error);
+        let event = JournalNetworkEvent::BadResponse(*peer_id, QueryRequestTag::Broadcast, error);
         self.dispatcher.moderator().report(event);
     }
 }
@@ -93,7 +93,7 @@ impl SignatureQuery {
         QueryResponse::parse_signature(&response).map_err(QueryError::TlError)
     }
     pub fn report(&self, peer_id: &PeerId, error: TlError) {
-        let event = JournalEvent::BadResponse(*peer_id, QueryRequestTag::Signature, error);
+        let event = JournalNetworkEvent::BadResponse(*peer_id, QueryRequestTag::Signature, error);
         self.dispatcher.moderator().report(event);
     }
 }
@@ -151,7 +151,7 @@ impl DownloadQuery {
         }
     }
 
-    pub fn report(&self, event: JournalEvent) {
+    pub fn report(&self, event: JournalNetworkEvent) {
         self.0.dispatcher.moderator().report(event);
     }
 }

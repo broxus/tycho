@@ -17,7 +17,8 @@ use crate::moderator::journal::batch::batch;
 use crate::moderator::journal::item::{JournalItem, JournalItemFull};
 use crate::moderator::journal::record_key::RecordKeyFactory;
 use crate::moderator::{
-    JournalEvent, JournalPoint, JournalPointRef, JournalStore, RecordFull, RecordValue,
+    JournalDagEvent, JournalEvent, JournalNetworkEvent, JournalPoint, JournalPointRef,
+    JournalStore, RecordFull, RecordValue,
 };
 use crate::storage::{MempoolDb, MempoolStore};
 use crate::test_utils::{default_test_config, test_logger};
@@ -41,11 +42,15 @@ async fn point_not_corrupt_across_batches() -> Result<()> {
     let point_id = *point.info().id();
     let first = JournalItemFull {
         key: key_factory.new_millis(1_000),
-        item: JournalItem::Event(JournalEvent::SenderNotAuthor(PeerId([1; _]), point_id)),
+        item: JournalItem::Event(
+            JournalNetworkEvent::SenderNotAuthor(PeerId([1; _]), point_id).into(),
+        ),
     };
     let second = JournalItemFull {
         key: key_factory.new_millis(2_000),
-        item: JournalItem::Event(JournalEvent::SenderNotAuthor(PeerId([2; _]), point_id)),
+        item: JournalItem::Event(
+            JournalNetworkEvent::SenderNotAuthor(PeerId([2; _]), point_id).into(),
+        ),
     };
 
     store.store_records(batch(&[first]), journal_point_max_bytes)?;
@@ -176,45 +181,48 @@ fn gen_items(count: u8, points: &[Point]) -> Vec<JournalItemFull> {
 
     for i in 0..count {
         let peer_id = PeerId([i; _]);
-        let event = match i % 4 {
-            0 => match points.get(i as usize) {
-                Some(point) => JournalEvent::SenderNotAuthor(peer_id, *point.info().id()),
-                None => JournalEvent::UnknownQuery(peer_id, TlError::InvalidData),
-            },
-            1 => match points.get(i as usize) {
-                Some(point) => JournalEvent::ReplacedPoint {
+        let event: JournalEvent = match i % 4 {
+            0 => <_>::from(match points.get(i as usize) {
+                Some(point) => JournalNetworkEvent::SenderNotAuthor(peer_id, *point.info().id()),
+                None => JournalNetworkEvent::UnknownQuery(peer_id, TlError::InvalidData),
+            }),
+            1 => <_>::from(match points.get(i as usize) {
+                Some(point) => JournalNetworkEvent::ReplacedPoint {
                     peer_id,
                     requested: *point.info().id(), // should be unique but won't
                     received: *point.info().id(),
                 },
-                None => JournalEvent::BadRequest(
+                None => JournalNetworkEvent::BadRequest(
                     peer_id,
                     QueryRequestTag::Signature,
                     TlError::UnexpectedEof,
                 ),
-            },
-            2 => match points.get(i as usize) {
-                Some(point) => JournalEvent::EvidenceNoInclusion {
+            }),
+            2 => <_>::from(match points.get(i as usize) {
+                Some(point) => JournalDagEvent::EvidenceNoInclusion {
                     signer: peer_id,
                     blamed: vec![*point.info().id()],
                     proofs: vec![*point.info().id()],
                 },
-                None => JournalEvent::Equivocated(
+                None => JournalDagEvent::Equivocated(
                     peer_id,
                     Round(rand::rng().next_u32()),
                     std::array::from_fn::<_, 3, _>(|j| *Digest::wrap(&[j as u8; _])).to_vec(),
                 ),
-            },
+            }),
             3 => match points.get(i as usize) {
-                Some(point) => {
+                Some(point) => <_>::from({
                     let info = point.info().clone();
                     let reason = InvalidReason::MustHaveSkippedRound(*point.info().id());
                     match DagPoint::new_invalid(info, Cert::default(), &<_>::random(), reason) {
-                        DagPoint::Invalid(invalid) => JournalEvent::Invalid(invalid),
+                        DagPoint::Invalid(invalid) => JournalDagEvent::Invalid(invalid),
                         _ => unreachable!(),
                     }
-                }
-                None => JournalEvent::QueryLimitReached(peer_id, QueryRequestTag::Broadcast),
+                }),
+                None => <_>::from(JournalNetworkEvent::QueryLimitReached(
+                    peer_id,
+                    QueryRequestTag::Broadcast,
+                )),
             },
             _ => unreachable!(),
         };

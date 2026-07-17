@@ -18,7 +18,7 @@ use crate::intercom::core::query::request::{
 use crate::intercom::core::query::response::QueryResponse;
 use crate::intercom::{BroadcastFilter, Downloader, PeerSchedule, Uploader};
 use crate::models::Point;
-use crate::moderator::{JournalEvent, Moderator};
+use crate::moderator::{JournalNetworkEvent, Moderator};
 use crate::storage::MempoolStore;
 
 #[derive(Clone, Default)]
@@ -159,7 +159,8 @@ impl ResponderInner {
                     error = %tl_error,
                     "unexpected query",
                 );
-                (state.moderator).report(JournalEvent::UnknownQuery(*peer_id, tl_error));
+                let event = JournalNetworkEvent::UnknownQuery(*peer_id, tl_error);
+                state.moderator.report(event);
                 return None;
             }
         };
@@ -191,7 +192,7 @@ impl ResponderInner {
                     peer_id = display(peer_id.alt()),
                     "query limit reached",
                 );
-                let event = JournalEvent::QueryLimitReached(*peer_id, tag);
+                let event = JournalNetworkEvent::QueryLimitReached(*peer_id, tag);
                 state.moderator.report(event);
                 response.set_hard_limited();
                 return None;
@@ -207,7 +208,7 @@ impl ResponderInner {
                     error = %tl_error,
                     "bad request",
                 );
-                let event = JournalEvent::BadRequest(*peer_id, tag, tl_error);
+                let event = JournalNetworkEvent::BadRequest(*peer_id, tag, tl_error);
                 state.moderator.report(event);
                 return None;
             }
@@ -234,7 +235,7 @@ impl ResponderInner {
                             digest = display(wrong_id.digest.alt()),
                             "broadcasted other's point",
                         );
-                        let event = JournalEvent::SenderNotAuthor(*peer_id, *wrong_id);
+                        let event = JournalNetworkEvent::SenderNotAuthor(*peer_id, *wrong_id);
                         (state.moderator).report(event);
                         return None;
                     }
@@ -246,7 +247,8 @@ impl ResponderInner {
                             error = %integrity_err,
                             "bad point",
                         );
-                        let event = JournalEvent::PointIntegrityError(*peer_id, tag, integrity_err);
+                        let event =
+                            JournalNetworkEvent::PointIntegrityError(*peer_id, tag, integrity_err);
                         (state.moderator).report(event);
                         return None;
                     }
@@ -257,7 +259,7 @@ impl ResponderInner {
                             error = %tl_error,
                             "bad request",
                         );
-                        let event = JournalEvent::BadRequest(*peer_id, tag, tl_error);
+                        let event = JournalNetworkEvent::BadRequest(*peer_id, tag, tl_error);
                         state.moderator.report(event);
                         return None;
                     }

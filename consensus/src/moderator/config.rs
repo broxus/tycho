@@ -56,6 +56,9 @@ pub struct JournalConfig {
 
     #[serde(with = "tycho_util::serde_helpers::humantime")]
     pub batch_interval: Duration,
+
+    /// Size of LRU cache for point-related events that may be duplicated at `Engine` restart
+    pub dedup_dag_events: usize,
 }
 
 impl Default for JournalConfig {
@@ -64,6 +67,7 @@ impl Default for JournalConfig {
             ttl: BanConfigDuration(Duration::from_hours(30 * 24)),
             clean_interval: Duration::from_hours(1),
             batch_interval: Duration::from_secs(2),
+            dedup_dag_events: 1000,
         }
     }
 }
