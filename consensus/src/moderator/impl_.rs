@@ -22,8 +22,8 @@ use crate::moderator::journal::batch::batch;
 use crate::moderator::journal::item::{JournalItem, JournalItemFull};
 use crate::moderator::journal::record_key::RecordKeyFactory;
 use crate::moderator::{
-    BanConfigDuration, DelayedDbTask, JournalConfig, JournalEvent, JournalPoint, JournalStore,
-    ModeratorConfig, RecordFull,
+    BanConfigDuration, DelayedDbTask, JournalConfig, JournalEvent, JournalNetworkEvent,
+    JournalPoint, JournalStore, ModeratorConfig, RecordFull,
 };
 use crate::storage::MempoolDb;
 
@@ -68,7 +68,12 @@ impl Moderator {
             })
             .context("channel db delayed write of node start")?;
 
-        let ban_core = BanCore::new(config.bans, record_key_factory, delayed_db_tasks_tx);
+        let ban_core = BanCore::new(
+            config.bans,
+            config.journal.dedup_dag_events,
+            record_key_factory,
+            delayed_db_tasks_tx,
+        );
 
         let is_init = Arc::new(AtomicBool::new(false));
         let (init_tx, init_rx) = oneshot::channel();
@@ -126,8 +131,8 @@ impl Moderator {
         self.0.set_peer_schedule(peer_schedule);
     }
 
-    pub(crate) fn report(&self, data: JournalEvent) {
-        self.0.report(data);
+    pub(crate) fn report<T: Into<JournalEvent>>(&self, data: T) {
+        self.0.report(data.into());
     }
 
     pub(crate) fn apply_mempool_config(&self, conf: &MempoolConfig) {
@@ -454,11 +459,14 @@ fn meter_event(item: &JournalItem) {
         return;
     };
     let kind = match event {
-        JournalEvent::BadRequest(_, query, _) => format!("{query:?} request tl err"),
-        JournalEvent::BadResponse(_, query, _) => format!("{query:?} response tl err"),
-        JournalEvent::QueryLimitReached(_, query) => format!("{query:?} rate limit"),
-        JournalEvent::PointIntegrityError(_, query, err) => format!("{query:?} {err:?}"),
-        other => format!("{:?}", other.tag()),
+        JournalEvent::Network(network) => match network {
+            JournalNetworkEvent::BadRequest(_, query, _) => format!("{query:?} request tl err"),
+            JournalNetworkEvent::BadResponse(_, query, _) => format!("{query:?} response tl err"),
+            JournalNetworkEvent::QueryLimitReached(_, query) => format!("{query:?} rate limit"),
+            JournalNetworkEvent::PointIntegrityError(_, query, err) => format!("{query:?} {err:?}"),
+            other => format!("{:?}", other.tag()),
+        },
+        JournalEvent::Dag(event) => format!("{:?}", event.tag()),
     };
     let labels = [("kind", kind), ("peer_id", format!("{}", event.peer_id()))];
     metrics::counter!("tycho_mempool_moderator_event", &labels).increment(1);

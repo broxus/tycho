@@ -160,6 +160,16 @@ static MONOTONIC_CLOCK: LazyLock<MonotonicClock> = LazyLock::new(|| MonotonicClo
 });
 impl MonotonicClock {
     pub fn now_millis() -> u64 {
+        let since_epoch = Self::since_unix_epoch();
+        u64::try_from(since_epoch.as_millis()).unwrap_or_else(|_| {
+            panic!(
+                "current time millis exceed u64: {}",
+                since_epoch.as_millis()
+            )
+        })
+    }
+
+    pub fn since_unix_epoch() -> Duration {
         // initialize lazy lock
         let Self {
             init_instant,
@@ -180,7 +190,7 @@ impl MonotonicClock {
             )
         });
 
-        let since_epoch = system_time
+        system_time
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
             .unwrap_or_else(|err| {
                 panic!(
@@ -188,14 +198,7 @@ impl MonotonicClock {
                     std::time::SystemTime::UNIX_EPOCH,
                     humantime::format_duration(err.duration())
                 )
-            });
-
-        u64::try_from(since_epoch.as_millis()).unwrap_or_else(|_| {
-            panic!(
-                "current time millis exceed u64: {}",
-                since_epoch.as_millis()
-            )
-        })
+            })
     }
 }
 

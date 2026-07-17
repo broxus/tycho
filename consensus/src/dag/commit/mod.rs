@@ -17,7 +17,7 @@ use crate::intercom::StatsRanges;
 use crate::models::{
     AnchorData, AnyLink, DagPoint, MempoolPeerStats, PointInfo, Round, ValidPoint,
 };
-use crate::moderator::JournalEvent;
+use crate::moderator::JournalDagEvent;
 
 #[derive(thiserror::Error, Debug)]
 #[error("Committer encountered local history conflict at round {}", .0.0)]
@@ -154,7 +154,7 @@ impl Committer {
         anchor_round: Round,
         stats_ranges: &StatsRanges,
         conf: &MempoolConfig,
-    ) -> TaskResult<(FastHashMap<PeerId, MempoolPeerStats>, Vec<JournalEvent>)> {
+    ) -> TaskResult<(FastHashMap<PeerId, MempoolPeerStats>, Vec<JournalDagEvent>)> {
         // in case previous anchor was triggered directly - rounds are already dropped
         let drained =
             (self.dag).drain_upto(anchor_round - conf.consensus.commit_history_rounds.get());

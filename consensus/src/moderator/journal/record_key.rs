@@ -20,7 +20,6 @@ impl RecordKeyFactory {
         }
     }
 
-    #[cfg(test)]
     pub fn new_millis(&mut self, created: u64) -> RecordKey {
         RecordKey {
             created: UnixTime::from_millis(created),

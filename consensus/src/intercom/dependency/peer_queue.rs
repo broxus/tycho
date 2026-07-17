@@ -70,7 +70,7 @@ impl PeerQueue {
         if status.is_ready_to_query(attempt) {
             status.is_in_flight = true;
             status.last_attempt = Some(attempt);
-            self.0.upsert(peer_id, Reverse(status), PartialEq::ne).ok();
+            self.0.upsert(peer_id, Reverse(status), PartialEq::ne);
             Some(peer_id)
         } else {
             None
@@ -87,7 +87,7 @@ impl PeerQueue {
             return false;
         };
         f(&mut status);
-        self.0.upsert(*peer_id, Reverse(status), PartialEq::ne).ok();
+        self.0.upsert(*peer_id, Reverse(status), PartialEq::ne);
         true
     }
 
