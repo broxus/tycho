@@ -7,3 +7,4 @@ pub const COLLATOR: &str = "collator";
 pub const COLLATOR_READ_NEXT_EXTS: &str = "collator::read_next_externals";
 pub const EXEC_MANAGER: &str = "exec_manager";
 pub const VALIDATOR: &str = "validator";
+pub const VALIDATOR_EXCHANGE_FAILURE: &str = "validator_exchange_failure";

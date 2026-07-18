@@ -24,7 +24,10 @@ use tycho_util::metrics::HistogramGuard;
 
 use super::ValidatorStdImplConfig;
 use crate::tracing_targets;
-use crate::validator::rpc::{ExchangeSignatures, ValidatorClient, ValidatorService};
+use crate::validator::rpc::{
+    ExchangeSignatures, ExchangeSlotBounds, ValidatorClient, ValidatorService,
+    record_incoming_no_slot,
+};
 use crate::validator::{
     AddSession, BriefValidatorDescr, CompositeValidationSessionId, ValidationComplete,
     ValidationSessionId, ValidationStatus, ValidatorNetworkContext, proto,
@@ -878,7 +881,36 @@ impl ExchangeSignatures for SessionState {
             // Find the slot for the specified block seqno.
             let Some(slot) = self.cached_signatures.peek(&block_seqno, &guard) else {
                 metrics::counter!(METRIC_MISS_EXCHANGES_IN_TOTAL).increment(1);
-                return Err(ValidationError::NoSlot);
+                let error = ValidationError::NoSlot;
+                if tracing::enabled!(
+                    target: tracing_targets::VALIDATOR_EXCHANGE_FAILURE,
+                    tracing::Level::DEBUG
+                ) {
+                    let mut active_slots = self.block_signatures.iter(&guard);
+                    let active_first_block_seqno = active_slots.next().map(|(seqno, _)| *seqno);
+                    let active_last_block_seqno = active_slots
+                        .last()
+                        .map(|(seqno, _)| *seqno)
+                        .or(active_first_block_seqno);
+                    let mut cache_slots = self.cached_signatures.iter(&guard);
+                    let cache_first_block_seqno = cache_slots.next().map(|(seqno, _)| *seqno);
+                    let cache_last_block_seqno = cache_slots
+                        .last()
+                        .map(|(seqno, _)| *seqno)
+                        .or(cache_first_block_seqno);
+                    record_incoming_no_slot(
+                        peer_id,
+                        block_seqno,
+                        ExchangeSlotBounds {
+                            active_first_block_seqno,
+                            active_last_block_seqno,
+                            cache_first_block_seqno,
+                            cache_last_block_seqno,
+                        },
+                        &error,
+                    );
+                }
+                return Err(error);
             };
             metrics::counter!(METRIC_CACHE_EXCHANGES_IN_TOTAL).increment(1);
 
