@@ -1,6 +1,6 @@
 use std::mem;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use futures_util::future::BoxFuture;
@@ -127,6 +127,7 @@ impl Broadcaster {
         bcaster_signal: oneshot::Sender<BroadcasterSignal>,
         collector_status: watch::Receiver<CollectorStatus>,
     ) -> TaskResult<Arc<LastOwnPoint>> {
+        let started_at = Instant::now();
         // how this was supposed to work:
         // * in short: broadcast to all and gather signatures from those who accepted the point
         // * both broadcast and signature tasks have their own retry loop for every peer
@@ -155,17 +156,26 @@ impl Broadcaster {
             bcaster_signal: Some(bcaster_signal),
             collector_status,
         };
-        loop {
+        let outcome = loop {
             tokio::select! {
                 biased; // mandatory priority: signals lifecycle, updates, data lifecycle
                 // rare event that may cause immediate completion
                 result = wire.collector_status.changed() => {
-                    if self.should_finish(&mut wire, result) {
-                        break;
+                    if let Some(outcome) = self.should_finish(&mut wire, result) {
+                        break outcome;
                     }
                 },
                 // rare event essential for up-to-date retries
-                update = self.peer_updates.recv() => self.match_peer_updates(update)?,
+                update = self.peer_updates.recv() => {
+                    if let Err(error) = self.match_peer_updates(update) {
+                        self.log_completion(
+                            started_at,
+                            wire.collector_status.borrow().attempt,
+                            "cancelled",
+                        );
+                        return Err(error);
+                    }
+                },
                 // either request signature immediately or postpone until retry
                 Some(out) = self.bcast_futures.next() => {
                     self.match_broadcast_result(out);
@@ -179,7 +189,8 @@ impl Broadcaster {
                     panic!("unhandled match arm in Broadcaster::run tokio::select");
                 }
             }
-        }
+        };
+        self.log_completion(started_at, wire.collector_status.borrow().attempt, outcome);
         Ok(Arc::new(LastOwnPoint {
             digest: *self.point.info().digest(),
             evidence: mem::take(&mut self.signatures).into_iter().collect(),
@@ -229,17 +240,17 @@ impl Broadcaster {
         &mut self,
         wire: &mut CollectorWire,
         collector_signal: Result<(), watch::error::RecvError>,
-    ) -> bool {
+    ) -> Option<&'static str> {
         let collector_status = *wire.collector_status.borrow_and_update();
 
-        let is_ready = if collector_signal.is_ok() {
+        let outcome = if collector_signal.is_ok() {
             self.continue_interval.reset(); // synchronise tick delays
 
             if self.rejections.len() >= self.signers_count.reliable_minority() {
                 if let Some(sender) = mem::take(&mut wire.bcaster_signal) {
                     _ = sender.send(BroadcasterSignal::Err);
                 };
-                true
+                Some("rejection_threshold")
             } else {
                 if collector_status.attempt >= self.ctx.conf().consensus.min_sign_attempts.get()
                     && self.signatures.len() >= self.signers_count.majority_of_others()
@@ -248,14 +259,16 @@ impl Broadcaster {
                     _ = sender.send(BroadcasterSignal::Ok);
                 };
                 self.match_attempt(collector_status.attempt);
-                false
+                None
             }
+        } else if wire.bcaster_signal.is_none() {
+            Some("success_threshold")
         } else {
-            true
+            Some("channel_closed")
         };
         tracing::debug!(
             parent: self.ctx.span(),
-            result = is_ready,
+            result = outcome.is_some(),
             collector = format!(
                 "{{ {collector_signal:?}, attempt={}, ready={} }}",
                 collector_status.attempt,
@@ -267,7 +280,39 @@ impl Broadcaster {
             "F+1" = self.signers_count.reliable_minority(),
             "ready?",
         );
-        is_ready
+        outcome
+    }
+
+    fn log_completion(&self, started_at: Instant, final_attempt: u8, outcome: &'static str) {
+        if tracing::enabled!(target: "consensus_network", tracing::Level::DEBUG) {
+            let point_id = self.point.info().id();
+            let unresolved_peers = self
+                .signers
+                .iter()
+                .filter(|peer_id| {
+                    **peer_id != point_id.author
+                        && !self.signatures.contains_key(peer_id)
+                        && !self.rejections.contains(peer_id)
+                })
+                .count();
+            tracing::debug!(
+                target: "consensus_network",
+                parent: self.ctx.span(),
+                operation = "broadcast",
+                event = "completed",
+                round = point_id.round.0,
+                point_digest = display(point_id.digest.alt()),
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                final_attempt,
+                validator_count = self.signers.len(),
+                collected_signatures = self.signatures.len(),
+                rejections = self.rejections.len(),
+                unresolved_peers,
+                inflight_peers = self.inflight_peers.len(),
+                outcome,
+                "consensus point broadcast completed",
+            );
+        }
     }
 
     fn match_attempt(&mut self, attempt: u8) {
