@@ -842,10 +842,71 @@ impl RpcStorage {
                 }
             }
 
-            fn flush(&mut self) -> Result<()> {
-                self.raw
-                    .write_opt(std::mem::take(&mut self.batch), self.writeopt)?;
-                Ok(())
+            fn flush(
+                &mut self,
+                batch_index: usize,
+                batch_item_count: usize,
+                total_invalid: usize,
+                operation_started_at: Instant,
+                mc_seqno: u32,
+                min_lt: u64,
+                keep_tx_per_account: usize,
+            ) -> Result<()> {
+                let write_started_at = Instant::now();
+                let result = self
+                    .raw
+                    .write_opt(std::mem::take(&mut self.batch), self.writeopt);
+                let write_duration_ms = write_started_at.elapsed().as_millis() as u64;
+                let total_elapsed_ms = operation_started_at.elapsed().as_millis() as u64;
+                let cumulative_primary_deletions = self.total_tx + total_invalid;
+                let cumulative_hash_index_deletions = self.total_tx_by_hash;
+                let cumulative_in_msg_index_deletions = self.total_tx_by_in_msg;
+                let cumulative_secondary_deletions = cumulative_hash_index_deletions
+                    .saturating_add(cumulative_in_msg_index_deletions);
+
+                match result {
+                    Ok(()) => {
+                        tracing::debug!(
+                            target: "rpc_gc",
+                            event = "batch_write",
+                            outcome = "success",
+                            batch_index,
+                            batch_item_count,
+                            cumulative_primary_deletions,
+                            cumulative_secondary_deletions,
+                            cumulative_hash_index_deletions,
+                            cumulative_in_msg_index_deletions,
+                            write_duration_ms,
+                            total_elapsed_ms,
+                            mc_seqno,
+                            min_lt,
+                            keep_tx_per_account,
+                            "transaction GC batch write"
+                        );
+                        Ok(())
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            target: "rpc_gc",
+                            event = "batch_write",
+                            outcome = "failure",
+                            batch_index,
+                            batch_item_count,
+                            cumulative_primary_deletions,
+                            cumulative_secondary_deletions,
+                            cumulative_hash_index_deletions,
+                            cumulative_in_msg_index_deletions,
+                            write_duration_ms,
+                            total_elapsed_ms,
+                            mc_seqno,
+                            min_lt,
+                            keep_tx_per_account,
+                            error = ?error,
+                            "transaction GC batch write"
+                        );
+                        Err(error.into())
+                    }
+                }
             }
         }
 
@@ -1000,6 +1061,7 @@ impl RpcStorage {
             let mut total_invalid = 0usize;
             let mut iteration = 0usize;
             let mut tx_count = 0usize;
+            let mut batch_index = 0usize;
             loop {
                 let Some((key, value)) = iter.item() else {
                     break iter.status()?;
@@ -1056,7 +1118,16 @@ impl RpcStorage {
                 // Write batch
                 if items >= ITEMS_PER_BATCH {
                     tracing::info!(iteration, "flushing batch");
-                    gc.flush()?;
+                    batch_index += 1;
+                    gc.flush(
+                        batch_index,
+                        items,
+                        total_invalid,
+                        started_at,
+                        mc_seqno,
+                        min_lt,
+                        keep_tx_per_account,
+                    )?;
                     items = 0;
                 }
             }
@@ -1066,7 +1137,16 @@ impl RpcStorage {
 
             // Write remaining batch
             if items != 0 {
-                gc.flush()?;
+                batch_index += 1;
+                gc.flush(
+                    batch_index,
+                    items,
+                    total_invalid,
+                    started_at,
+                    mc_seqno,
+                    min_lt,
+                    keep_tx_per_account,
+                )?;
             }
 
             // Reset gc flag
