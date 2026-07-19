@@ -65,8 +65,8 @@ impl Producer {
             key_pair,
             head.current().round(),
             head.current().leader(),
-            includes,
-            witness,
+            &includes,
+            &witness,
             conf,
         )
     }
@@ -80,8 +80,8 @@ impl Producer {
         current_round: Round,
         current_leader: Option<&PeerId>,
 
-        includes: Vec<PointInfo>,
-        witness: Vec<PointInfo>,
+        includes: &FastHashMap<PeerId, PointInfo>,
+        witness: &FastHashMap<PeerId, PointInfo>,
 
         conf: &MempoolConfig,
     ) -> Result<Point, ProduceError> {
@@ -99,7 +99,7 @@ impl Producer {
             _ => None,
         };
 
-        let (anchor_proof, anchor_trigger) = link::anchor_links(current_round, &includes, &witness);
+        let (anchor_proof, anchor_trigger) = link::anchor_links(current_round, includes, witness);
 
         let role = if proven_vertex.is_some() {
             let last_own_point = last_own_point.as_ref().expect("guarded by `proven_vertex`");
@@ -162,19 +162,15 @@ impl Producer {
             last.evidence.len() >= last.signers.reliable_minority()
         }));
 
-        let prev_info = (includes.iter()).find(|point| point.author() == local_id);
+        let prev_info = includes.get(&local_id);
 
         Self::check_prev_point(prev_info, proven_vertex)?;
 
-        let (time, anchor_time) = Self::get_time(
-            &role.anchor_proof(&local_id),
-            prev_info,
-            &includes,
-            &witness,
-        );
+        let (time, anchor_time) =
+            Self::get_time(&role.anchor_proof(&local_id), prev_info, includes, witness);
 
         let includes = includes
-            .into_iter()
+            .values()
             .map(|info| (*info.author(), *info.digest()))
             .collect::<FastHashMap<_, _>>();
 
@@ -185,7 +181,7 @@ impl Producer {
         );
 
         let witness = witness
-            .into_iter()
+            .values()
             .map(|info| (*info.author(), *info.digest()))
             .collect::<FastHashMap<_, _>>();
 
@@ -211,7 +207,7 @@ impl Producer {
         ))
     }
 
-    fn includes(finished_dag_round: &DagRound) -> Vec<PointInfo> {
+    fn includes(finished_dag_round: &DagRound) -> FastHashMap<PeerId, PointInfo> {
         let includes = finished_dag_round.threshold().get_reached();
         assert!(
             includes.len() >= finished_dag_round.peer_count().majority(),
@@ -228,10 +224,10 @@ impl Producer {
         finished_dag_round: &DagRound,
         local_id: &PeerId,
         last_own_point: Option<&LastOwnPoint>,
-    ) -> Vec<PointInfo> {
+    ) -> FastHashMap<PeerId, PointInfo> {
         let round = finished_dag_round.round();
         let Some(witness_round) = finished_dag_round.prev().upgrade() else {
-            return Vec::new();
+            return FastHashMap::default();
         };
 
         let includes = last_own_point
@@ -254,17 +250,17 @@ impl Producer {
                     loc.state
                         .get_or_reject()
                         .ok()
-                        .map(|signed| signed.first_resolved.info().clone())
+                        .map(|signed| (*peer, signed.first_resolved.info().clone()))
                 }
             })
-            .collect::<Vec<_>>()
+            .collect::<_>()
     }
 
     fn get_time(
         anchor_proof: &AnyLink<'_>,
         prev_info: Option<&PointInfo>,
-        includes: &[PointInfo],
-        witness: &[PointInfo],
+        includes: &FastHashMap<PeerId, PointInfo>,
+        witness: &FastHashMap<PeerId, PointInfo>,
     ) -> (UnixTime, UnixTime) {
         let anchor_time = match anchor_proof {
             AnyLink::ToSelf => {
@@ -278,9 +274,7 @@ impl Producer {
                     Through::Witness(peer_id) => (peer_id, &witness),
                 };
 
-                let info = through
-                    .iter()
-                    .find(|point| point.author() == peer_id)
+                let info = (through.get(peer_id))
                     .expect("path to anchor proof should exist in new point dependencies");
 
                 info.anchor_time()
@@ -338,8 +332,8 @@ mod link {
 
     pub fn anchor_links(
         current_round: Round,
-        includes: &[PointInfo],
-        witness: &[PointInfo],
+        includes: &FastHashMap<PeerId, PointInfo>,
+        witness: &FastHashMap<PeerId, PointInfo>,
     ) -> (AnchorLink, AnchorLink) {
         let trigger_source = link_source(includes, witness, AnchorStageRole::Trigger);
         let max_proof_source = link_source(includes, witness, AnchorStageRole::Proof);
@@ -364,24 +358,24 @@ mod link {
     }
 
     fn link_source<'a>(
-        includes: &'a [PointInfo],
-        witness: &'a [PointInfo],
+        includes: &'a FastHashMap<PeerId, PointInfo>,
+        witness: &'a FastHashMap<PeerId, PointInfo>,
         link_field: AnchorStageRole,
     ) -> LinkSource<'a> {
-        let incl_info = includes
+        let (_, incl_info) = includes
             .iter()
-            .max_by_key(|point| point.anchor_round(link_field))
+            .max_by_key(|(_, info)| info.anchor_round(link_field))
             .expect("non-empty list of includes for own point");
 
         let newer_witness = witness
             .iter()
-            .max_by_key(|wit_info| wit_info.anchor_round(link_field))
-            .filter(|wit_info| {
+            .max_by_key(|(_, wit_info)| wit_info.anchor_round(link_field))
+            .filter(|(_, wit_info)| {
                 wit_info.anchor_round(link_field) > incl_info.anchor_round(link_field)
             });
 
         match newer_witness {
-            Some(info) => LinkSource {
+            Some((_, info)) => LinkSource {
                 info,
                 path: Through::Witness(*info.author()),
             },

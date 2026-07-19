@@ -67,15 +67,16 @@ pub async fn populate_points<const PEER_COUNT: usize>(
 ) {
     let prev_dag_round = dag_round.prev().upgrade().expect("prev DAG round exists");
     let prev_points = prev_dag_round
-        .select(|(_, loc)| {
+        .select(|(peer_id, loc)| {
             loc.versions
                 .values()
                 .map(|a| a.clone().now_or_never().expect("must be ready"))
                 .map(|p| p.expect("shutdown"))
                 .map(|p| p.valid().expect("must be valid").info().clone())
                 .next()
+                .map(|info| (*peer_id, info))
         })
-        .collect::<Vec<_>>();
+        .collect();
 
     let mut points = FastHashMap::default();
     for idx in 0..PEER_COUNT {
@@ -136,7 +137,7 @@ fn point<const PEER_COUNT: usize>(
     round: Round,
     idx: usize,
     peers: &[(PeerId, Arc<KeyPair>); PEER_COUNT],
-    includes: &[PointInfo],
+    includes: &FastHashMap<PeerId, PointInfo>,
     round_leader: Option<&PeerId>,
     input_buffer: &InputBuffer,
     conf: &MempoolConfig,
@@ -148,9 +149,7 @@ fn point<const PEER_COUNT: usize>(
     );
     let peer_count = PeerCount::try_from(PEER_COUNT).expect("enough peers in non-genesis round");
 
-    let author = peers[idx].0;
-
-    let prev_info = includes.iter().find(|info| info.author() == author);
+    let prev_info = includes.get(&peers[idx].0);
 
     let last_own_point = prev_info.map(|info| LastOwnPoint {
         digest: *info.digest(),
@@ -176,8 +175,8 @@ fn point<const PEER_COUNT: usize>(
         &peers[idx].1,
         round,
         round_leader,
-        includes.to_vec(),
-        Default::default(),
+        includes,
+        &Default::default(),
         conf,
     )
     .expect("failed to create point")

@@ -1,3 +1,4 @@
+use std::mem;
 use std::sync::atomic;
 use std::sync::atomic::AtomicU32;
 use std::time::Duration;
@@ -132,7 +133,7 @@ impl Threshold {
     }
 
     /// use only after [`Self::reached()`] was awaited to completion
-    pub fn get_reached(&self) -> Vec<PointInfo> {
+    pub fn get_reached(&self) -> FastHashMap<PeerId, PointInfo> {
         let mut work = match self.work.try_lock() {
             Ok(guard) => guard,
             Err(e) => panic!("threshold lock must be released: {e}"),
@@ -181,7 +182,7 @@ impl Threshold {
             removed_from_channel,
         );
 
-        work.ready.values().cloned().collect()
+        mem::take(&mut work.ready)
     }
 
     fn push_ready(ready: &mut FastHashMap<PeerId, PointInfo>, info: PointInfo) {
@@ -384,7 +385,7 @@ mod test {
         let thresh = Arc::into_inner(thresh).expect("must be single reference");
         let work = thresh.work.into_inner();
 
-        assert_eq!(count.ready as usize, work.ready.len(), "ready count");
+        assert_eq!(work.ready.len(), 0, "all ready taken");
 
         assert_eq!(count.delayed as usize, work.delayed.len(), "delayed count");
 
