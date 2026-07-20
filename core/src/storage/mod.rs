@@ -23,9 +23,9 @@ pub use self::db::{CellsDb, CoreDb, CoreDbExt};
 pub use self::gc::ManualGcTrigger;
 pub use self::node_state::{NodeStateStorage, NodeSyncState};
 pub use self::persistent_state::{
-    BriefBocHeader, PersistentState, PersistentStateInfo, PersistentStateKind,
+    BriefBocHeader, PersistentState, PersistentStateInfo, PersistentStateKind, PersistentStateMeta,
     PersistentStateStorage, QueueDiffReader, QueueStateReader, QueueStateWriter, ShardStateReader,
-    ShardStateWriter,
+    ShardStateWriter, validate_persistent_state_split_metadata,
 };
 pub use self::shard_state::{
     BlockInfoForApply, InitiatedStoreState, LoadStateHint, ShardStateStorage,
@@ -99,6 +99,14 @@ impl CoreStorage {
     }
 
     pub async fn open(ctx: StorageContext, config: CoreStorageConfig) -> Result<Self> {
+        anyhow::ensure!(
+            config.persistent_state_split_depth
+                <= CoreStorageConfig::MAX_PERSISTENT_STATE_SPLIT_DEPTH,
+            "persistent_state_split_depth exceeds maximum: value={}, max={}",
+            config.persistent_state_split_depth,
+            CoreStorageConfig::MAX_PERSISTENT_STATE_SPLIT_DEPTH
+        );
+
         let db: CoreDb = ctx.open_preconfigured(CORE_DB_SUBDIR)?;
         db.normalize_version()?;
         db.apply_migrations().await?;
@@ -116,9 +124,10 @@ impl CoreStorage {
             cell_storage_worker_pool.clone(),
         );
         cells_db.normalize_version()?;
-        // WARNING: Raw import cleanup must run before migrations and counter loading so
-        // partial raw-import cells, counters, temp rows, and shard roots stay hidden.
-        cell_counters.cleanup_interrupted_raw_import()?;
+
+        // WARNING: An interrupted raw import poisons local storage.
+        cell_counters.check_no_interrupted_raw_import()?;
+
         let mut cell_counters = apply_cells_migrations(cells_db.clone(), cell_counters).await?;
         cell_counters.load_latest_or_empty()?;
 
@@ -158,6 +167,7 @@ impl CoreStorage {
             block_handle_storage.clone(),
             block_storage.clone(),
             shard_state_storage.clone(),
+            config.persistent_state_split_depth,
         )?;
 
         persistent_state_storage.preload().await?;

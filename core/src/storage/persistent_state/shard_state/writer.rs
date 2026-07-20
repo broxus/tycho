@@ -5,22 +5,26 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
+use tycho_block_util::block::collect_shard_split_prefixes;
 use tycho_storage::fs::Dir;
-use tycho_types::cell::{CellDescriptor, HashBytes};
+use tycho_types::cell::{Cell, CellDescriptor, HashBytes};
 use tycho_types::models::*;
-use tycho_util::FastHashMap;
 use tycho_util::compression::ZstdCompressedFile;
 use tycho_util::progress_bar::ProgressBar;
 use tycho_util::sync::CancellationFlag;
+use tycho_util::{FastHashMap, FastHashSet};
 
-use crate::storage::CellsDb;
+use super::super::PersistentStateKind;
 use crate::storage::shard_state::decode_indexed_value;
+use crate::storage::{CellsDb, CoreStorageConfig};
 
 pub struct ShardStateWriter<'a> {
     db: &'a CellsDb,
     states_dir: &'a Dir,
     block_id: &'a BlockId,
+    part_prefix: Option<u64>,
 }
 
 impl<'a> ShardStateWriter<'a> {
@@ -31,18 +35,50 @@ impl<'a> ShardStateWriter<'a> {
     // Partially written BOC file.
     const FILE_EXTENSION_TEMP: &'static str = "boc.temp";
 
+    pub const META_FILE_EXTENSION: &'static str = "meta.json";
+
+    fn build_file_name_base<S>(name: S, part_prefix: Option<u64>) -> String
+    where
+        S: Display,
+    {
+        match part_prefix {
+            Some(prefix) => format!("{name}_part_{prefix:016x}"),
+            None => name.to_string(),
+        }
+    }
+
     pub fn file_name<S>(name: S) -> PathBuf
     where
         S: Display,
     {
-        PathBuf::from(name.to_string()).with_extension(Self::FILE_EXTENSION)
+        Self::file_name_ext(name, None)
+    }
+
+    pub fn file_name_ext<S>(name: S, part_prefix: Option<u64>) -> PathBuf
+    where
+        S: Display,
+    {
+        PathBuf::from(Self::build_file_name_base(name, part_prefix))
+            .with_extension(Self::FILE_EXTENSION)
     }
 
     pub fn temp_file_name<S>(name: S) -> PathBuf
     where
         S: Display,
     {
-        PathBuf::from(name.to_string()).with_extension(Self::FILE_EXTENSION_TEMP)
+        Self::temp_file_name_ext(name, None)
+    }
+
+    pub fn temp_file_name_ext<S>(name: S, part_prefix: Option<u64>) -> PathBuf
+    where
+        S: Display,
+    {
+        PathBuf::from(Self::build_file_name_base(name, part_prefix))
+            .with_extension(Self::FILE_EXTENSION_TEMP)
+    }
+
+    pub fn meta_file_name(block_id: &BlockId) -> PathBuf {
+        PathBuf::from(block_id.to_string()).with_extension(Self::META_FILE_EXTENSION)
     }
 
     pub fn new(db: &'a CellsDb, states_dir: &'a Dir, block_id: &'a BlockId) -> Self {
@@ -50,20 +86,42 @@ impl<'a> ShardStateWriter<'a> {
             db,
             states_dir,
             block_id,
+            part_prefix: None,
+        }
+    }
+
+    pub fn new_part(
+        db: &'a CellsDb,
+        states_dir: &'a Dir,
+        block_id: &'a BlockId,
+        part_prefix: u64,
+    ) -> Self {
+        Self {
+            db,
+            states_dir,
+            block_id,
+            part_prefix: Some(part_prefix),
         }
     }
 
     pub fn write_file(
         &self,
         mut boc_file: File,
+        cancelled: Option<&CancellationFlag>,
+    ) -> Result<()> {
+        boc_file.seek(SeekFrom::Start(0))?;
+        self.write_uncompressed_boc(boc_file, cancelled)
+    }
+
+    fn write_uncompressed_boc<R: Read>(
+        &self,
+        mut boc_file: R,
         _cancelled: Option<&CancellationFlag>,
     ) -> Result<()> {
-        let temp_file_name = Self::temp_file_name(self.block_id);
+        let temp_file_name = Self::temp_file_name_ext(self.block_id, self.part_prefix);
         scopeguard::defer! {
             self.states_dir.remove_file(&temp_file_name).ok();
         }
-
-        boc_file.seek(SeekFrom::Start(0))?;
 
         // Create states file
         let compressed_file = self
@@ -89,7 +147,7 @@ impl<'a> ShardStateWriter<'a> {
         // Atomically rename the file
         self.states_dir
             .file(&temp_file_name)
-            .rename(Self::file_name(self.block_id))
+            .rename(Self::file_name_ext(self.block_id, self.part_prefix))
             .map_err(Into::into)
     }
 
@@ -98,7 +156,16 @@ impl<'a> ShardStateWriter<'a> {
         root_hash: &HashBytes,
         cancelled: Option<&CancellationFlag>,
     ) -> Result<HashBytes> {
-        self.write_inner(root_hash, None, None, cancelled)
+        self.write_inner(root_hash, None, None, None, cancelled)
+    }
+
+    pub fn write_with_absent(
+        &self,
+        root_hash: &HashBytes,
+        to_make_absent_cells: FastHashMap<HashBytes, Cell>,
+        cancelled: Option<&CancellationFlag>,
+    ) -> Result<HashBytes> {
+        self.write_inner(root_hash, None, Some(to_make_absent_cells), None, cancelled)
     }
 
     pub fn write_tracked(
@@ -108,19 +175,26 @@ impl<'a> ShardStateWriter<'a> {
         progress_bar: &mut ProgressBar,
         cancelled: Option<&CancellationFlag>,
     ) -> Result<HashBytes> {
-        self.write_inner(root_hash, Some(file_name), Some(progress_bar), cancelled)
+        self.write_inner(
+            root_hash,
+            Some(file_name),
+            None,
+            Some(progress_bar),
+            cancelled,
+        )
     }
 
     fn write_inner(
         &self,
         root_hash: &HashBytes,
         file_name: Option<&str>,
-        mut progress_bar: Option<&mut ProgressBar>,
+        to_make_absent_cells: Option<FastHashMap<HashBytes, Cell>>,
+        progress_bar: Option<&mut ProgressBar>,
         cancelled: Option<&CancellationFlag>,
     ) -> Result<HashBytes> {
         let temp_file_name = match file_name {
-            Some(name) => Self::temp_file_name(name),
-            None => Self::temp_file_name(self.block_id),
+            Some(name) => Self::temp_file_name_ext(name, self.part_prefix),
+            None => Self::temp_file_name_ext(self.block_id, self.part_prefix),
         };
 
         scopeguard::defer! {
@@ -129,10 +203,28 @@ impl<'a> ShardStateWriter<'a> {
 
         // Load cells from db in reverse order into the temp file
         tracing::info!("started loading cells");
-        let mut intermediate = self
-            .write_rev(&root_hash.0, cancelled)
+        let intermediate = self
+            .write_rev(&root_hash.0, to_make_absent_cells, cancelled)
             .context("Failed to write reversed cells data")?;
         tracing::info!("finished loading cells");
+
+        self.write_intermediate(
+            temp_file_name.clone(),
+            file_name,
+            intermediate,
+            progress_bar,
+            cancelled,
+        )
+    }
+
+    fn write_intermediate(
+        &self,
+        temp_file_name: PathBuf,
+        file_name: Option<&str>,
+        mut intermediate: IntermediateState,
+        mut progress_bar: Option<&mut ProgressBar>,
+        cancelled: Option<&CancellationFlag>,
+    ) -> Result<HashBytes> {
         let cell_count = intermediate.cell_sizes.len() as u32;
 
         // Compute offset type size (usually 4 bytes)
@@ -174,7 +266,7 @@ impl<'a> ShardStateWriter<'a> {
         buffer.write_all(&1u32.to_be_bytes())?;
 
         // Absent cell count | current len: 14
-        buffer.write_all(&[0, 0, 0, 0])?;
+        buffer.write_all(&intermediate.absent_cells_count.to_be_bytes())?;
 
         // Total cell size   | current len: 18
         buffer.write_all(&intermediate.total_size.to_be_bytes()[(8 - offset_size)..8])?;
@@ -217,13 +309,21 @@ impl<'a> ShardStateWriter<'a> {
                 d2: cell_buffer[1],
             };
 
-            let ref_offset = 2 + descriptor.byte_len() as usize;
-            for r in 0..descriptor.reference_count() as usize {
-                let ref_offset = ref_offset + r * REF_SIZE;
-                let slice = &mut cell_buffer[ref_offset..ref_offset + REF_SIZE];
+            // skip refs for absent cells
+            if !descriptor.is_absent() {
+                let hash_depth_len = if descriptor.store_hashes() {
+                    descriptor.hash_count() * (32 + 2)
+                } else {
+                    0
+                };
+                let ref_offset = 2 + hash_depth_len as usize + descriptor.byte_len() as usize;
+                for r in 0..descriptor.reference_count() as usize {
+                    let ref_offset = ref_offset + r * REF_SIZE;
+                    let slice = &mut cell_buffer[ref_offset..ref_offset + REF_SIZE];
 
-                let index = u32::from_be_bytes(slice.try_into().unwrap());
-                slice.copy_from_slice(&(cell_count - index - 1).to_be_bytes());
+                    let index = u32::from_be_bytes(slice.try_into().unwrap());
+                    slice.copy_from_slice(&(cell_count - index - 1).to_be_bytes());
+                }
             }
 
             buffer.write_all(&cell_buffer[..cell_size as usize])?;
@@ -248,8 +348,8 @@ impl<'a> ShardStateWriter<'a> {
         };
 
         let name = match file_name {
-            None => Self::file_name(self.block_id),
-            Some(name) => Self::file_name(name),
+            None => Self::file_name_ext(self.block_id, self.part_prefix),
+            Some(name) => Self::file_name_ext(name, self.part_prefix),
         };
 
         self.states_dir.file(&temp_file_name).rename(name)?;
@@ -260,6 +360,7 @@ impl<'a> ShardStateWriter<'a> {
     fn write_rev(
         &self,
         root_hash: &[u8; 32],
+        mut to_make_absent_cells: Option<FastHashMap<HashBytes, Cell>>,
         cancelled: Option<&CancellationFlag>,
     ) -> Result<IntermediateState> {
         enum StackItem {
@@ -282,6 +383,11 @@ impl<'a> ShardStateWriter<'a> {
 
         let mut references_buffer = SmallVec::<[[u8; 32]; 4]>::with_capacity(4);
 
+        // data buffer for absent cell
+        let mut absent_data_buffer = Vec::new();
+
+        let mut absent_cells_count = 0u32;
+
         let mut indices = FastHashMap::default();
         let mut remap = FastHashMap::default();
         let mut cell_sizes = Vec::<u8>::with_capacity(FILE_BUFFER_LEN);
@@ -290,6 +396,18 @@ impl<'a> ShardStateWriter<'a> {
         let mut total_size = 0u64;
         let mut iteration = 0u32;
         let mut remap_index = 0u32;
+
+        // we put cells in the stack and traverse down one branch until the leaf is reached,
+        // then write this leaf cell, go back to the parent cell, and visit the sibling branch,
+        // so when both child branches are stored, we continue moving backward
+
+        // the leaf will have index 0 and the root will have the maximum index
+        // parent cells refer to children by indexes
+        // e.g. for the original branch
+        // A -> B -> D
+        //   -> C -> E
+        // the intermediate file will contain
+        // E[0; ] C[1; ref 0] D[2; ] B[3; ref 2] A[4; ref 1,3]
 
         stack.push((iteration, StackItem::New(*root_hash)));
         indices.insert(*root_hash, (iteration, false));
@@ -306,18 +424,42 @@ impl<'a> ShardStateWriter<'a> {
 
             match data {
                 StackItem::New(hash) => {
-                    let value = raw
-                        .get_pinned_cf_opt(&cf, hash, read_options)?
-                        .ok_or(CellWriterError::CellNotFound)?;
+                    let hash_bytes = HashBytes::from(hash);
 
-                    let (_, value) =
-                        decode_indexed_value(value.as_ref()).ok_or(CellWriterError::InvalidCell)?;
-                    if value.is_empty() {
-                        return Err(CellWriterError::InvalidCell.into());
-                    }
+                    let to_make_absent_cell = to_make_absent_cells
+                        .as_mut()
+                        .and_then(|map| map.remove(&hash_bytes));
 
-                    let (descriptor, data) = deserialize_cell(value, &mut references_buffer)
-                        .ok_or(CellWriterError::InvalidCell)?;
+                    let (descriptor, data) = if let Some(to_make_absent_cell) = &to_make_absent_cell
+                    {
+                        // count absent cells
+                        absent_cells_count += 1;
+
+                        let descriptor =
+                            make_absent_cell_data(to_make_absent_cell, &mut absent_data_buffer);
+
+                        references_buffer.clear();
+                        (
+                            descriptor,
+                            SmallVec::from_slice(absent_data_buffer.as_slice()),
+                        )
+                    } else {
+                        // read cell from db
+                        let value = raw
+                            .get_pinned_cf_opt(&cf, hash, read_options)?
+                            .ok_or(CellWriterError::CellNotFound(hash_bytes))?;
+
+                        let (_, value) = decode_indexed_value(value.as_ref())
+                            .ok_or(CellWriterError::InvalidCell(hash_bytes))?;
+                        if value.is_empty() {
+                            return Err(CellWriterError::InvalidCell(hash_bytes).into());
+                        }
+
+                        let (descriptor, data) = deserialize_cell(value, &mut references_buffer)
+                            .ok_or(CellWriterError::InvalidCell(hash_bytes))?;
+
+                        (descriptor, SmallVec::from_slice(data))
+                    };
 
                     let mut reference_indices = SmallVec::with_capacity(references_buffer.len());
 
@@ -357,7 +499,7 @@ impl<'a> ShardStateWriter<'a> {
                         StackItem::Loaded(LoadedCell {
                             hash,
                             descriptor,
-                            data: SmallVec::from_slice(data),
+                            data,
                             indices: reference_indices,
                         }),
                     ));
@@ -392,11 +534,21 @@ impl<'a> ShardStateWriter<'a> {
                         tracing::info!(iteration);
                     }
 
-                    let cell_size = 2 + loaded.data.len() + loaded.indices.len() * REF_SIZE;
+                    // absent cell contain only 1 descriptor byte
+                    let descriptor_len = 1 + !loaded.descriptor.is_absent() as usize;
+
+                    let cell_size =
+                        descriptor_len + loaded.data.len() + loaded.indices.len() * REF_SIZE;
                     cell_sizes.push(cell_size as u8);
                     total_size += cell_size as u64;
 
-                    temp_file_buffer.write_all(&[loaded.descriptor.d1, loaded.descriptor.d2])?;
+                    if descriptor_len > 1 {
+                        temp_file_buffer
+                            .write_all(&[loaded.descriptor.d1, loaded.descriptor.d2])?;
+                    } else {
+                        temp_file_buffer.write_all(&[loaded.descriptor.d1])?;
+                    }
+
                     temp_file_buffer.write_all(&loaded.data)?;
                     for index in loaded.indices {
                         let index = remap.get(&index).with_context(|| {
@@ -408,6 +560,8 @@ impl<'a> ShardStateWriter<'a> {
             }
         }
 
+        ensure_absent_cells_consumed(&to_make_absent_cells)?;
+
         drop(temp_file_buffer);
 
         file.flush()?;
@@ -416,14 +570,172 @@ impl<'a> ShardStateWriter<'a> {
             file,
             cell_sizes,
             total_size,
+            absent_cells_count,
         })
     }
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub struct PersistentStateMeta {
+    pub split_depth: u8,
+    pub parts: Vec<u64>,
+}
+
+impl PersistentStateMeta {
+    pub const VERSION: u8 = 1;
+
+    pub fn new(split_depth: u8, mut parts: Vec<u64>) -> Self {
+        parts.sort_unstable();
+        parts.dedup();
+        Self { split_depth, parts }
+    }
+
+    pub fn write(&self, states_dir: &Dir, block_id: &BlockId) -> Result<()> {
+        let file_path = states_dir
+            .path()
+            .join(ShardStateWriter::meta_file_name(block_id));
+        self.write_to_file(file_path)
+    }
+
+    pub fn write_to_file(&self, file_path: impl AsRef<std::path::Path>) -> Result<()> {
+        let raw = RawPersistentStateMeta {
+            version: Self::VERSION,
+            split_depth: self.split_depth,
+            parts: self
+                .parts
+                .iter()
+                .map(|prefix| format!("{prefix:016x}"))
+                .collect(),
+        };
+
+        let file_path = file_path.as_ref();
+        let temp_file_path = file_path.with_extension("temp");
+        scopeguard::defer! {
+            std::fs::remove_file(&temp_file_path).ok();
+        }
+
+        tycho_util::serde_helpers::save_json_to_file(&raw, &temp_file_path)?;
+        std::fs::rename(&temp_file_path, file_path)?;
+
+        Ok(())
+    }
+
+    pub fn read(states_dir: &Dir, block_id: &BlockId) -> Result<Option<Self>> {
+        let file_path = states_dir
+            .path()
+            .join(ShardStateWriter::meta_file_name(block_id));
+        Self::read_from_file(file_path)
+    }
+
+    pub fn read_from_file(file_path: impl AsRef<std::path::Path>) -> Result<Option<Self>> {
+        if !file_path.as_ref().exists() {
+            return Ok(None);
+        }
+
+        let raw: RawPersistentStateMeta =
+            tycho_util::serde_helpers::load_json_from_file(file_path)?;
+        anyhow::ensure!(
+            raw.version == Self::VERSION,
+            "unsupported persistent state meta version: {}",
+            raw.version
+        );
+        let mut parts = Vec::with_capacity(raw.parts.len());
+        for prefix in raw.parts {
+            if prefix.len() != 16 || !prefix.chars().all(|c| c.is_ascii_hexdigit()) {
+                anyhow::bail!("invalid persistent state part prefix: {prefix}");
+            }
+            parts.push(u64::from_str_radix(&prefix, 16)?);
+        }
+
+        Ok(Some(Self::new(raw.split_depth, parts)))
+    }
+}
+
+pub fn validate_persistent_state_split_metadata(
+    shard_id: &ShardIdent,
+    kind: PersistentStateKind,
+    split_depth: u32,
+    part_prefixes: impl IntoIterator<Item = u64>,
+) -> Result<()> {
+    let part_prefixes = part_prefixes.into_iter().collect::<Vec<_>>();
+    anyhow::ensure!(
+        split_depth <= u32::from(CoreStorageConfig::MAX_PERSISTENT_STATE_SPLIT_DEPTH),
+        "persistent state split depth exceeds maximum: split_depth={}, max={}",
+        split_depth,
+        CoreStorageConfig::MAX_PERSISTENT_STATE_SPLIT_DEPTH
+    );
+
+    if part_prefixes.is_empty() {
+        anyhow::ensure!(
+            split_depth == 0,
+            "persistent state split depth without parts: split_depth={split_depth}"
+        );
+        return Ok(());
+    }
+
+    anyhow::ensure!(
+        kind == PersistentStateKind::Shard,
+        "split persistent state parts are not supported for {kind:?}"
+    );
+    anyhow::ensure!(
+        !shard_id.is_masterchain(),
+        "split persistent state parts are not supported for masterchain state"
+    );
+    anyhow::ensure!(
+        split_depth > 0,
+        "persistent state split depth must be positive when parts are present"
+    );
+
+    let max_parts = 1usize
+        .checked_shl(split_depth)
+        .context("invalid persistent state split depth")?;
+    anyhow::ensure!(
+        part_prefixes.len() <= max_parts,
+        "too many persistent state parts: parts={}, max={max_parts}",
+        part_prefixes.len()
+    );
+
+    let mut unique_prefixes = FastHashSet::default();
+    for prefix in &part_prefixes {
+        anyhow::ensure!(
+            unique_prefixes.insert(*prefix),
+            "duplicate persistent state part prefix: {prefix:016x}"
+        );
+    }
+
+    let mut expected_prefixes = FastHashSet::default();
+    collect_shard_split_prefixes(
+        &ShardIdent::new_full(shard_id.workchain()),
+        split_depth as u8,
+        &mut expected_prefixes,
+    )?;
+    for prefix in part_prefixes {
+        // persistent state parts use absolute workchain prefixes,
+        // so ensure each one intersects with the block shard (will be actual on split and merge)
+        let is_related_to_block_shard = ShardIdent::new(shard_id.workchain(), prefix)
+            .is_some_and(|part_shard| part_shard.intersects(shard_id));
+        anyhow::ensure!(
+            expected_prefixes.contains(&prefix) && is_related_to_block_shard,
+            "invalid persistent state part prefix for split depth {split_depth}: {prefix:016x}"
+        );
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RawPersistentStateMeta {
+    version: u8,
+    split_depth: u8,
+    #[serde(default)]
+    parts: Vec<String>,
 }
 
 struct IntermediateState {
     file: File,
     cell_sizes: Vec<u8>,
     total_size: u64,
+    absent_cells_count: u32,
 }
 
 fn deserialize_cell<'a>(
@@ -461,6 +773,40 @@ fn deserialize_cell<'a>(
     }
 
     Some((descriptor, data))
+}
+
+fn make_absent_cell_data(cell: &Cell, absent_data_buffer: &mut Vec<u8>) -> CellDescriptor {
+    let level_mask = cell.level_mask();
+    let d1 = CellDescriptor::ABSENT_MASK | level_mask.to_byte() << 5;
+    let absent_descriptor = CellDescriptor::new([d1, 0]);
+
+    absent_data_buffer.clear();
+    absent_data_buffer.reserve(absent_descriptor.hash_count() as usize * (32 + 2));
+
+    for level in level_mask {
+        absent_data_buffer.extend_from_slice(cell.hash(level).as_slice());
+    }
+
+    for level in level_mask {
+        absent_data_buffer.extend_from_slice(&cell.depth(level).to_be_bytes());
+    }
+
+    absent_descriptor
+}
+
+fn ensure_absent_cells_consumed(
+    to_make_absent_cells: &Option<FastHashMap<HashBytes, Cell>>,
+) -> Result<()> {
+    if let Some(to_make_absent_cells) = to_make_absent_cells {
+        let remaining = to_make_absent_cells.len();
+        anyhow::ensure!(
+            remaining == 0,
+            "not all requested absent cells were written: remaining={}, sample={:?}",
+            remaining,
+            to_make_absent_cells.keys().take(4).collect::<Vec<_>>(),
+        );
+    }
+    Ok(())
 }
 
 fn number_of_bytes_to_fit(l: u64) -> u32 {
@@ -502,10 +848,10 @@ const FILE_BUFFER_LEN: usize = 128 * 1024 * 1024; // 128 MB
 
 #[derive(thiserror::Error, Debug)]
 enum CellWriterError {
-    #[error("Cell not found in cell db")]
-    CellNotFound,
-    #[error("Invalid cell")]
-    InvalidCell,
+    #[error("Cell {0} not found in cell db")]
+    CellNotFound(HashBytes),
+    #[error("Invalid cell {0}")]
+    InvalidCell(HashBytes),
 }
 
 struct IntermediateHasher<W: Write> {

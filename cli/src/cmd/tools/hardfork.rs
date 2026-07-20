@@ -65,7 +65,12 @@ impl Cmd {
             })
             .await?;
 
-            let storage = CoreStorage::open(ctx, CoreStorageConfig::default().without_gc()).await?;
+            let storage_config = CoreStorageConfig::default().without_gc();
+            anyhow::ensure!(
+                storage_config.persistent_state_split_depth == 0,
+                "hardfork creation supports only persistent_state_split_depth = 0"
+            );
+            let storage = CoreStorage::open(ctx, storage_config).await?;
 
             let Some(mc_block_id) = storage
                 .shard_state_storage()

@@ -31,17 +31,37 @@ impl StarterClient for BlockchainRpcClient {
         kind: PersistentStateKind,
     ) -> Result<FoundState<'a>> {
         let pending_state = self.find_persistent_state(block_id, kind).await?;
-        let this = self.clone();
+
+        let split_depth = pending_state.split_depth;
+        let parts = pending_state
+            .parts
+            .iter()
+            .map(|part| FoundStatePart {
+                prefix: part.prefix,
+            })
+            .collect::<Vec<_>>();
+        let pending_state_for_part = pending_state.clone();
 
         Ok(FoundState {
+            split_depth,
+            parts,
             download: Box::new(move |output| {
                 Box::pin(async move {
-                    let output = this
-                        .download_persistent_state(pending_state, output)
+                    let output = self
+                        .download_persistent_state(pending_state, None, output)
                         .await?;
                     Ok(output)
                 })
             }),
+            download_part: Some(Box::new(move |part, output| {
+                let pending_state = pending_state_for_part.clone();
+                Box::pin(async move {
+                    let output = self
+                        .download_persistent_state(pending_state, Some(part.prefix), output)
+                        .await?;
+                    Ok(output)
+                })
+            })),
         })
     }
 
@@ -70,10 +90,20 @@ pub struct FoundBlockDataFull {
 }
 
 pub struct FoundState<'a> {
+    pub split_depth: u32,
+    pub parts: Vec<FoundStatePart>,
     pub download: Box<DownloadFn<'a>>,
+    pub download_part: Option<Box<DownloadPartFn<'a>>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FoundStatePart {
+    pub prefix: u64,
 }
 
 type DownloadFn<'a> = dyn FnOnce(File) -> BoxFuture<'a, Result<File>> + Send + 'a;
+type DownloadPartFn<'a> =
+    dyn Fn(FoundStatePart, File) -> BoxFuture<'a, Result<File>> + Send + Sync + 'a;
 type PunishFn = dyn FnOnce(PunishReason) + Send + 'static;
 
 #[cfg(feature = "s3")]
@@ -122,6 +152,8 @@ mod s3 {
             };
 
             Ok(FoundState {
+                split_depth: 0,
+                parts: Vec::new(),
                 download: Box::new(move |output| {
                     Box::pin(async move {
                         let output = self
@@ -131,6 +163,7 @@ mod s3 {
                         Ok(output)
                     })
                 }),
+                download_part: None,
             })
         }
 

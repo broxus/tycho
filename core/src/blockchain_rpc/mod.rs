@@ -4,7 +4,7 @@ pub use self::broadcast_listener::{
 pub use self::client::{
     BlockDataFull, BlockDataFullWithNeighbour, BlockchainRpcClient, BlockchainRpcClientBuilder,
     BlockchainRpcClientConfig, DataRequirement, PendingArchive, PendingArchiveResponse,
-    PendingPersistentState, SelfBroadcastListener,
+    PendingPersistentState, PendingPersistentStatePart, SelfBroadcastListener,
 };
 #[cfg(feature = "s3")]
 pub use self::providers::S3RpcDataProvider;

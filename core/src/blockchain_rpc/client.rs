@@ -23,7 +23,7 @@ use crate::overlay_client::{
 };
 use crate::proto::blockchain::*;
 use crate::proto::overlay::BroadcastPrefix;
-use crate::storage::PersistentStateKind;
+use crate::storage::{PersistentStateKind, validate_persistent_state_split_metadata};
 use crate::util::downloader::{DownloaderError, DownloaderResponseHandle, download_and_decompress};
 
 /// A listener for self-broadcasted messages.
@@ -421,6 +421,72 @@ impl BlockchainRpcClient {
                         kind,
                         size,
                         chunk_size,
+                        split_depth: 0,
+                        parts: Vec::new(),
+                        neighbour,
+                    });
+                }
+                PersistentStateInfo::FoundWithParts {
+                    size,
+                    chunk_size,
+                    split_depth,
+                    parts,
+                } => {
+                    // split not supported for persistent queue state
+                    if kind != PersistentStateKind::Shard {
+                        let neighbour = handle.reject();
+                        let e = anyhow::anyhow!(
+                            "split persistent state info is not supported for {kind:?}"
+                        );
+                        tracing::warn!(
+                            peer_id = %neighbour.peer_id(),
+                            ?kind,
+                            "rejected invalid persistent state split metadata: {e:?}",
+                        );
+                        err = Some(Error::Internal(e));
+                        continue;
+                    }
+
+                    if let Err(e) = validate_persistent_state_split_metadata(
+                        &block_id.shard,
+                        kind,
+                        split_depth,
+                        parts.iter().map(|part| part.prefix),
+                    ) {
+                        let neighbour = handle.reject();
+                        tracing::warn!(
+                            peer_id = %neighbour.peer_id(),
+                            ?kind,
+                            "rejected invalid persistent state split metadata: {e:?}",
+                        );
+                        err = Some(Error::Internal(e));
+                        continue;
+                    }
+
+                    let neighbour = handle.accept();
+                    tracing::debug!(
+                        peer_id = %neighbour.peer_id(),
+                        state_size = size.get(),
+                        state_chunk_size = chunk_size.get(),
+                        state_split_depth = split_depth,
+                        state_parts_count = parts.len(),
+                        ?kind,
+                        "found split persistent state",
+                    );
+
+                    return Ok(PendingPersistentState {
+                        block_id: *block_id,
+                        kind,
+                        size,
+                        chunk_size,
+                        split_depth,
+                        parts: parts
+                            .into_iter()
+                            .map(|part| PendingPersistentStatePart {
+                                prefix: part.prefix,
+                                size: part.size,
+                            })
+                            .collect(),
                         neighbour,
                     });
                 }
@@ -442,6 +508,7 @@ impl BlockchainRpcClient {
     pub async fn download_persistent_state<W>(
         &self,
         state: PendingPersistentState,
+        part_shard_prefix: Option<u64>,
         output: W,
     ) -> Result<W, Error>
     where
@@ -454,9 +521,16 @@ impl BlockchainRpcClient {
 
         let block_id = state.block_id;
         let max_retries = self.inner.config.download_retries;
+        let size = match part_shard_prefix {
+            Some(prefix) => state
+                .part(prefix)
+                .map(|part| part.size)
+                .ok_or(Error::NotFound)?,
+            None => state.size,
+        };
 
         download_and_decompress(
-            state.size,
+            size,
             state.chunk_size,
             PARALLEL_REQUESTS,
             output,
@@ -465,7 +539,15 @@ impl BlockchainRpcClient {
 
                 let req = match state.kind {
                     PersistentStateKind::Shard => {
-                        Request::from_tl(rpc::GetPersistentShardStateChunk { block_id, offset })
+                        if let Some(prefix) = part_shard_prefix {
+                            Request::from_tl(rpc::GetPersistentShardStatePartChunk {
+                                block_id,
+                                prefix,
+                                offset,
+                            })
+                        } else {
+                            Request::from_tl(rpc::GetPersistentShardStateChunk { block_id, offset })
+                        }
                     }
                     PersistentStateKind::Queue => {
                         Request::from_tl(rpc::GetPersistentQueueStateChunk { block_id, offset })
@@ -657,7 +739,21 @@ pub struct PendingPersistentState {
     pub kind: PersistentStateKind,
     pub size: NonZeroU64,
     pub chunk_size: NonZeroU32,
+    pub split_depth: u32,
+    pub parts: Vec<PendingPersistentStatePart>,
     pub neighbour: Neighbour,
+}
+
+impl PendingPersistentState {
+    pub fn part(&self, prefix: u64) -> Option<&PendingPersistentStatePart> {
+        self.parts.iter().find(|part| part.prefix == prefix)
+    }
+}
+
+#[derive(Clone)]
+pub struct PendingPersistentStatePart {
+    pub prefix: u64,
+    pub size: NonZeroU64,
 }
 
 pub struct BlockDataFull {

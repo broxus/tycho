@@ -1,4 +1,5 @@
 use std::fs::File;
+use std::path::Path;
 use std::pin::pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,9 +28,10 @@ use crate::block_strider::{CheckProof, ProofChecker};
 use crate::blockchain_rpc::BlockchainRpcClient;
 use crate::overlay_client::PunishReason;
 use crate::proto::blockchain::{KeyBlockProof, ZerostateProof};
+use crate::storage::shard_state::{RawImportSession, StoreStateRawError};
 use crate::storage::{
     BlockHandle, CoreStorage, KeyBlocksDirection, MaybeExistingHandle, NewBlockMeta,
-    PersistentStateKind,
+    PersistentStateKind, PersistentStateMeta, validate_persistent_state_split_metadata,
 };
 
 impl StarterInner {
@@ -472,12 +474,17 @@ impl StarterInner {
             );
         };
 
-        state_storage.begin_raw_import()?;
+        let raw_import = state_storage.create_raw_import_session();
 
         let mc_block_id = self.zerostate.as_block_id();
         tracing::info!(%mc_block_id, "importing masterchain zerostate");
         state_storage
-            .store_state_bytes(&mc_block_id, mc_zerostate, Some(&self.zerostate.root_hash))
+            .store_state_bytes(
+                &mc_block_id,
+                mc_zerostate,
+                Some(&self.zerostate.root_hash),
+                &raw_import,
+            )
             .await?;
 
         let mc_zerostate = state_storage
@@ -526,7 +533,12 @@ impl StarterInner {
 
             tracing::info!(%block_id, "importing shard zerostate");
             state_storage
-                .store_state_bytes(&block_id, state_bytes, Some(&block_id.root_hash))
+                .store_state_bytes(
+                    &block_id,
+                    state_bytes,
+                    Some(&block_id.root_hash),
+                    &raw_import,
+                )
                 .await?;
         }
 
@@ -596,7 +608,7 @@ impl StarterInner {
             .store_shard_state(mc_block_id.seqno, &handle)
             .await?;
 
-        state_storage.finish_raw_import()?;
+        raw_import.finish()?;
 
         tracing::info!("imported zerostates");
 
@@ -609,19 +621,36 @@ impl StarterInner {
 
         let handle_storage = self.storage.block_handle_storage();
 
+        let state_storage = self.storage.shard_state_storage();
+        let raw_import = state_storage.create_raw_import_session();
+
         let (handle, state) = self
-            .download_shard_state(&zerostate_id, &zerostate_id, true, &zerostate_id.root_hash)
+            .download_shard_state(
+                &zerostate_id,
+                &zerostate_id,
+                true,
+                &zerostate_id.root_hash,
+                &raw_import,
+            )
             .await?;
 
         for item in state.shards()?.latest_blocks() {
             let block_id = item?;
             let (handle, _) = self
-                .download_shard_state(&zerostate_id, &block_id, true, &block_id.root_hash)
+                .download_shard_state(
+                    &zerostate_id,
+                    &block_id,
+                    true,
+                    &block_id.root_hash,
+                    &raw_import,
+                )
                 .await?;
             handle_storage.set_block_committed(&handle);
         }
 
         handle_storage.set_block_committed(&handle);
+
+        raw_import.finish()?;
 
         Ok((handle, state))
     }
@@ -631,6 +660,8 @@ impl StarterInner {
         mc_block_id: &BlockId,
         block_id: &BlockId,
     ) -> Result<(BlockHandle, BlockStuff)> {
+        tracing::info!(%block_id, "download and import queue and shard state: started");
+
         // First download the block itself, with all its parts (proof and queue diff).
         let (handle, block) = self.download_block_data(mc_block_id, block_id).await?;
         self.storage
@@ -641,14 +672,25 @@ impl StarterInner {
         if !self.ignore_states {
             let state_update = block.as_ref().load_state_update()?;
 
+            let state_storage = self.storage.shard_state_storage();
+            let raw_import = state_storage.create_raw_import_session();
+
             let (_, shard_state) = self
-                .download_shard_state(mc_block_id, block_id, false, &state_update.new_hash)
+                .download_shard_state(
+                    mc_block_id,
+                    block_id,
+                    false,
+                    &state_update.new_hash,
+                    &raw_import,
+                )
                 .await?;
             let state_hash = *shard_state.root_cell().repr_hash();
             assert_eq!(
                 state_update.new_hash, state_hash,
                 "storage must verify expected root hash"
             );
+
+            raw_import.finish()?;
         }
 
         // Download persistent queue state
@@ -658,6 +700,8 @@ impl StarterInner {
             let top_update = &block.as_ref().out_msg_queue_updates;
             self.download_queue_state(&handle, top_update).await?;
         }
+
+        tracing::info!(%block_id, "download and import queue and shard state: finished");
 
         Ok((handle, block))
     }
@@ -774,9 +818,10 @@ impl StarterInner {
         block_id: &BlockId,
         is_zerostate: bool,
         expected_state_root: &HashBytes,
+        raw_import: &RawImportSession,
     ) -> Result<(BlockHandle, ShardStateStuff)> {
         enum StoreZeroStateFrom {
-            File(FileBuilder),
+            File(DownloadedPersistentStateBundle),
             State(RefMcStateHandle),
         }
 
@@ -788,15 +833,22 @@ impl StarterInner {
 
         let state_file = temp.file(format!("state_{block_id}"));
         let state_file_path = state_file.path().to_owned();
+        let state_meta_file = state_file.with_extension("meta.json");
+        let state_meta_file_path = state_meta_file.path().to_owned();
 
         // NOTE: Intentionally dont spawn yet
-        let remove_state_file = async move || {
-            if let Err(e) = tokio::fs::remove_file(&state_file_path).await {
-                tracing::warn!(
-                    path = %state_file_path.display(),
-                    "failed to remove downloaded shard state: {e:?}",
-                );
-            }
+        let remove_downloaded_state_files = async move || {
+            let prefixes = PersistentStateMeta::read_from_file(&state_meta_file_path)
+                .ok()
+                .flatten()
+                .map(|meta| meta.parts)
+                .unwrap_or_default();
+            remove_downloaded_persistent_state_files(
+                &state_file_path,
+                &state_meta_file_path,
+                &prefixes,
+            )
+            .await;
         };
 
         let mc_seqno = mc_block_id.seqno;
@@ -805,11 +857,24 @@ impl StarterInner {
             async move {
                 match from {
                     // Fast reuse the downloaded file if possible
-                    StoreZeroStateFrom::File(mut state_file) => {
+                    StoreZeroStateFrom::File(mut bundle) => {
                         // Reuse downloaded (and validated) file as is.
-                        let state_file = state_file.read(true).open()?;
+                        let persistent_parts = bundle
+                            .parts
+                            .iter_mut()
+                            .map(|(prefix, file)| Ok((*prefix, file.read(true).open()?)))
+                            .collect::<Result<Vec<_>>>()?;
                         persistent_states
-                            .store_shard_state_file(mc_seqno, &block_handle, state_file)
+                            .store_shard_state_files(
+                                mc_seqno,
+                                &block_handle,
+                                bundle.main.read(true).open()?,
+                                persistent_parts,
+                                bundle
+                                    .split_depth
+                                    .try_into()
+                                    .context("invalid persistent split depth")?,
+                            )
                             .await
                     }
                     // Possibly slow full state traversal
@@ -843,8 +908,32 @@ impl StarterInner {
             );
 
             if !handle.has_persistent_shard_state() {
-                let from = if state_file.exists() {
-                    StoreZeroStateFrom::File(state_file)
+                let meta = match PersistentStateMeta::read_from_file(state_meta_file.path()) {
+                    Ok(meta) => meta,
+                    Err(e) => {
+                        tracing::warn!("failed to read downloaded persistent state meta: {e:?}");
+                        None
+                    }
+                };
+                let from = if let Some(meta) = &meta
+                    && is_downloaded_persistent_state_ready(&state_file, meta)
+                {
+                    // omit invalid downloaded bundle
+                    match validate_persistent_state_split_metadata(
+                        &block_id.shard,
+                        PersistentStateKind::Shard,
+                        meta.split_depth.into(),
+                        meta.parts.iter().copied(),
+                    ) {
+                        Ok(()) => StoreZeroStateFrom::File(downloaded_persistent_state_bundle(
+                            &state_file,
+                            meta,
+                        )),
+                        Err(e) => {
+                            tracing::warn!("ignoring invalid downloaded persistent state: {e:?}");
+                            StoreZeroStateFrom::State(state.ref_mc_state_handle().clone())
+                        }
+                    }
                 } else {
                     // FIXME: Ensure that `state` is stored as direct.
                     StoreZeroStateFrom::State(state.ref_mc_state_handle().clone())
@@ -854,7 +943,7 @@ impl StarterInner {
                     .context("failed to store persistent shard state")?;
             }
 
-            remove_state_file().await;
+            remove_downloaded_state_files().await;
 
             tracing::info!("using the stored shard state");
             return Ok((handle.clone(), state));
@@ -862,24 +951,34 @@ impl StarterInner {
 
         // Try download the state
         for attempt in 0..MAX_PERSISTENT_STATE_RETRIES {
-            let file = match self
-                .download_persistent_state_file(block_id, PersistentStateKind::Shard, &state_file)
+            let mut bundle = match self
+                .download_persistent_state_bundle(block_id, PersistentStateKind::Shard, &state_file)
                 .await
             {
-                Ok(file) => file,
+                Ok(bundle) => bundle,
                 Err(e) => {
                     tracing::error!(attempt, "failed to download persistent shard state: {e:?}");
-                    remove_state_file().await;
+                    remove_downloaded_state_files().await;
                     continue;
                 }
             };
 
-            // NOTE: `store_state_file` error is mostly unrecoverable since the operation
-            //       context is too large to be atomic. This downloaded-state path is
-            //       rebuild-only on interruption, unlike bootstrap raw import marker cleanup.
-            // TODO: mark all errors before `apply_temp_cell` as recoverable.
+            // NOTE: An error after raw apply starts is unrecoverable because the operation
+            //       context is too large to be atomic. The active session is intentionally
+            //       left unfinished so restart requires a full re-sync.
+            let part_files = bundle
+                .parts
+                .iter_mut()
+                .map(|(_, file)| file.read(true).open())
+                .collect::<Result<Vec<_>, _>>()?;
             match shard_states
-                .store_state_file(block_id, file, Some(expected_state_root))
+                .store_state_split_files(
+                    block_id,
+                    bundle.main.read(true).open()?,
+                    part_files,
+                    Some(expected_state_root),
+                    raw_import,
+                )
                 .await
             {
                 Ok(root_hash) => {
@@ -890,10 +989,18 @@ impl StarterInner {
                 }
                 Err(e) => {
                     tracing::error!("failed to store shard state file: {e:?}");
-                    remove_state_file().await;
-                    continue;
+                    match e.downcast_ref::<StoreStateRawError>() {
+                        Some(StoreStateRawError::BeforeApply(_)) => {
+                            remove_downloaded_state_files().await;
+                            continue;
+                        }
+                        _ => {
+                            // potentially unrecoverable failure, keep poisoned marker
+                            return Err(e).context("shard state storage may be partially modified");
+                        }
+                    }
                 }
-            }
+            };
 
             let state = shard_states
                 .load_state(mc_seqno, block_id)
@@ -918,12 +1025,35 @@ impl StarterInner {
                 block_handles.set_is_zerostate(&block_handle);
             }
 
-            let from = StoreZeroStateFrom::File(state_file);
-            try_save_persistent(&block_handle, from)
+            let persistent_parts = bundle
+                .parts
+                .iter_mut()
+                .map(|(prefix, file)| Ok((*prefix, file.read(true).open()?)))
+                .collect::<Result<Vec<_>>>()?;
+            persistent_states
+                .store_shard_state_files(
+                    mc_seqno,
+                    &block_handle,
+                    bundle.main.read(true).open()?,
+                    persistent_parts,
+                    bundle
+                        .split_depth
+                        .try_into()
+                        .context("invalid persistent split depth")?,
+                )
                 .await
-                .context("failed to store persistent shard state")?;
+                .context("failed to store persistent shard state bundle")?;
 
-            remove_state_file().await;
+            remove_downloaded_persistent_state_files(
+                bundle.main.path(),
+                state_meta_file.path(),
+                &bundle
+                    .parts
+                    .iter()
+                    .map(|(prefix, _)| *prefix)
+                    .collect::<Vec<_>>(),
+            )
+            .await;
 
             tracing::info!("using the downloaded shard state");
             return Ok((block_handle, state));
@@ -1089,29 +1219,213 @@ impl StarterInner {
         kind: PersistentStateKind,
         state_file: &FileBuilder,
     ) -> Result<File> {
+        let mut bundle = self
+            .download_persistent_state_bundle(block_id, kind, state_file)
+            .await?;
+        anyhow::ensure!(
+            bundle.parts.is_empty(),
+            "single-file persistent state download received split bundle"
+        );
+        bundle.main.read(true).open()
+    }
+
+    async fn download_persistent_state_bundle(
+        &self,
+        block_id: &BlockId,
+        kind: PersistentStateKind,
+        state_file: &FileBuilder,
+    ) -> Result<DownloadedPersistentStateBundle> {
         let mut temp_file = state_file.with_extension("temp");
         let temp_file_path = temp_file.path().to_owned();
         scopeguard::defer! {
             std::fs::remove_file(temp_file_path).ok();
         };
 
+        let meta_file = state_file.with_extension("meta.json");
+
         let client = &self.starter_client;
         loop {
-            if state_file.exists() {
-                // Use the downloaded state file if it exists
-                return state_file.clone().read(true).open();
+            if kind == PersistentStateKind::Queue && state_file.exists() {
+                return Ok(DownloadedPersistentStateBundle {
+                    main: state_file.clone(),
+                    parts: Vec::new(),
+                    split_depth: 0,
+                });
             }
 
-            let pending_state = client.find_persistent_state(block_id, kind).await?;
+            let local_meta = match kind {
+                PersistentStateKind::Shard => {
+                    PersistentStateMeta::read_from_file(meta_file.path())?
+                }
+                PersistentStateKind::Queue => None,
+            };
+            if let Some(meta) = &local_meta
+                && is_downloaded_persistent_state_ready(state_file, meta)
+            {
+                // omit and remove invalid downloaded bundle
+                match validate_persistent_state_split_metadata(
+                    &block_id.shard,
+                    kind,
+                    meta.split_depth.into(),
+                    meta.parts.iter().copied(),
+                ) {
+                    Ok(()) => return Ok(downloaded_persistent_state_bundle(state_file, meta)),
+                    Err(e) => {
+                        tracing::warn!("removing invalid downloaded persistent state files: {e:?}");
+                        remove_downloaded_persistent_state_files(
+                            state_file.path(),
+                            meta_file.path(),
+                            &meta.parts,
+                        )
+                        .await;
+                    }
+                }
+            }
 
-            let output = temp_file.write(true).create(true).truncate(true).open()?;
-            _ = (pending_state.download)(output).await?;
+            let mut pending_state = client.find_persistent_state(block_id, kind).await?;
+            let remote_meta = PersistentStateMeta::new(
+                pending_state
+                    .split_depth
+                    .try_into()
+                    .context("invalid persistent split depth")?,
+                pending_state.parts.iter().map(|part| part.prefix).collect(),
+            );
+            // the starter client is trait-based, so keep this boundary check for non-RPC providers
+            validate_persistent_state_split_metadata(
+                &block_id.shard,
+                kind,
+                remote_meta.split_depth.into(),
+                remote_meta.parts.iter().copied(),
+            )?;
 
-            tokio::fs::rename(temp_file.path(), state_file.path()).await?;
+            if local_meta.as_ref() != Some(&remote_meta) {
+                let old_prefixes = local_meta
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|meta| meta.parts.iter().copied());
+                let new_prefixes = remote_meta.parts.iter().copied();
+                remove_downloaded_persistent_state_files(
+                    state_file.path(),
+                    meta_file.path(),
+                    &old_prefixes.chain(new_prefixes).collect::<Vec<_>>(),
+                )
+                .await;
+                if kind == PersistentStateKind::Shard {
+                    remote_meta.write_to_file(meta_file.path())?;
+                }
+            }
 
-            // NOTE: File will be loaded on the next iteration of the loop
+            if is_downloaded_persistent_state_ready(state_file, &remote_meta) {
+                return Ok(downloaded_persistent_state_bundle(state_file, &remote_meta));
+            }
+
+            let parts_to_download = pending_state.parts.clone();
+            let download_part = pending_state.download_part.take();
+            if !state_file.exists() {
+                let output = temp_file.write(true).create(true).truncate(true).open()?;
+                _ = (pending_state.download)(output).await?;
+
+                tokio::fs::rename(temp_file.path(), state_file.path()).await?;
+            }
+
+            if !parts_to_download.is_empty() {
+                let Some(download_part) = download_part else {
+                    anyhow::bail!("split persistent state download missing part downloader");
+                };
+                for part in &parts_to_download {
+                    let part_file = state_file.with_extension(format!("part_{:016x}", part.prefix));
+                    let mut temp_part_file =
+                        state_file.with_extension(format!("part_{:016x}.temp", part.prefix));
+                    let temp_part_file_path = temp_part_file.path().to_owned();
+                    scopeguard::defer! {
+                        std::fs::remove_file(temp_part_file_path).ok();
+                    };
+                    if part_file.exists() {
+                        continue;
+                    }
+
+                    let output = temp_part_file
+                        .write(true)
+                        .create(true)
+                        .truncate(true)
+                        .open()?;
+                    _ = download_part(part.clone(), output).await?;
+
+                    tokio::fs::rename(temp_part_file.path(), part_file.path()).await?;
+                }
+            }
+
+            if is_downloaded_persistent_state_ready(state_file, &remote_meta) {
+                return Ok(downloaded_persistent_state_bundle(state_file, &remote_meta));
+            }
+
+            // NOTE: File will be loaded on the next iteration of the loop.
         }
     }
+}
+
+fn is_downloaded_persistent_state_ready(
+    state_file: &FileBuilder,
+    meta: &PersistentStateMeta,
+) -> bool {
+    state_file.exists()
+        && downloaded_persistent_state_part_files(state_file, meta)
+            .iter()
+            .all(|(_, file)| file.exists())
+}
+
+fn downloaded_persistent_state_bundle(
+    state_file: &FileBuilder,
+    meta: &PersistentStateMeta,
+) -> DownloadedPersistentStateBundle {
+    DownloadedPersistentStateBundle {
+        main: state_file.clone(),
+        parts: downloaded_persistent_state_part_files(state_file, meta),
+        split_depth: meta.split_depth.into(),
+    }
+}
+
+fn downloaded_persistent_state_part_files(
+    state_file: &FileBuilder,
+    meta: &PersistentStateMeta,
+) -> Vec<(u64, FileBuilder)> {
+    meta.parts
+        .iter()
+        .map(|prefix| {
+            (
+                *prefix,
+                state_file.with_extension(format!("part_{prefix:016x}")),
+            )
+        })
+        .collect()
+}
+
+async fn remove_downloaded_persistent_state_files(
+    state_file: &Path,
+    meta_file: &Path,
+    prefixes: &[u64],
+) {
+    let remove_file = async |file_path: &Path| {
+        if let Err(e) = tokio::fs::remove_file(file_path).await {
+            tracing::warn!(
+                file_path = %file_path.display(),
+                "failed to remove downloaded shard state: {e:?}",
+            );
+        }
+    };
+
+    remove_file(state_file).await;
+    remove_file(meta_file).await;
+    for prefix in prefixes {
+        let file = state_file.with_extension(format!("part_{prefix:016x}"));
+        remove_file(file.as_path()).await;
+    }
+}
+
+struct DownloadedPersistentStateBundle {
+    main: FileBuilder,
+    parts: Vec<(u64, FileBuilder)>,
+    split_depth: u32,
 }
 
 async fn download_block_proof_task(
