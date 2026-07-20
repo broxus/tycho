@@ -1,12 +1,13 @@
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use parking_lot::Mutex;
+use lru::LruCache;
+use parking_lot::{Mutex, RwLock};
 use rand::Rng;
-use rand::distr::uniform::{UniformInt, UniformSampler};
 use tokio::sync::Notify;
 use tycho_network::PeerId;
-use tycho_util::FastHashSet;
+use tycho_util::{FastHashSet, FastHasherState};
 
 use crate::overlay_client::neighbour::Neighbour;
 #[derive(Clone)]
@@ -46,14 +47,19 @@ impl Neighbours {
         &self.inner.changed
     }
 
-    pub fn choose(&self) -> Option<Neighbour> {
+    pub fn choose(&self, history: Option<&RequestHistory>) -> Option<Neighbour> {
         let selection_index = self.inner.selection_index.lock();
-        selection_index.choose(&mut rand::rng())
+        selection_index.choose(&mut rand::rng(), history)
     }
 
-    pub fn choose_multiple(&self, n: usize, neighbour_type: NeighbourType) -> Vec<Neighbour> {
+    pub fn choose_multiple(
+        &self,
+        n: usize,
+        neighbour_type: NeighbourType,
+        history: Option<&RequestHistory>,
+    ) -> Vec<Neighbour> {
         let selection_index = self.inner.selection_index.lock();
-        selection_index.choose_multiple(&mut rand::rng(), n, neighbour_type)
+        selection_index.choose_multiple(&mut rand::rng(), n, neighbour_type, history)
     }
 
     /// Tries to apply neighbours score to selection index.
@@ -209,15 +215,14 @@ struct Inner {
 struct SelectionIndex {
     /// Neighbour indices with cumulative weight.
     indices_with_weights: Vec<(Neighbour, u32)>,
-    /// Optional uniform distribution `[0; total_weight)`.
-    distribution: Option<UniformInt<u32>>,
+    total_weight: u32,
 }
 
 impl SelectionIndex {
     fn new(capacity: usize) -> Self {
         Self {
             indices_with_weights: Vec::with_capacity(capacity),
-            distribution: None,
+            total_weight: 0,
         }
     }
 
@@ -232,18 +237,53 @@ impl SelectionIndex {
             }
         }
 
-        self.distribution = UniformInt::new(0, total_weight).ok();
+        self.total_weight = total_weight;
 
         // TODO: fallback to uniform sample from any neighbour
     }
 
-    fn choose<R: Rng + ?Sized>(&self, rng: &mut R) -> Option<Neighbour> {
-        let chosen_weight = self.distribution.as_ref()?.sample(rng);
+    fn choose<R: Rng + ?Sized>(
+        &self,
+        rng: &mut R,
+        history: Option<&RequestHistory>,
+    ) -> Option<Neighbour> {
+        if self.total_weight == 0 || self.indices_with_weights.is_empty() {
+            return None;
+        }
 
-        // Find the first item which has a weight higher than the chosen weight.
-        let i = self
-            .indices_with_weights
-            .partition_point(|(_, w)| *w <= chosen_weight);
+        let i = if let Some(history) = history {
+            let mut adjusted_total_weight = 0;
+            let mut distrubution = vec![0; self.indices_with_weights.len()];
+
+            let history = history.state.read();
+            let mut prev_total_weight = 0;
+            for ((neighbour, total_weight), distrubution) in
+                std::iter::zip(&self.indices_with_weights, &mut distrubution)
+            {
+                let fine = history
+                    .fines
+                    .peek(neighbour.peer_id())
+                    .copied()
+                    .unwrap_or_default();
+
+                let weight = total_weight - prev_total_weight;
+                prev_total_weight = *total_weight;
+
+                debug_assert!(weight > 0);
+
+                let weight = std::cmp::max(weight.saturating_sub(fine as u32), 1);
+                adjusted_total_weight += weight;
+                *distrubution = adjusted_total_weight;
+            }
+            drop(history);
+
+            let chosen_weight = rng.random_range(0..adjusted_total_weight);
+            distrubution.partition_point(|&w| w <= chosen_weight)
+        } else {
+            let chosen_weight = rng.random_range(0..self.total_weight);
+            self.indices_with_weights
+                .partition_point(|(_, w)| *w <= chosen_weight)
+        };
 
         self.indices_with_weights
             .get(i)
@@ -256,6 +296,7 @@ impl SelectionIndex {
         rng: &mut R,
         mut n: usize,
         neighbour_type: NeighbourType,
+        history: Option<&RequestHistory>,
     ) -> Vec<Neighbour> {
         struct Element<'a> {
             key: f64,
@@ -292,18 +333,46 @@ impl SelectionIndex {
         }
 
         let mut candidates = Vec::with_capacity(self.indices_with_weights.len());
-        let mut prev_total_weight = None;
-        for (neighbour, total_weight) in &self.indices_with_weights {
-            let weight = match prev_total_weight {
-                Some(prev) => total_weight - prev,
-                None => *total_weight,
-            };
-            prev_total_weight = Some(*total_weight);
+        let mut prev_total_weight = 0;
+        match history {
+            Some(history) => {
+                let history = history.state.read();
+                for (neighbour, total_weight) in &self.indices_with_weights {
+                    let fine = history
+                        .fines
+                        .peek(neighbour.peer_id())
+                        .copied()
+                        .unwrap_or_default();
 
-            debug_assert!(weight > 0);
+                    let weight = total_weight - prev_total_weight;
+                    prev_total_weight = *total_weight;
 
-            let key = rng.random::<f64>().powf(1.0 / weight as f64);
-            candidates.push(Element { key, neighbour });
+                    debug_assert!(weight > 0);
+
+                    let weight = std::cmp::max(weight.saturating_sub(fine as u32), 1);
+
+                    candidates.push(Element {
+                        key: weight as f64,
+                        neighbour,
+                    });
+                }
+                drop(history);
+
+                for item in candidates.iter_mut() {
+                    item.key = rng.random::<f64>().powf(1.0 / item.key);
+                }
+            }
+            None => {
+                for (neighbour, total_weight) in &self.indices_with_weights {
+                    let weight = total_weight - prev_total_weight;
+                    prev_total_weight = *total_weight;
+
+                    debug_assert!(weight > 0);
+
+                    let key = rng.random::<f64>().powf(1.0 / weight as f64);
+                    candidates.push(Element { key, neighbour });
+                }
+            }
         }
 
         // Partially sort the array to find the `n` elements with the greatest
@@ -335,4 +404,52 @@ impl SelectionIndex {
 pub enum NeighbourType {
     All,
     Reliable,
+}
+
+#[derive(Clone)]
+pub struct RequestHistory {
+    state: Arc<RwLock<RequestHistoryState>>,
+}
+
+impl RequestHistory {
+    // NOTE: This value is chosen to just slightly outweight the "fast node" factor.
+    const MAX_FINE: u8 = 16;
+    const INITIAL_FINE: u8 = 1;
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            state: Arc::new(RwLock::new(RequestHistoryState {
+                fines: LruCache::with_hasher(
+                    NonZeroUsize::new(capacity).unwrap_or(NonZeroUsize::MIN),
+                    Default::default(),
+                ),
+            })),
+        }
+    }
+
+    pub fn got_response(&self, peer_id: &PeerId, useful: bool) {
+        let mut state = self.state.write();
+
+        if useful {
+            if let Some(fine) = state.fines.get_mut(peer_id) {
+                *fine >>= 1;
+                if *fine == 0 {
+                    state.fines.pop(peer_id);
+                }
+            }
+        } else {
+            let mut apply_fine = true;
+            let fine = state.fines.get_or_insert_mut(*peer_id, || {
+                apply_fine = false;
+                Self::INITIAL_FINE
+            });
+            if apply_fine && *fine < Self::MAX_FINE {
+                *fine <<= 1;
+            }
+        }
+    }
+}
+
+struct RequestHistoryState {
+    fines: LruCache<PeerId, u8, FastHasherState>,
 }

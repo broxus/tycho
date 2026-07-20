@@ -20,6 +20,7 @@ use tycho_util::serde_helpers;
 
 use crate::overlay_client::{
     Error, Neighbour, NeighbourType, PublicOverlayClient, QueryResponse, QueryResponseHandle,
+    RequestHistory,
 };
 use crate::proto::blockchain::*;
 use crate::proto::overlay::BroadcastPrefix;
@@ -54,6 +55,9 @@ pub struct BlockchainRpcClientConfig {
     ///
     /// Default: 10.
     pub download_retries: usize,
+
+    /// Capacity of per-request peer history.
+    pub request_history_size: BlockchainRpcRequestHistorySize,
 }
 
 impl Default for BlockchainRpcClientConfig {
@@ -62,8 +66,56 @@ impl Default for BlockchainRpcClientConfig {
             min_broadcast_timeout: Duration::from_millis(100),
             too_new_archive_threshold: 4,
             download_retries: 10,
+            request_history_size: Default::default(),
         }
     }
+}
+
+macro_rules! define_request_history {
+    (
+        config: $size:ident,
+        state: $state:ident,
+        default: { $($name:ident = $default:expr,)*$(,)? }$(,)?
+    ) => {
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        #[serde(default)]
+        pub struct $size {
+            $(pub $name: Option<usize>,)*
+        }
+
+        impl $size {
+            pub fn build_history(&self) -> $state {
+                $state {
+                    $($name: self.$name.map(RequestHistory::with_capacity),)*
+                }
+            }
+        }
+
+        impl Default for $size {
+            fn default() -> Self {
+                Self {
+                    $($name: $default,)*
+                }
+            }
+        }
+
+        pub struct $state {
+            $(pub $name: Option<RequestHistory>,)*
+        }
+    };
+}
+
+define_request_history! {
+    config: BlockchainRpcRequestHistorySize,
+    state: BlockchainRpcRequestHistory,
+    default: {
+        get_block_full = Some(20),
+        get_next_block_full = Some(20),
+        get_key_block_proof = Some(20),
+        get_zerostate_proof = Some(40),
+        get_persistent_state_info = Some(40),
+        get_archive_info = Some(20),
+    },
 }
 
 pub struct BlockchainRpcClientBuilder<MandatoryFields = PublicOverlayClient> {
@@ -74,6 +126,8 @@ pub struct BlockchainRpcClientBuilder<MandatoryFields = PublicOverlayClient> {
 
 impl BlockchainRpcClientBuilder<PublicOverlayClient> {
     pub fn build(self) -> BlockchainRpcClient {
+        let history = self.config.request_history_size.build_history();
+
         BlockchainRpcClient {
             inner: Arc::new(Inner {
                 config: self.config,
@@ -89,6 +143,7 @@ impl BlockchainRpcClientBuilder<PublicOverlayClient> {
                     )
                     .expect("correct quantile"),
                 ),
+                history,
             }),
         }
     }
@@ -252,10 +307,13 @@ impl BlockchainRpcClient {
     ) -> Result<QueryResponse<KeyBlockIds>, Error> {
         let client = &self.inner.overlay_client;
         let data = client
-            .query::<_, KeyBlockIds>(&rpc::GetNextKeyBlockIds {
-                block_id: *block,
-                max_size,
-            })
+            .query::<_, KeyBlockIds>(
+                &rpc::GetNextKeyBlockIds {
+                    block_id: *block,
+                    max_size,
+                },
+                None,
+            )
             .await?;
         Ok(data)
     }
@@ -271,7 +329,8 @@ impl BlockchainRpcClient {
     ) -> Result<BlockDataFullWithNeighbour, Error> {
         let overlay_client = self.inner.overlay_client.clone();
 
-        let Some(neighbour) = overlay_client.neighbours().choose() else {
+        let history = self.inner.history.get_block_full.as_ref();
+        let Some(neighbour) = overlay_client.neighbours().choose(history) else {
             return Err(Error::NoNeighbours);
         };
 
@@ -282,6 +341,7 @@ impl BlockchainRpcClient {
             overlay_client,
             neighbour,
             requirement,
+            history,
             retries,
         )
         .await
@@ -294,7 +354,8 @@ impl BlockchainRpcClient {
     ) -> Result<BlockDataFullWithNeighbour, Error> {
         let overlay_client = self.inner.overlay_client.clone();
 
-        let Some(neighbour) = overlay_client.neighbours().choose() else {
+        let history = self.inner.history.get_next_block_full.as_ref();
+        let Some(neighbour) = overlay_client.neighbours().choose(history) else {
             return Err(Error::NoNeighbours);
         };
 
@@ -307,6 +368,7 @@ impl BlockchainRpcClient {
             overlay_client,
             neighbour,
             requirement,
+            history,
             retries,
         )
         .await
@@ -317,20 +379,30 @@ impl BlockchainRpcClient {
         block_id: &BlockId,
     ) -> Result<QueryResponse<KeyBlockProof>, Error> {
         let client = &self.inner.overlay_client;
-        let data = client
-            .query::<_, KeyBlockProof>(&rpc::GetKeyBlockProof {
-                block_id: *block_id,
-            })
+
+        let res = client
+            .query::<_, KeyBlockProof>(
+                &rpc::GetKeyBlockProof {
+                    block_id: *block_id,
+                },
+                self.inner.history.get_key_block_proof.as_ref(),
+            )
             .await?;
-        Ok(data)
+
+        Ok(res)
     }
 
     pub async fn get_zerostate_proof(&self) -> Result<QueryResponse<ZerostateProof>, Error> {
         let client = &self.inner.overlay_client;
-        let data = client
-            .query::<_, ZerostateProof>(&rpc::GetZerostateProof)
+
+        let res = client
+            .query::<_, ZerostateProof>(
+                &rpc::GetZerostateProof,
+                self.inner.history.get_zerostate_proof.as_ref(),
+            )
             .await?;
-        Ok(data)
+
+        Ok(res)
     }
 
     pub async fn get_persistent_state_info(
@@ -338,12 +410,17 @@ impl BlockchainRpcClient {
         block_id: &BlockId,
     ) -> Result<QueryResponse<PersistentStateInfo>, Error> {
         let client = &self.inner.overlay_client;
-        let data = client
-            .query::<_, PersistentStateInfo>(&rpc::GetPersistentShardStateInfo {
-                block_id: *block_id,
-            })
+
+        let res = client
+            .query::<_, PersistentStateInfo>(
+                &rpc::GetPersistentShardStateInfo {
+                    block_id: *block_id,
+                },
+                self.inner.history.get_persistent_state_info.as_ref(),
+            )
             .await?;
-        Ok(data)
+
+        Ok(res)
     }
 
     pub async fn get_persistent_state_part(
@@ -360,6 +437,7 @@ impl BlockchainRpcClient {
                     block_id: *block_id,
                     offset,
                 }),
+                None,
             )
             .await?;
         Ok(data)
@@ -372,11 +450,14 @@ impl BlockchainRpcClient {
     ) -> Result<PendingPersistentState, Error> {
         const NEIGHBOUR_COUNT: usize = 10;
 
+        let history = self.inner.history.get_persistent_state_info.as_ref();
+
         // Get reliable neighbours with higher weight
-        let neighbours = self
-            .overlay_client()
-            .neighbours()
-            .choose_multiple(NEIGHBOUR_COUNT, NeighbourType::Reliable);
+        let neighbours = self.overlay_client().neighbours().choose_multiple(
+            NEIGHBOUR_COUNT,
+            NeighbourType::Reliable,
+            history,
+        );
 
         let req = match kind {
             PersistentStateKind::Shard => Request::from_tl(rpc::GetPersistentShardStateInfo {
@@ -389,10 +470,11 @@ impl BlockchainRpcClient {
 
         let mut futures = FuturesUnordered::new();
         for neighbour in neighbours {
-            futures.push(
-                self.overlay_client()
-                    .query_raw::<PersistentStateInfo>(neighbour.clone(), req.clone()),
-            );
+            futures.push(self.overlay_client().query_raw::<PersistentStateInfo>(
+                neighbour.clone(),
+                req.clone(),
+                history,
+            ));
         }
 
         let mut err = None;
@@ -498,10 +580,12 @@ impl BlockchainRpcClient {
         const NEIGHBOUR_COUNT: usize = 10;
 
         // Get reliable neighbours with higher weight
-        let neighbours = self
-            .overlay_client()
-            .neighbours()
-            .choose_multiple(NEIGHBOUR_COUNT, NeighbourType::Reliable);
+        let history = self.inner.history.get_archive_info.as_ref();
+        let neighbours = self.overlay_client().neighbours().choose_multiple(
+            NEIGHBOUR_COUNT,
+            NeighbourType::Reliable,
+            history,
+        );
 
         // Find a neighbour which has the requested archive
         let pending_archive = 'info: {
@@ -512,7 +596,10 @@ impl BlockchainRpcClient {
 
             let mut futures = FuturesUnordered::new();
             for neighbour in neighbours {
-                futures.push(self.overlay_client().query_raw(neighbour, req.clone()));
+                futures.push(
+                    self.overlay_client()
+                        .query_raw(neighbour, req.clone(), history),
+                );
             }
 
             let mut err = None;
@@ -638,6 +725,7 @@ struct Inner {
     overlay_client: PublicOverlayClient,
     broadcast_listener: Option<Box<dyn SelfBroadcastListener>>,
     response_tracker: Mutex<tycho_util::time::RollingP2Estimator>,
+    history: BlockchainRpcRequestHistory,
 }
 
 pub enum PendingArchiveResponse {
@@ -695,13 +783,14 @@ async fn download_block_inner(
     overlay_client: PublicOverlayClient,
     neighbour: Neighbour,
     requirement: DataRequirement,
+    history: Option<&RequestHistory>,
     retries: usize,
 ) -> Result<BlockDataFullWithNeighbour, Error> {
     let response = overlay_client
-        .query_raw::<BlockFull>(neighbour.clone(), req)
+        .query_raw::<BlockFull>(neighbour.clone(), req, history)
         .await?;
 
-    let (handle, block_full) = response.split();
+    let (mut handle, block_full) = response.split();
 
     let BlockFull::Found {
         block_id,
@@ -710,6 +799,7 @@ async fn download_block_inner(
         queue_diff: queue_diff_data,
     } = block_full
     else {
+        handle.attach_history(history.cloned());
         match requirement {
             DataRequirement::Optional => {
                 handle.ignore();
@@ -727,6 +817,10 @@ async fn download_block_inner(
             neighbour,
         });
     };
+
+    if let Some(history) = history {
+        history.got_response(handle.neighbour().peer_id(), true);
+    }
 
     const PARALLEL_REQUESTS: usize = 10;
 
@@ -815,6 +909,8 @@ async fn download_block_inner(
         .map(Bytes::from)
         .map_err(Error::Internal)?;
 
+    handle.accept();
+
     Ok(BlockDataFullWithNeighbour {
         data: Some(BlockDataFull {
             block_id,
@@ -836,7 +932,7 @@ async fn download_with_retries(
     let mut retries = 0;
     loop {
         match overlay_client
-            .query_raw::<Data>(neighbour.clone(), req.clone())
+            .query_raw::<Data>(neighbour.clone(), req.clone(), None)
             .await
         {
             Ok(r) => {
@@ -914,7 +1010,7 @@ mod tests {
                 let from = offset as usize;
                 let to = std::cmp::min(from + CHUNK_SIZE, compressed_data.len());
                 let chunk = compressed_data.slice(from..to);
-                let handle = QueryResponseHandle::with_roundtrip_ms(neighbour.clone(), 100);
+                let handle = QueryResponseHandle::with_roundtrip_ms(neighbour.clone(), 100, None);
                 futures_util::future::ready(Ok::<_, StubError>((handle, chunk)))
             },
             |result, chunk| {
