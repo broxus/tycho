@@ -283,7 +283,7 @@ impl DiffStatistics {
 
     pub fn total_statistics(&self) -> AccountStatistics {
         let mut total_statistics = FastHashMap::default();
-        for (_, partition_statistics) in self.inner.statistics.iter() {
+        for partition_statistics in self.inner.statistics.values() {
             for (account_addr, msgs_count) in partition_statistics {
                 total_statistics
                     .entry(account_addr.clone())

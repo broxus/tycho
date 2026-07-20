@@ -228,7 +228,7 @@ where
     /// After sync resumes collators, the next `detect_next_collation_step` must not
     /// use stale pre-sync statuses to start or resume a collator that is already in use.
     fn reset_collation_sync_status(guard: &mut CollationSyncState) {
-        for (_, collation_state) in guard.states.iter_mut() {
+        for collation_state in guard.states.values_mut() {
             collation_state.status = CollationStatus::AttemptsInProgress;
         }
     }

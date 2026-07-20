@@ -63,7 +63,7 @@ impl ArchiveProvider {
             let mut archive = None;
 
             let guard = self.archives.lock();
-            for (_, value) in guard.iter() {
+            for value in guard.values() {
                 if value.mc_block_ids.contains_key(&mc_block_id.seqno) {
                     archive = Some(value.clone());
                 }
@@ -109,7 +109,7 @@ impl BlockProvider for ArchiveProvider {
         let guard = self.archives.lock();
 
         let mut block_id = None;
-        for (_, value) in guard.iter() {
+        for value in guard.values() {
             if let Some(id) = value.mc_block_ids.get(&(prev_block_id.seqno + 1)) {
                 block_id = Some(*id);
             };
@@ -926,7 +926,7 @@ async fn heavy_archives() -> Result<()> {
             ArchiveBlockProvider::new(client, storage, ArchiveBlockProviderConfig::default());
 
         // getBlock
-        for (_, mc_block_id) in archive.mc_block_ids.iter() {
+        for mc_block_id in archive.mc_block_ids.values() {
             let result = archive_block_provider
                 .get_block(&mc_block_id.relative_to_self())
                 .await;

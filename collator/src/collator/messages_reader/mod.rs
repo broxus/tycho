@@ -334,12 +334,12 @@ impl<'a, 'b, V: InternalMessageValue> MessagesReader<'a, 'b, V> {
         let initial_reader_stage = MessagesReaderStage::ExistingAndExternals;
 
         // reset internals reader stages
-        for (_, par_reader_stage) in self.readers_stages.iter_mut() {
+        for par_reader_stage in self.readers_stages.values_mut() {
             *par_reader_stage = initial_reader_stage;
         }
 
         // reset internals readers
-        for (_, par) in self.internals_partition_readers.iter_mut() {
+        for par in self.internals_partition_readers.values_mut() {
             par.reset_read_state();
         }
 
@@ -358,7 +358,7 @@ impl<'a, 'b, V: InternalMessageValue> MessagesReader<'a, 'b, V> {
     }
 
     pub fn check_has_pending_internals_in_iterators(&mut self) -> Result<bool> {
-        for (_, par_reader) in self.internals_partition_readers.iter_mut() {
+        for par_reader in self.internals_partition_readers.values_mut() {
             if par_reader.check_has_pending_internals_in_iterators()? {
                 return Ok(true);
             }
@@ -367,7 +367,7 @@ impl<'a, 'b, V: InternalMessageValue> MessagesReader<'a, 'b, V> {
     }
 
     pub fn drop_internals_next_range_readers(&mut self) {
-        for (_, par_reader) in self.internals_partition_readers.iter_mut() {
+        for par_reader in self.internals_partition_readers.values_mut() {
             par_reader.drop_next_range_reader();
         }
     }

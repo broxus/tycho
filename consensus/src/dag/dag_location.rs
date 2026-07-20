@@ -464,8 +464,8 @@ impl Debug for AltFmt<'_, Signed<'_>> {
         write!(
             f,
             "Signed {{ {:?} {} }}",
-            &inner.first_resolved.info().id().alt(),
-            &inner.first_resolved.alt()
+            inner.first_resolved.info().id().alt(),
+            inner.first_resolved.alt()
         )
     }
 }

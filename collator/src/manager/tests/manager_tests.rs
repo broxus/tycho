@@ -4090,11 +4090,11 @@ impl TestProcessedToStuff {
             QueueKey::max_for_lt(block_stuff.end_lt()),
         );
         if shard.is_masterchain() {
-            for (_, partition_processed_to) in self.mc_processed_to_info.iter_mut() {
+            for partition_processed_to in self.mc_processed_to_info.values_mut() {
                 partition_processed_to.insert(block_stuff.id().shard, value);
             }
         } else {
-            for (_, partition_processed_to) in self.sc_processed_to_info.iter_mut() {
+            for partition_processed_to in self.sc_processed_to_info.values_mut() {
                 partition_processed_to.insert(block_stuff.id().shard, value);
             }
         }

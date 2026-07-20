@@ -1132,7 +1132,7 @@ where
         }
 
         // prune
-        for (_, collation_state) in guard.states.iter_mut() {
+        for collation_state in guard.states.values_mut() {
             collation_state
                 .last_imported_anchor_events
                 .retain(|it| it.ct > chain_time);

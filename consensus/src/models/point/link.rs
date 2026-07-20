@@ -106,7 +106,7 @@ impl AltFormat for IndirectLink {}
 impl Debug for AltFmt<'_, IndirectLink> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let inner = AltFormat::unpack(self);
-        write!(f, "to {:?} {:?}", &inner.to.alt(), &inner.path.alt())
+        write!(f, "to {:?} {:?}", inner.to.alt(), inner.path.alt())
     }
 }
 
