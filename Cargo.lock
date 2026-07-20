@@ -2804,9 +2804,9 @@ dependencies = [
 
 [[package]]
 name = "quinn-udp"
-version = "0.5.14"
+version = "0.5.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "addec6a0dcad8a8d96a771f815f0eaf55f9d1805756410b39f5fa81332574cbd"
+checksum = "35a133f956daabe89a61a685c2649f13d82d5aa4bd5d12d1277e1072a21c0694"
 dependencies = [
  "cfg_aliases",
  "libc",
@@ -4356,8 +4356,7 @@ dependencies = [
 [[package]]
 name = "tycho-executor"
 version = "0.3.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db04352220fdd532d450d9d2f2f54a8a92e6b223e1d6db54be7897242233fe0c"
+source = "git+https://github.com/broxus/tycho-vm.git?rev=e16ccb889e38fa2d031f744677ca35134f544086#e16ccb889e38fa2d031f744677ca35134f544086"
 dependencies = [
  "ahash",
  "anyhow",
@@ -4671,8 +4670,7 @@ dependencies = [
 [[package]]
 name = "tycho-vm"
 version = "0.3.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "398fd01d7033c604004294a42d2ec0096ff0337db303c250aea76a7515cf6f15"
+source = "git+https://github.com/broxus/tycho-vm.git?rev=e16ccb889e38fa2d031f744677ca35134f544086#e16ccb889e38fa2d031f744677ca35134f544086"
 dependencies = [
  "ahash",
  "anyhow",
@@ -4693,8 +4691,7 @@ dependencies = [
 [[package]]
 name = "tycho-vm-proc"
 version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6aac25f611eb7ab6031a0a3c0ea14884989a7280073bb154b431a991f9adb779"
+source = "git+https://github.com/broxus/tycho-vm.git?rev=e16ccb889e38fa2d031f744677ca35134f544086#e16ccb889e38fa2d031f744677ca35134f544086"
 dependencies = [
  "darling",
  "proc-macro2",

@@ -863,7 +863,7 @@ impl ShardAccountStuff {
         account_meta: AccountMeta,
         tx: Lazy<Transaction>,
         tx_meta: &TransactionMeta,
-        mut public_libs_diff: Vec<PublicLibraryChange>,
+        public_libs_diff: FastHashMap<HashBytes, PublicLibraryChange>,
     ) {
         use std::collections::hash_map;
 
@@ -893,36 +893,24 @@ impl ShardAccountStuff {
         };
 
         if is_masterchain {
-            // Sort diff in reverse order (sort must be stable here).
-            public_libs_diff.sort_by(|a, b| a.lib_hash().cmp(b.lib_hash()).reverse());
-
-            // Merge diff with the previous.
-            let mut prev_hash = None::<HashBytes>;
-            for op in public_libs_diff {
-                let hash = op.lib_hash();
-                if matches!(&prev_hash, Some(prev_hash) if prev_hash == hash) {
-                    // Skip duplicates (only the last change will be used because of reverse order).
-                    continue;
-                }
-                prev_hash = Some(*hash);
-
-                match self.public_libs_diff.entry(*hash) {
+            for (hash, op) in public_libs_diff {
+                match self.public_libs_diff.entry(hash) {
                     hash_map::Entry::Vacant(entry) => {
                         entry.insert(match op {
                             PublicLibraryChange::Add(cell) => Some(cell),
-                            PublicLibraryChange::Remove(_) => None,
+                            PublicLibraryChange::Remove => None,
                         });
                     }
                     hash_map::Entry::Occupied(entry) => match (entry.get(), op) {
                         // Removed before, added later -> no diff.
                         // Added before, removed later -> no diff.
                         (None, PublicLibraryChange::Add(_))
-                        | (Some(_), PublicLibraryChange::Remove(_)) => {
+                        | (Some(_), PublicLibraryChange::Remove) => {
                             entry.remove();
                         }
                         // Removed before, removed now -> diff persists.
                         // Added before, added now -> diff persists.
-                        (None, PublicLibraryChange::Remove(_))
+                        (None, PublicLibraryChange::Remove)
                         | (Some(_), PublicLibraryChange::Add(_)) => {}
                     },
                 }
