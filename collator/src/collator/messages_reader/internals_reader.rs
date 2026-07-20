@@ -715,7 +715,7 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
                         }
                         None => {
                             // set current position to the end of the range
-                            for (_, shard_reader_state) in reader_state.shards.iter_mut() {
+                            for shard_reader_state in reader_state.shards.values_mut() {
                                 shard_reader_state.set_fully_read();
                             }
 
@@ -872,7 +872,7 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
                 }
                 None => {
                     // set current position to the end of the range
-                    for (_, shard_reader_state) in reader_state.shards.iter_mut() {
+                    for shard_reader_state in reader_state.shards.values_mut() {
                         shard_reader_state.set_fully_read();
                     }
                 }

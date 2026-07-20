@@ -120,6 +120,7 @@ impl AccountStateResponse {
     }
 }
 
+#[allow(unused)]
 fn deserialize_account<'de, D>(deserializer: D) -> Result<Box<Account>, D::Error>
 where
     D: serde::Deserializer<'de>,

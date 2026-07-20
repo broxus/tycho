@@ -343,7 +343,7 @@ mod tests {
         anyhow::ensure!(
             inner.waiters.is_empty(),
             "all waiters must be removed: {:?}",
-            &*inner
+            inner
         );
         Ok(())
     }

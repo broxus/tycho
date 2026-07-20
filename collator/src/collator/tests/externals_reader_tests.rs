@@ -175,7 +175,7 @@ fn test_read_externals() {
             .increment_curr_processed_offset(par_id)
             .unwrap();
         let mut msg_group = MessageGroup::default();
-        let CollectExternalsResult { metrics: _, .. } = externals_reader
+        let CollectExternalsResult { .. } = externals_reader
             .collect_messages(
                 *par_id,
                 &mut msg_group,
@@ -296,7 +296,7 @@ fn test_read_externals() {
             .increment_curr_processed_offset(par_id)
             .unwrap();
         let mut msg_group = MessageGroup::default();
-        let CollectExternalsResult { metrics: _, .. } = externals_reader
+        let CollectExternalsResult { .. } = externals_reader
             .collect_messages(
                 *par_id,
                 &mut msg_group,
@@ -382,7 +382,7 @@ fn test_read_externals() {
             .increment_curr_processed_offset(par_id)
             .unwrap();
         let mut msg_group = MessageGroup::default();
-        let CollectExternalsResult { metrics: _, .. } = externals_reader
+        let CollectExternalsResult { .. } = externals_reader
             .collect_messages(
                 *par_id,
                 &mut msg_group,
@@ -451,7 +451,7 @@ fn test_read_externals() {
             .increment_curr_processed_offset(par_id)
             .unwrap();
         let mut msg_group = MessageGroup::default();
-        let CollectExternalsResult { metrics: _, .. } = externals_reader
+        let CollectExternalsResult { .. } = externals_reader
             .collect_messages(
                 *par_id,
                 &mut msg_group,
@@ -678,7 +678,7 @@ fn test_read_externals() {
             .increment_curr_processed_offset(par_id)
             .unwrap();
         let mut msg_group = MessageGroup::default();
-        let CollectExternalsResult { metrics: _, .. } = externals_reader
+        let CollectExternalsResult { .. } = externals_reader
             .collect_messages(
                 *par_id,
                 &mut msg_group,
@@ -843,7 +843,7 @@ fn test_read_externals() {
                 .increment_curr_processed_offset(par_id)
                 .unwrap();
             let mut msg_group = MessageGroup::default();
-            let CollectExternalsResult { metrics: _, .. } = externals_reader
+            let CollectExternalsResult { .. } = externals_reader
                 .collect_messages(
                     *par_id,
                     &mut msg_group,
