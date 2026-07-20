@@ -45,7 +45,7 @@ pub async fn test() {
     let slice = initial_peers.as_slice();
     while i < 1000 {
         // let start = Instant::now();
-        let n_opt = neighbours.choose();
+        let n_opt = neighbours.choose(None);
         // let end = Instant::now();
 
         if let Some(n) = n_opt {

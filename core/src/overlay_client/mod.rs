@@ -9,7 +9,7 @@ use tycho_network::{ConnectionError, Network, PublicOverlay, Request, UnknownPee
 
 pub use self::config::{NeighborsConfig, PublicOverlayClientConfig, ValidatorsConfig};
 pub use self::neighbour::{Neighbour, NeighbourStats, PunishReason};
-pub use self::neighbours::{NeighbourType, Neighbours};
+pub use self::neighbours::{NeighbourType, Neighbours, RequestHistory};
 pub use self::validators::{Validator, ValidatorSetPeers, ValidatorsResolver};
 use crate::proto::overlay;
 
@@ -131,12 +131,16 @@ impl PublicOverlayClient {
         self.inner.send_impl(neighbour, req).await
     }
 
-    pub async fn query<R, A>(&self, data: R) -> Result<QueryResponse<A>, Error>
+    pub async fn query<R, A>(
+        &self,
+        data: R,
+        history: Option<&RequestHistory>,
+    ) -> Result<QueryResponse<A>, Error>
     where
         R: tl_proto::TlWrite<Repr = tl_proto::Boxed>,
         for<'a> A: tl_proto::TlRead<'a, Repr = tl_proto::Boxed>,
     {
-        self.inner.query(data).await
+        self.inner.query(data, history).await
     }
 
     #[inline]
@@ -144,11 +148,15 @@ impl PublicOverlayClient {
         &self,
         neighbour: Neighbour,
         req: Request,
+        history: Option<&RequestHistory>,
     ) -> Result<QueryResponse<A>, Error>
     where
         for<'a> A: tl_proto::TlRead<'a, Repr = tl_proto::Boxed>,
     {
-        self.inner.query_impl(neighbour, req).await?.parse()
+        self.inner
+            .query_impl(neighbour, req, history)
+            .await?
+            .parse()
     }
 }
 
@@ -222,7 +230,7 @@ impl Inner {
             };
 
             let peer_id = *neighbour.peer_id();
-            match self.query_impl(neighbour.clone(), req.clone()).await {
+            match self.query_impl(neighbour.clone(), req.clone(), None).await {
                 Ok(res) => match tl_proto::deserialize::<overlay::Pong>(&res.data) {
                     Ok(_) => {
                         res.accept();
@@ -337,7 +345,7 @@ impl Inner {
     where
         R: tl_proto::TlWrite<Repr = tl_proto::Boxed>,
     {
-        let Some(neighbour) = self.neighbours.choose() else {
+        let Some(neighbour) = self.neighbours.choose(None) else {
             return Err(Error::NoNeighbours);
         };
 
@@ -352,16 +360,20 @@ impl Inner {
         res.map_err(Error::NetworkError)
     }
 
-    async fn query<R, A>(&self, data: R) -> Result<QueryResponse<A>, Error>
+    async fn query<R, A>(
+        &self,
+        data: R,
+        history: Option<&RequestHistory>,
+    ) -> Result<QueryResponse<A>, Error>
     where
         R: tl_proto::TlWrite<Repr = tl_proto::Boxed>,
         for<'a> A: tl_proto::TlRead<'a, Repr = tl_proto::Boxed>,
     {
-        let Some(neighbour) = self.neighbours.choose() else {
+        let Some(neighbour) = self.neighbours.choose(history) else {
             return Err(Error::NoNeighbours);
         };
 
-        self.query_impl(neighbour, Request::from_tl(data))
+        self.query_impl(neighbour, Request::from_tl(data), history)
             .await?
             .parse()
     }
@@ -399,6 +411,7 @@ impl Inner {
         &self,
         neighbour: Neighbour,
         req: Request,
+        history: Option<&RequestHistory>,
     ) -> Result<QueryResponse<Bytes>, Error> {
         let started_at = Instant::now();
 
@@ -415,6 +428,7 @@ impl Inner {
                 data: response.body,
                 roundtrip_ms: roundtrip.as_millis() as u64,
                 neighbour,
+                history: history.cloned(),
             }),
             Ok(Err(e)) => {
                 neighbour.track_request(&roundtrip, Some(false));
@@ -454,6 +468,7 @@ pub struct QueryResponse<A> {
     data: A,
     neighbour: Neighbour,
     roundtrip_ms: u64,
+    history: Option<RequestHistory>,
 }
 
 impl<A> QueryResponse<A> {
@@ -461,27 +476,36 @@ impl<A> QueryResponse<A> {
         &self.data
     }
 
+    pub fn neighbour(&self) -> &Neighbour {
+        &self.neighbour
+    }
+
     pub fn split(self) -> (QueryResponseHandle, A) {
-        let handle = QueryResponseHandle::with_roundtrip_ms(self.neighbour, self.roundtrip_ms);
+        let handle =
+            QueryResponseHandle::with_roundtrip_ms(self.neighbour, self.roundtrip_ms, self.history);
         (handle, self.data)
     }
 
-    pub fn accept(self) -> (Neighbour, A) {
+    pub fn accept(mut self) -> (Neighbour, A) {
         self.track_request(Some(true));
         (self.neighbour, self.data)
     }
 
-    pub fn reject(self) -> (Neighbour, A) {
+    pub fn reject(mut self) -> (Neighbour, A) {
         self.track_request(Some(false));
         (self.neighbour, self.data)
     }
 
-    pub fn ignore(self) -> (Neighbour, A) {
+    pub fn ignore(mut self) -> (Neighbour, A) {
         self.track_request(None);
         (self.neighbour, self.data)
     }
 
-    fn track_request(&self, success: Option<bool>) {
+    fn track_request(&mut self, success: Option<bool>) {
+        if let Some(history) = self.history.take() {
+            history.got_response(self.neighbour.peer_id(), matches!(success, Some(true)));
+        }
+
         self.neighbour
             .track_request(&Duration::from_millis(self.roundtrip_ms), success);
     }
@@ -505,6 +529,7 @@ impl QueryResponse<Bytes> {
                 data,
                 roundtrip_ms: self.roundtrip_ms,
                 neighbour: self.neighbour,
+                history: self.history,
             }),
             overlay::Response::Err(code) => {
                 self.reject();
@@ -517,32 +542,50 @@ impl QueryResponse<Bytes> {
 pub struct QueryResponseHandle {
     neighbour: Neighbour,
     roundtrip_ms: u64,
+    history: Option<RequestHistory>,
 }
 
 impl QueryResponseHandle {
-    pub fn with_roundtrip_ms(neighbour: Neighbour, roundtrip_ms: u64) -> Self {
+    pub fn with_roundtrip_ms(
+        neighbour: Neighbour,
+        roundtrip_ms: u64,
+        history: Option<RequestHistory>,
+    ) -> Self {
         Self {
             neighbour,
             roundtrip_ms,
+            history,
         }
     }
 
-    pub fn accept(self) -> Neighbour {
+    pub fn attach_history(&mut self, history: Option<RequestHistory>) {
+        self.history = history;
+    }
+
+    pub fn neighbour(&self) -> &Neighbour {
+        &self.neighbour
+    }
+
+    pub fn accept(mut self) -> Neighbour {
         self.track_request(Some(true));
         self.neighbour
     }
 
-    pub fn reject(self) -> Neighbour {
+    pub fn reject(mut self) -> Neighbour {
         self.track_request(Some(false));
         self.neighbour
     }
 
-    pub fn ignore(self) -> Neighbour {
+    pub fn ignore(mut self) -> Neighbour {
         self.track_request(None);
         self.neighbour
     }
 
-    fn track_request(&self, success: Option<bool>) {
+    fn track_request(&mut self, success: Option<bool>) {
+        if let Some(history) = self.history.take() {
+            history.got_response(self.neighbour.peer_id(), matches!(success, Some(true)));
+        }
+
         self.neighbour
             .track_request(&Duration::from_millis(self.roundtrip_ms), success);
     }
