@@ -23,7 +23,7 @@ use tycho_util::{FastHashMap, FastHashSet};
 pub use self::queue_state::reader::{QueueDiffReader, QueueStateReader};
 pub use self::queue_state::writer::QueueStateWriter;
 pub use self::shard_state::reader::{BriefBocHeader, ShardStateReader};
-pub use self::shard_state::writer::ShardStateWriter;
+pub use self::shard_state::writer::{PersistentStateMeta, ShardStateWriter};
 use super::{
     BlockHandle, BlockHandleStorage, BlockStorage, CellsDb, KeyBlocksDirection, NodeStateStorage,
     ShardStateStorage,
@@ -64,6 +64,13 @@ impl PersistentStateKind {
         }
     }
 
+    pub fn make_part_file_name(&self, block_id: &BlockId, part_prefix: u64) -> Option<PathBuf> {
+        match self {
+            Self::Shard => Some(ShardStateWriter::file_name_ext(block_id, Some(part_prefix))),
+            Self::Queue => None,
+        }
+    }
+
     pub fn from_extension(extension: &str) -> Option<Self> {
         match extension {
             ShardStateWriter::FILE_EXTENSION => Some(Self::Shard),
@@ -92,6 +99,7 @@ impl PersistentStateStorage {
         block_handle_storage: Arc<BlockHandleStorage>,
         block_storage: Arc<BlockStorage>,
         shard_state_storage: Arc<ShardStateStorage>,
+        persistent_state_split_depth: u8,
     ) -> Result<Self> {
         const MAX_PARALLEL_CHUNK_READS: usize = 20;
 
@@ -105,6 +113,7 @@ impl PersistentStateStorage {
                 block_handles: block_handle_storage,
                 blocks: block_storage,
                 shard_states: shard_state_storage,
+                persistent_state_split_depth,
                 descriptor_cache: Default::default(),
                 mc_seqno_to_block_ids: Default::default(),
                 chunks_semaphore: Arc::new(Semaphore::new(MAX_PARALLEL_CHUNK_READS)),
@@ -170,6 +179,20 @@ impl PersistentStateStorage {
                 // Skip subdirectories
                 if path.is_dir() {
                     tracing::warn!(path = %path.display(), "unexpected directory");
+                    continue;
+                }
+
+                // skip persistent metadata
+                if path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(".meta.json"))
+                {
+                    continue;
+                }
+
+                // skip parts
+                if parse_shard_state_part_file_name(&path).is_some() {
                     continue;
                 }
 
@@ -308,15 +331,27 @@ impl PersistentStateStorage {
                 Some(PersistentStateInfo {
                     size,
                     chunk_size: self.state_chunk_size(),
+                    split_depth: cached.meta.as_ref().map_or(0, |meta| meta.split_depth),
+                    parts: cached
+                        .parts
+                        .iter()
+                        .filter_map(|part| {
+                            Some(PersistentStatePartInfo {
+                                prefix: part.prefix,
+                                size: NonZeroU64::new(part.file.length() as u64)?,
+                            })
+                        })
+                        .collect(),
                 })
             })
     }
 
-    pub async fn read_state_part(
+    pub async fn read_state_chunk(
         &self,
         block_id: &BlockId,
         offset: u64,
         state_kind: PersistentStateKind,
+        part_shard_prefix: Option<u64>,
     ) -> Option<Vec<u8>> {
         // NOTE: Should be noop on x64
         let offset = usize::try_from(offset).ok()?;
@@ -335,7 +370,18 @@ impl PersistentStateStorage {
             kind: state_kind,
         };
         let cached = self.inner.descriptor_cache.get(&key)?.clone();
-        if offset > cached.file.length() {
+        let part_index = match (state_kind, part_shard_prefix) {
+            (PersistentStateKind::Shard, Some(prefix)) => {
+                Some(cached.parts.iter().position(|part| part.prefix == prefix)?)
+            }
+            _ => None,
+        };
+
+        let file = match part_index {
+            Some(index) => &cached.parts[index].file,
+            None => &cached.file,
+        };
+        if offset > file.length() {
             return None;
         }
 
@@ -346,11 +392,15 @@ impl PersistentStateStorage {
             // Ensure that permit is dropped only after cached state is used.
             let _permit = permit;
 
-            let end = std::cmp::min(offset.saturating_add(chunk_size), cached.file.length());
-            cached.file.as_slice()[offset..end].to_vec()
+            let file = match part_index {
+                Some(index) => &cached.parts[index].file,
+                None => &cached.file,
+            };
+            let end = std::cmp::min(offset.saturating_add(chunk_size), file.length());
+            Some(file.as_slice()[offset..end].to_vec())
         })
         .await
-        .ok()
+        .ok()?
     }
 
     #[tracing::instrument(skip_all, fields(mc_seqno, block_id = %handle.id()))]
@@ -392,6 +442,7 @@ impl PersistentStateStorage {
                 states_dir,
                 *handle.id(),
                 root_hash,
+                this.persistent_state_split_depth,
                 Some(cancelled.clone()),
             )
             .await
@@ -428,11 +479,13 @@ impl PersistentStateStorage {
     }
 
     #[tracing::instrument(skip_all, fields(mc_seqno, block_id = %handle.id()))]
-    pub async fn store_shard_state_file(
+    pub async fn store_shard_state_files(
         &self,
         mc_seqno: u32,
         handle: &BlockHandle,
-        file: File,
+        main: File,
+        parts: Vec<(u64, File)>,
+        split_depth: u8,
     ) -> Result<()> {
         if self
             .try_reuse_persistent_state(mc_seqno, handle, PersistentStateKind::Shard)
@@ -445,32 +498,102 @@ impl PersistentStateStorage {
         scopeguard::defer! {
             cancelled.cancel();
         }
+        let guard = scopeguard::guard((), |_| {
+            tracing::warn!("cancelled");
+        });
 
         let handle = handle.clone();
         let this = self.inner.clone();
+        let span = tracing::Span::current();
+
+        // prepare persistent state dir
+        let states_dir = {
+            let this = this.clone();
+            tokio::task::spawn_blocking(move || {
+                let _span = span.enter();
+
+                this.prepare_persistent_states_dir(mc_seqno)
+            })
+            .await??
+        };
+
+        // will use semaphore to limit parrallel io operations
+        const MAX_PARALLEL_STATE_FILE_WRITES: usize = 4;
+        let semaphore = Arc::new(Semaphore::new(MAX_PARALLEL_STATE_FILE_WRITES));
+
+        // write part files in parallel
+        let mut prefixes = Vec::with_capacity(parts.len());
+        let mut parts_writes = tokio::task::JoinSet::new();
+        for (prefix, file) in parts {
+            prefixes.push(prefix);
+
+            let permit = semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .context("state file write semaphore closed")?;
+            let cells_db = this.cells_db.clone();
+            let states_dir = states_dir.clone();
+            let block_id = *handle.id();
+            let cancelled = cancelled.clone();
+            let span = tracing::Span::current();
+
+            parts_writes.spawn_blocking(move || {
+                let _permit = permit;
+                let _span = span.enter();
+
+                ShardStateWriter::new_part(&cells_db, &states_dir, &block_id, prefix)
+                    .write_file(file, Some(&cancelled))
+                    .with_context(|| format!("failed to write persistent state part {prefix:016x}"))
+            });
+        }
+
+        // collect results
+        let mut write_result = Ok::<_, anyhow::Error>(());
+        while let Some(result) = parts_writes.join_next().await {
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    cancelled.cancel();
+                    if write_result.is_ok() {
+                        write_result = Err(e);
+                    }
+                }
+                Err(e) => {
+                    cancelled.cancel();
+                    if write_result.is_ok() {
+                        write_result = Err(e.into());
+                    }
+                }
+            }
+        }
+        write_result?;
+
+        // write metadata and main file
         let cancelled = cancelled.clone();
         let span = tracing::Span::current();
 
         let state = tokio::task::spawn_blocking(move || {
             let _span = span.enter();
 
-            let guard = scopeguard::guard((), |_| {
-                tracing::warn!("cancelled");
-            });
+            // write persistent metadata even for single file
+            PersistentStateMeta::new(if prefixes.is_empty() { 0 } else { split_depth }, prefixes)
+                .write(&states_dir, handle.id())?;
 
-            let states_dir = this.prepare_persistent_states_dir(mc_seqno)?;
+            // write main
+            ShardStateWriter::new(&this.cells_db, &states_dir, handle.id())
+                .write_file(main, Some(&cancelled))?;
 
-            let cell_writer = ShardStateWriter::new(&this.cells_db, &states_dir, handle.id());
-            cell_writer.write_file(file, Some(&cancelled))?;
             this.block_handles.set_has_persistent_shard_state(&handle);
             let state = this.cache_state(mc_seqno, handle.id(), PersistentStateKind::Shard)?;
 
-            scopeguard::ScopeGuard::into_inner(guard);
             Ok::<_, anyhow::Error>(state)
         })
         .await??;
 
         self.notify_with_persistent_state(&state).await;
+
+        scopeguard::ScopeGuard::into_inner(guard);
         Ok(())
     }
 
@@ -747,6 +870,24 @@ impl PersistentStateStorage {
 
             let states_dir = this.prepare_persistent_states_dir(mc_seqno)?;
 
+            if kind == PersistentStateKind::Shard {
+                // write parts
+                for part in &cached.parts {
+                    let file_name = ShardStateWriter::file_name_ext(block_id, Some(part.prefix));
+                    let temp_file = states_dir.file(ShardStateWriter::temp_file_name_ext(
+                        block_id,
+                        Some(part.prefix),
+                    ));
+                    std::fs::write(temp_file.path(), part.file.as_slice())?;
+                    temp_file.rename(file_name)?;
+                }
+
+                // write persistent state metadata
+                let meta = cached.meta.clone().unwrap_or_default();
+                meta.write(&states_dir, &block_id)?;
+            }
+
+            // write main
             let temp_file = states_dir.file(kind.make_temp_file_name(&block_id));
             std::fs::write(temp_file.path(), cached.file.as_slice())?;
             temp_file.rename(kind.make_file_name(&block_id))?;
@@ -776,6 +917,7 @@ struct Inner {
     block_handles: Arc<BlockHandleStorage>,
     blocks: Arc<BlockStorage>,
     shard_states: Arc<ShardStateStorage>,
+    persistent_state_split_depth: u8,
     descriptor_cache: DashMap<CacheKey, Arc<CachedState>>,
     mc_seqno_to_block_ids: Mutex<BTreeMap<u32, FastHashSet<BlockId>>>,
     chunks_semaphore: Arc<Semaphore>,
@@ -862,12 +1004,10 @@ impl Inner {
             kind,
         };
 
-        let load_mapped = || {
-            let mut file = self
-                .mc_states_dir(mc_seqno)
-                .file(kind.make_file_name(block_id))
-                .read(true)
-                .open()?;
+        let states_dir = self.mc_states_dir(mc_seqno);
+
+        let load_mapped = |file_name: PathBuf| {
+            let mut file = states_dir.file(file_name).read(true).open()?;
 
             // We create a copy of the original file here to make sure
             // that the underlying mapped file will not be changed outside
@@ -885,10 +1025,48 @@ impl Inner {
             MappedFile::from_existing_file(temp_file).context("failed to map a temp file")
         };
 
-        let file =
-            load_mapped().with_context(|| format!("failed to cache {kind:?} for {block_id}"))?;
+        // cache main file
+        let file = load_mapped(kind.make_file_name(block_id))
+            .with_context(|| format!("failed to cache {kind:?} for {block_id}"))?;
 
-        let new_state = Arc::new(CachedState { mc_seqno, file });
+        let (meta, parts) = if kind == PersistentStateKind::Shard {
+            // cache metadata, and parts if exist
+            let meta = match PersistentStateMeta::read(&states_dir, block_id)? {
+                Some(meta) => meta,
+                None if has_shard_state_part_files(&states_dir, block_id)? => {
+                    anyhow::bail!(
+                        "incomplete split persistent state bundle for {block_id}: missing metadata"
+                    )
+                }
+                None => PersistentStateMeta::default(),
+            };
+            let mut parts = Vec::with_capacity(meta.parts.len());
+            for &prefix in &meta.parts {
+                let file_name = ShardStateWriter::file_name_ext(block_id, Some(prefix));
+                anyhow::ensure!(
+                    states_dir.file(&file_name).path().is_file(),
+                    "incomplete split persistent state bundle for {block_id}: missing part {prefix:016x}"
+                );
+                parts.push(CachedStatePart {
+                    prefix,
+                    file: load_mapped(file_name).with_context(|| {
+                        format!(
+                            "failed to cache split persistent state part {prefix:016x} for {block_id}"
+                        )
+                    })?,
+                });
+            }
+            (Some(meta), parts)
+        } else {
+            (None, Vec::new())
+        };
+
+        let new_state = Arc::new(CachedState {
+            mc_seqno,
+            file,
+            meta,
+            parts,
+        });
 
         let prev_mc_seqno = match self.descriptor_cache.entry(key) {
             Entry::Vacant(entry) => {
@@ -944,10 +1122,72 @@ impl Inner {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+fn has_shard_state_part_files(states_dir: &Dir, block_id: &BlockId) -> Result<bool> {
+    let block_id = block_id.to_string();
+    for entry in std::fs::read_dir(states_dir.path())? {
+        let path = entry?.path();
+        if path.is_file()
+            && parse_shard_state_part_file_name(&path)
+                .is_some_and(|(part_block_id, _)| part_block_id == block_id)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn parse_shard_state_part_file_name(path: &std::path::Path) -> Option<(&str, u64)> {
+    if path.extension()?.to_str()? != ShardStateWriter::FILE_EXTENSION {
+        return None;
+    }
+    let (block_id, prefix) = path.file_stem()?.to_str()?.rsplit_once("_part_")?;
+    if prefix.len() != 16 {
+        return None;
+    }
+    let prefix = u64::from_str_radix(prefix, 16).ok()?;
+    block_id.parse::<BlockId>().ok()?;
+    Some((block_id, prefix))
+}
+
+pub(super) fn check_can_reuse_shard_state_part_files(
+    states_dir: &Dir,
+    block_id: &BlockId,
+    expected_meta: &PersistentStateMeta,
+) -> Result<bool> {
+    // read metadata from the disk
+    let meta = match PersistentStateMeta::read(states_dir, block_id) {
+        Ok(Some(meta)) => meta,
+        Ok(None) => return Ok(false),
+        Err(e) if e.downcast_ref::<std::io::Error>().is_none() => return Ok(false),
+        Err(e) => return Err(e),
+    };
+
+    // can reuse existing parts only if metadata matches and all part files exist
+    if meta != *expected_meta {
+        return Ok(false);
+    }
+    for &prefix in &expected_meta.parts {
+        let file_name = ShardStateWriter::file_name_ext(block_id, Some(prefix));
+        if !states_dir.file(&file_name).path().is_file() {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+#[derive(Debug, Clone)]
 pub struct PersistentStateInfo {
     pub size: NonZeroU64,
     pub chunk_size: NonZeroU32,
+    pub split_depth: u8,
+    pub parts: Vec<PersistentStatePartInfo>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PersistentStatePartInfo {
+    pub prefix: u64,
+    pub size: NonZeroU64,
 }
 
 #[derive(Clone)]
@@ -1015,6 +1255,13 @@ static RECEIVER_ID: AtomicUsize = AtomicUsize::new(0);
 
 struct CachedState {
     mc_seqno: u32,
+    file: MappedFile,
+    meta: Option<PersistentStateMeta>,
+    parts: Vec<CachedStatePart>,
+}
+
+struct CachedStatePart {
+    prefix: u64,
     file: MappedFile,
 }
 
