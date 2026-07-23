@@ -4271,6 +4271,7 @@ dependencies = [
  "tracing-subscriber",
  "tycho-crypto",
  "tycho-network",
+ "tycho-slasher-traits",
  "tycho-storage",
  "tycho-types",
  "tycho-util",

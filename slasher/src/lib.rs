@@ -1,3 +1,4 @@
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -24,8 +25,8 @@ use tycho_util::serde_helpers;
 
 use self::bc::SlasherParams;
 pub use self::bc::{
-    BlocksBatch, ContractSubscription, EncodeBlocksBatchMessage, MessageDelivered,
-    SignatureHistory, SignedMessage, SlasherContract, StdSlasherContract,
+    BlocksBatch, ContractSubscription, EncodeBlocksBatchMessage, MessageDelivered, SignedMessage,
+    SlasherContract, StdSlasherContract,
 };
 use self::collector::{ValidatorEventsCollector, ValidatorSessionInfo};
 use self::storage::SlasherStorage;
@@ -82,10 +83,15 @@ pub struct SlasherConfig {
     /// Default: `1000`
     pub vset_len_threshold: u32,
 
-    // At least this number of block samples must be collected to accuse someone.
-    //
-    // Default: `100`
-    pub block_samples_threshold: u64,
+    /// At least this number of block samples must be collected to accuse someone.
+    ///
+    /// Default: `100`
+    pub block_samples_threshold: NonZeroU64,
+
+    /// At least this number of rounds must be filled to accuse someone.
+    ///
+    /// Default: `1000`
+    pub filled_rounds_threshold: NonZeroU64,
 
     /// At least this number of malformed batches must be collected to accuse someone.
     ///
@@ -96,6 +102,12 @@ pub struct SlasherConfig {
     ///
     /// Default: `0.5`
     pub slow_node_factor: f64,
+
+    /// We treat the node as low-proven if its proven-point rate is this times
+    /// the median rate.
+    ///
+    /// Default: `0.67`
+    pub proven_node_factor: f64,
 }
 
 impl Default for SlasherConfig {
@@ -105,9 +117,11 @@ impl Default for SlasherConfig {
             message_retry_interval: Duration::from_secs(1),
             prev_delivery_timeout: Some(Duration::from_secs(5)),
             vset_len_threshold: 1000,
-            block_samples_threshold: 100,
+            block_samples_threshold: 100.try_into().unwrap(),
+            filled_rounds_threshold: 1000.try_into().unwrap(),
             malformed_samples_threshold: 5,
             slow_node_factor: 0.5,
+            proven_node_factor: 0.67,
         }
     }
 }
@@ -119,7 +133,7 @@ pub struct Slasher {
 }
 
 impl Slasher {
-    pub fn new<C: SlasherContract>(
+    pub async fn new<C: SlasherContract>(
         node_keys: Arc<ed25519::KeyPair>,
         contract: C,
         blockchain_rpc_client: BlockchainRpcClient,
@@ -138,8 +152,9 @@ impl Slasher {
         let known_session_id = tycho_slasher_traits::ValidationSessionId::from(state_extra);
         let blockchain_config = &state_extra.config;
 
-        let storage =
-            SlasherStorage::open(storage_context).context("failed to open slasher storage")?;
+        let storage = SlasherStorage::open(storage_context)
+            .await
+            .context("failed to open slasher storage")?;
 
         let current_vset = Arc::new(ParsedVset::from_raw(
             blockchain_config.get_current_validator_set_raw()?,
