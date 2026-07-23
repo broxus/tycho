@@ -336,6 +336,20 @@ where
             );
 
             let next_block_id_short = calc_next_block_id_short(&prev_blocks_ids);
+            let add_validator_session = || {
+                // need to add validation session only for masterchain blocks,
+                // shard blocks are not being validated
+                if shard_id.is_masterchain() {
+                    self.validator.add_session(AddSession {
+                        shard_ident: shard_id,
+                        session_id: new_session_info.get_validation_session_id(),
+                        start_block_seqno: next_block_id_short.seqno,
+                        vset_hash: raw_validators_set.repr_hash(),
+                        validators: &new_session_info.collators().validators,
+                    })?;
+                }
+                anyhow::Ok(())
+            };
 
             match self.active_collators.entry(shard_id) {
                 DashMapEntry::Occupied(_) => {
@@ -344,6 +358,7 @@ where
                         "Active collator exists for collation session {:?}. Will resume it",
                         new_session_info.id(),
                     );
+                    add_validator_session()?;
                     sessions_to_keep.push((shard_id, new_session_info.clone(), prev_blocks_ids));
                 }
                 DashMapEntry::Vacant(entry) => {
@@ -382,6 +397,7 @@ where
                         }
                         Ok(collator) => {
                             let collator = Box::new(collator);
+                            add_validator_session()?;
 
                             // init collator
                             let collator =
@@ -407,17 +423,6 @@ where
                         }
                     }
                 }
-            }
-
-            // need to add validation session only for masterchain blocks, shard blocks are not being validated
-            if shard_id.is_masterchain() {
-                self.validator.add_session(AddSession {
-                    shard_ident: shard_id,
-                    session_id: new_session_info.get_validation_session_id(),
-                    start_block_seqno: next_block_id_short.seqno,
-                    vset_hash: raw_validators_set.repr_hash(),
-                    validators: &new_session_info.collators().validators,
-                })?;
             }
 
             self.active_collation_sessions
