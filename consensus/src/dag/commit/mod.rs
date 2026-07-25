@@ -31,6 +31,7 @@ struct EnqueuedAnchor {
 }
 
 pub struct Committer {
+    // TODO receive SupportedTrigger once ProofCommitGate stops passing valid triggers through.
     triggers_rx: mpsc::UnboundedReceiver<WeakDagPointFuture>,
     futures: FuturesUnordered<WeakDagPointFuture>,
     dag: DagBack,

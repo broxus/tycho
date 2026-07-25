@@ -36,6 +36,7 @@ impl ProofCarrierRound {
     }
 
     pub fn observe(&mut self, _valid: &ValidPoint) -> Option<ProofCarrierQuorum> {
+        // TODO count one first-valid carrier per author and exact proof id at this round.
         None
     }
 }
@@ -66,17 +67,21 @@ impl ProofCarrierCounts {
         _include_infos: impl Iterator<Item = &'a PointInfo>,
         _witness_infos: impl Iterator<Item = &'a PointInfo>,
     ) -> Self {
+        // TODO group semantic anchor-proof ids by carrier round and distinct author.
         Self::new(includes, witness)
     }
 
     pub fn observe_dependency(&mut self, _point: &PointInfo, _dependency: &PointInfo) {
+        // TODO count only exact dependencies from the point's includes or witness map.
     }
 
     pub fn required_proof(&self) -> Option<PointId> {
+        // TODO return the proof lock established by a same-round carrier quorum.
         None
     }
 
     pub fn incompatible_proof(&self, _point: &PointInfo) -> Option<PointId> {
+        // TODO return the required proof when the selected proof neither matches nor extends it.
         None
     }
 }
@@ -111,6 +116,7 @@ impl ProofCommitGate {
         _proof_id: PointId,
         trigger: WeakDagPointFuture,
     ) {
+        // TODO retain the trigger until its exact proof has a carrier quorum.
         self.ready_tx.send(trigger).ok();
     }
 
@@ -119,9 +125,11 @@ impl ProofCommitGate {
     }
 
     pub fn register_quorum(&self, _quorum: ProofCarrierQuorum) {
+        // TODO retain the quorum and release pending triggers for its exact proof.
     }
 
     pub fn clean(&self, _bottom_round: Round) {
+        // TODO remove pending triggers and quorum evidence below retained DAG history.
     }
 }
 

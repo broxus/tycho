@@ -389,6 +389,7 @@ mod link {
             witness.values(),
         );
         let _required_proof = counts.required_proof();
+        // TODO resolve the required proof to one dependency path for anchor-link construction.
         None
     }
 
