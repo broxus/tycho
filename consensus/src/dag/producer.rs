@@ -2,6 +2,7 @@ use tycho_crypto::ed25519::KeyPair;
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
+use crate::dag::proof_carrier::ProofCarrierCounts;
 use crate::dag::{DagHead, DagRound};
 use crate::effects::{AltFormat, RoundCtx};
 use crate::engine::{InputBuffer, MempoolConfig};
@@ -58,6 +59,8 @@ impl Producer {
         let local_id = PeerId::from(key_pair.public_key);
         let includes = Self::includes(finished_round);
         let witness = Self::witness(finished_round, &local_id, last_own_point);
+        let includes_peer_count = finished_round.peer_count();
+        let witness_peer_count = (finished_round.prev().upgrade()).map(|round| round.peer_count());
 
         Self::create(
             last_own_point,
@@ -67,6 +70,8 @@ impl Producer {
             head.current().leader(),
             &includes,
             &witness,
+            includes_peer_count,
+            witness_peer_count,
             conf,
         )
     }
@@ -82,6 +87,8 @@ impl Producer {
 
         includes: &FastHashMap<PeerId, PointInfo>,
         witness: &FastHashMap<PeerId, PointInfo>,
+        includes_peer_count: PeerCount,
+        witness_peer_count: Option<PeerCount>,
 
         conf: &MempoolConfig,
     ) -> Result<Point, ProduceError> {
@@ -99,7 +106,13 @@ impl Producer {
             _ => None,
         };
 
-        let (anchor_proof, anchor_trigger) = link::anchor_links(current_round, includes, witness);
+        let (anchor_proof, anchor_trigger) = link::anchor_links(
+            current_round,
+            includes,
+            witness,
+            includes_peer_count,
+            witness_peer_count,
+        );
 
         let role = if proven_vertex.is_some() {
             let last_own_point = last_own_point.as_ref().expect("guarded by `proven_vertex`");
@@ -334,17 +347,23 @@ mod link {
         current_round: Round,
         includes: &FastHashMap<PeerId, PointInfo>,
         witness: &FastHashMap<PeerId, PointInfo>,
+        includes_peer_count: PeerCount,
+        witness_peer_count: Option<PeerCount>,
     ) -> (AnchorLink, AnchorLink) {
         let trigger_source = link_source(includes, witness, AnchorStageRole::Trigger);
         let max_proof_source = link_source(includes, witness, AnchorStageRole::Proof);
+        let carrier_proof_source =
+            carrier_proof_source(includes, witness, includes_peer_count, witness_peer_count);
 
-        let proof_source = if trigger_source.info.anchor_round(AnchorStageRole::Trigger)
-            > max_proof_source.info.anchor_round(AnchorStageRole::Proof)
-        {
-            trigger_source
-        } else {
-            max_proof_source
-        };
+        let proof_source = carrier_proof_source.unwrap_or_else(|| {
+            if trigger_source.info.anchor_round(AnchorStageRole::Trigger)
+                > max_proof_source.info.anchor_round(AnchorStageRole::Proof)
+            {
+                trigger_source
+            } else {
+                max_proof_source
+            }
+        });
 
         let anchor_proof = link(current_round, proof_source, AnchorStageRole::Proof);
         let anchor_trigger = link(current_round, trigger_source, AnchorStageRole::Trigger);
@@ -355,6 +374,22 @@ mod link {
     struct LinkSource<'a> {
         info: &'a PointInfo,
         path: Through,
+    }
+
+    fn carrier_proof_source<'a>(
+        includes: &'a FastHashMap<PeerId, PointInfo>,
+        witness: &'a FastHashMap<PeerId, PointInfo>,
+        includes_peer_count: PeerCount,
+        witness_peer_count: Option<PeerCount>,
+    ) -> Option<LinkSource<'a>> {
+        let counts = ProofCarrierCounts::from_dependencies(
+            includes_peer_count,
+            witness_peer_count,
+            includes.values(),
+            witness.values(),
+        );
+        let _required_proof = counts.required_proof();
+        None
     }
 
     fn link_source<'a>(

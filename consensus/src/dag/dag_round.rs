@@ -1,6 +1,6 @@
 use std::sync::{Arc, OnceLock, Weak};
 
-use tokio::sync::mpsc;
+use parking_lot::Mutex;
 use tycho_crypto::ed25519::KeyPair;
 use tycho_network::PeerId;
 use tycho_util::FastDashMap;
@@ -8,12 +8,13 @@ use tycho_util::FastDashMap;
 use crate::dag::IllFormedReason;
 use crate::dag::dag_location::DagLocation;
 use crate::dag::dag_point_future::{DagPointFuture, WeakDagPointFuture};
+use crate::dag::proof_carrier::{ProofCarrierRound, ProofCommitGate};
 use crate::dag::proof_leader::ProofLeader;
 use crate::dag::threshold::Threshold;
 use crate::effects::{AltFmt, AltFormat, Ctx, RoundCtx, ValidateCtx};
 use crate::engine::{MempoolConfig, NodeConfig};
 use crate::intercom::{Downloader, PeerSchedule};
-use crate::models::{Digest, PeerCount, Point, PointRestore, Round, WeakCert};
+use crate::models::{Digest, PeerCount, Point, PointRestore, Round, ValidPoint, WeakCert};
 use crate::storage::MempoolStore;
 
 #[derive(Clone)]
@@ -35,7 +36,8 @@ pub struct DagRoundInner {
     used_anchor_proof: OnceLock<PeerId>,
     locations: FastDashMap<PeerId, DagLocation>,
     threshold: Threshold,
-    triggers_tx: mpsc::UnboundedSender<WeakDagPointFuture>,
+    proof_carriers: Mutex<ProofCarrierRound>,
+    proof_commit_gate: Arc<ProofCommitGate>,
     /// sequence of prev rounds: 0 for newest; never empty
     prevs: Vec<WeakDagRound>,
 }
@@ -47,31 +49,31 @@ impl WeakDagRound {
 }
 
 impl DagRound {
-    pub fn new_bottom(
+    pub(super) fn new_bottom(
         round: Round,
-        triggers_tx: &mpsc::UnboundedSender<WeakDagPointFuture>,
+        proof_commit_gate: &Arc<ProofCommitGate>,
         peer_schedule: &PeerSchedule,
         conf: &MempoolConfig,
     ) -> Self {
         Self::new(
             round,
             WeakDagRound(Weak::new()),
-            triggers_tx,
+            proof_commit_gate,
             peer_schedule,
             conf,
         )
     }
 
-    pub fn new_next(
+    pub(super) fn new_next(
         &self,
-        triggers_tx: &mpsc::UnboundedSender<WeakDagPointFuture>,
+        proof_commit_gate: &Arc<ProofCommitGate>,
         peer_schedule: &PeerSchedule,
         conf: &MempoolConfig,
     ) -> Self {
         Self::new(
             self.round().next(),
             self.downgrade(),
-            triggers_tx,
+            proof_commit_gate,
             peer_schedule,
             conf,
         )
@@ -80,7 +82,7 @@ impl DagRound {
     fn new(
         round: Round,
         prev: WeakDagRound,
-        triggers_tx: &mpsc::UnboundedSender<WeakDagPointFuture>,
+        proof_commit_gate: &Arc<ProofCommitGate>,
         peer_schedule: &PeerSchedule,
         conf: &MempoolConfig,
     ) -> Self {
@@ -126,7 +128,8 @@ impl DagRound {
             used_anchor_proof: OnceLock::new(),
             locations: FastDashMap::with_capacity_and_hasher(peers.len(), Default::default()),
             threshold: Threshold::new(round, peer_count, conf),
-            triggers_tx: triggers_tx.clone(),
+            proof_carriers: Mutex::new(ProofCarrierRound::new(round, peer_count)),
+            proof_commit_gate: proof_commit_gate.clone(),
             prevs,
         }));
 
@@ -155,6 +158,14 @@ impl DagRound {
 
     pub fn threshold(&self) -> &Threshold {
         &self.0.threshold
+    }
+
+    pub(super) fn add_first_valid(&self, valid: &ValidPoint) {
+        self.0.threshold.add(valid);
+        let quorum = self.0.proof_carriers.lock().observe(valid);
+        if let Some(quorum) = quorum {
+            self.0.proof_commit_gate.register_quorum(quorum);
+        }
     }
 
     fn edit<F, R>(&self, author: &PeerId, edit: F) -> R
@@ -227,7 +238,7 @@ impl DagRound {
                         point,
                         key_pair,
                         &loc.state,
-                        &self.0.triggers_tx,
+                        &self.0.proof_commit_gate,
                         downloader,
                         store,
                         round_ctx,
@@ -264,7 +275,7 @@ impl DagRound {
                         point,
                         reason,
                         &loc.state,
-                        &self.0.triggers_tx,
+                        &self.0.proof_commit_gate,
                         store,
                         round_ctx,
                     )
@@ -295,7 +306,7 @@ impl DagRound {
                         self,
                         point,
                         &loc.state,
-                        &self.0.triggers_tx,
+                        &self.0.proof_commit_gate,
                         downloader,
                         store,
                         round_ctx,
@@ -322,7 +333,7 @@ impl DagRound {
                     digest,
                     None,
                     &loc.state,
-                    &self.0.triggers_tx,
+                    &self.0.proof_commit_gate,
                     downloader,
                     store,
                     round_ctx,
@@ -361,7 +372,7 @@ impl DagRound {
                         digest,
                         Some(depender),
                         &loc.state,
-                        &self.0.triggers_tx,
+                        &self.0.proof_commit_gate,
                         downloader,
                         store,
                         validate_ctx,
@@ -395,7 +406,7 @@ impl DagRound {
                         self,
                         point_restore,
                         &loc.state,
-                        &self.0.triggers_tx,
+                        &self.0.proof_commit_gate,
                         downloader,
                         store,
                         round_ctx,

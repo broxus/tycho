@@ -11,6 +11,7 @@ use tycho_util::futures::{Shared, WeakShared};
 use tycho_util::sync::OnceTake;
 
 use crate::dag::dag_location::InclusionState;
+use crate::dag::proof_carrier::ProofCommitGate;
 use crate::dag::{
     BasicVerifier, DagRound, IllFormedReason, InvalidDependency, InvalidReason, UninitVset,
     ValidateResult, Verifier, VerifyError,
@@ -22,8 +23,8 @@ use crate::engine::NodeConfig;
 use crate::intercom::{DownloadResult, Downloader};
 use crate::models::point_status::*;
 use crate::models::{
-    AnyLink, Cert, CertDirectDeps, DagPoint, Digest, Point, PointId, PointInfo, PointRestore,
-    WeakCert,
+    AnchorStageRole, AnyLink, Cert, CertDirectDeps, DagPoint, Digest, Point, PointId, PointInfo,
+    PointRestore, WeakCert,
 };
 use crate::storage::MempoolStore;
 
@@ -77,12 +78,12 @@ impl DagPointFuture {
     /// locally created points are assumed to be valid, checked prior insertion if needed;
     /// for points of others - there are all other methods
     #[allow(clippy::too_many_arguments)] // TODO arch: make args less granular
-    pub fn new_local_valid(
+    pub(super) fn new_local_valid(
         point_dag_round: &DagRound,
         point: &Point,
         key_pair: Option<Arc<KeyPair>>,
         state: &InclusionState,
-        triggers_tx: &mpsc::UnboundedSender<WeakDagPointFuture>,
+        proof_commit_gate: &Arc<ProofCommitGate>,
         downloader: Downloader,
         store: MempoolStore,
         round_ctx: &RoundCtx,
@@ -91,7 +92,7 @@ impl DagPointFuture {
         let info = point.info().clone();
         let point = point.clone();
         let state = state.clone();
-        let triggers_tx = triggers_tx.clone();
+        let proof_commit_gate = proof_commit_gate.clone();
         let validate_ctx = ValidateCtx::new(round_ctx, &info);
         let cert = Cert::default();
         let cert_clone = cert.clone();
@@ -224,7 +225,7 @@ impl DagPointFuture {
 
             scopeguard::ScopeGuard::into_inner(abort_guard);
 
-            Self::ok(self_weak_rx, &triggers_tx, dag_point).await
+            Self::ok(self_weak_rx, &proof_commit_gate, dag_point).await
         });
 
         Self::finish(self_weak_tx, DagPointFutureType::Validate {
@@ -233,18 +234,18 @@ impl DagPointFuture {
         })
     }
 
-    pub fn new_ill_formed_broadcast(
+    pub(super) fn new_ill_formed_broadcast(
         point: &Point,
         reason: &IllFormedReason,
         state: &InclusionState,
-        triggers_tx: &mpsc::UnboundedSender<WeakDagPointFuture>,
+        proof_commit_gate: &Arc<ProofCommitGate>,
         store: &MempoolStore,
         round_ctx: &RoundCtx,
     ) -> Self {
         let point = point.clone();
         let reason = reason.clone();
         let state = state.clone();
-        let triggers_tx = triggers_tx.clone();
+        let proof_commit_gate = proof_commit_gate.clone();
         let store = store.clone();
         let task_ctx = round_ctx.task();
         let round_ctx = round_ctx.clone();
@@ -273,7 +274,7 @@ impl DagPointFuture {
                 dag_point
             };
             let dag_point = LIMIT.spawn_blocking(ctx.task(), full_fn).await.await?;
-            Self::ok(self_weak_rx, &triggers_tx, dag_point).await
+            Self::ok(self_weak_rx, &proof_commit_gate, dag_point).await
         });
 
         Self::finish(self_weak_tx, DagPointFutureType::Validate {
@@ -283,11 +284,11 @@ impl DagPointFuture {
     }
 
     #[allow(clippy::too_many_arguments)] // TODO arch: make args less granular
-    pub fn new_broadcast(
+    pub(super) fn new_broadcast(
         point_dag_round: &DagRound,
         point: &Point,
         state: &InclusionState,
-        triggers_tx: &mpsc::UnboundedSender<WeakDagPointFuture>,
+        proof_commit_gate: &Arc<ProofCommitGate>,
         downloader: &Downloader,
         store: &MempoolStore,
         round_ctx: &RoundCtx,
@@ -296,7 +297,7 @@ impl DagPointFuture {
         let info = point.info().clone();
         let point = point.clone();
         let state = state.clone();
-        let triggers_tx = triggers_tx.clone();
+        let proof_commit_gate = proof_commit_gate.clone();
         let downloader = downloader.clone();
         let store = store.clone();
         let validate_ctx = ValidateCtx::new(round_ctx, &info);
@@ -334,7 +335,7 @@ impl DagPointFuture {
                 dag_point
             };
             let nested = LIMIT.spawn_blocking(validate_ctx.task(), store_fn);
-            Self::ok(self_weak_rx, &triggers_tx, nested.await.await?).await
+            Self::ok(self_weak_rx, &proof_commit_gate, nested.await.await?).await
         });
 
         Self::finish(self_weak_tx, DagPointFutureType::Validate {
@@ -344,13 +345,13 @@ impl DagPointFuture {
     }
 
     #[allow(clippy::too_many_arguments)] // TODO arch: make args less granular
-    pub fn new_download<T>(
+    pub(super) fn new_download<T>(
         point_dag_round: &DagRound,
         author: &PeerId,
         digest: &Digest,
         first_depender: Option<&PeerId>,
         state: &InclusionState,
-        triggers_tx: &mpsc::UnboundedSender<WeakDagPointFuture>,
+        proof_commit_gate: &Arc<ProofCommitGate>,
         downloader: &Downloader,
         store: &MempoolStore,
         into_round_ctx: &T,
@@ -366,7 +367,7 @@ impl DagPointFuture {
         };
         let point_dag_round = point_dag_round.downgrade();
         let state = state.clone();
-        let triggers_tx = triggers_tx.clone();
+        let proof_commit_gate = proof_commit_gate.clone();
         let downloader = downloader.clone();
         let store = store.clone();
         let task_ctx = into_round_ctx.task();
@@ -425,7 +426,7 @@ impl DagPointFuture {
                         dag_point
                     };
                     let nested = LIMIT.spawn_blocking(into_round_ctx.task(), store_fn);
-                    Self::ok(self_weak_rx, &triggers_tx, nested.await.await?).await
+                    Self::ok(self_weak_rx, &proof_commit_gate, nested.await.await?).await
                 }
                 DownloadResult::IllFormed(point, VerifyError::IllFormed(reason)) => {
                     let mut status = PointStatusIllFormed {
@@ -444,7 +445,7 @@ impl DagPointFuture {
                         dag_point
                     };
                     let nested = LIMIT.spawn_blocking(into_round_ctx.task(), store_fn);
-                    Self::ok(self_weak_rx, &triggers_tx, nested.await.await?).await
+                    Self::ok(self_weak_rx, &proof_commit_gate, nested.await.await?).await
                 }
                 DownloadResult::IllFormed(point, VerifyError::Fail(UninitVset(_))) => {
                     let store_status = PointStatusFound {
@@ -468,7 +469,7 @@ impl DagPointFuture {
                         dag_point
                     };
                     let nested = LIMIT.spawn_blocking(into_round_ctx.task(), store_fn);
-                    Self::ok(self_weak_rx, &triggers_tx, nested.await.await?).await
+                    Self::ok(self_weak_rx, &proof_commit_gate, nested.await.await?).await
                 }
                 DownloadResult::NotFound => {
                     let mut status = PointStatusNotFound {
@@ -488,7 +489,7 @@ impl DagPointFuture {
                         dag_point
                     };
                     let nested = LIMIT.spawn_blocking(into_round_ctx.task(), store_fn);
-                    Self::ok(self_weak_rx, &triggers_tx, nested.await.await?).await
+                    Self::ok(self_weak_rx, &proof_commit_gate, nested.await.await?).await
                 }
             }
         });
@@ -502,11 +503,11 @@ impl DagPointFuture {
     }
 
     #[allow(clippy::too_many_arguments)] // TODO arch: make args less granular
-    pub fn new_restore(
+    pub(super) fn new_restore(
         point_dag_round: &DagRound,
         point_restore: PointRestore,
         state: &InclusionState,
-        triggers_tx: &mpsc::UnboundedSender<WeakDagPointFuture>,
+        proof_commit_gate: &Arc<ProofCommitGate>,
         downloader: &Downloader,
         store: &MempoolStore,
         round_ctx: &RoundCtx,
@@ -582,7 +583,7 @@ impl DagPointFuture {
             Either::Left(verified) => {
                 let point_dag_round = point_dag_round.downgrade();
                 let state = state.clone();
-                let triggers_tx = triggers_tx.clone();
+                let proof_commit_gate = proof_commit_gate.clone();
                 let downloader = downloader.clone();
                 let store = store.clone();
                 let round_ctx = round_ctx.clone();
@@ -614,7 +615,7 @@ impl DagPointFuture {
                         dag_point
                     };
                     let nested = LIMIT.spawn_blocking(round_ctx.task(), store_fn);
-                    Self::ok(self_weak_rx, &triggers_tx, nested.await.await?).await
+                    Self::ok(self_weak_rx, &proof_commit_gate, nested.await.await?).await
                 };
                 let lazy = Box::pin(async move { ctx.task().spawn(future).await });
                 Self::finish(self_weak_tx, DagPointFutureType::Restore {
@@ -624,14 +625,14 @@ impl DagPointFuture {
             }
             Either::Right(dag_point) => {
                 state.resolve(&dag_point);
-                let is_ok_to_send = super::commit::filter(&dag_point).is_some();
+                let trigger_registration = TriggerRegistration::new(&dag_point);
                 let ready = Box::pin(future::ready(Ok(dag_point)));
                 let this = Self(DagPointFutureType::Restore {
                     lazy: Shared::new(ready),
                     cert: cert_clone,
                 });
-                if is_ok_to_send {
-                    triggers_tx.send(this.downgrade()).ok();
+                if let Some(registration) = trigger_registration {
+                    registration.register(proof_commit_gate, this.downgrade());
                 }
                 this
             }
@@ -746,13 +747,13 @@ impl DagPointFuture {
 
     async fn ok(
         self_weak_rx: oneshot::Receiver<WeakDagPointFuture>,
-        triggers_tx: &mpsc::UnboundedSender<WeakDagPointFuture>,
+        proof_commit_gate: &ProofCommitGate,
         dag_point: DagPoint,
     ) -> TaskResult<DagPoint> {
-        if super::commit::filter(&dag_point).is_some()
+        if let Some(registration) = TriggerRegistration::new(&dag_point)
             && let Ok(self_weak) = self_weak_rx.await
         {
-            triggers_tx.send(self_weak).ok();
+            registration.register(proof_commit_gate, self_weak);
         }
         Ok(dag_point)
     }
@@ -830,6 +831,36 @@ impl future::Future for WeakDagPointFuture {
             Poll::Ready(Some((Err(Cancelled()), _))) => Poll::Ready(Err(Cancelled())),
             Poll::Ready(None) => Poll::Ready(Ok(None)),
             Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+enum TriggerRegistration {
+    Valid {
+        trigger_id: PointId,
+        proof_id: PointId,
+    },
+    HistoryConflict,
+}
+
+impl TriggerRegistration {
+    fn new(dag_point: &DagPoint) -> Option<Self> {
+        Some(match super::commit::filter(dag_point)? {
+            Ok(valid) => Self::Valid {
+                trigger_id: *valid.info().id(),
+                proof_id: valid.info().anchor_id(AnchorStageRole::Proof),
+            },
+            Err(_) => Self::HistoryConflict,
+        })
+    }
+
+    fn register(self, gate: &ProofCommitGate, trigger: WeakDagPointFuture) {
+        match self {
+            Self::Valid {
+                trigger_id,
+                proof_id,
+            } => gate.register_trigger(trigger_id, proof_id, trigger),
+            Self::HistoryConflict => gate.register_history_conflict(trigger),
         }
     }
 }

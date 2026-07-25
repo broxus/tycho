@@ -51,7 +51,7 @@ impl Debug for PointInfo {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, TlRead, TlWrite, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, TlRead, TlWrite, Serialize)]
 #[tl(boxed, id = "consensus.pointId", scheme = "proto.tl")]
 pub struct PointId {
     pub round: Round,

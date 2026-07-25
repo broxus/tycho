@@ -177,6 +177,8 @@ fn point<const PEER_COUNT: usize>(
         round_leader,
         includes,
         &Default::default(),
+        peer_count,
+        None,
         conf,
     )
     .expect("failed to create point")

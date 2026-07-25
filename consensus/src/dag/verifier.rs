@@ -10,6 +10,7 @@ use tycho_util::metrics::HistogramGuard;
 
 use crate::dag::dag_location::DagLocation;
 use crate::dag::dag_point_future::WeakDagPointFuture;
+use crate::dag::proof_carrier::ProofCarrierCounts;
 use crate::dag::{DagRound, ProofLeader, WeakDagRound};
 use crate::effects::{AltFormat, Ctx, TaskResult, ValidateCtx};
 use crate::engine::MempoolConfig;
@@ -103,6 +104,12 @@ pub enum InvalidReason {
     AnchorProofDoesntInheritAnchorTime(PointId),
     #[error("anchor candidate's time is not inherited from its proof {:?}", .0.alt())]
     AnchorTimeNotInheritedFromProof(PointId),
+    #[error(
+        "anchor proof {:?} neither matches nor extends carrier-supported proof {:?}",
+        .0.0.alt(),
+        .0.1.alt(),
+    )]
+    ProofCarrierMismatch((PointId, PointId)),
     #[error("must have referenced prev point {:?}", .0.alt())]
     MustHaveReferencedPrevPoint(PointId),
     #[error("must have skipped round after {:?}", .0.alt())]
@@ -250,9 +257,18 @@ impl Verifier {
 
         let mut latest_invalid_dep = None;
 
-        let is_valid_fut =
-            Self::check_valid(&info, deps_and_prev, &mut latest_invalid_dep, ctx.conf())
-                .instrument(entered_span.exit());
+        let proof_carriers = ProofCarrierCounts::new(
+            r_1.peer_count(),
+            r_2_opt.as_ref().map(|round| round.peer_count()),
+        );
+        let is_valid_fut = Self::check_valid(
+            &info,
+            deps_and_prev,
+            &mut latest_invalid_dep,
+            proof_carriers,
+            ctx.conf(),
+        )
+        .instrument(entered_span.exit());
 
         // drop strong links before await
         drop(r_0);
@@ -377,6 +393,7 @@ impl Verifier {
         info: &PointInfo,
         mut deps_and_prev: FuturesUnordered<WeakDagPointFuture>,
         latest_invalid_dep: &mut Option<InvalidDependency>,
+        mut proof_carriers: ProofCarrierCounts,
         conf: &MempoolConfig,
     ) -> TaskResult<Option<InvalidReason>> {
         // point is well-formed if we got here, so point.proof matches point.includes
@@ -458,6 +475,7 @@ impl Verifier {
                     continue; // invalidating deps (ill and not found) are not checked against
                 }
             };
+            proof_carriers.observe_dependency(info, dep);
 
             if is_prev_point && let Some(reason) = Self::is_proof_ok(info, dep) {
                 invalid_reason = Some(reason);
@@ -545,6 +563,13 @@ impl Verifier {
                     }
                 }
             }
+        }
+
+        if let Some(required_proof) = proof_carriers.incompatible_proof(info) {
+            invalid_reason = Some(InvalidReason::ProofCarrierMismatch((
+                anchor_proof_id,
+                required_proof,
+            )));
         }
 
         Ok(invalid_reason)

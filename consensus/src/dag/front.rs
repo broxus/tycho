@@ -1,6 +1,8 @@
+use std::sync::Arc;
+
 use tokio::sync::mpsc;
 
-use crate::dag::dag_point_future::WeakDagPointFuture;
+use crate::dag::proof_carrier::ProofCommitGate;
 use crate::dag::{Committer, DagHead, DagRound};
 use crate::effects::{AltFmt, AltFormat, Ctx, EngineCtx, RoundCtx};
 use crate::engine::lifecycle::FixHistoryFlag;
@@ -9,7 +11,7 @@ use crate::intercom::PeerSchedule;
 use crate::models::{PointId, Round};
 
 pub struct DagFront {
-    triggers_tx: mpsc::UnboundedSender<WeakDagPointFuture>,
+    proof_commit_gate: Arc<ProofCommitGate>,
     // from the oldest in front to the current round and the next one in back
     rounds: Vec<DagRound>,
     // back bottom may be moved by commit
@@ -24,17 +26,22 @@ impl DagFront {
         conf: &MempoolConfig,
     ) -> (Self, Committer) {
         let (triggers_tx, triggers_rx) = mpsc::unbounded_channel();
-        let pre_genesis_round =
-            DagRound::new_bottom(genesis_id.round.prev(), &triggers_tx, peer_schedule, conf);
+        let proof_commit_gate = Arc::new(ProofCommitGate::new(triggers_tx));
+        let pre_genesis_round = DagRound::new_bottom(
+            genesis_id.round.prev(),
+            &proof_commit_gate,
+            peer_schedule,
+            conf,
+        );
 
-        let genesis_round = pre_genesis_round.new_next(&triggers_tx, peer_schedule, conf);
+        let genesis_round = pre_genesis_round.new_next(&proof_commit_gate, peer_schedule, conf);
         (genesis_round.used_anchor_proof().set(genesis_id.author)).expect("set genesis committed");
 
         let mut committer = Committer::new(triggers_rx);
         committer.init(&genesis_round, fix_history.0, conf);
 
         let this = Self {
-            triggers_tx,
+            proof_commit_gate,
             last_back_bottom: committer.bottom_round(),
             rounds: vec![pre_genesis_round, genesis_round],
         };
@@ -89,17 +96,18 @@ impl DagFront {
                 self.rounds.clear();
                 self.rounds.push(DagRound::new_bottom(
                     self.last_back_bottom,
-                    &self.triggers_tx,
+                    &self.proof_commit_gate,
                     peer_schedule,
                     conf,
                 ));
+                self.proof_commit_gate.clean(self.last_back_bottom);
             }
         }
 
         // to preserve contiguity; even if new rounds are drained, they will be passed to Back Dag
         for _ in self.top().round().next().0..=new_top.0 {
             let top = self.top();
-            (self.rounds).push(top.new_next(&self.triggers_tx, peer_schedule, conf));
+            (self.rounds).push(top.new_next(&self.proof_commit_gate, peer_schedule, conf));
         }
         EngineCtx::meter_dag_len((new_top - self.last_back_bottom.0).0 as usize);
     }
@@ -163,6 +171,8 @@ impl DagFront {
             result.iter().map(|p| p.round()).collect::<Vec<_>>(),
             self.rounds.iter().map(|p| p.round()).collect::<Vec<_>>(),
         );
+
+        self.proof_commit_gate.clean(self.bottom_round());
 
         result
     }

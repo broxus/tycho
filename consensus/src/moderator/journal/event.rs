@@ -254,6 +254,10 @@ impl JournalDagEvent {
             | InvalidReason::DepIllFormed((point_id, _)) => {
                 point_keys.push(point_id.key());
             }
+            InvalidReason::ProofCarrierMismatch((declared, required)) => {
+                point_keys.push(declared.key());
+                point_keys.push(required.key());
+            }
         }
     }
     pub fn index(&self) -> JournalDagEventIndex {

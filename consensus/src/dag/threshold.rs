@@ -64,7 +64,7 @@ impl Threshold {
         ThresholdCount::unpack(self.count.load(atomic::Ordering::Relaxed))
     }
 
-    pub fn add(&self, valid: &ValidPoint) {
+    pub(super) fn add(&self, valid: &ValidPoint) {
         assert_eq!(valid.info().round(), self.round, "point round mismatch");
         // count no matter if threshold is already reached;
         // increase counter before send to reduce it upon receive;

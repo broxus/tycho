@@ -15,5 +15,6 @@ mod dag_round;
 mod front;
 mod head;
 mod producer;
+mod proof_carrier;
 mod threshold;
 mod verifier;

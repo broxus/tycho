@@ -274,7 +274,7 @@ impl InclusionState {
             };
             if valid.info().digest() == first_valid {
                 if let Some(dag_round) = self.0.parent.upgrade() {
-                    dag_round.threshold().add(valid);
+                    dag_round.add_first_valid(valid);
                 }
             } else {
                 panic!(
