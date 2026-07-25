@@ -8,7 +8,7 @@ use tycho_network::PeerId;
 use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::dag::dag_point_future::WeakDagPointFuture;
-use crate::models::{PeerCount, PointId, PointInfo, Round, ValidPoint};
+use crate::models::{AnchorStageRole, PeerCount, PointId, PointInfo, Round, ValidPoint};
 
 #[derive(Clone, Copy)]
 pub(super) struct CarrierVote {
@@ -35,9 +35,32 @@ impl ProofCarrierRound {
         }
     }
 
-    pub fn observe(&mut self, _valid: &ValidPoint) -> Option<ProofCarrierQuorum> {
-        // TODO count one first-valid carrier per author and exact proof id at this round.
-        None
+    pub fn observe(&mut self, valid: &ValidPoint) -> Option<ProofCarrierQuorum> {
+        let info = valid.info();
+        assert_eq!(info.round(), self.round, "carrier round mismatch");
+        assert!(valid.is_first_valid(), "proof carrier must be first-valid");
+
+        if self.by_author.contains_key(info.author()) {
+            return None;
+        }
+
+        let vote = CarrierVote {
+            carrier: *info.id(),
+            proof: info.anchor_id(AnchorStageRole::Proof),
+        };
+        self.by_author.insert(*info.author(), vote);
+
+        let carriers = self.by_proof.entry(vote.proof).or_default();
+        carriers.push(vote.carrier);
+        if carriers.len() < self.target || !self.formed.insert(vote.proof) {
+            return None;
+        }
+
+        Some(ProofCarrierQuorum {
+            proof: vote.proof,
+            carrier_round: self.round,
+            carriers: carriers.clone().into(),
+        })
     }
 }
 
