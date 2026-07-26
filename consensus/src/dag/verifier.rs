@@ -415,6 +415,7 @@ impl Verifier {
             info.time() + UnixTime::from_millis(conf.consensus.clock_skew_millis.get() as _);
 
         let mut invalid_reason = None;
+        let mut anchor_summaries = Vec::new();
 
         // join all dependencies despite the reason to invalidate the point is found
         while let Some(task_result) = deps_and_prev.next().await {
@@ -476,6 +477,7 @@ impl Verifier {
                 }
             };
             proof_carriers.observe_dependency(info, dep);
+            anchor_summaries.push(dep.clone());
 
             if is_prev_point && let Some(reason) = Self::is_proof_ok(info, dep) {
                 invalid_reason = Some(reason);
@@ -484,16 +486,6 @@ impl Verifier {
             if dep.time() > max_allowed_dep_time {
                 // dependency time may exceed those in point only by a small value from config
                 invalid_reason = Some(InvalidReason::DependencyTimeTooFarInFuture(dep_id));
-            }
-
-            for (anchor_role, anchor_role_round) in [
-                (AnchorStageRole::Trigger, anchor_trigger_id.round),
-                (AnchorStageRole::Proof, anchor_proof_id.round),
-            ] {
-                if dep.anchor_round(anchor_role) > anchor_role_round {
-                    let tuple = (anchor_role, dep_id);
-                    invalid_reason = Some(InvalidReason::NewerAnchorInDependency(tuple));
-                }
             }
 
             if dep_id == anchor_proof_id && dep.anchor_proof() != AnyLink::ToSelf {
@@ -534,9 +526,6 @@ impl Verifier {
 
             if let Some((to, through)) = chained_proof_to_through {
                 let dep_anchor_proof_id = dep.anchor_id(AnchorStageRole::Proof);
-                if dep_anchor_proof_id.round > to.round {
-                    invalid_reason = Some(InvalidReason::NewerProofToChainInDependency(dep_id));
-                }
 
                 if let Some(through) = through {
                     if dep_id == through && dep_anchor_proof_id != to {
@@ -562,6 +551,29 @@ impl Verifier {
                         }
                     }
                 }
+            }
+        }
+
+        // Freshness is required only inside the carrier-supported proof branch.
+        for dep in anchor_summaries {
+            if proof_carriers.incompatible_proof(&dep).is_some() {
+                continue;
+            }
+
+            for (anchor_role, anchor_role_round) in [
+                (AnchorStageRole::Trigger, anchor_trigger_id.round),
+                (AnchorStageRole::Proof, anchor_proof_id.round),
+            ] {
+                if dep.anchor_round(anchor_role) > anchor_role_round {
+                    let tuple = (anchor_role, *dep.id());
+                    invalid_reason = Some(InvalidReason::NewerAnchorInDependency(tuple));
+                }
+            }
+
+            if let Some((to, _)) = chained_proof_to_through
+                && dep.anchor_round(AnchorStageRole::Proof) > to.round
+            {
+                invalid_reason = Some(InvalidReason::NewerProofToChainInDependency(*dep.id()));
             }
         }
 

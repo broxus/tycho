@@ -350,20 +350,25 @@ mod link {
         includes_peer_count: PeerCount,
         witness_peer_count: Option<PeerCount>,
     ) -> (AnchorLink, AnchorLink) {
-        let trigger_source = link_source(includes, witness, AnchorStageRole::Trigger);
-        let max_proof_source = link_source(includes, witness, AnchorStageRole::Proof);
-        let carrier_proof_source =
-            carrier_proof_source(includes, witness, includes_peer_count, witness_peer_count);
+        let proof_carriers = ProofCarrierCounts::from_dependencies(
+            includes_peer_count,
+            witness_peer_count,
+            includes.values(),
+            witness.values(),
+        );
+        // A carrier quorum restricts both inherited anchors to its proof branch.
+        let trigger_source =
+            link_source(includes, witness, AnchorStageRole::Trigger, &proof_carriers);
+        let max_proof_source =
+            link_source(includes, witness, AnchorStageRole::Proof, &proof_carriers);
 
-        let proof_source = carrier_proof_source.unwrap_or_else(|| {
-            if trigger_source.info.anchor_round(AnchorStageRole::Trigger)
-                > max_proof_source.info.anchor_round(AnchorStageRole::Proof)
-            {
-                trigger_source
-            } else {
-                max_proof_source
-            }
-        });
+        let proof_source = if trigger_source.info.anchor_round(AnchorStageRole::Trigger)
+            > max_proof_source.info.anchor_round(AnchorStageRole::Proof)
+        {
+            trigger_source
+        } else {
+            max_proof_source
+        };
 
         let anchor_proof = link(current_round, proof_source, AnchorStageRole::Proof);
         let anchor_trigger = link(current_round, trigger_source, AnchorStageRole::Trigger);
@@ -376,49 +381,40 @@ mod link {
         path: Through,
     }
 
-    fn carrier_proof_source<'a>(
-        includes: &'a FastHashMap<PeerId, PointInfo>,
-        witness: &'a FastHashMap<PeerId, PointInfo>,
-        includes_peer_count: PeerCount,
-        witness_peer_count: Option<PeerCount>,
-    ) -> Option<LinkSource<'a>> {
-        let counts = ProofCarrierCounts::from_dependencies(
-            includes_peer_count,
-            witness_peer_count,
-            includes.values(),
-            witness.values(),
-        );
-        let _required_proof = counts.required_proof();
-        // TODO resolve the required proof to one dependency path for anchor-link construction.
-        None
-    }
-
     fn link_source<'a>(
         includes: &'a FastHashMap<PeerId, PointInfo>,
         witness: &'a FastHashMap<PeerId, PointInfo>,
         link_field: AnchorStageRole,
+        proof_carriers: &ProofCarrierCounts,
     ) -> LinkSource<'a> {
-        let (_, incl_info) = includes
-            .iter()
-            .max_by_key(|(_, info)| info.anchor_round(link_field))
-            .expect("non-empty list of includes for own point");
+        let incl_info = includes
+            .values()
+            .filter(|info| proof_carriers.incompatible_proof(info).is_none())
+            .max_by_key(|info| info.anchor_round(link_field));
 
-        let newer_witness = witness
-            .iter()
-            .max_by_key(|(_, wit_info)| wit_info.anchor_round(link_field))
-            .filter(|(_, wit_info)| {
-                wit_info.anchor_round(link_field) > incl_info.anchor_round(link_field)
-            });
+        let wit_info = witness
+            .values()
+            .filter(|info| proof_carriers.incompatible_proof(info).is_none())
+            .max_by_key(|info| info.anchor_round(link_field));
 
-        match newer_witness {
-            Some((_, info)) => LinkSource {
+        match (incl_info, wit_info) {
+            (Some(incl), Some(wit))
+                if wit.anchor_round(link_field) > incl.anchor_round(link_field) =>
+            {
+                LinkSource {
+                    info: wit,
+                    path: Through::Witness(*wit.author()),
+                }
+            }
+            (Some(info), _) => LinkSource {
+                info,
+                path: Through::Includes(*info.author()),
+            },
+            (None, Some(info)) => LinkSource {
                 info,
                 path: Through::Witness(*info.author()),
             },
-            None => LinkSource {
-                info: incl_info,
-                path: Through::Includes(*incl_info.author()),
-            },
+            (None, None) => panic!("proof carrier quorum must leave an eligible dependency"),
         }
     }
 
