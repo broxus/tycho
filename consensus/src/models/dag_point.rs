@@ -13,6 +13,61 @@ use crate::models::point_status::{
 };
 use crate::models::{PointInfo, PointKey, Round};
 
+#[derive(Clone, Debug)]
+pub(crate) struct ProofLock(Arc<ProofLockInner>);
+
+#[derive(Debug)]
+struct ProofLockInner {
+    proof: PointId,
+    parent: Option<ProofLock>,
+}
+
+impl ProofLock {
+    pub(crate) fn new(proof: PointId, parent: Option<Self>) -> Self {
+        if let Some(parent) = &parent {
+            assert!(
+                parent.proof().round < proof.round,
+                "proof lock must advance by round"
+            );
+        }
+        Self(Arc::new(ProofLockInner { proof, parent }))
+    }
+
+    pub(crate) fn proof(&self) -> PointId {
+        self.0.proof
+    }
+
+    pub(crate) fn parent(&self) -> Option<&Self> {
+        self.0.parent.as_ref()
+    }
+
+    pub(crate) fn contains(&self, proof: PointId) -> bool {
+        let mut lock = Some(self);
+        while let Some(current) = lock {
+            if current.proof() == proof {
+                return true;
+            }
+            lock = current.parent();
+        }
+        false
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ProofConstraintConflict {
+    pub first: PointId,
+    pub second: PointId,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) enum ProofConstraint {
+    #[default]
+    Unconstrained,
+    Locked(ProofLock),
+    Incomplete,
+    Conflicting(ProofConstraintConflict),
+}
+
 #[derive(Clone)]
 /// cases with point hash or signature mismatch are not represented in enum;
 /// any mismatch from third party nodes:
@@ -40,20 +95,27 @@ pub enum DagPoint {
 }
 
 impl DagPoint {
-    pub fn new_valid(info: PointInfo, cert: Cert, status: &PointStatusValid) -> Self {
+    pub(crate) fn new_valid(
+        info: PointInfo,
+        cert: Cert,
+        status: &PointStatusValid,
+        proof_constraint: ProofConstraint,
+    ) -> Self {
         DagPoint::Valid(ValidPoint(Arc::new(ValidPointInner {
             info,
             first_valid: status.is_first_valid,
             is_first_resolved: status.is_first_resolved,
             cert,
+            proof_constraint,
         })))
     }
 
-    pub fn new_trans_invalid(
+    pub(crate) fn new_trans_invalid(
         info: PointInfo,
         cert: Cert,
         status: &PointStatusTransInvalid,
         root_cause: InvalidDependency,
+        proof_constraint: ProofConstraint,
     ) -> Self {
         DagPoint::TransInvalid(TransInvalidPoint(Arc::new(TransInvalidPointInner {
             info,
@@ -61,20 +123,23 @@ impl DagPoint {
             cert,
             root_cause,
             is_restored: status.is_restored,
+            proof_constraint,
         })))
     }
 
-    pub fn new_invalid(
+    pub(crate) fn new_invalid(
         info: PointInfo,
         cert: Cert,
         status: &PointStatusInvalid,
         reason: InvalidReason,
+        proof_constraint: ProofConstraint,
     ) -> Self {
         DagPoint::Invalid(InvalidPoint(Arc::new(InvalidPointInner {
             info,
             is_first_resolved: status.is_first_resolved,
             cert,
             reason,
+            proof_constraint,
         })))
     }
 
@@ -113,6 +178,24 @@ impl DagPoint {
             Self::TransInvalid(invalid) if invalid.is_certified() => Some(invalid.info()),
             Self::Invalid(invalid) if invalid.is_certified() => Some(invalid.info()),
             _ => None,
+        }
+    }
+
+    pub(crate) fn resolved_info(&self) -> Option<&PointInfo> {
+        match self {
+            Self::Valid(valid) => Some(valid.info()),
+            Self::TransInvalid(invalid) => Some(invalid.info()),
+            Self::Invalid(invalid) => Some(invalid.info()),
+            Self::IllFormed(_) | Self::NotFound(_) => None,
+        }
+    }
+
+    pub(crate) fn proof_constraint(&self) -> Option<&ProofConstraint> {
+        match self {
+            Self::Valid(valid) => Some(valid.proof_constraint()),
+            Self::TransInvalid(invalid) => Some(invalid.proof_constraint()),
+            Self::Invalid(invalid) => Some(invalid.proof_constraint()),
+            Self::IllFormed(_) | Self::NotFound(_) => None,
         }
     }
 
@@ -221,6 +304,7 @@ struct ValidPointInner {
     first_valid: bool,
     is_first_resolved: bool,
     cert: Cert,
+    proof_constraint: ProofConstraint,
 }
 impl ValidPoint {
     pub fn info(&self) -> &PointInfo {
@@ -235,6 +319,9 @@ impl ValidPoint {
     pub fn is_certified(&self) -> bool {
         self.0.cert.is_certified()
     }
+    pub(crate) fn proof_constraint(&self) -> &ProofConstraint {
+        &self.0.proof_constraint
+    }
     pub fn committable(self) -> Committable {
         Committable(CommittableInner::Valid(self))
     }
@@ -248,6 +335,7 @@ struct TransInvalidPointInner {
     cert: Cert,
     root_cause: InvalidDependency,
     is_restored: bool,
+    proof_constraint: ProofConstraint,
 }
 impl TransInvalidPoint {
     pub fn info(&self) -> &PointInfo {
@@ -271,6 +359,9 @@ impl TransInvalidPoint {
     pub fn is_restored(&self) -> bool {
         self.0.is_restored
     }
+    pub(crate) fn proof_constraint(&self) -> &ProofConstraint {
+        &self.0.proof_constraint
+    }
 }
 
 #[derive(Clone)]
@@ -280,6 +371,7 @@ struct InvalidPointInner {
     is_first_resolved: bool,
     cert: Cert,
     reason: InvalidReason,
+    proof_constraint: ProofConstraint,
 }
 impl InvalidPoint {
     pub fn info(&self) -> &PointInfo {
@@ -293,6 +385,9 @@ impl InvalidPoint {
     }
     pub fn reason(&self) -> &InvalidReason {
         &self.0.reason
+    }
+    pub(crate) fn proof_constraint(&self) -> &ProofConstraint {
+        &self.0.proof_constraint
     }
 }
 

@@ -336,7 +336,9 @@ impl RoundCtx {
                     ProduceError::NextRoundThreshold | ProduceError::NotScheduled => {
                         tracing::info!(parent: self.span(), %reason, "produce point skipped");
                     }
-                    ProduceError::PrevPointMismatch { .. } => {
+                    ProduceError::PrevPointMismatch { .. }
+                    | ProduceError::ProofConstraintIncomplete
+                    | ProduceError::ProofConstraintConflict(_) => {
                         tracing::error!(parent: self.span(), %reason, "produce point skipped");
                     }
                 };
@@ -346,6 +348,8 @@ impl RoundCtx {
                     | ProduceError::NextRoundThreshold => "late",
                     ProduceError::NotScheduled => "not in v_set",
                     ProduceError::PrevPointMismatch { .. } => "prev point",
+                    ProduceError::ProofConstraintIncomplete
+                    | ProduceError::ProofConstraintConflict(_) => "proof constraint",
                 };
                 metrics::counter!("tycho_mempool_engine_produce_skipped", "kind" => label)
                     .increment(1);

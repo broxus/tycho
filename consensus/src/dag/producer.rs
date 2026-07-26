@@ -2,13 +2,14 @@ use tycho_crypto::ed25519::KeyPair;
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
-use crate::dag::proof_carrier::ProofCarrierCounts;
+use crate::dag::proof_carrier::{ProofCarrierCounts, ProofCarrierProjection};
 use crate::dag::{DagHead, DagRound};
 use crate::effects::{AltFormat, RoundCtx};
 use crate::engine::{InputBuffer, MempoolConfig};
 use crate::models::{
     AnchorLink, AnchorStageRole, AnyLink, Digest, IndirectLink, PeerCount, Point, PointData,
-    PointInfo, PointRole, Round, Signature, Through, UnixTime, ValidPoint,
+    PointId, PointInfo, PointRole, ProofConstraint, Round, Signature, Through, UnixTime,
+    ValidPoint,
 };
 
 pub struct LastOwnPoint {
@@ -40,6 +41,14 @@ pub enum ProduceError {
         included: Digest,
         broadcasted: Option<Digest>,
     },
+    #[error("cannot produce with incomplete inherited proof constraint")]
+    ProofConstraintIncomplete,
+    #[error(
+        "cannot produce with conflicting proof constraints {:?} and {:?}",
+        .0.0.alt(),
+        .0.1.alt(),
+    )]
+    ProofConstraintConflict(Box<(PointId, PointId)>),
 }
 
 pub struct Producer;
@@ -61,7 +70,13 @@ impl Producer {
         let witness_points = Self::witness(finished_round, &local_id, last_own_point);
         let includes_peer_count = finished_round.peer_count();
         let witness_peer_count = (finished_round.prev().upgrade()).map(|round| round.peer_count());
-
+        let proof_carriers = ProofCarrierCounts::from_valid_dependencies(
+            includes_peer_count,
+            witness_peer_count,
+            include_points.values(),
+            witness_points.values(),
+        )
+        .finish();
         let includes = include_points
             .into_iter()
             .map(|(peer, valid)| (peer, valid.info().clone()))
@@ -71,7 +86,7 @@ impl Producer {
             .map(|(peer, valid)| (peer, valid.info().clone()))
             .collect();
 
-        Self::create(
+        Self::create_with_projection(
             last_own_point,
             input_buffer,
             key_pair,
@@ -79,13 +94,13 @@ impl Producer {
             head.current().leader(),
             &includes,
             &witness,
-            includes_peer_count,
-            witness_peer_count,
+            &proof_carriers,
             conf,
         )
     }
 
     #[allow(clippy::too_many_arguments, reason = "used in test with many peers")]
+    #[cfg(any(feature = "test", test))]
     pub fn create(
         last_own_point: Option<&LastOwnPoint>,
         input_buffer: &InputBuffer,
@@ -101,6 +116,52 @@ impl Producer {
 
         conf: &MempoolConfig,
     ) -> Result<Point, ProduceError> {
+        let proof_carriers = ProofCarrierCounts::from_dependencies(
+            includes_peer_count,
+            witness_peer_count,
+            includes.values(),
+            witness.values(),
+        )
+        .finish();
+        Self::create_with_projection(
+            last_own_point,
+            input_buffer,
+            key_pair,
+            current_round,
+            current_leader,
+            includes,
+            witness,
+            &proof_carriers,
+            conf,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, reason = "keeps test-facing create simple")]
+    fn create_with_projection(
+        last_own_point: Option<&LastOwnPoint>,
+        input_buffer: &InputBuffer,
+
+        key_pair: &KeyPair,
+        current_round: Round,
+        current_leader: Option<&PeerId>,
+
+        includes: &FastHashMap<PeerId, PointInfo>,
+        witness: &FastHashMap<PeerId, PointInfo>,
+        proof_carriers: &ProofCarrierProjection,
+
+        conf: &MempoolConfig,
+    ) -> Result<Point, ProduceError> {
+        match proof_carriers.constraint() {
+            ProofConstraint::Unconstrained | ProofConstraint::Locked(_) => {}
+            ProofConstraint::Incomplete => return Err(ProduceError::ProofConstraintIncomplete),
+            ProofConstraint::Conflicting(conflict) => {
+                return Err(ProduceError::ProofConstraintConflict(Box::new((
+                    conflict.first,
+                    conflict.second,
+                ))));
+            }
+        }
+
         let local_id = PeerId::from(key_pair.public_key);
 
         let proven_vertex = match last_own_point {
@@ -115,13 +176,8 @@ impl Producer {
             _ => None,
         };
 
-        let (anchor_proof, anchor_trigger) = link::anchor_links(
-            current_round,
-            includes,
-            witness,
-            includes_peer_count,
-            witness_peer_count,
-        );
+        let (anchor_proof, anchor_trigger) =
+            link::anchor_links(current_round, includes, witness, proof_carriers);
 
         let role = if proven_vertex.is_some() {
             let last_own_point = last_own_point.as_ref().expect("guarded by `proven_vertex`");
@@ -356,20 +412,13 @@ mod link {
         current_round: Round,
         includes: &FastHashMap<PeerId, PointInfo>,
         witness: &FastHashMap<PeerId, PointInfo>,
-        includes_peer_count: PeerCount,
-        witness_peer_count: Option<PeerCount>,
+        proof_carriers: &ProofCarrierProjection,
     ) -> (AnchorLink, AnchorLink) {
-        let proof_carriers = ProofCarrierCounts::from_dependencies(
-            includes_peer_count,
-            witness_peer_count,
-            includes.values(),
-            witness.values(),
-        );
         // A carrier quorum restricts both inherited anchors to its proof branch.
         let trigger_source =
-            link_source(includes, witness, AnchorStageRole::Trigger, &proof_carriers);
+            link_source(includes, witness, AnchorStageRole::Trigger, proof_carriers);
         let max_proof_source =
-            link_source(includes, witness, AnchorStageRole::Proof, &proof_carriers);
+            link_source(includes, witness, AnchorStageRole::Proof, proof_carriers);
 
         let proof_source = if trigger_source.info.anchor_round(AnchorStageRole::Trigger)
             > max_proof_source.info.anchor_round(AnchorStageRole::Proof)
@@ -394,7 +443,7 @@ mod link {
         includes: &'a FastHashMap<PeerId, PointInfo>,
         witness: &'a FastHashMap<PeerId, PointInfo>,
         link_field: AnchorStageRole,
-        proof_carriers: &ProofCarrierCounts,
+        proof_carriers: &ProofCarrierProjection,
     ) -> LinkSource<'a> {
         let incl_info = includes
             .values()

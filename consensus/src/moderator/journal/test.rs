@@ -11,7 +11,8 @@ use crate::dag::InvalidReason;
 use crate::intercom::QueryRequestTag;
 use crate::models::point_status::{PointStatusStoreRandom, PointStatusStored};
 use crate::models::{
-    AnchorLink, Cert, DagPoint, Digest, Point, PointData, PointRole, Round, UnixTime,
+    AnchorLink, Cert, DagPoint, Digest, Point, PointData, PointRole, ProofConstraint, Round,
+    UnixTime,
 };
 use crate::moderator::journal::batch::batch;
 use crate::moderator::journal::item::{JournalItem, JournalItemFull};
@@ -214,7 +215,13 @@ fn gen_items(count: u8, points: &[Point]) -> Vec<JournalItemFull> {
                 Some(point) => <_>::from({
                     let info = point.info().clone();
                     let reason = InvalidReason::MustHaveSkippedRound(*point.info().id());
-                    match DagPoint::new_invalid(info, Cert::default(), &<_>::random(), reason) {
+                    match DagPoint::new_invalid(
+                        info,
+                        Cert::default(),
+                        &<_>::random(),
+                        reason,
+                        ProofConstraint::Unconstrained,
+                    ) {
                         DagPoint::Invalid(invalid) => JournalDagEvent::Invalid(invalid),
                         _ => unreachable!(),
                     }

@@ -11,10 +11,10 @@ use tycho_util::futures::{Shared, WeakShared};
 use tycho_util::sync::OnceTake;
 
 use crate::dag::dag_location::InclusionState;
-use crate::dag::proof_carrier::ProofCommitGate;
+use crate::dag::proof_carrier::{ProofCarrierCounts, ProofCommitGate};
 use crate::dag::{
     BasicVerifier, DagRound, IllFormedReason, InvalidDependency, InvalidReason, UninitVset,
-    ValidateResult, Verifier, VerifyError,
+    ValidateResult, ValidatedPoint, Verifier, VerifyError,
 };
 use crate::effects::{
     AltFormat, Cancelled, Ctx, DownloadCtx, RoundCtx, SpawnLimit, Task, TaskResult, ValidateCtx,
@@ -24,12 +24,17 @@ use crate::intercom::{DownloadResult, Downloader};
 use crate::models::point_status::*;
 use crate::models::{
     AnchorStageRole, AnyLink, Cert, CertDirectDeps, DagPoint, Digest, Point, PointId, PointInfo,
-    PointRestore, WeakCert,
+    PointRestore, ProofConstraint, WeakCert,
 };
 use crate::storage::MempoolStore;
 
 static LIMIT: LazyLock<SpawnLimit> =
     LazyLock::new(|| SpawnLimit::new(NodeConfig::get().max_blocking_tasks.get() as usize));
+
+struct RestoreContext {
+    cert_deps: CertDirectDeps,
+    proof_constraint: ProofConstraint,
+}
 
 #[derive(Clone)]
 pub struct DagPointFuture(DagPointFutureType);
@@ -147,7 +152,7 @@ impl DagPointFuture {
 
             let validate_local_point = || {
                 use anyhow::bail;
-                match &validated {
+                match &validated.result {
                     ValidateResult::Valid => {}
                     ValidateResult::TransInvalid(reason) => bail!("trans Invalid: {reason:?}"),
                     ValidateResult::Invalid(reason) => bail!("Invalid: {reason}"),
@@ -515,17 +520,19 @@ impl DagPointFuture {
         let cert = Cert::default();
         let cert_clone = cert.clone();
 
-        if let Some(info) = match &point_restore {
+        let restore_context = match &point_restore {
             PointRestore::Valid(info, _)
             | PointRestore::TransInvalid(info, _)
-            | PointRestore::Invalid(info, _) => Some(info),
+            | PointRestore::Invalid(info, _) => {
+                let context = Self::gather_restore_context(point_dag_round, info);
+                cert.set_deps(context.cert_deps);
+                Some(context.proof_constraint)
+            }
             // deps for `Found` are set in `validate()`
             PointRestore::IllFormed(_, _)
             | PointRestore::NotFound(_, _)
             | PointRestore::Found(_, _) => None,
-        } {
-            cert.set_deps(Self::gather_cert_deps(point_dag_round, info));
-        }
+        };
         if point_restore.has_proof() {
             cert.certify(round_ctx.conf());
         }
@@ -536,7 +543,9 @@ impl DagPointFuture {
         let validate_or_restore = match point_restore {
             PointRestore::Valid(info, mut status) => {
                 state.acquire_restore(info.id(), &mut status);
-                let dag_point = DagPoint::new_valid(info, cert, &status);
+                let proof_constraint =
+                    restore_context.expect("valid restore must have proof constraint");
+                let dag_point = DagPoint::new_valid(info, cert, &status, proof_constraint);
                 Either::Right(dag_point)
             }
             PointRestore::TransInvalid(info, mut status) => {
@@ -547,7 +556,10 @@ impl DagPointFuture {
                     },
                 };
                 state.acquire_restore(info.id(), &mut status);
-                let dag_point = DagPoint::new_trans_invalid(info, cert, &status, root_cause);
+                let proof_constraint =
+                    restore_context.expect("trans-invalid restore must have proof constraint");
+                let dag_point =
+                    DagPoint::new_trans_invalid(info, cert, &status, root_cause, proof_constraint);
                 Either::Right(dag_point)
             }
             PointRestore::Invalid(info, mut status) => {
@@ -555,7 +567,10 @@ impl DagPointFuture {
                     has_dag_round: status.has_dag_round,
                 };
                 state.acquire_restore(info.id(), &mut status);
-                let dag_point = DagPoint::new_invalid(info, cert, &status, reason);
+                let proof_constraint =
+                    restore_context.expect("invalid restore must have proof constraint");
+                let dag_point =
+                    DagPoint::new_invalid(info, cert, &status, reason, proof_constraint);
                 Either::Right(dag_point)
             }
             PointRestore::IllFormed(id, mut status) => {
@@ -643,15 +658,19 @@ impl DagPointFuture {
         state: &InclusionState,
         info: PointInfo,
         cert: Cert,
-        validated: ValidateResult,
+        validated: ValidatedPoint,
     ) -> (DagPoint, PointStatusStored) {
+        let ValidatedPoint {
+            result,
+            proof_constraint,
+        } = validated;
         let id = info.id();
-        match validated {
+        match result {
             ValidateResult::Valid => {
                 let mut status = Self::new_valid_status(&info, &cert);
                 state.acquire(id, &mut status);
                 (
-                    DagPoint::new_valid(info, cert, &status),
+                    DagPoint::new_valid(info, cert, &status, proof_constraint),
                     PointStatusStored::Valid(status),
                 )
             }
@@ -659,7 +678,7 @@ impl DagPointFuture {
                 let mut status = Self::new_trans_invalid_status(&info, &cert, &inv_dep);
                 state.acquire(id, &mut status);
                 (
-                    DagPoint::new_trans_invalid(info, cert, &status, inv_dep),
+                    DagPoint::new_trans_invalid(info, cert, &status, inv_dep, proof_constraint),
                     PointStatusStored::TransInvalid(status),
                 )
             }
@@ -671,7 +690,7 @@ impl DagPointFuture {
                 };
                 state.acquire(id, &mut status);
                 (
-                    DagPoint::new_invalid(info, cert, &status, reason),
+                    DagPoint::new_invalid(info, cert, &status, reason, proof_constraint),
                     PointStatusStored::Invalid(status),
                 )
             }
@@ -724,25 +743,85 @@ impl DagPointFuture {
         anchor_flags
     }
 
-    fn gather_cert_deps(point_dag_round: &DagRound, info: &PointInfo) -> CertDirectDeps {
+    fn gather_restore_context(point_dag_round: &DagRound, info: &PointInfo) -> RestoreContext {
         let mut cert_deps = CertDirectDeps {
             includes: Vec::with_capacity(info.includes().len()),
             witness: Vec::with_capacity(info.witness().len()),
         };
-        if let Some(r_1) = point_dag_round.prev().upgrade() {
-            cert_deps.includes.extend(r_1.select(|(peer, loc)| {
-                (info.includes().get(peer))
-                    .and_then(|digest| loc.versions.get(digest).map(|a| (*digest, a.weak_cert())))
-            }));
-            if let Some(r_2) = r_1.prev().upgrade() {
-                cert_deps.witness.extend(r_2.select(|(peer, loc)| {
-                    info.witness().get(peer).and_then(|digest| {
-                        loc.versions.get(digest).map(|a| (*digest, a.weak_cert()))
-                    })
-                }));
-            }
+        let Some(r_1) = point_dag_round.prev().upgrade() else {
+            let proof_constraint = if info.includes().is_empty() && info.witness().is_empty() {
+                ProofConstraint::Unconstrained
+            } else {
+                ProofConstraint::Incomplete
+            };
+            return RestoreContext {
+                cert_deps,
+                proof_constraint,
+            };
+        };
+        let r_2 = r_1.prev().upgrade();
+        let mut proof_carriers =
+            ProofCarrierCounts::new(r_1.peer_count(), r_2.as_ref().map(DagRound::peer_count));
+
+        for (peer, digest) in info.includes() {
+            let dependency = r_1
+                .view(peer, |loc| loc.versions.get(digest).cloned())
+                .flatten();
+            let Some(dependency) = dependency else {
+                proof_carriers.mark_incomplete();
+                continue;
+            };
+            cert_deps.includes.push((*digest, dependency.weak_cert()));
+            Self::observe_restored_dependency(info, dependency, &mut proof_carriers);
         }
-        cert_deps
+
+        if let Some(r_2) = r_2 {
+            for (peer, digest) in info.witness() {
+                let dependency = r_2
+                    .view(peer, |loc| loc.versions.get(digest).cloned())
+                    .flatten();
+                let Some(dependency) = dependency else {
+                    proof_carriers.mark_incomplete();
+                    continue;
+                };
+                cert_deps.witness.push((*digest, dependency.weak_cert()));
+                Self::observe_restored_dependency(info, dependency, &mut proof_carriers);
+            }
+        } else if !info.witness().is_empty() {
+            proof_carriers.mark_incomplete();
+        }
+
+        RestoreContext {
+            cert_deps,
+            proof_constraint: proof_carriers.finish().into_constraint(),
+        }
+    }
+
+    fn observe_restored_dependency(
+        info: &PointInfo,
+        dependency: DagPointFuture,
+        proof_carriers: &mut ProofCarrierCounts,
+    ) {
+        // Older resolved statuses are restored synchronously before this round is inserted.
+        let Some(result) = dependency.now_or_never() else {
+            proof_carriers.mark_incomplete();
+            return;
+        };
+        let Ok(dependency) = result else {
+            proof_carriers.mark_incomplete();
+            return;
+        };
+        let Some(dependency_info) = dependency.resolved_info() else {
+            proof_carriers.mark_incomplete();
+            return;
+        };
+        let constraint_enforced = matches!(&dependency, DagPoint::Valid(_));
+        proof_carriers.observe_dependency(
+            info,
+            dependency_info,
+            dependency.proof_constraint(),
+            constraint_enforced,
+        );
     }
 
     async fn ok(

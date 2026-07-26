@@ -185,7 +185,8 @@ impl JournalDagEvent {
             Self::Invalid(invalid) => match invalid.reason() {
                 InvalidReason::AfterLoadFromDb { .. } // already (re)stored
                 | InvalidReason::NoRoundInDag(_)
-                | InvalidReason::DependencyRoundDropped => JournalAction::Ignore,
+                | InvalidReason::DependencyRoundDropped
+                | InvalidReason::ProofConstraintIncomplete => JournalAction::Ignore,
                 _ => JournalAction::StoreAndCheckBan,
             },
             Self::TransInvalid(invalid) => {
@@ -234,7 +235,7 @@ impl JournalDagEvent {
             InvalidReason::AfterLoadFromDb { .. } // point already stored, but we reference it
             // for self-diagnostics only, because this round was successfully commited
             | InvalidReason::NoRoundInDag(_) | InvalidReason::DependencyRoundDropped
-            | InvalidReason::DepNotFound(_) => {},
+            | InvalidReason::DepNotFound(_) | InvalidReason::ProofConstraintIncomplete => {},
             InvalidReason::NotTrigger(point_id)
             | InvalidReason::TimeNotGreaterThanInPrevPoint(point_id)
             | InvalidReason::AnchorProofDoesntInheritAnchorTime(point_id)
@@ -254,10 +255,11 @@ impl JournalDagEvent {
             | InvalidReason::DepIllFormed((point_id, _)) => {
                 point_keys.push(point_id.key());
             }
-            InvalidReason::ProofCarrierMismatch(tuple) => {
-                let (declared, required) = &**tuple;
-                point_keys.push(declared.key());
-                point_keys.push(required.key());
+            InvalidReason::ProofCarrierMismatch(tuple)
+            | InvalidReason::ProofConstraintConflict(tuple) => {
+                let (first, second) = &**tuple;
+                point_keys.push(first.key());
+                point_keys.push(second.key());
             }
         }
     }

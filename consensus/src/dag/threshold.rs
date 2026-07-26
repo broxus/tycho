@@ -293,7 +293,8 @@ mod test {
     use crate::dag::threshold::Threshold;
     use crate::models::point_status::PointStatusValid;
     use crate::models::{
-        AnchorLink, Cert, DagPoint, PeerCount, Point, PointData, PointRole, UnixTime,
+        AnchorLink, Cert, DagPoint, PeerCount, Point, PointData, PointRole, ProofConstraint,
+        UnixTime,
     };
     use crate::test_utils::default_test_config;
 
@@ -420,6 +421,11 @@ mod test {
             conf,
         );
 
-        DagPoint::new_valid(point.info().clone(), Cert::default(), &status)
+        DagPoint::new_valid(
+            point.info().clone(),
+            Cert::default(),
+            &status,
+            ProofConstraint::Unconstrained,
+        )
     }
 }

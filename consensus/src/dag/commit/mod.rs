@@ -114,7 +114,8 @@ impl Committer {
                 assert_eq!(
                     trigger_proof,
                     quorum.proof(),
-                    "carrier quorum at round {} supports proof {:?}, but trigger {:?} names {:?}",
+                    "carrier quorum of {} points at round {} supports proof {:?}, but trigger {:?} names {:?}",
+                    quorum.carrier_count(),
                     quorum.carrier_round().0,
                     quorum.proof().alt(),
                     trigger.id().alt(),

@@ -9,7 +9,9 @@ use tycho_crypto::ed25519::KeyPair;
 use tycho_network::{Network, OverlayId, PeerId, PrivateOverlay, Router};
 use tycho_util::FastHashMap;
 
-use crate::dag::{BasicVerifier, DagRound, LastOwnPoint, Producer, ValidateResult, Verifier};
+use crate::dag::{
+    BasicVerifier, DagRound, LastOwnPoint, Producer, ValidateResult, ValidatedPoint, Verifier,
+};
 use crate::effects::{Ctx, EngineCtx, MempoolRayon, RoundCtx, TaskTracker, ValidateCtx};
 use crate::engine::{InputBuffer, MempoolConfig, MempoolMergedConfig};
 use crate::intercom::{
@@ -111,7 +113,13 @@ pub async fn populate_points<const PEER_COUNT: usize>(
         )
         .await;
         assert!(
-            matches!(validated, Ok(ValidateResult::Valid)),
+            matches!(
+                validated,
+                Ok(ValidatedPoint {
+                    result: ValidateResult::Valid,
+                    ..
+                })
+            ),
             "expected valid point, got {validated:?} for {:#?}; leader {:?}",
             point.info(),
             dag_round.leader(),

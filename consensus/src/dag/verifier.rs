@@ -17,8 +17,8 @@ use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule, PeerScheduleStateless};
 use crate::models::{
     AnchorStageRole, AnyLink, Cert, CertDirectDeps, DagPoint, Digest, EvidenceSigError,
-    IndirectLink, PeerCount, PointId, PointInfo, PointMap, Round, StructureIssue, Through,
-    UnixTime,
+    IndirectLink, PeerCount, PointId, PointInfo, PointMap, ProofConstraint, Round, StructureIssue,
+    Through, UnixTime,
 };
 use crate::storage::MempoolStore;
 // Note on equivocation.
@@ -48,6 +48,12 @@ pub enum ValidateResult {
     Invalid(InvalidReason),
     TransInvalid(InvalidDependency),
     Valid,
+}
+
+#[derive(Debug)]
+pub(crate) struct ValidatedPoint {
+    pub result: ValidateResult,
+    pub proof_constraint: ProofConstraint,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -110,6 +116,14 @@ pub enum InvalidReason {
         .0.1.alt(),
     )]
     ProofCarrierMismatch(Box<(PointId, PointId)>),
+    #[error("proof constraint cannot be reconstructed from complete dependencies")]
+    ProofConstraintIncomplete,
+    #[error(
+        "incompatible proof constraints {:?} and {:?}",
+        .0.0.alt(),
+        .0.1.alt(),
+    )]
+    ProofConstraintConflict(Box<(PointId, PointId)>),
     #[error("must have referenced prev point {:?}", .0.alt())]
     MustHaveReferencedPrevPoint(PointId),
     #[error("must have skipped round after {:?}", .0.alt())]
@@ -155,7 +169,9 @@ impl InvalidReason {
     pub fn has_dag_round(&self) -> bool {
         match self {
             Self::AfterLoadFromDb { has_dag_round } => *has_dag_round,
-            Self::NoRoundInDag(_) | Self::DependencyRoundDropped => false,
+            Self::NoRoundInDag(_)
+            | Self::DependencyRoundDropped
+            | Self::ProofConstraintIncomplete => false,
             _ => true,
         }
     }
@@ -181,14 +197,14 @@ impl Verifier {
     /// must be called iff [`BasicVerifier::verify`] succeeded
     ///
     /// We do not require the whole `Point` to avoid OOM as during sync Dag can grow large.
-    pub async fn validate(
+    pub(crate) async fn validate(
         info: PointInfo,        // @ r+0
         r_0_weak: WeakDagRound, // r+0
         downloader: Downloader,
         store: MempoolStore,
         cert: Cert,
         ctx: ValidateCtx,
-    ) -> TaskResult<ValidateResult> {
+    ) -> TaskResult<ValidatedPoint> {
         let _task_duration = HistogramGuard::begin("tycho_mempool_verifier_validate_time");
         let entered_span = ctx.span().clone().entered();
         let peer_schedule = downloader.peer_schedule();
@@ -201,7 +217,7 @@ impl Verifier {
                 // for genesis point it's sufficient to be well-formed and pass integrity check,
                 // it cannot be validated against AnchorStage (as it knows nothing about genesis)
                 // and cannot contain dependencies
-                return ctx.validated(&cert, ValidateResult::Valid);
+                return ctx.validated(&cert, ValidateResult::Valid, ProofConstraint::Unconstrained);
             }
             cmp::Ordering::Greater => {} // peer usage is already verified
         }
@@ -209,10 +225,18 @@ impl Verifier {
         let Some(r_0) = r_0_weak.upgrade() else {
             // have to decide between ill-formed and invalid
             if let Some(reason) = Self::check_proof_link(&info, None, peer_schedule, ctx.conf()) {
-                return ctx.validated(&cert, ValidateResult::IllFormed(reason));
+                return ctx.validated(
+                    &cert,
+                    ValidateResult::IllFormed(reason),
+                    ProofConstraint::Incomplete,
+                );
             }
             let reason = InvalidReason::NoRoundInDag(PointMap::Evidence);
-            return ctx.validated(&cert, ValidateResult::Invalid(reason));
+            return ctx.validated(
+                &cert,
+                ValidateResult::Invalid(reason),
+                ProofConstraint::Incomplete,
+            );
         };
         assert_eq!(
             r_0.round(),
@@ -221,12 +245,20 @@ impl Verifier {
         );
 
         if let Some(reason) = Self::check_proof_link(&info, Some(&r_0), peer_schedule, ctx.conf()) {
-            return ctx.validated(&cert, ValidateResult::IllFormed(reason));
+            return ctx.validated(
+                &cert,
+                ValidateResult::IllFormed(reason),
+                ProofConstraint::Incomplete,
+            );
         }
 
         let Some(r_1) = r_0.prev().upgrade() else {
             let reason = InvalidReason::NoRoundInDag(PointMap::Includes);
-            return ctx.validated(&cert, ValidateResult::Invalid(reason));
+            return ctx.validated(
+                &cert,
+                ValidateResult::Invalid(reason),
+                ProofConstraint::Incomplete,
+            );
         };
         let r_2_opt = r_1.prev().upgrade();
 
@@ -243,7 +275,11 @@ impl Verifier {
         if r_2_opt.is_none() && !info.witness().is_empty() {
             // to catch history conflict earlier we've spawned deps and certified the prev one
             let reason = InvalidReason::NoRoundInDag(PointMap::Witness);
-            return ctx.validated(&cert, ValidateResult::Invalid(reason));
+            return ctx.validated(
+                &cert,
+                ValidateResult::Invalid(reason),
+                ProofConstraint::Incomplete,
+            );
         }
 
         deps_and_prev.extend(
@@ -275,7 +311,8 @@ impl Verifier {
         drop(r_1);
         drop(r_2_opt);
 
-        let invalid_reason = match is_valid_fut.await? {
+        let (direct_reason, proof_constraint) = is_valid_fut.await?;
+        let invalid_reason = match direct_reason {
             Some(direct) => Some(direct),
             None => {
                 Self::check_indirect_links(
@@ -299,7 +336,7 @@ impl Verifier {
             ValidateResult::Valid
         };
 
-        ctx.validated(&cert, valid_result)
+        ctx.validated(&cert, valid_result, proof_constraint)
     }
 
     fn check_proof_link(
@@ -395,7 +432,7 @@ impl Verifier {
         latest_invalid_dep: &mut Option<InvalidDependency>,
         mut proof_carriers: ProofCarrierCounts,
         conf: &MempoolConfig,
-    ) -> TaskResult<Option<InvalidReason>> {
+    ) -> TaskResult<(Option<InvalidReason>, ProofConstraint)> {
         // point is well-formed if we got here, so point.proof matches point.includes
         let prev_digest_in_point = info.prev_digest();
         let prev_round = info.round().prev();
@@ -423,9 +460,14 @@ impl Verifier {
                 if invalid_reason.is_none() {
                     invalid_reason = Some(InvalidReason::DependencyRoundDropped);
                 }
+                proof_carriers.mark_incomplete();
                 break;
             };
             let dep_id = *dag_point.id();
+            let is_mapped_dependency = (dep_id.round == info.round().prev()
+                && info.includes().get(&dep_id.author) == Some(&dep_id.digest))
+                || (dep_id.round == info.round().prev().prev()
+                    && info.witness().get(&dep_id.author) == Some(&dep_id.digest));
 
             let is_prev_point = if dep_id.round == prev_round && dep_id.author == info.author() {
                 match prev_digest_in_point {
@@ -468,15 +510,25 @@ impl Verifier {
                 false
             };
 
+            let constraint_enforced = matches!(&dag_point, DagPoint::Valid(_));
+            let dep_constraint = dag_point.proof_constraint().cloned();
             let dep = match Self::dependency(latest_invalid_dep, &dag_point, None, prev_round, conf)
             {
                 Ok(dep) => dep,
                 Err(reason) => {
                     invalid_reason = Some(reason);
+                    if is_mapped_dependency {
+                        proof_carriers.mark_incomplete();
+                    }
                     continue; // invalidating deps (ill and not found) are not checked against
                 }
             };
-            proof_carriers.observe_dependency(info, dep);
+            proof_carriers.observe_dependency(
+                info,
+                dep,
+                dep_constraint.as_ref(),
+                constraint_enforced,
+            );
             anchor_summaries.push(dep.clone());
 
             if is_prev_point && let Some(reason) = Self::is_proof_ok(info, dep) {
@@ -554,6 +606,20 @@ impl Verifier {
             }
         }
 
+        let proof_carriers = proof_carriers.finish();
+        match proof_carriers.constraint() {
+            ProofConstraint::Unconstrained | ProofConstraint::Locked(_) => {}
+            ProofConstraint::Incomplete => {
+                invalid_reason = Some(InvalidReason::ProofConstraintIncomplete);
+            }
+            ProofConstraint::Conflicting(conflict) => {
+                invalid_reason = Some(InvalidReason::ProofConstraintConflict(Box::new((
+                    conflict.first,
+                    conflict.second,
+                ))));
+            }
+        }
+
         // Freshness is required only inside the carrier-supported proof branch.
         for dep in anchor_summaries {
             if proof_carriers.incompatible_proof(&dep).is_some() {
@@ -580,11 +646,11 @@ impl Verifier {
         if let Some(required_proof) = proof_carriers.incompatible_proof(info) {
             invalid_reason = Some(InvalidReason::ProofCarrierMismatch(Box::new((
                 anchor_proof_id,
-                *required_proof,
+                required_proof,
             ))));
         }
 
-        Ok(invalid_reason)
+        Ok((invalid_reason, proof_carriers.into_constraint()))
     }
 
     async fn check_indirect_links(
@@ -1089,7 +1155,12 @@ impl ValidateCtx {
             .increment(1);
     }
 
-    fn validated(&self, cert: &Cert, result: ValidateResult) -> TaskResult<ValidateResult> {
+    fn validated(
+        &self,
+        cert: &Cert,
+        result: ValidateResult,
+        proof_constraint: ProofConstraint,
+    ) -> TaskResult<ValidatedPoint> {
         match &result {
             ValidateResult::IllFormed(reason) => {
                 tracing::error!(
@@ -1127,6 +1198,9 @@ impl ValidateCtx {
                 );
             }
         };
-        Ok(result)
+        Ok(ValidatedPoint {
+            result,
+            proof_constraint,
+        })
     }
 }

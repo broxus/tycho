@@ -1,5 +1,4 @@
-#![allow(dead_code, reason = "proof carrier quorum wireframe")]
-
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -13,7 +12,8 @@ use tycho_util::{FastHashMap, FastHashSet};
 use crate::dag::dag_point_future::WeakDagPointFuture;
 use crate::effects::TaskResult;
 use crate::models::{
-    AnchorStageRole, AnyLink, DagPoint, PeerCount, PointId, PointInfo, Round, ValidPoint,
+    AnchorStageRole, AnyLink, DagPoint, PeerCount, PointId, PointInfo, ProofConstraint,
+    ProofConstraintConflict, ProofLock, Round, ValidPoint,
 };
 
 #[derive(Clone, Copy)]
@@ -85,12 +85,20 @@ impl ProofCarrierQuorum {
     pub fn carrier_round(&self) -> Round {
         self.carrier_round
     }
+
+    pub fn carrier_count(&self) -> usize {
+        self.carriers.len()
+    }
 }
 
 pub(super) struct ProofCarrierCounts {
     includes: ProofCarrierBucket,
     witness: Option<ProofCarrierBucket>,
     proof_parents: FastHashMap<PointId, PointId>,
+    proof_ancestors: FastHashSet<(PointId, PointId)>,
+    inherited: Vec<ProofLock>,
+    incomplete: bool,
+    conflict: Option<ProofConstraintConflict>,
 }
 
 // One bucket is one dependency round. The point map already names at most one
@@ -147,9 +155,14 @@ impl ProofCarrierCounts {
             includes: ProofCarrierBucket::new(includes),
             witness: witness.map(ProofCarrierBucket::new),
             proof_parents: Default::default(),
+            proof_ancestors: Default::default(),
+            inherited: Default::default(),
+            incomplete: false,
+            conflict: None,
         }
     }
 
+    #[cfg(any(feature = "test", test))]
     pub fn from_dependencies<'a>(
         includes: PeerCount,
         witness: Option<PeerCount>,
@@ -158,49 +171,84 @@ impl ProofCarrierCounts {
     ) -> Self {
         let mut this = Self::new(includes, witness);
         for info in include_infos {
-            this.observe_include(info);
+            this.observe_include(info, None, false);
         }
         for info in witness_infos {
-            this.observe_witness(info);
+            this.observe_witness(info, None, false);
         }
         this
     }
 
-    pub fn observe_dependency(&mut self, point: &PointInfo, dependency: &PointInfo) {
+    pub fn from_valid_dependencies<'a>(
+        includes: PeerCount,
+        witness: Option<PeerCount>,
+        include_points: impl Iterator<Item = &'a ValidPoint>,
+        witness_points: impl Iterator<Item = &'a ValidPoint>,
+    ) -> Self {
+        let mut this = Self::new(includes, witness);
+        for valid in include_points {
+            this.observe_include(valid.info(), Some(valid.proof_constraint()), true);
+        }
+        for valid in witness_points {
+            this.observe_witness(valid.info(), Some(valid.proof_constraint()), true);
+        }
+        this
+    }
+
+    pub fn observe_dependency(
+        &mut self,
+        point: &PointInfo,
+        dependency: &PointInfo,
+        constraint: Option<&ProofConstraint>,
+        constraint_enforced: bool,
+    ) {
         // Ignore other versions spawned only to validate the author's previous location.
         let is_include = dependency.round() == point.round().prev()
             && point.includes().get(dependency.author()) == Some(dependency.digest());
         if is_include {
-            self.observe_include(dependency);
+            self.observe_include(dependency, constraint, constraint_enforced);
             return;
         }
 
         let is_witness = dependency.round() == point.round().prev().prev()
             && point.witness().get(dependency.author()) == Some(dependency.digest());
         if is_witness {
-            self.observe_witness(dependency);
+            self.observe_witness(dependency, constraint, constraint_enforced);
         }
     }
 
-    pub fn required_proof(&self) -> Option<&PointId> {
-        // Includes are the newer carrier round and supersede witness evidence.
-        self.includes
-            .required_proof()
-            .or_else(|| self.witness.as_ref()?.required_proof())
+    pub fn mark_incomplete(&mut self) {
+        self.incomplete = true;
     }
 
-    pub fn incompatible_proof(&self, point: &PointInfo) -> Option<&PointId> {
-        let required = self.required_proof()?;
-        (!self.proof_extends(point, *required)).then_some(required)
+    pub fn finish(self) -> ProofCarrierProjection {
+        let constraint = self.derive_constraint();
+        ProofCarrierProjection {
+            constraint,
+            proof_parents: self.proof_parents,
+            proof_ancestors: self.proof_ancestors,
+        }
     }
 
-    fn observe_include(&mut self, info: &PointInfo) {
+    fn observe_include(
+        &mut self,
+        info: &PointInfo,
+        constraint: Option<&ProofConstraint>,
+        constraint_enforced: bool,
+    ) {
         self.observe_proof_parent(info);
+        self.observe_constraint(info, constraint, constraint_enforced);
         self.includes.observe(info);
     }
 
-    fn observe_witness(&mut self, info: &PointInfo) {
+    fn observe_witness(
+        &mut self,
+        info: &PointInfo,
+        constraint: Option<&ProofConstraint>,
+        constraint_enforced: bool,
+    ) {
         self.observe_proof_parent(info);
+        self.observe_constraint(info, constraint, constraint_enforced);
         self.witness
             .as_mut()
             .expect("witness dependency without its peer schedule")
@@ -220,6 +268,149 @@ impl ProofCarrierCounts {
         self.proof_parents.entry(*info.id()).or_insert(parent);
     }
 
+    fn observe_constraint(
+        &mut self,
+        info: &PointInfo,
+        constraint: Option<&ProofConstraint>,
+        constraint_enforced: bool,
+    ) {
+        match constraint {
+            None | Some(ProofConstraint::Unconstrained) => {}
+            Some(ProofConstraint::Locked(lock)) => {
+                self.inherited.push(lock.clone());
+                let proof = info.anchor_id(AnchorStageRole::Proof);
+                let required = lock.proof();
+                if constraint_enforced && proof != required {
+                    if proof.round > required.round {
+                        // Validity attests that the dependency selected a descendant of its lock.
+                        self.proof_ancestors.insert((proof, required));
+                    } else {
+                        self.conflict.get_or_insert(ProofConstraintConflict {
+                            first: required,
+                            second: proof,
+                        });
+                    }
+                }
+            }
+            Some(ProofConstraint::Incomplete) => self.incomplete = true,
+            Some(ProofConstraint::Conflicting(conflict)) => {
+                self.conflict.get_or_insert(*conflict);
+            }
+        }
+    }
+
+    fn derive_constraint(&self) -> ProofConstraint {
+        if let Some(conflict) = self.conflict {
+            return ProofConstraint::Conflicting(conflict);
+        }
+        if self.incomplete {
+            return ProofConstraint::Incomplete;
+        }
+
+        let mut sources = self.inherited.clone();
+        // Includes are the newer carrier round and supersede witness evidence.
+        if let Some(proof) = self.includes.required_proof().or_else(|| {
+            self.witness
+                .as_ref()
+                .and_then(ProofCarrierBucket::required_proof)
+        }) {
+            sources.push(ProofLock::new(*proof, None));
+        }
+        if sources.is_empty() {
+            return ProofConstraint::Unconstrained;
+        }
+
+        let mut by_round = BTreeMap::<Round, PointId>::new();
+        for lock in &sources {
+            let mut current = Some(lock);
+            while let Some(item) = current {
+                let proof = item.proof();
+                if let Some(other) = by_round.insert(proof.round, proof)
+                    && other != proof
+                {
+                    let conflict = ProofConstraintConflict {
+                        first: other,
+                        second: proof,
+                    };
+                    return ProofConstraint::Conflicting(conflict);
+                }
+                current = item.parent();
+            }
+        }
+
+        let proofs = by_round.into_values().collect::<Vec<_>>();
+        for pair in proofs.windows(2) {
+            let [older, newer] = pair else {
+                unreachable!("window size is fixed")
+            };
+            let is_inherited = sources
+                .iter()
+                .any(|lock| lock.contains(*older) && lock.contains(*newer));
+            if !is_inherited && !self.proof_id_extends(*newer, *older) {
+                let conflict = ProofConstraintConflict {
+                    first: *older,
+                    second: *newer,
+                };
+                return ProofConstraint::Conflicting(conflict);
+            }
+        }
+
+        let mut lock = None;
+        for proof in proofs {
+            lock = Some(ProofLock::new(proof, lock));
+        }
+        ProofConstraint::Locked(lock.expect("proof sources are not empty"))
+    }
+
+    fn proof_id_extends(&self, mut proof: PointId, required: PointId) -> bool {
+        if proof == required {
+            return true;
+        }
+        for _ in 0..=self.proof_parents.len() {
+            if proof.round <= required.round {
+                return false;
+            }
+            if self.proof_ancestors.contains(&(proof, required)) {
+                return true;
+            }
+            let Some(parent) = self.proof_parents.get(&proof).copied() else {
+                return false;
+            };
+            if parent == required {
+                return true;
+            }
+            if parent.round >= proof.round {
+                return false;
+            }
+            proof = parent;
+        }
+        false
+    }
+}
+
+pub(super) struct ProofCarrierProjection {
+    constraint: ProofConstraint,
+    proof_parents: FastHashMap<PointId, PointId>,
+    proof_ancestors: FastHashSet<(PointId, PointId)>,
+}
+
+impl ProofCarrierProjection {
+    pub fn constraint(&self) -> &ProofConstraint {
+        &self.constraint
+    }
+
+    pub fn into_constraint(self) -> ProofConstraint {
+        self.constraint
+    }
+
+    pub fn incompatible_proof(&self, point: &PointInfo) -> Option<PointId> {
+        let ProofConstraint::Locked(lock) = &self.constraint else {
+            return None;
+        };
+        let required = lock.proof();
+        (!self.proof_extends(point, required)).then_some(required)
+    }
+
     fn proof_extends(&self, point: &PointInfo, required: PointId) -> bool {
         let mut proof = point.anchor_id(AnchorStageRole::Proof);
         if proof == required {
@@ -231,6 +422,9 @@ impl ProofCarrierCounts {
         for _ in 0..=self.proof_parents.len() {
             if proof.round <= required.round {
                 return false;
+            }
+            if self.proof_ancestors.contains(&(proof, required)) {
+                return true;
             }
 
             let parent = if proof == *point.id() && point.anchor_proof() == AnyLink::ToSelf {
