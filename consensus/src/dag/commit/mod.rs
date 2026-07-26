@@ -10,12 +10,12 @@ use tycho_util::FastHashMap;
 use crate::dag::DagRound;
 use crate::dag::commit::back::DagBack;
 use crate::dag::commit::inspector::RoundInspector;
-use crate::dag::dag_point_future::WeakDagPointFuture;
+use crate::dag::proof_carrier::{CommitterSignal, ResolvedCommitterSignal};
 use crate::effects::{AltFmt, AltFormat, Cancelled, TaskResult};
 use crate::engine::{EngineResult, MempoolConfig};
 use crate::intercom::StatsRanges;
 use crate::models::{
-    AnchorData, AnyLink, DagPoint, MempoolPeerStats, PointInfo, Round, ValidPoint,
+    AnchorData, AnchorStageRole, AnyLink, DagPoint, MempoolPeerStats, PointInfo, Round, ValidPoint,
 };
 use crate::moderator::JournalDagEvent;
 
@@ -31,9 +31,8 @@ struct EnqueuedAnchor {
 }
 
 pub struct Committer {
-    // TODO receive SupportedTrigger once ProofCommitGate stops passing valid triggers through.
-    triggers_rx: mpsc::UnboundedReceiver<WeakDagPointFuture>,
-    futures: FuturesUnordered<WeakDagPointFuture>,
+    triggers_rx: mpsc::UnboundedReceiver<CommitterSignal>,
+    futures: FuturesUnordered<CommitterSignal>,
     dag: DagBack,
     // some anchors won't contain full history after a gap (filled with sync),
     // so this determines least round at which fully reproducible anchor may be produced
@@ -45,7 +44,7 @@ pub struct Committer {
 }
 
 impl Committer {
-    pub fn new(triggers_rx: mpsc::UnboundedReceiver<WeakDagPointFuture>) -> Self {
+    pub(super) fn new(triggers_rx: mpsc::UnboundedReceiver<CommitterSignal>) -> Self {
         Self {
             triggers_rx,
             futures: FuturesUnordered::new(),
@@ -94,11 +93,36 @@ impl Committer {
             tokio::select! {
                 biased;
                 Some(future) = self.triggers_rx.recv() => self.futures.push(future),
-                Some(trigger_opt) = self.futures.next() => if let Some(trigger) = trigger_opt? {
-                    break Ok(trigger);
+                Some(signal_opt) = self.futures.next() => if let Some(signal) = signal_opt? {
+                    break Ok(Self::resolve_signal(signal));
                 },
                 else => return Err(Cancelled()),
             }
+        }
+    }
+
+    fn resolve_signal(signal: ResolvedCommitterSignal) -> DagPoint {
+        match signal {
+            ResolvedCommitterSignal::Supported { trigger, quorum } => {
+                let Some(Ok(valid)) = filter(&trigger) else {
+                    panic!(
+                        "proof commit gate emitted a non-valid trigger: {:?}",
+                        trigger.id().alt()
+                    );
+                };
+                let trigger_proof = valid.info().anchor_id(AnchorStageRole::Proof);
+                assert_eq!(
+                    trigger_proof,
+                    quorum.proof(),
+                    "carrier quorum at round {} supports proof {:?}, but trigger {:?} names {:?}",
+                    quorum.carrier_round().0,
+                    quorum.proof().alt(),
+                    trigger.id().alt(),
+                    trigger_proof.alt(),
+                );
+                trigger
+            }
+            ResolvedCommitterSignal::HistoryConflict(trigger) => trigger,
         }
     }
 
@@ -365,21 +389,23 @@ mod test {
     async fn test_commit_with_gap() {
         test_impl(0, Round(25), [9, 5, 17], Round(97)).await;
 
+        // A next Sticky point starts another exact proof, so intermediate Sticky triggers
+        // remain pending and are committed together after the chain gets carrier support.
         test_impl(1, Round(26), [8, 6, 16], Round(95)).await;
-        test_impl(2, Round(26), [12, 8, 25], Round(96)).await;
-        test_impl(3, Round(26), [12, 6, 22], Round(94)).await;
+        test_impl(2, Round(21), [12, 6, 27], Round(96)).await;
+        test_impl(3, Round(19), [12, 4, 24], Round(94)).await;
 
-        test_impl(4, Round(26), [15, 7, 28], Round(95)).await; // N mod 3 == 1
-        test_impl(5, Round(26), [17, 9, 34], Round(96)).await; // N mod 3 == 2 is optimal
-        test_impl(6, Round(26), [14, 9, 31], Round(98)).await; // N mod 3 == 0
+        test_impl(4, Round(20), [15, 5, 30], Round(95)).await; // N mod 3 == 1
+        test_impl(5, Round(21), [12, 12, 36], Round(96)).await; // N mod 3 == 2 is optimal
+        test_impl(6, Round(19), [14, 7, 28], Round(88)).await; // N mod 3 == 0
 
-        test_impl(7, Round(26), [16, 10, 35], Round(98)).await;
-        test_impl(8, Round(26), [18, 11, 39], Round(98)).await;
-        test_impl(9, Round(26), [18, 10, 32], Round(94)).await;
+        test_impl(7, Round(20), [16, 8, 32], Round(89)).await;
+        test_impl(8, Round(21), [18, 9, 36], Round(90)).await;
+        test_impl(9, Round(13), [10, 10, 40], Round(94)).await;
 
-        test_impl(10, Round(26), [19, 11, 36], Round(95)).await;
-        test_impl(11, Round(26), [20, 12, 40], Round(96)).await;
-        test_impl(12, Round(26), [18, 10, 37], Round(94)).await;
+        test_impl(10, Round(14), [11, 11, 44], Round(95)).await;
+        test_impl(11, Round(15), [12, 12, 48], Round(96)).await;
+        test_impl(12, Round(19), [13, 13, 39], Round(94)).await;
     }
 
     async fn test_impl(
@@ -519,8 +545,9 @@ mod test {
     ) -> Vec<AnchorData> {
         let mut committed = Vec::new();
 
-        while let Ok(trigger) = committer.triggers_rx.try_recv() {
-            let trigger = trigger.await.expect("trigger").expect("strong ref");
+        while let Ok(signal) = committer.triggers_rx.try_recv() {
+            let signal = signal.await.expect("trigger").expect("strong ref");
+            let trigger = Committer::resolve_signal(signal);
             let trigger_round = trigger.round();
             let batch = committer.commit(&trigger, conf).unwrap_or_else(|err| {
                 panic!("commit on trigger @ {trigger_round:?} failed: {err}")

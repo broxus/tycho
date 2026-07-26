@@ -1,6 +1,9 @@
 #![allow(dead_code, reason = "proof carrier quorum wireframe")]
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
@@ -8,7 +11,10 @@ use tycho_network::PeerId;
 use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::dag::dag_point_future::WeakDagPointFuture;
-use crate::models::{AnchorStageRole, AnyLink, PeerCount, PointId, PointInfo, Round, ValidPoint};
+use crate::effects::TaskResult;
+use crate::models::{
+    AnchorStageRole, AnyLink, DagPoint, PeerCount, PointId, PointInfo, Round, ValidPoint,
+};
 
 #[derive(Clone, Copy)]
 pub(super) struct CarrierVote {
@@ -69,6 +75,16 @@ pub(super) struct ProofCarrierQuorum {
     proof: PointId,
     carrier_round: Round,
     carriers: Arc<[PointId]>,
+}
+
+impl ProofCarrierQuorum {
+    pub fn proof(&self) -> PointId {
+        self.proof
+    }
+
+    pub fn carrier_round(&self) -> Round {
+        self.carrier_round
+    }
 }
 
 pub(super) struct ProofCarrierCounts {
@@ -239,24 +255,36 @@ impl ProofCarrierCounts {
     }
 }
 
-#[derive(Default)]
 struct ProofCommitGateState {
+    // Prevent a late task from restoring evidence after its DAG round was dropped.
+    bottom_round: Round,
     by_proof: FastHashMap<PointId, ProofCommitState>,
+}
+
+impl Default for ProofCommitGateState {
+    fn default() -> Self {
+        Self {
+            bottom_round: Round::BOTTOM,
+            by_proof: Default::default(),
+        }
+    }
 }
 
 #[derive(Default)]
 struct ProofCommitState {
     quorum: Option<Arc<ProofCarrierQuorum>>,
     pending: FastHashMap<PointId, WeakDagPointFuture>,
+    // Keep released IDs too, so repeated registration cannot enqueue a trigger twice.
+    seen: FastHashSet<PointId>,
 }
 
 pub(super) struct ProofCommitGate {
     state: Mutex<ProofCommitGateState>,
-    ready_tx: mpsc::UnboundedSender<WeakDagPointFuture>,
+    ready_tx: mpsc::UnboundedSender<CommitterSignal>,
 }
 
 impl ProofCommitGate {
-    pub fn new(ready_tx: mpsc::UnboundedSender<WeakDagPointFuture>) -> Self {
+    pub fn new(ready_tx: mpsc::UnboundedSender<CommitterSignal>) -> Self {
         Self {
             state: Default::default(),
             ready_tx,
@@ -265,28 +293,146 @@ impl ProofCommitGate {
 
     pub fn register_trigger(
         &self,
-        _trigger_id: PointId,
-        _proof_id: PointId,
+        trigger_id: PointId,
+        proof_id: PointId,
         trigger: WeakDagPointFuture,
     ) {
-        // TODO retain the trigger until its exact proof has a carrier quorum.
-        self.ready_tx.send(trigger).ok();
+        let ready = {
+            let mut state = self.state.lock();
+            if trigger_id.round < state.bottom_round {
+                return;
+            }
+
+            let proof_state = state.by_proof.entry(proof_id).or_default();
+            if !proof_state.seen.insert(trigger_id) {
+                return;
+            }
+
+            match proof_state.quorum.clone() {
+                Some(quorum) => Some(SupportedTrigger { trigger, quorum }),
+                None => {
+                    proof_state.pending.insert(trigger_id, trigger);
+                    None
+                }
+            }
+        };
+
+        if let Some(ready) = ready {
+            self.ready_tx.send(CommitterSignal::Supported(ready)).ok();
+        }
     }
 
     pub fn register_history_conflict(&self, trigger: WeakDagPointFuture) {
-        self.ready_tx.send(trigger).ok();
+        // This is a recovery signal, not a valid trigger waiting for proof support.
+        self.ready_tx
+            .send(CommitterSignal::HistoryConflict(trigger))
+            .ok();
     }
 
-    pub fn register_quorum(&self, _quorum: ProofCarrierQuorum) {
-        // TODO retain the quorum and release pending triggers for its exact proof.
+    pub fn register_quorum(&self, quorum: ProofCarrierQuorum) {
+        let ready = {
+            let mut state = self.state.lock();
+            if quorum.carrier_round < state.bottom_round {
+                return;
+            }
+
+            let proof_state = state.by_proof.entry(quorum.proof).or_default();
+            let quorum = Arc::new(quorum);
+            // Later carrier evidence for the same proof remains retained for longer.
+            let retained = match &proof_state.quorum {
+                Some(current) if current.carrier_round >= quorum.carrier_round => current.clone(),
+                _ => {
+                    proof_state.quorum = Some(quorum.clone());
+                    quorum
+                }
+            };
+
+            std::mem::take(&mut proof_state.pending)
+                .into_values()
+                .map(|trigger| SupportedTrigger {
+                    trigger,
+                    quorum: retained.clone(),
+                })
+                .collect::<Vec<_>>()
+        };
+
+        for ready in ready {
+            self.ready_tx.send(CommitterSignal::Supported(ready)).ok();
+        }
     }
 
-    pub fn clean(&self, _bottom_round: Round) {
-        // TODO remove pending triggers and quorum evidence below retained DAG history.
+    pub fn clean(&self, bottom_round: Round) {
+        let mut state = self.state.lock();
+        if bottom_round <= state.bottom_round {
+            return;
+        }
+        state.bottom_round = bottom_round;
+
+        state.by_proof.retain(|_, proof_state| {
+            proof_state
+                .pending
+                .retain(|trigger, _| trigger.round >= bottom_round);
+            proof_state
+                .seen
+                .retain(|trigger| trigger.round >= bottom_round);
+
+            if proof_state
+                .quorum
+                .as_ref()
+                .is_some_and(|quorum| quorum.carrier_round < bottom_round)
+            {
+                proof_state.quorum = None;
+            }
+
+            proof_state.quorum.is_some()
+                || !proof_state.pending.is_empty()
+                || !proof_state.seen.is_empty()
+        });
     }
 }
 
 pub(super) struct SupportedTrigger {
     trigger: WeakDagPointFuture,
     quorum: Arc<ProofCarrierQuorum>,
+}
+
+pub(super) enum CommitterSignal {
+    Supported(SupportedTrigger),
+    HistoryConflict(WeakDagPointFuture),
+}
+
+pub(super) enum ResolvedCommitterSignal {
+    Supported {
+        trigger: DagPoint,
+        quorum: Arc<ProofCarrierQuorum>,
+    },
+    HistoryConflict(DagPoint),
+}
+
+impl Future for CommitterSignal {
+    type Output = TaskResult<Option<ResolvedCommitterSignal>>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match self.get_mut() {
+            Self::Supported(supported) => match Pin::new(&mut supported.trigger).poll(cx) {
+                Poll::Ready(Ok(Some(trigger))) => {
+                    Poll::Ready(Ok(Some(ResolvedCommitterSignal::Supported {
+                        trigger,
+                        quorum: supported.quorum.clone(),
+                    })))
+                }
+                Poll::Ready(Ok(None)) => Poll::Ready(Ok(None)),
+                Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+                Poll::Pending => Poll::Pending,
+            },
+            Self::HistoryConflict(future) => match Pin::new(future).poll(cx) {
+                Poll::Ready(Ok(Some(trigger))) => {
+                    Poll::Ready(Ok(Some(ResolvedCommitterSignal::HistoryConflict(trigger))))
+                }
+                Poll::Ready(Ok(None)) => Poll::Ready(Ok(None)),
+                Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+                Poll::Pending => Poll::Pending,
+            },
+        }
+    }
 }

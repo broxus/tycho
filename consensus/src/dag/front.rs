@@ -100,8 +100,8 @@ impl DagFront {
                     peer_schedule,
                     conf,
                 ));
-                self.proof_commit_gate.clean(self.last_back_bottom);
             }
+            self.proof_commit_gate.clean(self.last_back_bottom);
         }
 
         // to preserve contiguity; even if new rounds are drained, they will be passed to Back Dag
@@ -118,7 +118,7 @@ impl DagFront {
     /// then front will keep "pending back reset" until back becomes available to sync
     pub fn sync_back(&mut self, committer: &mut Committer, round_ctx: &RoundCtx) {
         if committer.top_round() == self.top().round() {
-            self.last_back_bottom = committer.bottom_round(); // now front is in sync with back too
+            self.update_back_bottom(committer.bottom_round());
             return;
         }
 
@@ -151,9 +151,15 @@ impl DagFront {
             &self.drain_upto(self.top().round() - conf.consensus.min_front_rounds()),
         );
         committer.extend_from_ahead(&self.rounds);
-        self.last_back_bottom = committer.bottom_round();
+        self.update_back_bottom(committer.bottom_round());
 
         EngineCtx::meter_dag_len(committer.dag_len());
+    }
+
+    fn update_back_bottom(&mut self, bottom_round: Round) {
+        // Gate evidence remains usable while its round is retained in either DAG half.
+        self.last_back_bottom = bottom_round;
+        self.proof_commit_gate.clean(bottom_round);
     }
 
     fn drain_upto(&mut self, new_bottom_round: Round) -> Vec<DagRound> {
@@ -171,8 +177,6 @@ impl DagFront {
             result.iter().map(|p| p.round()).collect::<Vec<_>>(),
             self.rounds.iter().map(|p| p.round()).collect::<Vec<_>>(),
         );
-
-        self.proof_commit_gate.clean(self.bottom_round());
 
         result
     }
