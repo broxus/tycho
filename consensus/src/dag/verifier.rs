@@ -109,7 +109,7 @@ pub enum InvalidReason {
         .0.0.alt(),
         .0.1.alt(),
     )]
-    ProofCarrierMismatch((PointId, PointId)),
+    ProofCarrierMismatch(Box<(PointId, PointId)>),
     #[error("must have referenced prev point {:?}", .0.alt())]
     MustHaveReferencedPrevPoint(PointId),
     #[error("must have skipped round after {:?}", .0.alt())]
@@ -415,7 +415,7 @@ impl Verifier {
             info.time() + UnixTime::from_millis(conf.consensus.clock_skew_millis.get() as _);
 
         let mut invalid_reason = None;
-        let mut anchor_summaries = Vec::new();
+        let mut anchor_summaries = Vec::with_capacity(deps_and_prev.len());
 
         // join all dependencies despite the reason to invalidate the point is found
         while let Some(task_result) = deps_and_prev.next().await {
@@ -578,10 +578,10 @@ impl Verifier {
         }
 
         if let Some(required_proof) = proof_carriers.incompatible_proof(info) {
-            invalid_reason = Some(InvalidReason::ProofCarrierMismatch((
+            invalid_reason = Some(InvalidReason::ProofCarrierMismatch(Box::new((
                 anchor_proof_id,
-                required_proof,
-            )));
+                *required_proof,
+            ))));
         }
 
         Ok(invalid_reason)

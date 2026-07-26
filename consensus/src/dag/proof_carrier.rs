@@ -120,8 +120,8 @@ impl ProofCarrierBucket {
         }
     }
 
-    fn required_proof(&self) -> Option<PointId> {
-        self.quorum
+    fn required_proof(&self) -> Option<&PointId> {
+        self.quorum.as_ref()
     }
 }
 
@@ -166,16 +166,16 @@ impl ProofCarrierCounts {
         }
     }
 
-    pub fn required_proof(&self) -> Option<PointId> {
+    pub fn required_proof(&self) -> Option<&PointId> {
         // Includes are the newer carrier round and supersede witness evidence.
         self.includes
             .required_proof()
             .or_else(|| self.witness.as_ref()?.required_proof())
     }
 
-    pub fn incompatible_proof(&self, point: &PointInfo) -> Option<PointId> {
+    pub fn incompatible_proof(&self, point: &PointInfo) -> Option<&PointId> {
         let required = self.required_proof()?;
-        (!self.proof_extends(point, required)).then_some(required)
+        (!self.proof_extends(point, *required)).then_some(required)
     }
 
     fn observe_include(&mut self, info: &PointInfo) {

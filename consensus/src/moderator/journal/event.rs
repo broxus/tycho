@@ -254,7 +254,8 @@ impl JournalDagEvent {
             | InvalidReason::DepIllFormed((point_id, _)) => {
                 point_keys.push(point_id.key());
             }
-            InvalidReason::ProofCarrierMismatch((declared, required)) => {
+            InvalidReason::ProofCarrierMismatch(tuple) => {
+                let (declared, required) = &**tuple;
                 point_keys.push(declared.key());
                 point_keys.push(required.key());
             }
