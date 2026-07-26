@@ -815,7 +815,8 @@ impl DagPointFuture {
             proof_carriers.mark_incomplete();
             return;
         };
-        let constraint_enforced = matches!(&dependency, DagPoint::Valid(_));
+        // Restore must reproduce the same certified-dependency override as live validation.
+        let constraint_enforced = dependency.trusted().is_some();
         proof_carriers.observe_dependency(
             info,
             dependency_info,

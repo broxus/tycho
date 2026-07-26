@@ -282,7 +282,7 @@ impl ProofCarrierCounts {
                 let required = lock.proof();
                 if constraint_enforced && proof != required {
                     if proof.round > required.round {
-                        // Validity attests that the dependency selected a descendant of its lock.
+                        // A valid or certified dependency attests this descendant relation.
                         self.proof_ancestors.insert((proof, required));
                     } else {
                         self.conflict.get_or_insert(ProofConstraintConflict {

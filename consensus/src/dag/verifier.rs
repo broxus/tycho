@@ -510,7 +510,8 @@ impl Verifier {
                 false
             };
 
-            let constraint_enforced = matches!(&dag_point, DagPoint::Valid(_));
+            // A certificate overrides a local invalid verdict, just as it does for dependency use.
+            let constraint_enforced = dag_point.trusted().is_some();
             let dep_constraint = dag_point.proof_constraint().cloned();
             let dep = match Self::dependency(latest_invalid_dep, &dag_point, None, prev_round, conf)
             {
