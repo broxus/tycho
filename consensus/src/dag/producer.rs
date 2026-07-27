@@ -8,7 +8,7 @@ use crate::effects::{AltFormat, RoundCtx};
 use crate::engine::{InputBuffer, MempoolConfig};
 use crate::models::{
     AnchorLink, AnchorStageRole, AnyLink, Digest, IndirectLink, PeerCount, Point, PointData,
-    PointInfo, PointRole, Round, Signature, Through, UnixTime,
+    PointInfo, PointRole, Round, Signature, Through, UnixTime, ValidPoint,
 };
 
 pub struct LastOwnPoint {
@@ -57,10 +57,19 @@ impl Producer {
         };
 
         let local_id = PeerId::from(key_pair.public_key);
-        let includes = Self::includes(finished_round);
-        let witness = Self::witness(finished_round, &local_id, last_own_point);
+        let include_points = Self::includes(finished_round);
+        let witness_points = Self::witness(finished_round, &local_id, last_own_point);
         let includes_peer_count = finished_round.peer_count();
         let witness_peer_count = (finished_round.prev().upgrade()).map(|round| round.peer_count());
+
+        let includes = include_points
+            .into_iter()
+            .map(|(peer, valid)| (peer, valid.info().clone()))
+            .collect();
+        let witness = witness_points
+            .into_iter()
+            .map(|(peer, valid)| (peer, valid.info().clone()))
+            .collect();
 
         Self::create(
             last_own_point,
@@ -220,7 +229,7 @@ impl Producer {
         ))
     }
 
-    fn includes(finished_dag_round: &DagRound) -> FastHashMap<PeerId, PointInfo> {
+    fn includes(finished_dag_round: &DagRound) -> FastHashMap<PeerId, ValidPoint> {
         let includes = finished_dag_round.threshold().get_reached();
         assert!(
             includes.len() >= finished_dag_round.peer_count().majority(),
@@ -237,7 +246,7 @@ impl Producer {
         finished_dag_round: &DagRound,
         local_id: &PeerId,
         last_own_point: Option<&LastOwnPoint>,
-    ) -> FastHashMap<PeerId, PointInfo> {
+    ) -> FastHashMap<PeerId, ValidPoint> {
         let round = finished_dag_round.round();
         let Some(witness_round) = finished_dag_round.prev().upgrade() else {
             return FastHashMap::default();
@@ -263,7 +272,7 @@ impl Producer {
                     loc.state
                         .get_or_reject()
                         .ok()
-                        .map(|signed| (*peer, signed.first_resolved.info().clone()))
+                        .map(|signed| (*peer, signed.first_resolved.clone()))
                 }
             })
             .collect::<_>()

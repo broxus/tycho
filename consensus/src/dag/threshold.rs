@@ -12,7 +12,7 @@ use tycho_util::FastHashMap;
 
 use crate::effects::AltFormat;
 use crate::engine::MempoolConfig;
-use crate::models::{PeerCount, PointInfo, Round, UnixTime, ValidPoint};
+use crate::models::{PeerCount, Round, UnixTime, ValidPoint};
 
 const TOO_FAR_FUTURE: UnixTime =
     UnixTime::from_millis(Duration::from_hours(365 * 24).as_millis() as u64);
@@ -23,15 +23,15 @@ pub struct Threshold {
     target_count: usize,
     clock_skew: UnixTime,
     count: AtomicU32,
-    sender: mpsc::Sender<PointInfo>,
+    sender: mpsc::Sender<ValidPoint>,
     work: Mutex<ThresholdWork>,
 }
 
 struct ThresholdWork {
     is_reached: bool,
-    ready: FastHashMap<PeerId, PointInfo>,
-    delayed: DelayQueue<PointInfo>,
-    receiver: mpsc::Receiver<PointInfo>,
+    ready: FastHashMap<PeerId, ValidPoint>,
+    delayed: DelayQueue<ValidPoint>,
+    receiver: mpsc::Receiver<ValidPoint>,
 }
 
 impl Threshold {
@@ -69,7 +69,7 @@ impl Threshold {
         // count no matter if threshold is already reached;
         // increase counter before send to reduce it upon receive;
         ThresholdCount::add_one_in_channel(&self.count);
-        match self.sender.try_send(valid.info().clone()) {
+        match self.sender.try_send(valid.clone()) {
             Ok(()) => {}
             Err(e) => {
                 // consider impossible
@@ -102,30 +102,30 @@ impl Threshold {
         let mut max_time = UnixTime::now() + self.clock_skew;
 
         while ready.len() < self.target_count {
-            let (info, is_from_channel) = tokio::select! {
-                Some(info) = receiver.recv() => {
-                    let mut to_delay = info.time() - max_time;
+            let (valid, is_from_channel) = tokio::select! {
+                Some(valid) = receiver.recv() => {
+                    let mut to_delay = valid.info().time() - max_time;
                     if to_delay > TOO_FAR_FUTURE {
                         ThresholdCount::set_decrease(&self.count, ready, delayed, true as u8);
                         continue; // discard: don't allow timer wheel to panic
                     }
                     if to_delay.millis() > 0 {
                         max_time = UnixTime::now() + self.clock_skew;
-                        to_delay = info.time() - max_time;
+                        to_delay = valid.info().time() - max_time;
                     }
 
                     if to_delay.millis() > 0 {
-                        delayed.insert(info, Duration::from_millis(to_delay.millis()));
+                        delayed.insert(valid, Duration::from_millis(to_delay.millis()));
                         ThresholdCount::set_decrease(&self.count, ready, delayed, true as u8);
                         continue;
                     } else {
-                        (info, true)
+                        (valid, true)
                     }
                 },
                 Some(expired) = delayed.next() => (expired.into_inner(), false)
             };
 
-            Self::push_ready(ready, info);
+            Self::push_ready(ready, valid);
             ThresholdCount::set_decrease(&self.count, ready, delayed, is_from_channel as u8);
         }
 
@@ -133,7 +133,7 @@ impl Threshold {
     }
 
     /// use only after [`Self::reached()`] was awaited to completion
-    pub fn get_reached(&self) -> FastHashMap<PeerId, PointInfo> {
+    pub fn get_reached(&self) -> FastHashMap<PeerId, ValidPoint> {
         let mut work = match self.work.try_lock() {
             Ok(guard) => guard,
             Err(e) => panic!("threshold lock must be released: {e}"),
@@ -148,30 +148,30 @@ impl Threshold {
 
         while let Some(next_key) = work.delayed.peek() {
             // manually re-check expiration
-            let info = work.delayed.remove(&next_key).into_inner();
-            let to_delay = info.time() - max_time;
+            let valid = work.delayed.remove(&next_key).into_inner();
+            let to_delay = valid.info().time() - max_time;
             if to_delay.millis() > 0 {
                 work.delayed
-                    .insert(info, Duration::from_millis(to_delay.millis()));
+                    .insert(valid, Duration::from_millis(to_delay.millis()));
                 break; // peek is ordered by duration, so others are left delayed anyway
             } else {
-                Self::push_ready(&mut work.ready, info);
+                Self::push_ready(&mut work.ready, valid);
             }
         }
         let mut removed_from_channel: u8 = 0;
-        while let Ok(info) = work.receiver.try_recv() {
+        while let Ok(valid) = work.receiver.try_recv() {
             removed_from_channel = removed_from_channel
                 .checked_add(1)
                 .expect("cannot overflow");
-            let to_delay = info.time() - max_time;
+            let to_delay = valid.info().time() - max_time;
             if to_delay > TOO_FAR_FUTURE {
                 continue; // discard: don't allow timer wheel to panic
             }
             if to_delay.millis() > 0 {
                 work.delayed
-                    .insert(info, Duration::from_millis(to_delay.millis()));
+                    .insert(valid, Duration::from_millis(to_delay.millis()));
             } else {
-                Self::push_ready(&mut work.ready, info);
+                Self::push_ready(&mut work.ready, valid);
             }
         }
 
@@ -185,17 +185,17 @@ impl Threshold {
         mem::take(&mut work.ready)
     }
 
-    fn push_ready(ready: &mut FastHashMap<PeerId, PointInfo>, info: PointInfo) {
+    fn push_ready(ready: &mut FastHashMap<PeerId, ValidPoint>, valid: ValidPoint) {
         ready
-            .entry(*info.author())
+            .entry(*valid.info().author())
             .and_modify(|old| {
                 panic!(
                     "cannot add to threshold same author twice: exists {:?} new digest {}",
-                    old.id().alt(),
-                    info.digest().alt()
+                    old.info().id().alt(),
+                    valid.info().digest().alt()
                 )
             })
-            .or_insert(info);
+            .or_insert(valid);
     }
 }
 
@@ -225,8 +225,8 @@ impl ThresholdCount {
 
     fn set_decrease(
         count: &AtomicU32,
-        ready: &FastHashMap<PeerId, PointInfo>,
-        delayed: &DelayQueue<PointInfo>,
+        ready: &FastHashMap<PeerId, ValidPoint>,
+        delayed: &DelayQueue<ValidPoint>,
         removed_from_channel: u8,
     ) {
         let ready_len = u8::try_from(ready.len()).expect("too many ready includes");
