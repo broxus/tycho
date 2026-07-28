@@ -1,7 +1,8 @@
 // TODO: Refactor models (crate::state vs crate::models).
 
 pub use self::config::{
-    BlackListConfig, RpcConfig, RpcStorageConfig, RunGetMethodConfig, TransactionsGcConfig,
+    BlackListConfig, RpcConfig, RpcStorageConfig, RpcTransactionPartitionsConfig,
+    RunGetMethodConfig, TransactionsGcConfig,
 };
 pub use self::endpoint::{RpcEndpoint, RpcEndpointBuilder, jrpc, proto};
 pub use self::models::{GenTimings, LastTransactionId, StateTimings};

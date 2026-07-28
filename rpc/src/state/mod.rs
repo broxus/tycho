@@ -9,7 +9,7 @@ use axum::extract::FromRef;
 use futures_util::future::BoxFuture;
 use parking_lot::RwLock;
 use tokio::net::TcpListener;
-use tokio::sync::{Notify, Semaphore, watch};
+use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinHandle;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
@@ -18,7 +18,7 @@ use tycho_core::block_strider::{
 };
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_core::global_config::ZerostateId;
-use tycho_core::storage::{CoreStorage, KeyBlocksDirection};
+use tycho_core::storage::CoreStorage;
 use tycho_rpc_subscriptions::SubscriberManagerConfig;
 use tycho_types::models::*;
 use tycho_types::prelude::*;
@@ -29,7 +29,7 @@ use tycho_util::time::now_sec;
 
 pub use self::storage::*;
 pub use self::subscriptions::{AccountUpdate, RegisterError, RpcSubscriptions};
-use crate::config::{BlackListConfig, RpcConfig, RpcStorageConfig, TransactionsGcConfig};
+use crate::config::{BlackListConfig, RpcConfig, RpcStorageConfig};
 use crate::endpoint::{JrpcEndpointCache, ProtoEndpointCache, RpcEndpoint, jrpc};
 use crate::models::{GenTimings, StateTimings};
 
@@ -48,11 +48,11 @@ impl FromRef<RpcState> for jrpc::SubscriptionsState {
 }
 
 mod db;
+mod codec;
+mod partition;
 mod storage;
 mod subscriptions;
 pub mod tables;
-
-const RPC_DB_SUBDIR: &str = "rpc";
 
 pub struct RpcStateBuilder<MandatoryFields = (CoreStorage, BlockchainRpcClient, ZerostateId)> {
     config: RpcConfig,
@@ -64,9 +64,6 @@ impl RpcStateBuilder {
         let (core_storage, blockchain_rpc_client, zerostate_id) = self.mandatory_fields;
         let config = self.config;
 
-        let gc_notify = Arc::new(Notify::new());
-
-        let mut gc_handle = None;
         let mut blacklisted_accounts = None::<BlacklistedAccounts>;
         let mut blacklist_watcher_handle = None;
 
@@ -74,17 +71,21 @@ impl RpcStateBuilder {
             RpcStorageConfig::Full {
                 gc, blacklist_path, ..
             } => {
-                let db = core_storage.context().open_preconfigured(RPC_DB_SUBDIR)?;
-                let rpc_storage = Arc::new(RpcStorage::new(db));
-
-                if let Some(config) = gc {
-                    gc_handle = Some(tokio::spawn(transactions_gc(
-                        config.clone(),
-                        core_storage.clone(),
-                        rpc_storage.clone(),
-                        gc_notify.clone(),
-                    )));
+                if gc.is_some() {
+                    anyhow::bail!(
+                        "transactions GC is unsupported with partitioned Full RPC storage; set rpc.storage.gc to null"
+                    );
                 }
+                config
+                    .storage
+                    .transaction_partitions()
+                    .expect("Full RPC storage has transaction partitions")
+                    .validate()
+                    .map_err(anyhow::Error::msg)?;
+                let rpc_storage = Arc::new(RpcStorage::open(
+                    core_storage.context().clone(),
+                    config.storage.transaction_partitions().expect("Full RPC storage has transaction partitions").clone(),
+                )?);
 
                 if let Some(path) = blacklist_path {
                     let accounts = BlacklistedAccounts::default();
@@ -154,8 +155,6 @@ impl RpcStateBuilder {
                 proto_cache: Default::default(),
                 subscriptions,
                 zerostate_id,
-                gc_notify,
-                gc_handle,
                 blacklisted_accounts,
                 blacklist_watcher_handle,
             }),
@@ -604,7 +603,7 @@ impl BlockSubscriber for RpcBlockSubscriber {
                 // NOTE: Update snapshot only for masterchain because it is handled last.
                 // It is updated only after processing all shards and mc block.
                 if let Some(rpc_storage) = &self.inner.rpc_storage {
-                    rpc_storage.update_snapshot();
+                    rpc_storage.commit_masterchain_block_set(ctx.block.id())?;
                 }
             }
             Ok(())
@@ -636,9 +635,6 @@ struct Inner {
     proto_cache: ProtoEndpointCache,
     subscriptions: Arc<RpcSubscriptions>,
     zerostate_id: ZerostateId,
-    // GC
-    gc_notify: Arc<Notify>,
-    gc_handle: Option<JoinHandle<()>>,
     // RPC blacklist
     blacklisted_accounts: Option<BlacklistedAccounts>,
     blacklist_watcher_handle: Option<JoinHandle<()>>,
@@ -737,6 +733,7 @@ impl Inner {
         self.update_timings(mc_state.as_ref().gen_utime, mc_state.as_ref().seqno);
 
         if let Some(rpc_storage) = &self.rpc_storage {
+            let reconciliation = rpc_storage.reconcile_startup(mc_block_id)?;
             let node_instance_id = self.core_storage.node_state().load_instance_id();
             let rpc_instance_id = rpc_storage.load_instance_id();
 
@@ -755,7 +752,16 @@ impl Inner {
 
             let shards = mc_state.shards()?.clone();
 
-            if node_instance_id != rpc_instance_id || self.config.storage.is_force_reindex() {
+            if node_instance_id != rpc_instance_id
+                || self.config.storage.is_force_reindex()
+                || reconciliation.rebuild_current_state
+            {
+                if reconciliation.rebuild_current_state {
+                    tracing::warn!(
+                        effective_frontier = reconciliation.effective_frontier.seqno,
+                        "rebuilding RPC current-state indices after detecting unpublished transaction partition commits"
+                    );
+                }
                 // Reset masterchain accounts.
                 // NOTE: Consume shard state to prevent if from being fully loaded.
                 rpc_storage
@@ -807,6 +813,8 @@ impl Inner {
                     .write()
                     .insert(block_id.shard, make_cached_accounts(&state)?);
             }
+
+            rpc_storage.publish_snapshot(&reconciliation.effective_frontier)?;
         }
 
         self.is_ready.store(true, Ordering::Release);
@@ -963,11 +971,6 @@ impl Inner {
             }
         }
 
-        // Send a new KeyBlock notification to run GC
-        if self.config.storage.gc_is_enabled() {
-            self.gc_notify.notify_waiters();
-        }
-
         let custom = block.load_custom()?;
 
         // Try to update cached config:
@@ -1114,10 +1117,6 @@ impl Inner {
 
 impl Drop for Inner {
     fn drop(&mut self) {
-        if let Some(handle) = self.gc_handle.take() {
-            handle.abort();
-        }
-
         if let Some(handle) = self.blacklist_watcher_handle.take() {
             handle.abort();
         }
@@ -1201,47 +1200,6 @@ impl CachedAccounts {
 
 type ShardAccountsDict = Dict<HashBytes, (DepthBalanceInfo, ShardAccount)>;
 
-// TODO: Use only rpc storage to find closest key block LT.
-async fn transactions_gc(
-    config: TransactionsGcConfig,
-    core_storage: CoreStorage,
-    rpc_storage: Arc<RpcStorage>,
-    gc_notify: Arc<Notify>,
-) {
-    let Ok(tx_ttl_sec) = config.tx_ttl.as_secs().try_into() else {
-        return;
-    };
-
-    loop {
-        // Wait for a new KeyBlock notification
-        gc_notify.notified().await;
-
-        let target_utime = now_sec().saturating_sub(tx_ttl_sec);
-        let gc_range = match find_closest_key_block_lt(&core_storage, target_utime).await {
-            Ok(lt) => lt,
-            Err(e) => {
-                tracing::error!(
-                    target_utime,
-                    "failed to find the closest key block lt: {e:?}"
-                );
-                continue;
-            }
-        };
-
-        if let Err(e) = rpc_storage
-            .remove_old_transactions(gc_range.mc_seqno, gc_range.lt, config.keep_tx_per_account)
-            .await
-        {
-            tracing::error!(
-                target_utime,
-                mc_seqno = gc_range.mc_seqno,
-                min_lt = gc_range.lt,
-                "failed to remove old transactions: {e:?}"
-            );
-        }
-    }
-}
-
 pub async fn watch_blacklisted_accounts(config_path: PathBuf, accounts: BlacklistedAccounts) {
     tracing::info!(
         config_path = %config_path.display(),
@@ -1274,43 +1232,6 @@ pub async fn watch_blacklisted_accounts(config_path: PathBuf, accounts: Blacklis
             }
         }
     }
-}
-
-async fn find_closest_key_block_lt(storage: &CoreStorage, utime: u32) -> Result<GcRange> {
-    let block_handle_storage = storage.block_handle_storage();
-
-    // Find the key block with max seqno which was preduced not later than `utime`
-    let handle = 'last_key_block: {
-        let iter = block_handle_storage.key_blocks_iterator(KeyBlocksDirection::Backward);
-        for key_block_id in iter {
-            let handle = block_handle_storage
-                .load_handle(&key_block_id)
-                .with_context(|| format!("key block not found: {key_block_id}"))?;
-
-            if handle.gen_utime() <= utime {
-                break 'last_key_block handle;
-            }
-        }
-
-        return Ok(GcRange::default());
-    };
-
-    // Load block proof
-    let block_proof = storage.block_storage().load_block_proof(&handle).await?;
-
-    // Read `start_lt` from virtual block info
-    let (virt_block, _) = block_proof.virtualize_block()?;
-    let info = virt_block.info.load()?;
-    Ok(GcRange {
-        mc_seqno: info.seqno,
-        lt: info.start_lt,
-    })
-}
-
-#[derive(Default)]
-struct GcRange {
-    mc_seqno: u32,
-    lt: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1428,6 +1349,43 @@ mod test {
     }
 
     #[tokio::test]
+    async fn rpc_state_rejects_transaction_gc_with_partitioned_full_storage() -> Result<()> {
+        let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
+        let storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
+        let network = make_network()?;
+        let public_overlay = PublicOverlay::builder(PUBLIC_OVERLAY_ID).build(
+            BlockchainRpcService::builder()
+                .with_storage(storage.clone())
+                .without_broadcast_listener()
+                .build(),
+        );
+        let blockchain_rpc_client = BlockchainRpcClient::builder()
+            .with_public_overlay_client(PublicOverlayClient::new(
+                network,
+                public_overlay,
+                PublicOverlayClientConfig::default(),
+            ))
+            .build();
+        let mut config = RpcConfig::default();
+        let RpcStorageConfig::Full { gc, .. } = &mut config.storage else {
+            unreachable!()
+        };
+        *gc = Some(Default::default());
+
+        let error = RpcState::builder()
+            .with_config(config)
+            .with_storage(storage)
+            .with_blockchain_rpc_client(blockchain_rpc_client)
+            .with_zerostate_id(ZerostateId::default())
+            .build()
+            .err()
+            .expect("transaction GC must be rejected for partitioned Full RPC storage");
+
+        assert!(format!("{error:#}").contains("transactions GC is unsupported"));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn rpc_state_handle_block() -> Result<()> {
         tycho_util::test::init_logger("rpc_state_handle_block", "debug");
 
@@ -1479,6 +1437,14 @@ mod test {
 
         block_subscriber.handle_block(&ctx, prepared).await?;
         delayed_handle.join().await?;
+
+        // publish explicitly because this unit fixture bypasses RpcState::init
+        rpc_state
+            .inner
+            .rpc_storage
+            .as_ref()
+            .unwrap()
+            .publish_snapshot(&ctx.mc_block_id)?;
 
         let account = HashBytes::from_str(
             "b06c29df56964af1aeb3bbda73ea5685bc54f4131c1c8559ba2c6f971976cd2b",

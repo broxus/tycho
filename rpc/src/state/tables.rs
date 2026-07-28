@@ -23,9 +23,84 @@ impl ColumnFamilyOptions<TableContext> for State {
     }
 }
 
+/// Partition lifecycle manifest keyed by a big-endian eight-byte partition id.
+pub struct PartitionManifests;
+
+impl ColumnFamily for PartitionManifests {
+    const NAME: &'static str = "partition_manifests";
+}
+
+impl ColumnFamilyOptions<TableContext> for PartitionManifests {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        zstd_block_based_table_factory(opts, ctx);
+    }
+}
+
+/// Transaction hash router keyed by the 32-byte transaction hash.
+///
+/// Values use `codec::RouterLocation` and contain the partition id and related masterchain seqno.
+pub struct TransactionRouter;
+
+impl ColumnFamily for TransactionRouter {
+    const NAME: &'static str = "transaction_router";
+}
+
+impl ColumnFamilyOptions<TableContext> for TransactionRouter {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        zstd_block_based_table_factory(opts, ctx);
+        optimize_for_point_lookup(opts, ctx);
+    }
+}
+
+/// Inbound message hash router keyed by the 32-byte inbound-message hash.
+///
+/// Values use `codec::RouterLocation` and contain the partition id and related masterchain seqno.
+pub struct InboundMessageRouter;
+
+impl ColumnFamily for InboundMessageRouter {
+    const NAME: &'static str = "inbound_message_router";
+}
+
+impl ColumnFamilyOptions<TableContext> for InboundMessageRouter {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        zstd_block_based_table_factory(opts, ctx);
+        optimize_for_point_lookup(opts, ctx);
+    }
+}
+
+/// Short block id router keyed by `codec::encode_short_block_id`.
+///
+/// Values use `codec::RouterLocation` and contain the partition id and related masterchain seqno.
+pub struct BlockRouter;
+
+impl ColumnFamily for BlockRouter {
+    const NAME: &'static str = "block_router";
+}
+
+impl ColumnFamilyOptions<TableContext> for BlockRouter {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        zstd_block_based_table_factory(opts, ctx);
+        optimize_for_point_lookup(opts, ctx);
+    }
+}
+
+/// Block write statistics keyed by `codec::partition_commit_key`.
+pub struct PartitionCommits;
+
+impl ColumnFamily for PartitionCommits {
+    const NAME: &'static str = "partition_commits";
+}
+
+impl ColumnFamilyOptions<TableContext> for PartitionCommits {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        zstd_block_based_table_factory(opts, ctx);
+    }
+}
+
 /// Stores raw transactions
 /// - Key: `workchain: i8, account: [u8; 32], lt: u64`
-/// - Value: `transaction mask: u8, transaction hash: [u8; 32], message hash: [u8; 32], transaction BOC`
+/// - Value: `related mc_seqno: u32 (BE), transaction mask: u8, transaction hash: [u8; 32],
+///   optional message hash: [u8; 32], transaction BOC`; use `codec::TransactionValueRef`.
 pub struct Transactions;
 
 impl Transactions {

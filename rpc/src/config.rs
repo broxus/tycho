@@ -107,6 +107,10 @@ pub enum RpcStorageConfig {
         /// `None` to disable garbage collection.
         gc: Option<TransactionsGcConfig>,
 
+        /// Transaction partition rotation configuration.
+        #[serde(default)]
+        transaction_partitions: RpcTransactionPartitionsConfig,
+
         /// Reset all accounts.
         ///
         /// Default: `false`.
@@ -130,6 +134,16 @@ impl RpcStorageConfig {
         match self {
             Self::Full { gc, .. } => gc.is_some(),
             Self::StateOnly => false,
+        }
+    }
+
+    pub fn transaction_partitions(&self) -> Option<&RpcTransactionPartitionsConfig> {
+        match self {
+            Self::Full {
+                transaction_partitions,
+                ..
+            } => Some(transaction_partitions),
+            Self::StateOnly => None,
         }
     }
 
@@ -161,10 +175,49 @@ impl Default for RpcConfig {
             real_ip_source: ClientIpSource::ConnectInfo,
             rate_limits: None,
             storage: RpcStorageConfig::Full {
-                gc: Some(Default::default()),
+                gc: None,
+                transaction_partitions: Default::default(),
                 force_reindex: false,
                 blacklist_path: None,
             },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RpcTransactionPartitionsConfig {
+    pub target_lsm_bytes: u64,
+    pub target_blob_bytes: u64,
+    pub target_index_records: u64,
+    pub max_open_sealed_partitions: usize,
+}
+
+impl RpcTransactionPartitionsConfig {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.target_lsm_bytes == 0 {
+            return Err("rpc transaction partition target_lsm_bytes must be positive");
+        }
+        if self.target_blob_bytes == 0 {
+            return Err("rpc transaction partition target_blob_bytes must be positive");
+        }
+        if self.target_index_records == 0 {
+            return Err("rpc transaction partition target_index_records must be positive");
+        }
+        if self.max_open_sealed_partitions == 0 {
+            return Err("rpc transaction partition max_open_sealed_partitions must be positive");
+        }
+        Ok(())
+    }
+}
+
+impl Default for RpcTransactionPartitionsConfig {
+    fn default() -> Self {
+        Self {
+            target_lsm_bytes: 4 * 1024 * 1024 * 1024,
+            target_blob_bytes: 16 * 1024 * 1024 * 1024,
+            target_index_records: 50_000_000,
+            max_open_sealed_partitions: 8,
         }
     }
 }
@@ -222,5 +275,43 @@ pub struct BlackListConfig {
 impl BlackListConfig {
     pub fn load_from<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
         serde_helpers::load_json_from_file(path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transaction_partitions_default_is_valid() {
+        assert!(RpcTransactionPartitionsConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn transaction_partitions_deserialize_with_defaults() {
+        let config: RpcStorageConfig = serde_json::from_str(
+            r#"{"type":"Full","gc":null,"force_reindex":false,"blacklist_path":null}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.transaction_partitions(),
+            Some(&RpcTransactionPartitionsConfig::default())
+        );
+    }
+
+    #[test]
+    fn transaction_partitions_reject_zero_values() {
+        let mut config = RpcTransactionPartitionsConfig::default();
+        config.target_lsm_bytes = 0;
+        assert!(config.validate().is_err());
+        config = RpcTransactionPartitionsConfig::default();
+        config.target_blob_bytes = 0;
+        assert!(config.validate().is_err());
+        config = RpcTransactionPartitionsConfig::default();
+        config.target_index_records = 0;
+        assert!(config.validate().is_err());
+        config = RpcTransactionPartitionsConfig::default();
+        config.max_open_sealed_partitions = 0;
+        assert!(config.validate().is_err());
     }
 }

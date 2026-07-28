@@ -1,12 +1,18 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use arc_swap::{ArcSwap, ArcSwapOption};
+use arc_swap::ArcSwap;
+use parking_lot::{Mutex, RwLock};
+use tokio::sync::Notify;
+use tokio::task::JoinHandle;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::ShardStateStuff;
+use tycho_storage::StorageContext;
 use tycho_storage::kv::InstanceId;
+use tycho_storage::kv::DEFAULT_MIN_BLOB_SIZE;
 use tycho_types::cell::Lazy;
 use tycho_types::models::*;
 use tycho_types::prelude::*;
@@ -15,8 +21,12 @@ use tycho_util::sync::CancellationFlag;
 use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb;
 
-use super::db::RpcDb;
-use super::tables::{self, Transactions};
+use crate::config::RpcTransactionPartitionsConfig;
+
+use super::db::{RpcCurrentStateDb, RpcRouterDb, RpcTransactionsDb};
+use super::partition::{PartitionDescriptor, PartitionId, PartitionManager, PartitionReadLease};
+use super::tables;
+use super::codec;
 
 #[derive(Default, Clone)]
 pub struct BlacklistedAccounts {
@@ -49,66 +59,687 @@ struct BlacklistedAccountsInner {
 }
 
 pub struct RpcStorage {
-    db: RpcDb,
+    partitions: Arc<Mutex<PartitionManager>>,
+    router: RpcRouterDb,
+    current_state: RpcCurrentStateDb,
     min_tx_lt: AtomicU64,
     min_tx_lt_guard: tokio::sync::Mutex<()>,
-    snapshot: ArcSwapOption<weedb::OwnedSnapshot>,
+    snapshots: Arc<SnapshotPublisher>,
+    sealing_notify: Arc<Notify>,
+    sealing_cancel: CancellationFlag,
+    sealing_task: Option<JoinHandle<()>>,
+}
+
+#[derive(Default)]
+struct SnapshotPublisher {
+    /// Keeps publication and sealing lease removal in one lock order.
+    current: RwLock<Option<Arc<RpcSnapshotInner>>>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BlockWriteStats {
+    pub transaction_count: u64,
+    pub index_record_count: u64,
+    pub estimated_lsm_bytes: u64,
+    pub estimated_blob_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlockWriteResult {
+    pub partition_id: u64,
+    pub stats: BlockWriteStats,
+    pub newly_committed: bool,
+}
+
+pub(crate) struct StartupReconciliation {
+    pub effective_frontier: BlockId,
+    pub rebuild_current_state: bool,
+}
+
+impl BlockWriteStats {
+    fn add_record(&mut self, key_len: usize, value_len: usize, blob_value: bool) -> Result<()> {
+        let key_len = u64::try_from(key_len).context("transaction record key length exceeds u64")?;
+        let value_len = u64::try_from(value_len).context("transaction record value length exceeds u64")?;
+        self.estimated_lsm_bytes = self.estimated_lsm_bytes.checked_add(key_len).context("transaction LSM estimate overflow")?;
+        if blob_value {
+            self.estimated_blob_bytes = self.estimated_blob_bytes.checked_add(value_len).context("transaction blob estimate overflow")?;
+        } else {
+            self.estimated_lsm_bytes = self.estimated_lsm_bytes.checked_add(value_len).context("transaction LSM estimate overflow")?;
+        }
+        Ok(())
+    }
+
+    fn add_transaction(&mut self, tx_value_len: usize, has_in_msg: bool) -> Result<()> {
+        self.transaction_count = self.transaction_count.checked_add(1).context("transaction count overflow")?;
+        self.index_record_count = self.index_record_count.checked_add(if has_in_msg { 4 } else { 3 }).context("transaction index count overflow")?;
+        let tx_value_len_u64 = u64::try_from(tx_value_len).context("transaction value length exceeds u64")?;
+        self.add_record(tables::Transactions::KEY_LEN, tx_value_len, tx_value_len_u64 >= DEFAULT_MIN_BLOB_SIZE)?;
+        self.add_record(32, tables::TransactionsByHash::VALUE_FULL_LEN, false)?;
+        if has_in_msg { self.add_record(32, tables::Transactions::KEY_LEN, false)?; }
+        self.add_record(tables::BlockTransactions::KEY_LEN, 32, false)
+    }
+}
+
+fn spawn_sealing_worker(
+    partitions: Arc<Mutex<PartitionManager>>,
+    snapshots: Arc<SnapshotPublisher>,
+    notify: Arc<Notify>,
+    cancelled: CancellationFlag,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut retry_delay = Duration::from_secs(1);
+        loop {
+            notify.notified().await;
+            while !cancelled.check() {
+                let Some(id) = partitions.lock().next_sealing_partition() else {
+                    break;
+                };
+                let started_at = Instant::now();
+                let result = seal_partition(
+                    partitions.clone(),
+                    snapshots.clone(),
+                    id,
+                    cancelled.clone(),
+                )
+                .await;
+                metrics::histogram!("tycho_storage_rpc_partition_sealing_time")
+                    .record(started_at.elapsed());
+                if let Err(e) = result {
+                    if !cancelled.check() {
+                        metrics::counter!(
+                            "tycho_storage_rpc_partition_sealing_failures_total"
+                        )
+                        .increment(1);
+                    }
+                    tracing::error!(partition_id = id.0, "failed to seal RPC transaction partition: {e:#}");
+                    tokio::time::sleep(retry_delay).await;
+                    retry_delay = retry_delay.saturating_mul(2).min(Duration::from_secs(30));
+                } else {
+                    retry_delay = Duration::from_secs(1);
+                }
+            }
+            if cancelled.check() {
+                break;
+            }
+        }
+    })
+}
+
+async fn seal_partition(
+    partitions: Arc<Mutex<PartitionManager>>,
+    snapshots: Arc<SnapshotPublisher>,
+    id: PartitionId,
+    cancelled: CancellationFlag,
+) -> Result<()> {
+    tokio::task::spawn_blocking(move || {
+        let db = partitions.lock().begin_sealing(id)?;
+        // reduce the final gated flush while old readers and pre-closing writers drain
+        flush_transaction_partition(&db)?;
+
+        let mut wait_delay = Duration::from_millis(10);
+        loop {
+            anyhow::ensure!(
+                !cancelled.check(),
+                "RPC transaction partition sealing cancelled"
+            );
+            let ready = {
+                let published = snapshots.current.read();
+                sealing_snapshot_can_be_withdrawn(&partitions, published.as_ref(), id)
+            };
+            if ready {
+                let mut published = snapshots.current.write();
+                if sealing_snapshot_can_be_withdrawn(&partitions, published.as_ref(), id) {
+                    let previous = published.take();
+                    let frontier =
+                        previous.as_ref().map(|snapshot| snapshot.visible_frontier);
+                    drop(previous);
+
+                    // a lease acquired before closing may have written after the preliminary flush
+                    let seal_result = flush_transaction_partition(&db)
+                        .and_then(|()| finish_sealing_partition(&partitions, id, db));
+                    let snapshot_result = match frontier {
+                        Some(frontier) => rebuild_composite_snapshot_until_ready(
+                            &partitions,
+                            frontier,
+                            &cancelled,
+                        )
+                        .map(Some),
+                        None => Ok(None),
+                    };
+                    let snapshot_error = match snapshot_result {
+                        Ok(Some(snapshot)) => {
+                            *published = Some(snapshot.0);
+                            None
+                        }
+                        Ok(None) => None,
+                        Err(e) => Some(e),
+                    };
+                    return match (seal_result, snapshot_error) {
+                        (Ok(()), None) => Ok(()),
+                        (Err(e), None) | (Ok(()), Some(e)) => Err(e),
+                        (Err(seal_error), Some(snapshot_error)) => Err(anyhow::anyhow!(
+                            "sealing failed: {seal_error:#}; composite snapshot rebuild failed: {snapshot_error:#}"
+                        )),
+                    };
+                }
+            }
+            std::thread::sleep(wait_delay);
+            wait_delay = wait_delay
+                .saturating_mul(2)
+                .min(Duration::from_millis(250));
+        }
+    })
+    .await?
+}
+
+fn sealing_snapshot_can_be_withdrawn(
+    partitions: &Arc<Mutex<PartitionManager>>,
+    published: Option<&Arc<RpcSnapshotInner>>,
+    id: PartitionId,
+) -> bool {
+    let current_is_unshared = published.is_none_or(|snapshot| Arc::strong_count(snapshot) == 1);
+    if !current_is_unshared {
+        return false;
+    }
+    let current_has_lease = published
+        .is_some_and(|snapshot| snapshot.writable_partitions.contains_key(&id));
+    let expected_handles = 2 + usize::from(current_has_lease);
+    partitions.lock().sealing_handle_strong_count(id) == Some(expected_handles)
+}
+
+fn rebuild_composite_snapshot_until_ready(
+    partitions: &Arc<Mutex<PartitionManager>>,
+    frontier: BlockId,
+    cancelled: &CancellationFlag,
+) -> Result<RpcSnapshot> {
+    let mut retry_delay = Duration::from_millis(10);
+    loop {
+        match build_composite_snapshot(&mut partitions.lock(), frontier) {
+            Ok(snapshot) => return Ok(snapshot),
+            Err(e) if cancelled.check() => {
+                return Err(e).context(
+                    "RPC composite snapshot rebuild cancelled after sealing",
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    retry_delay_ms = retry_delay.as_millis(),
+                    "failed to rebuild RPC composite snapshot after sealing: {e:#}"
+                );
+                std::thread::sleep(retry_delay);
+                retry_delay = retry_delay
+                    .saturating_mul(2)
+                    .min(Duration::from_secs(1));
+            }
+        }
+    }
+}
+
+fn finish_sealing_partition(
+    partitions: &Arc<Mutex<PartitionManager>>,
+    id: PartitionId,
+    db: Arc<RpcTransactionsDb>,
+) -> Result<()> {
+    let closed = partitions.lock().take_sealing_handle(id)?;
+    drop(closed);
+    drop(db);
+
+    let read_only = match partitions.lock().open_sealed_read_only(id) {
+        Ok(db) => db,
+        Err(read_only_error) => {
+            let reopened = partitions.lock().reopen_sealing_writable(id)
+                .context("failed to restore writable sealing partition after read-only reopen failure")?;
+            partitions.lock().restore_sealing_handle(id, reopened);
+            return Err(read_only_error).context("failed to reopen sealed transaction partition read-only");
+        }
+    };
+    if let Err(e) = partitions.lock().complete_sealing(id, read_only.clone()) {
+        drop(read_only);
+        let reopened = partitions.lock().reopen_sealing_writable(id)
+            .context("failed to restore writable sealing partition after control commit failure")?;
+        partitions.lock().restore_sealing_handle(id, reopened);
+        return Err(e).context("failed to persist sealed transaction partition");
+    }
+    Ok(())
+}
+
+fn flush_transaction_partition(db: &RpcTransactionsDb) -> Result<()> {
+    let raw = db.rocksdb();
+    raw.flush_wal(true)?;
+    let mut options = rocksdb::FlushOptions::default();
+    options.set_wait(true);
+    raw.flush_cf_opt(&db.transactions.cf(), &options)?;
+    raw.flush_cf_opt(&db.transactions_by_hash.cf(), &options)?;
+    raw.flush_cf_opt(&db.transactions_by_in_msg.cf(), &options)?;
+    raw.flush_cf_opt(&db.known_blocks.cf(), &options)?;
+    raw.flush_cf_opt(&db.block_transactions.cf(), &options)?;
+    raw.flush_cf_opt(&db.blocks_by_mc_seqno.cf(), &options)?;
+    raw.flush_cf_opt(&db.partition_commits.cf(), &options)?;
+    Ok(())
 }
 
 impl RpcStorage {
-    pub fn new(db: RpcDb) -> Self {
+    pub fn open(context: StorageContext, config: RpcTransactionPartitionsConfig) -> Result<Self> {
+        let partitions = Arc::new(Mutex::new(PartitionManager::open(context, config)?));
+        let router = partitions.lock().router_db().clone();
+        let current_state = partitions.lock().current_state_db().clone();
+        let persisted_min_lt = partitions.lock().min_transaction_lt();
+        let snapshots = Arc::new(SnapshotPublisher::default());
+        let sealing_notify = Arc::new(Notify::new());
+        let sealing_cancel = CancellationFlag::new();
+        let sealing_task = Some(spawn_sealing_worker(
+            partitions.clone(),
+            snapshots.clone(),
+            sealing_notify.clone(),
+            sealing_cancel.clone(),
+        ));
         let this = Self {
-            db,
+            partitions,
+            router,
+            current_state,
             min_tx_lt: AtomicU64::new(u64::MAX),
             min_tx_lt_guard: Default::default(),
-            snapshot: Default::default(),
+            snapshots,
+            sealing_notify,
+            sealing_cancel,
+            sealing_task,
         };
 
-        let state = &this.db.state;
-        if state.get(INSTANCE_ID).unwrap().is_none() {
-            state
-                .insert(INSTANCE_ID, rand::random::<InstanceId>())
-                .unwrap();
+        let state = &this.current_state.state;
+        if state.get(INSTANCE_ID)?.is_none() {
+            state.insert(INSTANCE_ID, rand::random::<InstanceId>())?;
         }
 
-        let min_lt = match state.get(TX_MIN_LT).unwrap() {
-            Some(value) if value.is_empty() => None,
-            Some(value) => Some(u64::from_le_bytes(value.as_ref().try_into().unwrap())),
-            None => None,
-        };
+        let min_lt = (persisted_min_lt != u64::MAX).then_some(persisted_min_lt);
 
         this.min_tx_lt
             .store(min_lt.unwrap_or(u64::MAX), Ordering::Release);
 
         tracing::debug!(?min_lt, "rpc storage initialized");
 
-        this
-    }
-
-    pub fn db(&self) -> &RpcDb {
-        &self.db
+        if this.partitions.lock().next_sealing_partition().is_some() {
+            this.sealing_notify.notify_one();
+        }
+        Ok(this)
     }
 
     pub fn min_tx_lt(&self) -> u64 {
         self.min_tx_lt.load(Ordering::Acquire)
     }
 
-    pub fn update_snapshot(&self) {
-        let snapshot = Arc::new(self.db.owned_snapshot());
-        self.snapshot.store(Some(snapshot));
+    pub(crate) fn reconcile_startup(
+        &self,
+        core_frontier: &BlockId,
+    ) -> Result<StartupReconciliation> {
+        anyhow::ensure!(
+            core_frontier.is_masterchain(),
+            "core RPC startup frontier must be a masterchain block"
+        );
+        let partitions = self.partitions.lock();
+        let control_frontier = partitions.visible_frontier().copied();
+        match control_frontier {
+            Some(control_frontier) if control_frontier.seqno < core_frontier.seqno => {
+                anyhow::bail!(
+                    "RPC visible frontier {} is behind core committed masterchain frontier {}; clear the RPC DB and reindex",
+                    control_frontier,
+                    core_frontier
+                );
+            }
+            Some(control_frontier) if control_frontier.seqno == core_frontier.seqno => {
+                anyhow::ensure!(
+                    control_frontier == *core_frontier,
+                    "RPC and core frontiers have different full block ids at masterchain seqno {}",
+                    core_frontier.seqno
+                );
+            }
+            None if core_frontier.seqno > 0 => {
+                anyhow::bail!(
+                    "RPC visible frontier is missing while core committed masterchain frontier is {}; clear the RPC DB and reindex",
+                    core_frontier
+                );
+            }
+            _ => {}
+        }
+
+        if let Some(control_frontier) = control_frontier
+            && control_frontier.seqno > 0
+        {
+            partitions
+                .validate_masterchain_commit(&control_frontier)
+                .context("invalid persisted RPC visible frontier")?;
+        }
+        if core_frontier.seqno > 0 {
+            partitions
+                .validate_masterchain_commit(core_frontier)
+                .context("RPC indexing is incomplete at the core committed frontier")?;
+            self.validate_startup_frontier_routers(&partitions, core_frontier.seqno)?;
+        }
+
+        Ok(StartupReconciliation {
+            effective_frontier: *core_frontier,
+            rebuild_current_state: partitions.has_commits_after(core_frontier.seqno),
+        })
+    }
+
+    fn validate_startup_frontier_routers(
+        &self,
+        partitions: &PartitionManager,
+        mc_seqno: u32,
+    ) -> Result<()> {
+        let (partition_id, lease) = partitions.lease_for_mc_seqno(mc_seqno)?;
+        let expected_location = codec::RouterLocation {
+            partition_id: partition_id.0,
+            mc_seqno,
+        };
+        let prefix = mc_seqno.to_be_bytes();
+        let mut commits = lease
+            .rocksdb()
+            .raw_iterator_cf(&lease.partition_commits.cf());
+        commits.seek(prefix);
+        while commits.valid() {
+            let key = commits
+                .key()
+                .context("startup frontier commit iterator returned no key")?;
+            if !key.starts_with(&prefix) {
+                break;
+            }
+            let value = commits
+                .value()
+                .context("startup frontier commit iterator returned no value")?;
+            let (related_mc_seqno, block_id) =
+                codec::decode_partition_commit_key(key)
+                    .context("invalid commit key at RPC startup frontier")?;
+            let commit = codec::decode_partition_commit(value)
+                .context("invalid commit value at RPC startup frontier")?;
+            // commit key, full block id, and digest must describe the same durable local write
+            anyhow::ensure!(
+                related_mc_seqno == mc_seqno
+                    && commit.block_id.as_short_id() == block_id
+                    && commit.digest == commit.block_id.root_hash,
+                "invalid commit identity at RPC startup frontier"
+            );
+
+            if let Some(value) = self
+                .router
+                .blocks
+                .get(codec::encode_short_block_id(&block_id))?
+            {
+                Self::validate_startup_router_location(
+                    "block",
+                    value.as_ref(),
+                    expected_location,
+                )?;
+            }
+            self.validate_startup_block_transaction_routers(
+                lease.db(),
+                &block_id,
+                expected_location,
+            )?;
+            commits.next();
+        }
+        commits.status()?;
+        Ok(())
+    }
+
+    fn validate_startup_block_transaction_routers(
+        &self,
+        db: &RpcTransactionsDb,
+        block_id: &BlockIdShort,
+        expected_location: codec::RouterLocation,
+    ) -> Result<()> {
+        let workchain = i8::try_from(block_id.shard.workchain())
+            .context("startup frontier block workchain exceeds i8")?;
+        let mut prefix = [0; tables::KnownBlocks::KEY_LEN];
+        prefix[0] = workchain as u8;
+        prefix[1..9].copy_from_slice(&block_id.shard.prefix().to_be_bytes());
+        prefix[9..13].copy_from_slice(&block_id.seqno.to_be_bytes());
+        let known_block = db
+            .known_blocks
+            .get(prefix)?
+            .context("startup frontier commit is missing its local known-block record")?;
+        anyhow::ensure!(
+            known_block.len() >= 68,
+            "invalid local known-block record at RPC startup frontier"
+        );
+        anyhow::ensure!(
+            u32::from_le_bytes(known_block[64..68].try_into().unwrap())
+                == expected_location.mc_seqno,
+            "local known-block record has a different related masterchain seqno at RPC startup frontier"
+        );
+        let mut transactions = db
+            .rocksdb()
+            .raw_iterator_cf(&db.block_transactions.cf());
+        transactions.seek(prefix);
+        while transactions.valid() {
+            let key = transactions
+                .key()
+                .context("startup frontier block-transaction iterator returned no key")?;
+            if !key.starts_with(&prefix) {
+                break;
+            }
+            anyhow::ensure!(
+                key.len() == tables::BlockTransactions::KEY_LEN,
+                "invalid block-transaction key length at RPC startup frontier"
+            );
+            let transaction_hash = transactions
+                .value()
+                .context("startup frontier block-transaction iterator returned no value")?;
+            anyhow::ensure!(
+                transaction_hash.len() == tables::BlockTransactions::VALUE_LEN,
+                "invalid transaction hash length at RPC startup frontier"
+            );
+            if let Some(value) = self.router.transactions.get(transaction_hash)? {
+                Self::validate_startup_router_location(
+                    "transaction",
+                    value.as_ref(),
+                    expected_location,
+                )?;
+            }
+
+            let locator = db
+                .transactions_by_hash
+                .get(transaction_hash)?
+                .context("startup frontier block transaction is missing its local hash locator")?;
+            anyhow::ensure!(
+                locator.len() == tables::TransactionsByHash::VALUE_FULL_LEN,
+                "invalid local hash locator length at RPC startup frontier"
+            );
+            anyhow::ensure!(
+                u32::from_le_bytes(locator[110..114].try_into().unwrap())
+                    == expected_location.mc_seqno,
+                "local hash locator has a different related masterchain seqno at RPC startup frontier"
+            );
+            let transaction = db
+                .transactions
+                .get(&locator[..tables::Transactions::KEY_LEN])?
+                .context("startup frontier hash locator points to a missing local transaction")?;
+            let transaction = codec::decode_transaction_value(transaction.as_ref())
+                .context("invalid local transaction at RPC startup frontier")?;
+            anyhow::ensure!(
+                transaction.mc_seqno() == expected_location.mc_seqno,
+                "local transaction has a different related masterchain seqno at RPC startup frontier"
+            );
+            let payload = transaction.payload();
+            anyhow::ensure!(
+                payload[1..33] == *transaction_hash,
+                "local transaction has a different hash at RPC startup frontier"
+            );
+            let mask = TransactionMask::from_bits_retain(payload[0]);
+            if mask.has_msg_hash() {
+                let inbound_message_hash = &payload[33..65];
+                let inbound_locator = db
+                    .transactions_by_in_msg
+                    .get(inbound_message_hash)?
+                    .context("startup frontier transaction is missing its local inbound-message locator")?;
+                anyhow::ensure!(
+                    inbound_locator.as_ref() == &locator[..tables::Transactions::KEY_LEN],
+                    "local inbound-message locator mismatch at RPC startup frontier"
+                );
+                if let Some(value) = self
+                    .router
+                    .inbound_messages
+                    .get(inbound_message_hash)?
+                {
+                    Self::validate_startup_router_location(
+                        "inbound-message",
+                        value.as_ref(),
+                        expected_location,
+                    )?;
+                }
+            }
+            transactions.next();
+        }
+        transactions.status()?;
+        Ok(())
+    }
+
+    fn validate_startup_router_location(
+        kind: &str,
+        value: &[u8],
+        expected: codec::RouterLocation,
+    ) -> Result<()> {
+        let actual = codec::decode_router_location(value)
+            .with_context(|| format!("malformed {kind} router at RPC startup frontier"))?;
+        anyhow::ensure!(
+            actual == expected,
+            "{kind} router points outside its local partition at RPC startup frontier"
+        );
+        Ok(())
+    }
+
+    pub fn publish_snapshot(&self, visible_frontier: &BlockId) -> Result<()> {
+        let mut published = self.snapshots.current.write();
+        // an older replay must not regress an already published effective frontier
+        let visible_frontier = match published.as_ref() {
+            Some(current) if current.visible_frontier.seqno > visible_frontier.seqno => {
+                current.visible_frontier
+            }
+            Some(current) if current.visible_frontier.seqno == visible_frontier.seqno => {
+                anyhow::ensure!(
+                    current.visible_frontier == *visible_frontier,
+                    "cannot publish a different RPC snapshot frontier at masterchain seqno {}",
+                    visible_frontier.seqno
+                );
+                *visible_frontier
+            }
+            _ => *visible_frontier,
+        };
+        let snapshot =
+            build_composite_snapshot(&mut self.partitions.lock(), visible_frontier)?;
+        *published = Some(snapshot.0);
+        Ok(())
+    }
+
+    /// Publishes a completed masterchain block set before exposing the following set to readers.
+    pub fn commit_masterchain_block_set(&self, block_id: &BlockId) -> Result<()> {
+        self.partitions.lock().commit_masterchain_block_set(block_id)?;
+        self.publish_snapshot(block_id)?;
+        if self.partitions.lock().next_sealing_partition().is_some() {
+            self.sealing_notify.notify_one();
+        }
+        Ok(())
     }
 
     pub fn load_snapshot(&self) -> Option<RpcSnapshot> {
-        self.snapshot.load_full().map(RpcSnapshot)
+        self.snapshots.current.read().clone().map(RpcSnapshot)
+    }
+
+    fn require_snapshot(&self, snapshot: Option<&RpcSnapshot>) -> Result<RpcSnapshot> {
+        snapshot
+            .cloned()
+            .or_else(|| self.load_snapshot())
+            .context("No RPC snapshot available")
+    }
+
+    fn resolve_router_location(
+        &self,
+        snapshot: RpcSnapshot,
+        location: codec::RouterLocation,
+    ) -> Result<Option<RpcTransactionPartitionRead>> {
+        if location.mc_seqno > snapshot.visible_frontier().seqno {
+            return Ok(None);
+        }
+        let id = PartitionId(location.partition_id);
+        let descriptor = snapshot
+            .descriptor(id)
+            .with_context(|| {
+                format!(
+                    "router location references transaction partition {} outside the RPC snapshot",
+                    id.0
+                )
+            })?;
+        anyhow::ensure!(
+            descriptor.first.block_id.is_some()
+                && descriptor.last.block_id.is_some()
+                && descriptor.first.mc_seqno <= location.mc_seqno
+                && location.mc_seqno <= descriptor.last.mc_seqno,
+            "router location masterchain seqno {} is outside transaction partition {} bounds",
+            location.mc_seqno,
+            id.0
+        );
+        acquire_partition_read(&self.partitions, snapshot, id).map(Some)
+    }
+
+    fn transaction_partition(
+        &self,
+        hash: &HashBytes,
+        snapshot: RpcSnapshot,
+    ) -> Result<Option<(codec::RouterLocation, RpcTransactionPartitionRead)>> {
+        let Some(value) = self.router.transactions.get_ext(hash, snapshot.router())? else {
+            return Ok(None);
+        };
+        let location = codec::decode_router_location(value.as_ref())
+            .context("invalid transaction router location")?;
+        drop(value);
+        Ok(self
+            .resolve_router_location(snapshot, location)?
+            .map(|partition| (location, partition)))
+    }
+
+    fn inbound_message_partition(
+        &self,
+        hash: &HashBytes,
+        snapshot: RpcSnapshot,
+    ) -> Result<Option<(codec::RouterLocation, RpcTransactionPartitionRead)>> {
+        let Some(value) = self
+            .router
+            .inbound_messages
+            .get_ext(hash, snapshot.router())?
+        else {
+            return Ok(None);
+        };
+        let location = codec::decode_router_location(value.as_ref())
+            .context("invalid inbound-message router location")?;
+        drop(value);
+        Ok(self
+            .resolve_router_location(snapshot, location)?
+            .map(|partition| (location, partition)))
+    }
+
+    fn block_partition(
+        &self,
+        block_id: &BlockIdShort,
+        snapshot: RpcSnapshot,
+    ) -> Result<Option<(codec::RouterLocation, RpcTransactionPartitionRead)>> {
+        let key = codec::encode_short_block_id(block_id);
+        let Some(value) = self.router.blocks.get_ext(key, snapshot.router())? else {
+            return Ok(None);
+        };
+        let location =
+            codec::decode_router_location(value.as_ref()).context("invalid block router location")?;
+        drop(value);
+        Ok(self
+            .resolve_router_location(snapshot, location)?
+            .map(|partition| (location, partition)))
     }
 
     pub fn store_instance_id(&self, id: InstanceId) {
-        let rpc_states = &self.db.state;
+        let rpc_states = &self.current_state.state;
         rpc_states.insert(INSTANCE_ID, id).unwrap();
     }
 
     pub fn load_instance_id(&self) -> InstanceId {
-        let id = self.db.state.get(INSTANCE_ID).unwrap().unwrap();
+        let id = self.current_state.state.get(INSTANCE_ID).unwrap().unwrap();
         InstanceId::from_slice(id.as_ref())
     }
 
@@ -116,80 +747,73 @@ impl RpcStorage {
         &self,
         snapshot: Option<&RpcSnapshot>,
     ) -> Result<Option<(u32, u32)>> {
-        let mut snapshot = snapshot.cloned();
-        if snapshot.is_none() {
-            snapshot = self.snapshot.load_full().map(RpcSnapshot);
-        }
-
-        let table = &self.db.known_blocks;
-
-        let mut range_from = [0x00; tables::KnownBlocks::KEY_LEN];
-        range_from[0] = -1i8 as u8;
-        range_from[1..9].copy_from_slice(&ShardIdent::PREFIX_FULL.to_be_bytes());
-        let mut range_to = [0xff; tables::KnownBlocks::KEY_LEN];
-        range_to[0..9].clone_from_slice(&range_from[0..9]);
-
-        let mut readopts = table.new_read_config();
-        if let Some(snapshot) = &snapshot {
-            readopts.set_snapshot(snapshot);
-        }
-        readopts.set_iterate_lower_bound(range_from.as_slice());
-        readopts.set_iterate_upper_bound(range_to.as_slice());
-        let mut iter = self.db.rocksdb().raw_iterator_cf_opt(&table.cf(), readopts);
-
-        iter.seek(range_from.as_slice());
-        Ok(if let Some(key) = iter.key() {
-            let from_seqno = u32::from_be_bytes(key[9..13].try_into().unwrap());
-            let mut to_seqno = from_seqno;
-
-            iter.seek_for_prev(range_to.as_slice());
-            if let Some(key) = iter.key() {
-                let seqno = u32::from_be_bytes(key[9..13].try_into().unwrap());
-                to_seqno = std::cmp::max(to_seqno, seqno);
+        let snapshot = self.require_snapshot(snapshot)?;
+        let mut range: Option<(u32, u32)> = None;
+        for descriptor in &snapshot.0.descriptors {
+            if descriptor.first.block_id.is_none()
+                || descriptor.first.mc_seqno > snapshot.visible_frontier().seqno
+            {
+                continue;
             }
-
-            Some((from_seqno, to_seqno))
-        } else {
-            iter.status()?;
-            None
-        })
+            let from = descriptor.first.mc_seqno;
+            let to = descriptor
+                .last
+                .mc_seqno
+                .min(snapshot.visible_frontier().seqno);
+            range = Some(match range {
+                Some((range_from, range_to)) => {
+                    (range_from.min(from), range_to.max(to))
+                }
+                None => (from, to),
+            });
+        }
+        Ok(range)
     }
 
     pub fn get_blocks_by_mc_seqno(
         &self,
         mc_seqno: u32,
-        mut snapshot: Option<RpcSnapshot>,
+        snapshot: Option<RpcSnapshot>,
     ) -> Result<Option<BlocksByMcSeqnoIter>> {
         let mut key = [0; tables::KnownBlocks::KEY_LEN];
         key[0] = -1i8 as u8;
         key[1..9].copy_from_slice(&ShardIdent::PREFIX_FULL.to_be_bytes());
         key[9..13].copy_from_slice(&mc_seqno.to_be_bytes());
 
-        if snapshot.is_none() {
-            snapshot = self.snapshot.load_full().map(RpcSnapshot);
+        let snapshot = self.require_snapshot(snapshot.as_ref())?;
+        if mc_seqno > snapshot.visible_frontier().seqno {
+            return Ok(None);
         }
-        let Some(snapshot) = snapshot else {
-            // TODO: Somehow always use snapshot.
-            anyhow::bail!("No snapshot available");
-        };
-
-        let table = &self.db.known_blocks;
-        if table.get_ext(key, Some(&snapshot))?.is_none() {
+        let Some(partition_id) = snapshot
+            .descriptor_for_mc_seqno(mc_seqno)
+            .map(|descriptor| descriptor.id)
+        else {
             return Ok(None);
         };
+        let partition =
+            acquire_partition_read(&self.partitions, snapshot, partition_id)?;
+        let table = &partition.lease.known_blocks;
+        let Some(value) = partition.get(table, key)? else {
+            return Ok(None);
+        };
+        anyhow::ensure!(value.len() >= 68, "invalid known masterchain block value");
+        let related_mc_seqno = u32::from_le_bytes(value[64..68].try_into().unwrap());
+        anyhow::ensure!(
+            related_mc_seqno == mc_seqno,
+            "known masterchain block has a different related masterchain seqno"
+        );
 
         let mut range_from = [0x00; tables::BlocksByMcSeqno::KEY_LEN];
         range_from[0..4].clone_from_slice(&mc_seqno.to_be_bytes());
         let mut range_to = [0xff; tables::BlocksByMcSeqno::KEY_LEN];
         range_to[0..4].clone_from_slice(&mc_seqno.to_be_bytes());
 
-        let table = &self.db.blocks_by_mc_seqno;
-        let mut readopts = table.new_read_config();
-        readopts.set_snapshot(&snapshot);
+        let table = &partition.lease.blocks_by_mc_seqno;
+        let mut readopts = partition.read_options(table)?;
         readopts.set_iterate_lower_bound(range_from.as_slice());
         readopts.set_iterate_upper_bound(range_to.as_slice());
 
-        let rocksdb = self.db.rocksdb();
+        let rocksdb = partition.lease.rocksdb();
         let mut iter = rocksdb.raw_iterator_cf_opt(&table.cf(), readopts);
         iter.seek(range_from.as_slice());
 
@@ -197,7 +821,7 @@ impl RpcStorage {
             mc_seqno,
             // SAFETY: Iterator was created from the same DB instance.
             inner: unsafe { weedb::OwnedRawIterator::new(rocksdb.clone(), iter) },
-            snapshot,
+            partition,
         }))
     }
 
@@ -214,11 +838,22 @@ impl RpcStorage {
         key[1..9].copy_from_slice(&block_id.shard.prefix().to_be_bytes());
         key[9..13].copy_from_slice(&block_id.seqno.to_be_bytes());
 
-        let table = &self.db.known_blocks;
-        let Some(value) = table.get_ext(key, snapshot)? else {
+        let snapshot = self.require_snapshot(snapshot)?;
+        let Some((location, partition)) =
+            self.block_partition(block_id, snapshot)?
+        else {
             return Ok(None);
         };
-        let value = value.as_ref();
+        let table = &partition.lease.known_blocks;
+        let value = partition
+            .get(table, key)?
+            .context("block router points to a missing local known-block record")?;
+        anyhow::ensure!(value.len() >= 68, "invalid known block value");
+        let mc_seqno = u32::from_le_bytes(value[64..68].try_into().unwrap());
+        anyhow::ensure!(
+            mc_seqno == location.mc_seqno,
+            "block router and local known-block record have different related masterchain seqnos"
+        );
 
         let brief_info = BriefBlockInfo::load_from_bytes(workchain as i32, &value[68..])
             .context("invalid brief info")?;
@@ -229,7 +864,6 @@ impl RpcStorage {
             root_hash: HashBytes::from_slice(&value[0..32]),
             file_hash: HashBytes::from_slice(&value[32..64]),
         };
-        let mc_seqno = u32::from_le_bytes(value[64..68].try_into().unwrap());
 
         Ok(Some((block_id, mc_seqno, brief_info)))
     }
@@ -239,23 +873,49 @@ impl RpcStorage {
         mc_seqno: u32,
         snapshot: Option<&RpcSnapshot>,
     ) -> Result<Option<Vec<BriefShardDescr>>> {
+        let snapshot = self.require_snapshot(snapshot)?;
+        if mc_seqno > snapshot.visible_frontier().seqno {
+            return Ok(None);
+        }
+        let Some(partition_id) = snapshot
+            .descriptor_for_mc_seqno(mc_seqno)
+            .map(|descriptor| descriptor.id)
+        else {
+            return Ok(None);
+        };
+        let partition =
+            acquire_partition_read(&self.partitions, snapshot, partition_id)?;
         let mut key = [0x00; tables::BlocksByMcSeqno::KEY_LEN];
         key[0..4].copy_from_slice(&mc_seqno.to_be_bytes());
         key[4] = -1i8 as u8;
         key[5..13].copy_from_slice(&ShardIdent::PREFIX_FULL.to_be_bytes());
         key[13..17].copy_from_slice(&mc_seqno.to_be_bytes());
 
-        let table = &self.db.blocks_by_mc_seqno;
-        let Some(value) = table.get_ext(key, snapshot)? else {
+        let table = &partition.lease.blocks_by_mc_seqno;
+        let Some(value) = partition.get(table, key)? else {
             return Ok(None);
         };
-        let value = value.as_ref();
+        anyhow::ensure!(
+            value.len() >= tables::BlocksByMcSeqno::DESCR_OFFSET,
+            "invalid masterchain block description value"
+        );
 
         let shard_count = u32::from_le_bytes(
             value[tables::BlocksByMcSeqno::VALUE_LEN..tables::BlocksByMcSeqno::VALUE_LEN + 4]
                 .try_into()
                 .unwrap(),
         ) as usize;
+        let expected_len = tables::BlocksByMcSeqno::DESCR_OFFSET
+            .checked_add(
+                shard_count
+                    .checked_mul(tables::BlocksByMcSeqno::DESCR_LEN)
+                    .context("masterchain shard description length overflow")?,
+            )
+            .context("masterchain shard description length overflow")?;
+        anyhow::ensure!(
+            value.len() >= expected_len,
+            "invalid masterchain shard description value length"
+        );
 
         let mut result = Vec::with_capacity(shard_count);
         for i in 0..shard_count {
@@ -284,7 +944,7 @@ impl RpcStorage {
         &self,
         code_hash: &HashBytes,
         continuation: Option<&StdAddr>,
-        mut snapshot: Option<RpcSnapshot>,
+        snapshot: Option<RpcSnapshot>,
     ) -> Result<CodeHashesIter<'_>> {
         let mut key = [0u8; tables::CodeHashes::KEY_LEN];
         key[0..32].copy_from_slice(code_hash.as_ref());
@@ -297,19 +957,16 @@ impl RpcStorage {
         upper_bound.extend_from_slice(&key[..32]);
         upper_bound.extend_from_slice(&[0xff; 33]);
 
-        let mut readopts = self.db.code_hashes.new_read_config();
+        let mut readopts = self.current_state.code_hashes.new_read_config();
         // TODO: somehow make the range inclusive since
         // upper_bound is not included in the range
         readopts.set_iterate_upper_bound(upper_bound);
 
-        if snapshot.is_none() {
-            snapshot = self.snapshot.load_full().map(RpcSnapshot);
-        }
-        let snapshot = snapshot.unwrap_or_else(|| RpcSnapshot(Arc::new(self.db.owned_snapshot())));
-        readopts.set_snapshot(&snapshot);
+        let snapshot = self.require_snapshot(snapshot.as_ref())?;
+        readopts.set_snapshot(snapshot.current_state());
 
-        let rocksdb = self.db.rocksdb();
-        let code_hashes_cf = self.db.code_hashes.cf();
+        let rocksdb = self.current_state.rocksdb();
+        let code_hashes_cf = self.current_state.code_hashes.cf();
         let mut iter = rocksdb.raw_iterator_cf_opt(&code_hashes_cf, readopts);
 
         iter.seek(key);
@@ -330,14 +987,14 @@ impl RpcStorage {
         cursor: Option<&BlockTransactionsCursor>,
         snapshot: Option<RpcSnapshot>,
     ) -> Result<Option<BlockTransactionsIterBuilder>> {
-        let Some(ids) = self.get_block_transaction_ids(block_id, reverse, cursor, snapshot)? else {
+        let snapshot = self.require_snapshot(snapshot.as_ref())?;
+        let Some(ids) =
+            self.get_block_transaction_ids(block_id, reverse, cursor, Some(snapshot))?
+        else {
             return Ok(None);
         };
 
-        Ok(Some(BlockTransactionsIterBuilder {
-            ids,
-            transactions_cf: self.db.transactions.get_unbounded_cf(),
-        }))
+        Ok(Some(BlockTransactionsIterBuilder { ids }))
     }
 
     pub fn get_block_transaction_ids(
@@ -345,18 +1002,17 @@ impl RpcStorage {
         block_id: &BlockIdShort,
         reverse: bool,
         cursor: Option<&BlockTransactionsCursor>,
-        mut snapshot: Option<RpcSnapshot>,
+        snapshot: Option<RpcSnapshot>,
     ) -> Result<Option<BlockTransactionIdsIter>> {
         let Ok(workchain) = i8::try_from(block_id.shard.workchain()) else {
             return Ok(None);
         };
 
-        if snapshot.is_none() {
-            snapshot = self.snapshot.load_full().map(RpcSnapshot);
-        }
-        let Some(snapshot) = snapshot else {
-            // TODO: Somehow always use snapshot.
-            anyhow::bail!("No snapshot available");
+        let snapshot = self.require_snapshot(snapshot.as_ref())?;
+        let Some((location, partition)) =
+            self.block_partition(block_id, snapshot)?
+        else {
+            return Ok(None);
         };
 
         let mut range_from = [0x00; tables::BlockTransactions::KEY_LEN];
@@ -369,12 +1025,16 @@ impl RpcStorage {
             range_from[45..53].copy_from_slice(&cursor.lt.to_be_bytes());
         }
 
-        let table = &self.db.known_blocks;
+        let table = &partition.lease.known_blocks;
         let ref_by_mc_seqno;
-        let block_id = match table.get_ext(&range_from[0..13], Some(&snapshot))? {
+        let block_id = match partition.get(table, &range_from[0..13])? {
             Some(value) => {
-                let value = value.as_ref();
+                anyhow::ensure!(value.len() >= 68, "invalid known block value");
                 ref_by_mc_seqno = u32::from_le_bytes(value[64..68].try_into().unwrap());
+                anyhow::ensure!(
+                    ref_by_mc_seqno == location.mc_seqno,
+                    "block router and local known-block record have different related masterchain seqnos"
+                );
                 BlockId {
                     shard: block_id.shard,
                     seqno: block_id.seqno,
@@ -388,13 +1048,12 @@ impl RpcStorage {
         let mut range_to = [0xff; tables::BlockTransactions::KEY_LEN];
         range_to[0..13].copy_from_slice(&range_from[0..13]);
 
-        let mut readopts = self.db.block_transactions.new_read_config();
+        let mut readopts = partition.read_options(&partition.lease.block_transactions)?;
         readopts.set_iterate_lower_bound(range_from.as_slice());
         readopts.set_iterate_upper_bound(range_to.as_slice());
-        readopts.set_snapshot(&snapshot);
 
-        let rocksdb = self.db.rocksdb();
-        let block_transactions_cf = self.db.block_transactions.cf();
+        let rocksdb = partition.lease.rocksdb();
+        let block_transactions_cf = partition.lease.block_transactions.cf();
         let mut iter = rocksdb.raw_iterator_cf_opt(&block_transactions_cf, readopts);
 
         if reverse {
@@ -420,7 +1079,7 @@ impl RpcStorage {
             is_reversed: reverse,
             // SAFETY: Iterator was created from the same DB instance.
             inner: unsafe { weedb::OwnedRawIterator::new(rocksdb.clone(), iter) },
-            snapshot,
+            partition,
         }))
     }
 
@@ -430,7 +1089,7 @@ impl RpcStorage {
         start_lt: Option<u64>,
         end_lt: Option<u64>,
         reverse: bool,
-        mut snapshot: Option<RpcSnapshot>,
+        snapshot: Option<RpcSnapshot>,
     ) -> Result<TransactionsIterBuilder> {
         let mut start_lt = start_lt.unwrap_or_default();
         let mut end_lt = end_lt.unwrap_or(u64::MAX);
@@ -440,10 +1099,7 @@ impl RpcStorage {
             end_lt = u64::MAX;
         }
 
-        if snapshot.is_none() {
-            snapshot = self.snapshot.load_full().map(RpcSnapshot);
-        }
-        let snapshot = snapshot.unwrap_or_else(|| RpcSnapshot(Arc::new(self.db.owned_snapshot())));
+        let snapshot = self.require_snapshot(snapshot.as_ref())?;
 
         let mut range_from = [0u8; tables::Transactions::KEY_LEN];
         range_from[0] = account.workchain as u8;
@@ -454,27 +1110,72 @@ impl RpcStorage {
         // not be included in the iteration result.
         range_to[33..41].copy_from_slice(&end_lt.saturating_add(1).to_be_bytes());
 
-        let mut readopts = self.db.transactions.new_read_config();
-        readopts.set_snapshot(&snapshot);
-        readopts.set_iterate_lower_bound(range_from.as_slice());
-        readopts.set_iterate_upper_bound(range_to.as_slice());
-
-        let rocksdb = self.db.rocksdb();
-        let transactions_cf = self.db.transactions.cf();
-        let mut iter = rocksdb.raw_iterator_cf_opt(&transactions_cf, readopts);
+        let mut partition_ids = snapshot
+            .0
+            .descriptors
+            .iter()
+            .filter(|descriptor| {
+                descriptor.first.block_id.is_some()
+                    && descriptor.first.mc_seqno <= snapshot.visible_frontier().seqno
+                    && descriptor.last.transaction_lt >= start_lt
+                    && descriptor.first.transaction_lt <= end_lt
+            })
+            .map(|descriptor| descriptor.id)
+            .collect::<Vec<_>>();
         if reverse {
-            iter.seek_for_prev(range_to.as_slice());
-        } else {
-            iter.seek(range_from.as_slice());
+            partition_ids.reverse();
         }
-        iter.status()?;
 
         Ok(TransactionsIterBuilder {
             is_reversed: reverse,
-            // SAFETY: Iterator was created from the same DB instance.
-            inner: unsafe { weedb::OwnedRawIterator::new(rocksdb.clone(), iter) },
+            visible_frontier_seqno: snapshot.visible_frontier().seqno,
+            partitions: self.partitions.clone(),
+            partition_ids,
+            range_from,
+            range_to,
             snapshot,
         })
+    }
+
+    fn get_routed_transaction<R, F>(
+        &self,
+        hash: &HashBytes,
+        snapshot: RpcSnapshot,
+        map: F,
+    ) -> Result<Option<R>>
+    where
+        F: FnOnce(TransactionInfo, &[u8]) -> R,
+    {
+        let Some((location, partition)) =
+            self.transaction_partition(hash, snapshot)?
+        else {
+            return Ok(None);
+        };
+        let tx_info = partition
+            .get_pinned(&partition.lease.transactions_by_hash, hash)?
+            .context("transaction router points to a missing local hash locator")?;
+        let info = TransactionInfo::from_bytes(tx_info.as_ref())
+            .context("transaction router points to an invalid local hash locator")?;
+        anyhow::ensure!(
+            info.mc_seqno == location.mc_seqno,
+            "transaction router and local hash locator have different related masterchain seqnos"
+        );
+        let tx = partition
+            .get_pinned(
+                &partition.lease.transactions,
+                &tx_info.as_ref()[..tables::Transactions::KEY_LEN],
+            )?
+            .context("transaction hash locator points to a missing local transaction")?;
+        let transaction_mc_seqno = TransactionData::related_mc_seqno(tx.as_ref())?;
+        anyhow::ensure!(
+            transaction_mc_seqno == location.mc_seqno,
+            "transaction router and local transaction have different related masterchain seqnos"
+        );
+        anyhow::ensure!(
+            TransactionData::read_tx_hash(tx.as_ref()) == *hash,
+            "transaction hash locator points to a transaction with a different hash"
+        );
+        Ok(Some(map(info, tx.as_ref())))
     }
 
     pub fn get_transaction(
@@ -482,15 +1183,11 @@ impl RpcStorage {
         hash: &HashBytes,
         snapshot: Option<&RpcSnapshot>,
     ) -> Result<Option<TransactionData<'_>>> {
-        let table = &self.db.transactions_by_hash;
-        let Some(tx_info) = table.get_ext(hash, snapshot)? else {
-            return Ok(None);
-        };
-        let key = &tx_info.as_ref()[..Transactions::KEY_LEN];
-
-        let table = &self.db.transactions;
-        let tx = table.get_ext(key, snapshot)?;
-        Ok(tx.map(TransactionData::new))
+        let snapshot = self.require_snapshot(snapshot)?;
+        Ok(self
+            .get_routed_transaction(hash, snapshot, |_, tx| {
+                TransactionData::from_owned(tx.to_vec())
+            })?)
     }
 
     pub fn get_transaction_ext<'db>(
@@ -498,22 +1195,12 @@ impl RpcStorage {
         hash: &HashBytes,
         snapshot: Option<&RpcSnapshot>,
     ) -> Result<Option<TransactionDataExt<'db>>> {
-        let table = &self.db.transactions_by_hash;
-        let Some(tx_info) = table.get_ext(hash, snapshot)? else {
-            return Ok(None);
-        };
-        let tx_info = tx_info.as_ref();
-        let Some(info) = TransactionInfo::from_bytes(tx_info) else {
-            return Ok(None);
-        };
-
-        let table = &self.db.transactions;
-        let tx = table.get_ext(&tx_info[..Transactions::KEY_LEN], snapshot)?;
-
-        Ok(tx.map(move |data| TransactionDataExt {
-            info,
-            data: TransactionData::new(data),
-        }))
+        let snapshot = self.require_snapshot(snapshot)?;
+        Ok(self
+            .get_routed_transaction(hash, snapshot, |info, tx| TransactionDataExt {
+                info,
+                data: TransactionData::from_owned(tx.to_vec()),
+            })?)
     }
 
     pub fn get_transaction_info(
@@ -521,11 +1208,8 @@ impl RpcStorage {
         hash: &HashBytes,
         snapshot: Option<&RpcSnapshot>,
     ) -> Result<Option<TransactionInfo>> {
-        let table = &self.db.transactions_by_hash;
-        let Some(tx_info) = table.get_ext(hash, snapshot)? else {
-            return Ok(None);
-        };
-        Ok(TransactionInfo::from_bytes(&tx_info))
+        let snapshot = self.require_snapshot(snapshot)?;
+        self.get_routed_transaction(hash, snapshot, |info, _| info)
     }
 
     pub fn get_src_transaction<'db>(
@@ -534,19 +1218,7 @@ impl RpcStorage {
         message_lt: u64,
         snapshot: Option<&RpcSnapshot>,
     ) -> Result<Option<TransactionData<'db>>> {
-        let table = &self.db.transactions;
-
-        let owned_snapshot;
-        let snapshot = match snapshot {
-            Some(snapshot) => snapshot,
-            None => {
-                owned_snapshot = self
-                    .load_snapshot()
-                    .unwrap_or_else(|| RpcSnapshot(Arc::new(self.db.owned_snapshot())));
-                &owned_snapshot
-            }
-        };
-
+        let snapshot = self.require_snapshot(snapshot)?;
         let mut key = [0u8; tables::Transactions::KEY_LEN];
         key[0] = account.workchain as u8;
         key[1..33].copy_from_slice(account.address.as_slice());
@@ -554,25 +1226,45 @@ impl RpcStorage {
         let lower_bound = key;
         key[33..41].copy_from_slice(&message_lt.to_be_bytes());
 
-        let mut readopts = table.new_read_config();
-        readopts.set_iterate_lower_bound(lower_bound);
-        readopts.set_iterate_upper_bound(key);
-        readopts.set_snapshot(snapshot);
-        let mut iter = self.db.rocksdb().raw_iterator_cf_opt(&table.cf(), readopts);
-        iter.seek_for_prev(key.as_slice());
+        let candidates = snapshot
+            .0
+            .descriptors
+            .iter()
+            .rev()
+            .filter(|descriptor| {
+                descriptor.first.block_id.is_some()
+                    && descriptor.first.mc_seqno <= snapshot.visible_frontier().seqno
+                    && descriptor.first.transaction_lt < message_lt
+            })
+            .map(|descriptor| descriptor.id)
+            .collect::<Vec<_>>();
+        for id in candidates {
+            let partition =
+                acquire_partition_read(&self.partitions, snapshot.clone(), id)?;
+            let table = &partition.lease.transactions;
+            let mut readopts = partition.read_options(table)?;
+            readopts.set_iterate_lower_bound(lower_bound);
+            readopts.set_iterate_upper_bound(key);
+            let mut iter = partition
+                .lease
+                .rocksdb()
+                .raw_iterator_cf_opt(&table.cf(), readopts);
+            iter.seek_for_prev(key.as_slice());
 
-        // TODO: Allow TransactionData to store iterator/data itself.
-        let Some(tx_key) = iter.key() else {
+            while let Some((tx_key, value)) = iter.item() {
+                if tx_key[0..33] != key[0..33] {
+                    break;
+                }
+                if TransactionData::related_mc_seqno(value)?
+                    <= snapshot.visible_frontier().seqno
+                {
+                    return Ok(Some(TransactionData::from_owned(value.to_vec())));
+                }
+                iter.prev();
+            }
             iter.status()?;
-            return Ok(None);
-        };
-        if tx_key[0..33] != key[0..33] {
-            return Ok(None);
         }
-
-        let tx = table.get_ext(tx_key, Some(snapshot))?;
-
-        Ok(tx.map(TransactionData::new))
+        Ok(None)
     }
 
     pub fn get_dst_transaction<'db>(
@@ -580,14 +1272,32 @@ impl RpcStorage {
         in_msg_hash: &HashBytes,
         snapshot: Option<&RpcSnapshot>,
     ) -> Result<Option<TransactionData<'db>>> {
-        let table = &self.db.transactions_by_in_msg;
-        let Some(key) = table.get_ext(in_msg_hash, snapshot)? else {
+        let snapshot = self.require_snapshot(snapshot)?;
+        let Some((location, partition)) =
+            self.inbound_message_partition(in_msg_hash, snapshot)?
+        else {
             return Ok(None);
         };
-
-        let table = &self.db.transactions;
-        let tx = table.get_ext(key, snapshot)?;
-        Ok(tx.map(TransactionData::new))
+        let key = partition
+            .get(&partition.lease.transactions_by_in_msg, in_msg_hash)?
+            .context("inbound-message router points to a missing local message locator")?;
+        anyhow::ensure!(
+            key.len() == tables::Transactions::KEY_LEN,
+            "invalid local inbound-message locator length"
+        );
+        let tx = partition
+            .get(&partition.lease.transactions, &key)?
+            .context("inbound-message locator points to a missing local transaction")?;
+        anyhow::ensure!(
+            TransactionData::related_mc_seqno(&tx)? == location.mc_seqno,
+            "inbound-message router and local transaction have different related masterchain seqnos"
+        );
+        let tx = TransactionData::from_owned(tx);
+        anyhow::ensure!(
+            tx.in_msg_hash().as_ref() == Some(in_msg_hash),
+            "inbound-message locator points to a transaction with a different message hash"
+        );
+        Ok(Some(tx))
     }
 
     #[tracing::instrument(
@@ -638,7 +1348,7 @@ impl RpcStorage {
         }
 
         // Rebuild code hashes
-        let db = self.db.clone();
+        let db = self.current_state.clone();
         let mut cancelled = cancelled.debounce(10000);
         let span = tracing::Span::current();
 
@@ -740,353 +1450,6 @@ impl RpcStorage {
         .await?
     }
 
-    #[tracing::instrument(level = "info", name = "remove_old_transactions", skip(self))]
-    pub async fn remove_old_transactions(
-        &self,
-        mc_seqno: u32,
-        min_lt: u64,
-        keep_tx_per_account: usize,
-    ) -> Result<()> {
-        const ITEMS_PER_BATCH: usize = 100000;
-
-        type TxKey = [u8; tables::Transactions::KEY_LEN];
-
-        enum PendingDelete {
-            Single,
-            Range,
-        }
-
-        struct GcState<'a> {
-            raw: &'a rocksdb::DB,
-            writeopt: &'a rocksdb::WriteOptions,
-            tx_cf: weedb::BoundedCfHandle<'a>,
-            tx_by_hash: weedb::BoundedCfHandle<'a>,
-            tx_by_in_msg: weedb::BoundedCfHandle<'a>,
-            key_range_begin: TxKey,
-            key_range_end: TxKey,
-            pending_delete: Option<PendingDelete>,
-            batch: rocksdb::WriteBatch,
-            total_tx: usize,
-            total_tx_by_hash: usize,
-            total_tx_by_in_msg: usize,
-        }
-
-        impl<'a> GcState<'a> {
-            fn new(db: &'a RpcDb) -> Self {
-                Self {
-                    raw: db.rocksdb(),
-                    writeopt: db.transactions.write_config(),
-                    tx_cf: db.transactions.cf(),
-                    tx_by_hash: db.transactions_by_hash.cf(),
-                    tx_by_in_msg: db.transactions_by_in_msg.cf(),
-                    key_range_begin: [0u8; tables::Transactions::KEY_LEN],
-                    key_range_end: [0u8; tables::Transactions::KEY_LEN],
-                    pending_delete: None,
-                    batch: Default::default(),
-                    total_tx: 0,
-                    total_tx_by_hash: 0,
-                    total_tx_by_in_msg: 0,
-                }
-            }
-
-            fn delete_tx(&mut self, key: &TxKey, value: &[u8]) {
-                // Batch multiple deletes for the primary table
-                self.pending_delete = Some(if self.pending_delete.is_none() {
-                    self.key_range_end.copy_from_slice(key);
-                    PendingDelete::Single
-                } else {
-                    self.key_range_begin.copy_from_slice(key);
-                    PendingDelete::Range
-                });
-                self.total_tx += 1;
-
-                // Must contain at least mask and tx hash
-                assert!(value.len() >= 33);
-
-                let mask = TransactionMask::from_bits_retain(value[0]);
-
-                // Delete transaction by hash index entry
-                let tx_hash = &value[1..33];
-                self.batch.delete_cf(&self.tx_by_hash, tx_hash);
-                self.total_tx_by_hash += 1;
-
-                // Delete transaction by incoming message hash index entry
-                if mask.has_msg_hash() {
-                    assert!(value.len() >= 65);
-
-                    let in_msg_hash = &value[33..65];
-                    self.batch.delete_cf(&self.tx_by_in_msg, in_msg_hash);
-                    self.total_tx_by_in_msg += 1;
-                }
-            }
-
-            fn end_account(&mut self) {
-                // Flush pending batch
-                if let Some(pending) = self.pending_delete.take() {
-                    match pending {
-                        PendingDelete::Single => self
-                            .batch
-                            .delete_cf(&self.tx_cf, self.key_range_end.as_slice()),
-                        PendingDelete::Range => {
-                            // Remove `[begin; end)`
-                            self.batch.delete_range_cf(
-                                &self.tx_cf,
-                                self.key_range_begin.as_slice(),
-                                self.key_range_end.as_slice(),
-                            );
-                            // Remove `end`
-                            self.batch
-                                .delete_cf(&self.tx_cf, self.key_range_end.as_slice());
-                        }
-                    }
-                }
-            }
-
-            fn flush(&mut self) -> Result<()> {
-                self.raw
-                    .write_opt(std::mem::take(&mut self.batch), self.writeopt)?;
-                Ok(())
-            }
-        }
-
-        if let Some(known_min_lt) = self.db.state.get(TX_MIN_LT)? {
-            let known_min_lt = u64::from_le_bytes(known_min_lt.as_ref().try_into().unwrap());
-            let was_running = matches!(
-                self.db.state.get(TX_GC_RUNNING)?,
-                Some(status) if !status.is_empty()
-            );
-
-            if !was_running && min_lt <= known_min_lt {
-                tracing::info!(known_min_lt, "skipping removal of old transactions");
-                return Ok(());
-            }
-        }
-
-        let cancelled = CancellationFlag::new();
-        scopeguard::defer! {
-            cancelled.cancel();
-        }
-
-        // Force update min lt and gc flag
-        self.min_tx_lt.store(min_lt, Ordering::Release);
-
-        let db = self.db.clone();
-        let mut cancelled = cancelled.debounce(10000);
-        let span = tracing::Span::current();
-
-        // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
-        tokio::task::spawn_blocking(move || {
-            let _span = span.enter();
-
-            let guard = scopeguard::guard((), |_| {
-                tracing::warn!("cancelled");
-            });
-
-            let raw = db.rocksdb().as_ref();
-
-            tracing::info!("started removing old transactions");
-            let started_at = Instant::now();
-
-            // Prepare snapshot and iterator
-            let snapshot = raw.snapshot();
-
-            // Delete block transactions.
-            'block: {
-                let mc_seqno = match mc_seqno.checked_sub(1) {
-                    None | Some(0) => break 'block,
-                    Some(seqno) => seqno,
-                };
-
-                let known_blocks = &db.known_blocks;
-                let blocks_by_mc_seqno = &db.blocks_by_mc_seqno;
-                let block_transactions = &db.block_transactions;
-
-                // Get masterchain block entry.
-                let mut key = [0u8; tables::BlocksByMcSeqno::KEY_LEN];
-                key[0..4].copy_from_slice(&mc_seqno.to_be_bytes());
-                key[4] = -1i8 as u8;
-                key[5..13].copy_from_slice(&ShardIdent::PREFIX_FULL.to_be_bytes());
-                key[13..17].copy_from_slice(&mc_seqno.to_be_bytes());
-
-                let Some(value) = snapshot.get_pinned_cf_opt(
-                    &blocks_by_mc_seqno.cf(),
-                    key,
-                    blocks_by_mc_seqno.new_read_config(),
-                )?
-                else {
-                    break 'block;
-                };
-                let value = value.as_ref();
-                debug_assert!(value.len() >= tables::BlocksByMcSeqno::VALUE_LEN + 4);
-
-                // Parse top shard block ids (short).
-                let shard_count = u32::from_le_bytes(
-                    value[tables::BlocksByMcSeqno::VALUE_LEN
-                        ..tables::BlocksByMcSeqno::VALUE_LEN + 4]
-                        .try_into()
-                        .unwrap(),
-                ) as usize;
-                let mut top_block_ids = Vec::with_capacity(1 + shard_count);
-                top_block_ids.push(BlockIdShort {
-                    shard: ShardIdent::MASTERCHAIN,
-                    seqno: mc_seqno,
-                });
-                for i in 0..shard_count {
-                    let offset = tables::BlocksByMcSeqno::DESCR_OFFSET
-                        + i * tables::BlocksByMcSeqno::DESCR_LEN;
-                    let descr = &value[offset..offset + tables::BlocksByMcSeqno::DESCR_LEN];
-                    top_block_ids.push(BlockIdShort {
-                        shard: ShardIdent::new(
-                            descr[0] as i8 as i32,
-                            u64::from_le_bytes(descr[1..9].try_into().unwrap()),
-                        )
-                        .context("invalid top shard ident")?,
-                        seqno: u32::from_le_bytes(descr[9..13].try_into().unwrap()),
-                    });
-                }
-
-                // Prepare batch.
-                let mut batch = rocksdb::WriteBatch::new();
-
-                // Delete `blocks_by_mc_seqno` range before the mc block.
-                let range_from = [0x00; tables::BlocksByMcSeqno::KEY_LEN];
-                let mut range_to = [0xff; tables::BlocksByMcSeqno::KEY_LEN];
-                range_to[0..4].copy_from_slice(&mc_seqno.to_be_bytes());
-                batch.delete_range_cf(&blocks_by_mc_seqno.cf(), range_from, range_to);
-                batch.delete_cf(&blocks_by_mc_seqno.cf(), range_to);
-
-                // Delete `known_blocks` and `block_transactions` ranges for each shard
-                // (including masterchain).
-                let mut range_from = [0x00; tables::BlockTransactions::KEY_LEN];
-                let mut range_to = [0xff; tables::BlockTransactions::KEY_LEN];
-                for block_id in top_block_ids {
-                    range_from[0] = block_id.shard.workchain() as i8 as u8;
-                    range_from[1..9].copy_from_slice(&block_id.shard.prefix().to_be_bytes());
-                    range_from[9..13].copy_from_slice(&block_id.seqno.to_be_bytes());
-                    range_to[0..13].copy_from_slice(&range_from[0..13]);
-                    batch.delete_range_cf(&block_transactions.cf(), range_from, range_to);
-                    batch.delete_cf(&block_transactions.cf(), range_to);
-
-                    let range_from = &range_from[0..tables::KnownBlocks::KEY_LEN];
-                    let range_to = &range_to[0..tables::KnownBlocks::KEY_LEN];
-                    batch.delete_range_cf(&known_blocks.cf(), range_from, range_to);
-                    batch.delete_cf(&known_blocks.cf(), range_to);
-                }
-
-                // Apply batch.
-                db.rocksdb()
-                    .write(batch)
-                    .context("failed to remove block transactions")?;
-            }
-
-            // Remove transactions
-            let mut readopts = db.transactions.new_read_config();
-            readopts.set_snapshot(&snapshot);
-            let mut iter = raw.raw_iterator_cf_opt(&db.transactions.cf(), readopts);
-            iter.seek_to_last();
-
-            // Prepare GC state
-            let mut gc = GcState::new(&db);
-
-            // `last_account` buffer is used to track the last processed account.
-            //
-            // The buffer is also used to seek to the beginning of the tx range.
-            // Its last 8 bytes are `min_lt`. It forces the `seek_prev` method
-            // to jump right to the last tx that is needed to be deleted.
-            let mut last_account: TxKey = [0u8; tables::Transactions::KEY_LEN];
-            last_account[33..41].copy_from_slice(&min_lt.to_be_bytes());
-
-            let mut items = 0usize;
-            let mut total_invalid = 0usize;
-            let mut iteration = 0usize;
-            let mut tx_count = 0usize;
-            loop {
-                let Some((key, value)) = iter.item() else {
-                    break iter.status()?;
-                };
-                iteration += 1;
-
-                if cancelled.check() {
-                    anyhow::bail!("transactions GC cancelled");
-                }
-
-                let Ok::<&TxKey, _>(key) = key.try_into() else {
-                    // Remove invalid entires from the primary index only
-                    items += 1;
-                    total_invalid += 1;
-                    gc.batch.delete_cf(&gc.tx_cf, key);
-                    iter.prev();
-                    continue;
-                };
-
-                // Check whether the prev account is processed
-                let item_account = &key[..33];
-                let is_prev_account = item_account != &last_account[..33];
-                if is_prev_account {
-                    // Update last account address
-                    last_account[..33].copy_from_slice(item_account);
-
-                    // Add pending delete into batch
-                    gc.end_account();
-
-                    tx_count = 0;
-                }
-
-                // Get lt from the key
-                let lt = u64::from_be_bytes(key[33..41].try_into().unwrap());
-
-                if tx_count < keep_tx_per_account {
-                    // Keep last `keep_tx_per_account` transactions for account
-                    tx_count += 1;
-                    iter.prev();
-                } else if lt < min_lt {
-                    // Add tx and its secondary indices into the batch
-                    items += 1;
-                    gc.delete_tx(key, value);
-                    iter.prev();
-                } else if lt > 0 {
-                    // Seek to the end of the removed range
-                    // (to start removing it backwards).
-                    iter.seek_for_prev(last_account.as_slice());
-                } else {
-                    // Just seek to the previous account.
-                    iter.prev();
-                }
-
-                // Write batch
-                if items >= ITEMS_PER_BATCH {
-                    tracing::info!(iteration, "flushing batch");
-                    gc.flush()?;
-                    items = 0;
-                }
-            }
-
-            // Add final pending delete into batch
-            gc.end_account();
-
-            // Write remaining batch
-            if items != 0 {
-                gc.flush()?;
-            }
-
-            // Reset gc flag
-            raw.put(TX_GC_RUNNING, [])?;
-
-            // Done
-            scopeguard::ScopeGuard::into_inner(guard);
-            tracing::info!(
-                elapsed = %humantime::format_duration(started_at.elapsed()),
-                total_invalid,
-                total_tx = gc.total_tx,
-                total_tx_by_hash = gc.total_tx_by_hash,
-                total_tx_by_in_msg = gc.total_tx_by_in_msg,
-                "finished removing old transactions"
-            );
-            Ok(())
-        })
-        .await?
-    }
-
     #[tracing::instrument(level = "info", name = "update", skip_all, fields(block_id = %block.id()))]
     pub async fn update(
         &self,
@@ -1094,9 +1457,9 @@ impl RpcStorage {
         block: BlockStuff,
         rpc_blacklist: Option<&BlacklistedAccounts>,
         subscriptions: &super::subscriptions::RpcSubscriptions,
-    ) -> Result<()> {
+    ) -> Result<BlockWriteResult> {
         let Ok(workchain) = i8::try_from(block.id().shard.workchain()) else {
-            return Ok(());
+            return Ok(BlockWriteResult { partition_id: 0, stats: Default::default(), newly_committed: false });
         };
 
         let is_masterchain = block.id().is_masterchain();
@@ -1110,12 +1473,35 @@ impl RpcStorage {
             .transpose()?;
 
         let span = tracing::Span::current();
-        let db = self.db.clone();
+        let (partition_id, mut partition_lease) = self.partitions.lock().lease_for_mc_seqno(mc_seqno)?;
+        let commit_key = codec::partition_commit_key(mc_seqno, &block.id().as_short_id());
+        let existing_commit = partition_lease.partition_commits.get(commit_key)?
+            .map(|value| codec::decode_partition_commit(value.as_ref()))
+            .transpose()?;
+        if let Some(commit) = existing_commit {
+            anyhow::ensure!(commit.block_id == *block.id() && commit.digest == block.id().root_hash, "partition commit marker identity mismatch for {}", block.id());
+        } else if partition_lease.lifecycle() == codec::ManifestLifecycle::Sealed {
+            anyhow::bail!("sealed transaction partition {} is missing commit marker for {}", partition_id.0, block.id());
+        } else {
+            let (write_partition_id, write_lease) =
+                self.partitions.lock().write_lease_for_mc_seqno(mc_seqno)?;
+            anyhow::ensure!(
+                write_partition_id == partition_id,
+                "transaction partition selection changed while preparing {}",
+                block.id()
+            );
+            partition_lease = write_lease;
+        }
+        let db = partition_lease.db().clone();
+        let newly_committed = existing_commit.is_none();
+        let router = self.router.clone();
+        let current_state = self.current_state.clone();
 
         let rpc_blacklist = rpc_blacklist.map(|x| x.load());
 
         // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
-        let (start_lt, updates) = tokio::task::spawn_blocking(move || {
+        let (start_lt, updates, computed_stats) = tokio::task::spawn_blocking(move || {
+            let _partition_lease = partition_lease;
             let prepare_batch_histogram =
                 HistogramGuard::begin("tycho_storage_rpc_prepare_batch_time");
 
@@ -1153,6 +1539,9 @@ impl RpcStorage {
             };
 
             let mut write_batch = rocksdb::WriteBatch::default();
+            let mut stats = BlockWriteStats::default();
+            let mut router_batch = rocksdb::WriteBatch::default();
+            let mut current_state_batch = rocksdb::WriteBatch::default();
             let tx_cf = &db.transactions.cf();
             let tx_by_hash_cf = &db.transactions_by_hash.cf();
             let tx_by_in_msg_cf = &db.transactions_by_in_msg.cf();
@@ -1308,7 +1697,7 @@ impl RpcStorage {
                         None => (TransactionMask::empty(), None),
                     };
 
-                    // Collect transaction data to `tx_buffer`
+                    // Collect transaction payload without the D3 related-masterchain prefix.
                     buffer.clear();
                     buffer.push(tx_mask.bits());
                     buffer.extend_from_slice(tx_hash.as_slice());
@@ -1319,10 +1708,14 @@ impl RpcStorage {
                         tx_cell.inner().as_ref(),
                     )
                     .encode(&mut buffer);
+                    let tx_value = codec::encode_transaction_value(mc_seqno, &buffer)?;
+                    stats.add_transaction(tx_value.len(), msg_hash.is_some())?;
 
                     // Write tx data and indices
                     write_batch.put_cf(tx_by_hash_cf, tx_hash.as_slice(), tx_info.as_slice());
                     write_batch.put_cf(block_txs_cf, block_tx.as_slice(), tx_hash.as_slice());
+                    let location = codec::encode_router_location(codec::RouterLocation { partition_id: partition_id.0, mc_seqno });
+                    router_batch.put_cf(&router.transactions.cf(), tx_hash.as_slice(), location);
 
                     if let Some(msg_hash) = msg_hash {
                         write_batch.put_cf(
@@ -1330,9 +1723,10 @@ impl RpcStorage {
                             msg_hash,
                             &tx_info[..tables::Transactions::KEY_LEN],
                         );
+                        router_batch.put_cf(&router.inbound_messages.cf(), msg_hash, location);
                     }
 
-                    write_batch.put_cf(tx_cf, &tx_info[..tables::Transactions::KEY_LEN], &buffer);
+                    write_batch.put_cf(tx_cf, &tx_info[..tables::Transactions::KEY_LEN], &tx_value);
                 }
 
                 // Update code hash
@@ -1353,12 +1747,12 @@ impl RpcStorage {
                 // Apply the update if any
                 if let Some(remove) = update {
                     Self::update_code_hash(
-                        &db,
+                        &current_state,
                         workchain,
                         &account,
                         &accounts,
                         remove,
-                        &mut write_batch,
+                        &mut current_state_batch,
                     )?;
                 }
             }
@@ -1375,14 +1769,53 @@ impl RpcStorage {
                 &block_tx[0..tables::KnownBlocks::KEY_LEN],
                 buffer.as_slice(),
             );
+            let location = codec::encode_router_location(codec::RouterLocation { partition_id: partition_id.0, mc_seqno });
+            router_batch.put_cf(&router.blocks.cf(), codec::encode_short_block_id(&block_id.as_short_id()), location);
 
             drop(prepare_batch_histogram);
 
             let _execute_batch_histogram =
                 HistogramGuard::begin("tycho_storage_rpc_execute_batch_time");
 
-            db.rocksdb()
-                .write_opt(write_batch, db.transactions.write_config())?;
+            if let Some(commit) = existing_commit {
+                anyhow::ensure!(
+                    commit.transaction_count == stats.transaction_count
+                        && commit.index_record_count == stats.index_record_count
+                        && commit.estimated_lsm_bytes == stats.estimated_lsm_bytes
+                        && commit.estimated_blob_bytes == stats.estimated_blob_bytes
+                        && commit.start_lt == info.start_lt
+                        && commit.end_lt == info.end_lt
+                        && commit.gen_utime == info.gen_utime,
+                    "partition commit marker statistics mismatch for {block_id}"
+                );
+            }
+
+            if newly_committed {
+                let commit = codec::PartitionCommit {
+                    block_id: *block_id,
+                    digest: block_id.root_hash,
+                    transaction_count: stats.transaction_count,
+                    estimated_lsm_bytes: stats.estimated_lsm_bytes,
+                    estimated_blob_bytes: stats.estimated_blob_bytes,
+                    index_record_count: stats.index_record_count,
+                    start_lt: info.start_lt,
+                    end_lt: info.end_lt,
+                    gen_utime: info.gen_utime,
+                };
+                write_batch.put_cf(&db.partition_commits.cf(), commit_key, codec::encode_partition_commit(&commit));
+                let _stage = HistogramGuard::begin("tycho_storage_rpc_write_partition_time");
+                db.rocksdb().write_opt(write_batch, db.transactions.write_config()).context("failed to write RPC partition stage")?;
+            }
+            let _stage = HistogramGuard::begin("tycho_storage_rpc_write_router_time");
+            router
+                .rocksdb()
+                .write_opt(router_batch, router.transactions.write_config()).context("failed to write RPC router stage")?;
+            drop(_stage);
+            let _stage = HistogramGuard::begin("tycho_storage_rpc_write_current_state_time");
+            current_state
+                .rocksdb()
+                .write_opt(current_state_batch, current_state.code_hashes.write_config()).context("failed to write RPC current-state stage")?;
+            drop(_stage);
 
             let updates = updates
                 .map(|map| {
@@ -1396,38 +1829,27 @@ impl RpcStorage {
                 })
                 .unwrap_or_default();
 
-            Ok::<_, anyhow::Error>((info.start_lt, updates))
+            Ok::<_, anyhow::Error>((info.start_lt, updates, stats))
         })
         .await??;
 
-        // Update min lt after a successful block processing.
-        'min_lt: {
-            // Update the runtime value first. Load is relaxed since we just need
-            // to know that the value was updated.
-            if start_lt < self.min_tx_lt.fetch_min(start_lt, Ordering::Release) {
-                // Acquire the operation guard to ensure that there is only one writer.
-                let _guard = self.min_tx_lt_guard.lock().await;
-
-                // Do nothing if the value was already updated while we were waiting.
-                // Load is Acquire since we need to see the most recent value.
-                if start_lt > self.min_tx_lt.load(Ordering::Acquire) {
-                    break 'min_lt;
-                }
-
-                // Update the value in the database.
-                self.db.state.insert(TX_MIN_LT, start_lt.to_le_bytes())?;
-            }
-        }
+        // Update the runtime value first, then repair the durable value even after a prior
+        // failed write already lowered the atomic cache.
+        self.min_tx_lt.fetch_min(start_lt, Ordering::Release);
+        let _guard = self.min_tx_lt_guard.lock().await;
+        let min_tx_lt = self.min_tx_lt.load(Ordering::Acquire);
+        self.partitions.lock().persist_min_transaction_lt_decrease(min_tx_lt)?;
 
         if !updates.is_empty() {
             subscriptions.fanout_updates(updates).await;
         }
 
-        Ok(())
+        let stats = existing_commit.map(|commit| BlockWriteStats { transaction_count: commit.transaction_count, index_record_count: commit.index_record_count, estimated_lsm_bytes: commit.estimated_lsm_bytes, estimated_blob_bytes: commit.estimated_blob_bytes }).unwrap_or(computed_stats);
+        Ok(BlockWriteResult { partition_id: partition_id.0, stats, newly_committed })
     }
 
     fn update_code_hash(
-        db: &RpcDb,
+        db: &RpcCurrentStateDb,
         workchain: i8,
         account: &HashBytes,
         accounts: &ShardAccountsDict,
@@ -1527,9 +1949,9 @@ impl RpcStorage {
                 extend_account_prefix(shard, true, to);
             }
 
-            let raw = self.db.rocksdb();
-            let cf = &self.db.code_hashes_by_address.cf();
-            let writeopts = self.db.code_hashes_by_address.write_config();
+            let raw = self.current_state.rocksdb();
+            let cf = &self.current_state.code_hashes_by_address.cf();
+            let writeopts = self.current_state.code_hashes_by_address.write_config();
 
             // Remove `[from; to)`
             raw.delete_range_cf_opt(cf, &from, &to, writeopts)?;
@@ -1543,7 +1965,7 @@ impl RpcStorage {
         }
 
         // Full scan the main code hashes index and remove all entires for the shard
-        let db = self.db.clone();
+        let db = self.current_state.clone();
         let mut cancelled = cancelled.debounce(1000);
         let shard = *shard;
         let span = tracing::Span::current();
@@ -1610,7 +2032,7 @@ trait TableExt {
     fn get_ext<'db, K: AsRef<[u8]>>(
         &'db self,
         key: K,
-        snapshot: Option<&RpcSnapshot>,
+        snapshot: &weedb::OwnedSnapshot,
     ) -> Result<Option<rocksdb::DBPinnableSlice<'db>>>;
 }
 
@@ -1618,22 +2040,17 @@ impl<T: weedb::ColumnFamily> TableExt for weedb::Table<T> {
     fn get_ext<'db, K: AsRef<[u8]>>(
         &'db self,
         key: K,
-        snapshot: Option<&RpcSnapshot>,
+        snapshot: &weedb::OwnedSnapshot,
     ) -> Result<Option<rocksdb::DBPinnableSlice<'db>>> {
-        match snapshot {
-            None => self.get(key),
-            Some(snapshot) => {
-                anyhow::ensure!(
-                    Arc::ptr_eq(snapshot.db(), self.db()),
-                    "snapshot must be made for the same DB instance"
-                );
-
-                let mut readopts = self.new_read_config();
-                readopts.set_snapshot(snapshot);
-                self.db().get_pinned_cf_opt(&self.cf(), key, &readopts)
-            }
-        }
-        .map_err(Into::into)
+        anyhow::ensure!(
+            Arc::ptr_eq(snapshot.db(), self.db()),
+            "snapshot must be made for the same DB instance"
+        );
+        let mut readopts = self.new_read_config();
+        readopts.set_snapshot(snapshot);
+        self.db()
+            .get_pinned_cf_opt(&self.cf(), key, &readopts)
+            .map_err(Into::into)
     }
 }
 
@@ -1837,23 +2254,236 @@ impl BriefBlockInfo {
     }
 }
 
+impl Drop for RpcStorage {
+    fn drop(&mut self) {
+        self.sealing_cancel.cancel();
+        if let Some(task) = self.sealing_task.take() {
+            task.abort();
+        }
+    }
+}
+
+struct RpcTransactionPartitionSnapshot {
+    descriptor: PartitionDescriptor,
+    snapshot: weedb::OwnedSnapshot,
+    lease: PartitionReadLease,
+}
+
+struct RpcSnapshotInner {
+    visible_frontier: BlockId,
+    manifest_epoch: u64,
+    descriptors: Vec<PartitionDescriptor>,
+    descriptor_indices: FastHashMap<PartitionId, usize>,
+    router: weedb::OwnedSnapshot,
+    current_state: weedb::OwnedSnapshot,
+    writable_partitions: BTreeMap<PartitionId, RpcTransactionPartitionSnapshot>,
+}
+
+fn build_composite_snapshot(
+    partitions: &mut PartitionManager,
+    visible_frontier: BlockId,
+) -> Result<RpcSnapshot> {
+    let descriptors = partitions.descriptors();
+    let descriptor_indices = descriptors
+        .iter()
+        .enumerate()
+        .map(|(index, descriptor)| (descriptor.id, index))
+        .collect();
+    let mut writable_partitions = BTreeMap::new();
+    for descriptor in &descriptors {
+        match descriptor.lifecycle {
+            codec::ManifestLifecycle::Active | codec::ManifestLifecycle::Sealing => {
+                let lease = partitions.snapshot_lease(descriptor.id)?;
+                let snapshot = lease.owned_snapshot();
+                writable_partitions.insert(
+                    descriptor.id,
+                    RpcTransactionPartitionSnapshot {
+                        descriptor: descriptor.clone(),
+                        snapshot,
+                        lease,
+                    },
+                );
+            }
+            codec::ManifestLifecycle::Creating => {
+                anyhow::bail!(
+                    "cannot publish RPC snapshot while transaction partition {} is creating",
+                    descriptor.id.0
+                );
+            }
+            // sealed partitions are immutable and opened through the bounded cache on demand
+            codec::ManifestLifecycle::Sealed => {}
+        }
+    }
+    anyhow::ensure!(
+        writable_partitions.contains_key(&partitions.active_id()),
+        "active transaction partition is missing from RPC snapshot"
+    );
+    Ok(RpcSnapshot(Arc::new(RpcSnapshotInner {
+        visible_frontier,
+        manifest_epoch: partitions.manifest_epoch(),
+        descriptors,
+        descriptor_indices,
+        router: partitions.router_db().owned_snapshot(),
+        current_state: partitions.current_state_db().owned_snapshot(),
+        writable_partitions,
+    })))
+}
+
 #[derive(Clone)]
 #[repr(transparent)]
-pub struct RpcSnapshot(Arc<weedb::OwnedSnapshot>);
+pub struct RpcSnapshot(Arc<RpcSnapshotInner>);
 
-impl std::ops::Deref for RpcSnapshot {
-    type Target = weedb::OwnedSnapshot;
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        self.0.as_ref()
+impl RpcSnapshot {
+    pub fn visible_frontier(&self) -> &BlockId {
+        &self.0.visible_frontier
     }
+
+    pub fn manifest_epoch(&self) -> u64 {
+        self.0.manifest_epoch
+    }
+
+    fn descriptor(&self, id: PartitionId) -> Option<&PartitionDescriptor> {
+        self.0
+            .descriptor_indices
+            .get(&id)
+            .map(|index| &self.0.descriptors[*index])
+    }
+
+    fn descriptor_for_mc_seqno(&self, mc_seqno: u32) -> Option<&PartitionDescriptor> {
+        if mc_seqno > self.visible_frontier().seqno {
+            return None;
+        }
+        self.0.descriptors.iter().find(|descriptor| {
+            descriptor.first.block_id.is_some()
+                && descriptor.last.block_id.is_some()
+                && descriptor.first.mc_seqno <= mc_seqno
+                && mc_seqno <= descriptor.last.mc_seqno
+        })
+    }
+
+    fn router(&self) -> &weedb::OwnedSnapshot {
+        &self.0.router
+    }
+
+    fn active_partition(&self) -> &RpcTransactionPartitionSnapshot {
+        self.0
+            .writable_partitions
+            .values()
+            .find(|partition| {
+                partition.descriptor.lifecycle == codec::ManifestLifecycle::Active
+            })
+            .expect("validated RPC snapshot has an active transaction partition")
+    }
+
+    fn current_state(&self) -> &weedb::OwnedSnapshot {
+        &self.0.current_state
+    }
+}
+
+struct RpcTransactionPartitionRead {
+    id: PartitionId,
+    snapshot: RpcSnapshot,
+    lease: PartitionReadLease,
+}
+
+impl RpcTransactionPartitionRead {
+    fn db_snapshot(&self) -> Option<&weedb::OwnedSnapshot> {
+        self.snapshot
+            .0
+            .writable_partitions
+            .get(&self.id)
+            .map(|partition| &partition.snapshot)
+    }
+
+    fn get<T, K>(&self, table: &weedb::Table<T>, key: K) -> Result<Option<Vec<u8>>>
+    where
+        T: weedb::ColumnFamily,
+        K: AsRef<[u8]>,
+    {
+        self.get_pinned(table, key)
+            .map(|value| value.map(|value| value.as_ref().to_vec()))
+    }
+
+    fn get_pinned<'a, T, K>(
+        &'a self,
+        table: &'a weedb::Table<T>,
+        key: K,
+    ) -> Result<Option<rocksdb::DBPinnableSlice<'a>>>
+    where
+        T: weedb::ColumnFamily,
+        K: AsRef<[u8]>,
+    {
+        anyhow::ensure!(
+            Arc::ptr_eq(table.db(), self.lease.rocksdb()),
+            "partition table must belong to the selected DB instance"
+        );
+        match self.db_snapshot() {
+            Some(snapshot) => table.get_ext(key, snapshot),
+            None => table.get(key).map_err(Into::into),
+        }
+    }
+
+    fn read_options<T: weedb::ColumnFamily>(
+        &self,
+        table: &weedb::Table<T>,
+    ) -> Result<rocksdb::ReadOptions> {
+        anyhow::ensure!(
+            Arc::ptr_eq(table.db(), self.lease.rocksdb()),
+            "partition table must belong to the selected DB instance"
+        );
+        let mut readopts = table.new_read_config();
+        if let Some(snapshot) = self.db_snapshot() {
+            readopts.set_snapshot(snapshot);
+        }
+        Ok(readopts)
+    }
+}
+
+fn acquire_partition_read(
+    partitions: &Arc<Mutex<PartitionManager>>,
+    snapshot: RpcSnapshot,
+    id: PartitionId,
+) -> Result<RpcTransactionPartitionRead> {
+    let descriptor = snapshot
+        .descriptor(id)
+        .with_context(|| format!("transaction partition {} is missing from the RPC snapshot", id.0))?;
+    let lease = match descriptor.lifecycle {
+        codec::ManifestLifecycle::Active | codec::ManifestLifecycle::Sealing => {
+            let partition = snapshot
+                .0
+                .writable_partitions
+                .get(&id)
+                .with_context(|| {
+                    format!(
+                        "writable transaction partition {} is missing from the RPC snapshot",
+                        id.0
+                    )
+                })?;
+            anyhow::ensure!(
+                partition.descriptor == *descriptor,
+                "writable transaction partition descriptor changed within the RPC snapshot"
+            );
+            partition.lease.clone()
+        }
+        codec::ManifestLifecycle::Sealed => {
+            let opener = partitions.lock().sealed_lease_opener(id)?;
+            opener.open()?
+        }
+        codec::ManifestLifecycle::Creating => {
+            anyhow::bail!("transaction partition {} is still creating", id.0);
+        }
+    };
+    Ok(RpcTransactionPartitionRead {
+        id,
+        snapshot,
+        lease,
+    })
 }
 
 pub struct BlocksByMcSeqnoIter {
     mc_seqno: u32,
     inner: weedb::OwnedRawIterator,
-    snapshot: RpcSnapshot,
+    partition: RpcTransactionPartitionRead,
 }
 
 impl BlocksByMcSeqnoIter {
@@ -1862,7 +2492,7 @@ impl BlocksByMcSeqnoIter {
     }
 
     pub fn snapshot(&self) -> &RpcSnapshot {
-        &self.snapshot
+        &self.partition.snapshot
     }
 }
 
@@ -1961,7 +2591,7 @@ pub struct BlockTransactionIdsIter {
     ref_by_mc_seqno: u32,
     is_reversed: bool,
     inner: weedb::OwnedRawIterator,
-    snapshot: RpcSnapshot,
+    partition: RpcTransactionPartitionRead,
 }
 
 impl BlockTransactionIdsIter {
@@ -1978,7 +2608,7 @@ impl BlockTransactionIdsIter {
     }
 
     pub fn snapshot(&self) -> &RpcSnapshot {
-        &self.snapshot
+        &self.partition.snapshot
     }
 }
 
@@ -2003,7 +2633,6 @@ impl Iterator for BlockTransactionIdsIter {
 
 pub struct BlockTransactionsIterBuilder {
     ids: BlockTransactionIdsIter,
-    transactions_cf: weedb::UnboundedCfHandle,
 }
 
 impl BlockTransactionsIterBuilder {
@@ -2038,7 +2667,6 @@ impl BlockTransactionsIterBuilder {
     {
         BlockTransactionsIter {
             ids: self.ids,
-            transactions_cf: self.transactions_cf,
             map,
         }
     }
@@ -2046,7 +2674,6 @@ impl BlockTransactionsIterBuilder {
 
 pub struct BlockTransactionsIter<F> {
     ids: BlockTransactionIdsIter,
-    transactions_cf: weedb::UnboundedCfHandle,
     map: F,
 }
 
@@ -2087,14 +2714,22 @@ where
             key[1..33].copy_from_slice(id.account.address.as_slice());
             key[33..41].copy_from_slice(&id.lt.to_be_bytes());
 
-            let cf = self.transactions_cf.bound();
-            let value = match self.ids.snapshot.get_pinned_cf(&cf, key) {
+            let value = match self.ids.partition.get_pinned(
+                &self.ids.partition.lease.transactions,
+                key,
+            ) {
                 Ok(Some(value)) => value,
                 // TODO: Maybe return error here?
                 Ok(None) => continue,
                 // TODO: Maybe return error here?
                 Err(_) => return None,
             };
+            if !TransactionData::related_mc_seqno(value.as_ref())
+                .is_ok_and(|mc_seqno| mc_seqno == self.ids.ref_by_mc_seqno)
+                || TransactionData::read_tx_hash(value.as_ref()) != id.hash
+            {
+                continue;
+            }
             break (self.map)(
                 &id.account,
                 id.lt,
@@ -2113,8 +2748,11 @@ pub struct FullTransactionId {
 
 pub struct TransactionsIterBuilder {
     is_reversed: bool,
-    inner: weedb::OwnedRawIterator,
-    // NOTE: We must store the snapshot for as long as iterator is alive.
+    visible_frontier_seqno: u32,
+    partitions: Arc<Mutex<PartitionManager>>,
+    partition_ids: Vec<PartitionId>,
+    range_from: [u8; tables::Transactions::KEY_LEN],
+    range_to: [u8; tables::Transactions::KEY_LEN],
     snapshot: RpcSnapshot,
 }
 
@@ -2135,7 +2773,14 @@ impl TransactionsIterBuilder {
     {
         TransactionsIter {
             is_reversed: self.is_reversed,
-            inner: self.inner,
+            visible_frontier_seqno: self.visible_frontier_seqno,
+            current: None,
+            next_partition: 0,
+            visited_partitions: 0,
+            partitions: self.partitions,
+            partition_ids: self.partition_ids,
+            range_from: self.range_from,
+            range_to: self.range_to,
             map,
             snapshot: self.snapshot,
         }
@@ -2147,16 +2792,35 @@ impl TransactionsIterBuilder {
     {
         TransactionsIter {
             is_reversed: self.is_reversed,
-            inner: self.inner,
+            visible_frontier_seqno: self.visible_frontier_seqno,
+            current: None,
+            next_partition: 0,
+            visited_partitions: 0,
+            partitions: self.partitions,
+            partition_ids: self.partition_ids,
+            range_from: self.range_from,
+            range_to: self.range_to,
             map,
             snapshot: self.snapshot,
         }
     }
 }
 
+struct PartitionTransactionsIter {
+    inner: weedb::OwnedRawIterator,
+    partition: RpcTransactionPartitionRead,
+}
+
 pub struct TransactionsIter<F, const EXT: bool> {
     is_reversed: bool,
-    inner: weedb::OwnedRawIterator,
+    visible_frontier_seqno: u32,
+    current: Option<PartitionTransactionsIter>,
+    next_partition: usize,
+    visited_partitions: u64,
+    partitions: Arc<Mutex<PartitionManager>>,
+    partition_ids: Vec<PartitionId>,
+    range_from: [u8; tables::Transactions::KEY_LEN],
+    range_to: [u8; tables::Transactions::KEY_LEN],
     map: F,
     snapshot: RpcSnapshot,
 }
@@ -2173,6 +2837,86 @@ impl<F, const EXT: bool> TransactionsIter<F, EXT> {
     pub fn snapshot(&self) -> &RpcSnapshot {
         &self.snapshot
     }
+
+    fn open_next_partition(&mut self) -> bool {
+        let Some(id) = self.partition_ids.get(self.next_partition).copied() else {
+            return false;
+        };
+        self.next_partition += 1;
+        self.visited_partitions += 1;
+        let partition = match acquire_partition_read(
+            &self.partitions,
+            self.snapshot.clone(),
+            id,
+        ) {
+            Ok(partition) => partition,
+            Err(e) => {
+                tracing::error!(
+                    partition_id = id.0,
+                    "failed to open RPC transaction partition during account iteration: {e:#}"
+                );
+                self.next_partition = self.partition_ids.len();
+                return false;
+            }
+        };
+        let table = &partition.lease.transactions;
+        let mut readopts = match partition.read_options(table) {
+            Ok(readopts) => readopts,
+            Err(e) => {
+                tracing::error!(
+                    partition_id = id.0,
+                    "failed to configure RPC transaction partition iterator: {e:#}"
+                );
+                self.next_partition = self.partition_ids.len();
+                return false;
+            }
+        };
+        readopts.set_iterate_lower_bound(self.range_from);
+        readopts.set_iterate_upper_bound(self.range_to);
+        let rocksdb = partition.lease.rocksdb();
+        let mut inner =
+            rocksdb.raw_iterator_cf_opt(&table.cf(), readopts);
+        if self.is_reversed {
+            inner.seek_for_prev(self.range_to);
+        } else {
+            inner.seek(self.range_from);
+        }
+        if let Err(e) = inner.status() {
+            tracing::error!(
+                partition_id = id.0,
+                "failed to seek RPC transaction partition iterator: {e}"
+            );
+            self.next_partition = self.partition_ids.len();
+            return false;
+        }
+        self.current = Some(PartitionTransactionsIter {
+            // SAFETY: Iterator was created from the same DB instance.
+            inner: unsafe { weedb::OwnedRawIterator::new(rocksdb.clone(), inner) },
+            partition,
+        });
+        true
+    }
+
+    fn finish_current_partition(&mut self) -> bool {
+        if let Some(current) = self.current.as_mut()
+            && let Err(e) = current.inner.status()
+        {
+            tracing::error!(
+                partition_id = current.partition.id.0,
+                "RPC transaction partition iterator failed: {e}"
+            );
+            self.next_partition = self.partition_ids.len();
+        }
+        self.current = None;
+        self.open_next_partition()
+    }
+}
+
+impl<F, const EXT: bool> Drop for TransactionsIter<F, EXT> {
+    fn drop(&mut self) {
+        metrics::histogram!("tycho_storage_rpc_account_query_partitions_visited")
+            .record(self.visited_partitions as f64);
+    }
 }
 
 impl<F, R> Iterator for TransactionsIter<F, false>
@@ -2182,14 +2926,33 @@ where
     type Item = R;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let value = self.inner.value()?;
-        let result = (self.map)(TransactionData::read_transaction(value))?;
-        if self.is_reversed {
-            self.inner.prev();
-        } else {
-            self.inner.next();
+        loop {
+            if self.current.is_none() && !self.open_next_partition() {
+                return None;
+            }
+            let Some(value) = self.current.as_mut().unwrap().inner.value() else {
+                if self.finish_current_partition() {
+                    continue;
+                }
+                return None;
+            };
+            let visible = TransactionData::related_mc_seqno(value)
+                .expect("validated rpc transaction value")
+                <= self.visible_frontier_seqno;
+            let result = if visible {
+                (self.map)(TransactionData::read_transaction(value))
+            } else {
+                None
+            };
+            if self.is_reversed {
+                self.current.as_mut().unwrap().inner.prev();
+            } else {
+                self.current.as_mut().unwrap().inner.next();
+            }
+            if let Some(result) = result {
+                return Some(result);
+            }
         }
-        Some(result)
     }
 }
 
@@ -2200,18 +2963,37 @@ where
     type Item = R;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let (key, value) = self.inner.item()?;
-        let result = (self.map)(
-            u64::from_be_bytes(key[33..41].try_into().unwrap()),
-            &TransactionData::read_tx_hash(value),
-            TransactionData::read_transaction(value),
-        )?;
-        if self.is_reversed {
-            self.inner.prev();
-        } else {
-            self.inner.next();
+        loop {
+            if self.current.is_none() && !self.open_next_partition() {
+                return None;
+            }
+            let Some((key, value)) = self.current.as_mut().unwrap().inner.item() else {
+                if self.finish_current_partition() {
+                    continue;
+                }
+                return None;
+            };
+            let visible = TransactionData::related_mc_seqno(value)
+                .expect("validated rpc transaction value")
+                <= self.visible_frontier_seqno;
+            let result = if visible {
+                (self.map)(
+                    u64::from_be_bytes(key[33..41].try_into().unwrap()),
+                    &TransactionData::read_tx_hash(value),
+                    TransactionData::read_transaction(value),
+                )
+            } else {
+                None
+            };
+            if self.is_reversed {
+                self.current.as_mut().unwrap().inner.prev();
+            } else {
+                self.current.as_mut().unwrap().inner.next();
+            }
+            if let Some(result) = result {
+                return Some(result);
+            }
         }
-        Some(result)
     }
 }
 
@@ -2268,23 +3050,47 @@ pub struct TransactionDataExt<'a> {
 }
 
 pub struct TransactionData<'a> {
-    data: rocksdb::DBPinnableSlice<'a>,
+    data: TransactionDataInner<'a>,
+}
+
+enum TransactionDataInner<'a> {
+    Pinned(rocksdb::DBPinnableSlice<'a>),
+    Owned(Vec<u8>),
+}
+
+impl AsRef<[u8]> for TransactionDataInner<'_> {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::Pinned(data) => data.as_ref(),
+            Self::Owned(data) => data.as_ref(),
+        }
+    }
 }
 
 impl<'a> TransactionData<'a> {
     pub fn new(data: rocksdb::DBPinnableSlice<'a>) -> Self {
-        Self { data }
+        Self {
+            data: TransactionDataInner::Pinned(data),
+        }
+    }
+
+    fn from_owned(data: Vec<u8>) -> Self {
+        Self {
+            data: TransactionDataInner::Owned(data),
+        }
     }
 
     pub fn tx_hash(&self) -> HashBytes {
-        let value = self.data.as_ref();
-        assert!(!value.is_empty());
+        let value = codec::decode_transaction_value(self.data.as_ref())
+            .expect("validated rpc transaction value")
+            .payload();
         HashBytes::from_slice(&value[1..33])
     }
 
     pub fn in_msg_hash(&self) -> Option<HashBytes> {
-        let value = self.data.as_ref();
-        assert!(!value.is_empty());
+        let value = codec::decode_transaction_value(self.data.as_ref())
+            .expect("validated rpc transaction value")
+            .payload();
 
         let mask = TransactionMask::from_bits_retain(value[0]);
         mask.has_msg_hash()
@@ -2292,12 +3098,20 @@ impl<'a> TransactionData<'a> {
     }
 
     fn read_tx_hash(value: &[u8]) -> HashBytes {
+        let value = codec::decode_transaction_value(value)
+            .expect("validated rpc transaction value")
+            .payload();
         HashBytes::from_slice(&value[1..33])
     }
 
+    fn related_mc_seqno(value: &[u8]) -> Result<u32> {
+        Ok(codec::decode_transaction_value(value)?.mc_seqno())
+    }
+
     fn read_transaction<T: AsRef<[u8]> + ?Sized>(value: &T) -> &[u8] {
-        let value = value.as_ref();
-        assert!(!value.is_empty());
+        let value = codec::decode_transaction_value(value.as_ref())
+            .expect("validated rpc transaction value")
+            .payload();
 
         let mask = TransactionMask::from_bits_retain(value[0]);
         let boc_start = if mask.has_msg_hash() { 65 } else { 33 }; // 1 + 32 + (32)
@@ -2310,7 +3124,7 @@ impl<'a> TransactionData<'a> {
 
 impl AsRef<[u8]> for TransactionData<'_> {
     fn as_ref(&self) -> &[u8] {
-        Self::read_transaction(self.data.as_ref())
+        Self::read_transaction(&self.data)
     }
 }
 
@@ -2425,13 +3239,375 @@ impl TransactionMask {
 
 type AddressKey = [u8; 33];
 
-const TX_MIN_LT: &[u8] = b"tx_min_lt";
-const TX_GC_RUNNING: &[u8] = b"tx_gc_running";
 const INSTANCE_ID: &[u8] = b"instance_id";
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
+    use tycho_rpc_subscriptions::SubscriberManagerConfig;
+    use tycho_types::boc::Boc;
+
+    fn test_partitions_config() -> RpcTransactionPartitionsConfig {
+        RpcTransactionPartitionsConfig {
+            target_lsm_bytes: 1,
+            target_blob_bytes: 1,
+            target_index_records: 1,
+            max_open_sealed_partitions: 1,
+        }
+    }
+
+    fn masterchain_block(seqno: u32) -> BlockId {
+        BlockId {
+            shard: ShardIdent::MASTERCHAIN,
+            seqno,
+            root_hash: HashBytes([seqno as u8; 32]),
+            file_hash: HashBytes([(seqno as u8).wrapping_add(1); 32]),
+        }
+    }
+
+    fn basechain_block(seqno: u32) -> BlockId {
+        BlockId {
+            shard: ShardIdent::BASECHAIN,
+            seqno,
+            root_hash: HashBytes([(seqno as u8).wrapping_add(10); 32]),
+            file_hash: HashBytes([(seqno as u8).wrapping_add(11); 32]),
+        }
+    }
+
+    fn indexed_block() -> BlockStuff {
+        let block_data = include_bytes!("../../../core/tests/data/block.bin");
+        let root = Boc::decode(block_data).unwrap();
+        let block = root.parse::<Block>().unwrap();
+        let block_id = BlockId::from_str(
+            include_str!("../../../core/tests/data/block_id.txt").trim_end(),
+        )
+        .unwrap();
+        BlockStuff::from_block_and_root(&block_id, block, root, block_data.len())
+    }
+
+    struct ReadTestTransaction {
+        lt: u64,
+        hash: HashBytes,
+        in_msg_hash: HashBytes,
+        boc_byte: u8,
+    }
+
+    fn known_block_key(block_id: &BlockId) -> [u8; tables::KnownBlocks::KEY_LEN] {
+        let mut key = [0; tables::KnownBlocks::KEY_LEN];
+        key[0] = i8::try_from(block_id.shard.workchain()).unwrap() as u8;
+        key[1..9].copy_from_slice(&block_id.shard.prefix().to_be_bytes());
+        key[9..13].copy_from_slice(&block_id.seqno.to_be_bytes());
+        key
+    }
+
+    fn known_block_value(
+        block_id: &BlockId,
+        mc_block_id: &BlockId,
+        start_lt: u64,
+        end_lt: u64,
+        tx_count: u32,
+    ) -> Vec<u8> {
+        let mut value = Vec::new();
+        value.extend_from_slice(block_id.root_hash.as_slice());
+        value.extend_from_slice(block_id.file_hash.as_slice());
+        value.extend_from_slice(&mc_block_id.seqno.to_le_bytes());
+        BriefBlockInfo {
+            global_id: 0,
+            version: 0,
+            flags: 0,
+            after_merge: false,
+            after_split: false,
+            before_split: false,
+            want_merge: false,
+            want_split: false,
+            validator_list_hash_short: 0,
+            catchain_seqno: 0,
+            min_ref_mc_seqno: 0,
+            is_key_block: false,
+            prev_key_block_seqno: 0,
+            start_lt,
+            end_lt,
+            gen_utime: mc_block_id.seqno,
+            vert_seqno: 0,
+            rand_seed: HashBytes::ZERO,
+            tx_count,
+            master_ref: (!block_id.is_masterchain()).then_some(*mc_block_id),
+            prev_blocks: Vec::new(),
+        }
+        .write_to_bytes(&mut value);
+        value
+    }
+
+    fn insert_read_test_block(
+        storage: &RpcStorage,
+        account: &StdAddr,
+        mc_block_id: &BlockId,
+        block_id: &BlockId,
+        transactions: &[ReadTestTransaction],
+        estimated_lsm_bytes: u64,
+    ) -> PartitionId {
+        let (partition_id, lease) = {
+            let manager = storage.partitions.lock();
+            (manager.active_id(), manager.active_lease())
+        };
+        let mut local_batch = rocksdb::WriteBatch::default();
+        let mut router_batch = rocksdb::WriteBatch::default();
+        let start_lt = transactions.first().map_or(mc_block_id.seqno as u64 * 10, |tx| tx.lt);
+        let end_lt = transactions.last().map_or(start_lt + 1, |tx| tx.lt + 1);
+        for tx in transactions {
+            let mut tx_key = [0; tables::Transactions::KEY_LEN];
+            tx_key[0] = account.workchain as u8;
+            tx_key[1..33].copy_from_slice(account.address.as_slice());
+            tx_key[33..41].copy_from_slice(&tx.lt.to_be_bytes());
+
+            let mut payload = Vec::with_capacity(66);
+            payload.push(TransactionMask::HAS_MSG_HASH.bits());
+            payload.extend_from_slice(tx.hash.as_slice());
+            payload.extend_from_slice(tx.in_msg_hash.as_slice());
+            payload.push(tx.boc_byte);
+            local_batch.put_cf(
+                &lease.transactions.cf(),
+                tx_key,
+                codec::encode_transaction_value(mc_block_id.seqno, &payload).unwrap(),
+            );
+
+            let mut tx_info = [0; tables::TransactionsByHash::VALUE_FULL_LEN];
+            tx_info[0] = account.workchain as u8;
+            tx_info[1..33].copy_from_slice(account.address.as_slice());
+            tx_info[33..41].copy_from_slice(&tx.lt.to_be_bytes());
+            tx_info[41] = block_id.shard.prefix_len() as u8;
+            tx_info[42..46].copy_from_slice(&block_id.seqno.to_le_bytes());
+            tx_info[46..78].copy_from_slice(block_id.root_hash.as_slice());
+            tx_info[78..110].copy_from_slice(block_id.file_hash.as_slice());
+            tx_info[110..114].copy_from_slice(&mc_block_id.seqno.to_le_bytes());
+            local_batch.put_cf(&lease.transactions_by_hash.cf(), tx.hash, tx_info);
+            local_batch.put_cf(&lease.transactions_by_in_msg.cf(), tx.in_msg_hash, tx_key);
+
+            let mut block_tx_key = [0; tables::BlockTransactions::KEY_LEN];
+            block_tx_key[0] = block_id.shard.workchain() as i8 as u8;
+            block_tx_key[1..9].copy_from_slice(&block_id.shard.prefix().to_be_bytes());
+            block_tx_key[9..13].copy_from_slice(&block_id.seqno.to_be_bytes());
+            block_tx_key[13..45].copy_from_slice(account.address.as_slice());
+            block_tx_key[45..53].copy_from_slice(&tx.lt.to_be_bytes());
+            local_batch.put_cf(&lease.block_transactions.cf(), block_tx_key, tx.hash);
+
+            let location = codec::encode_router_location(codec::RouterLocation {
+                partition_id: partition_id.0,
+                mc_seqno: mc_block_id.seqno,
+            });
+            router_batch.put_cf(&storage.router.transactions.cf(), tx.hash, location);
+            router_batch.put_cf(
+                &storage.router.inbound_messages.cf(),
+                tx.in_msg_hash,
+                location,
+            );
+        }
+
+        for current_block_id in [block_id, mc_block_id] {
+            let tx_count = if current_block_id == block_id {
+                transactions.len() as u32
+            } else {
+                0
+            };
+            local_batch.put_cf(
+                &lease.known_blocks.cf(),
+                known_block_key(current_block_id),
+                known_block_value(
+                    current_block_id,
+                    mc_block_id,
+                    start_lt,
+                    end_lt,
+                    tx_count,
+                ),
+            );
+            let location = codec::encode_router_location(codec::RouterLocation {
+                partition_id: partition_id.0,
+                mc_seqno: mc_block_id.seqno,
+            });
+            router_batch.put_cf(
+                &storage.router.blocks.cf(),
+                codec::encode_short_block_id(&current_block_id.as_short_id()),
+                location,
+            );
+        }
+
+        let mut block_value = Vec::new();
+        block_value.extend_from_slice(block_id.root_hash.as_slice());
+        block_value.extend_from_slice(block_id.file_hash.as_slice());
+        block_value.extend_from_slice(&start_lt.to_le_bytes());
+        block_value.extend_from_slice(&end_lt.to_le_bytes());
+        let mut block_key = [0; tables::BlocksByMcSeqno::KEY_LEN];
+        block_key[..4].copy_from_slice(&mc_block_id.seqno.to_be_bytes());
+        block_key[4] = block_id.shard.workchain() as i8 as u8;
+        block_key[5..13].copy_from_slice(&block_id.shard.prefix().to_be_bytes());
+        block_key[13..17].copy_from_slice(&block_id.seqno.to_be_bytes());
+        local_batch.put_cf(&lease.blocks_by_mc_seqno.cf(), block_key, &block_value);
+
+        let mut mc_value = Vec::new();
+        mc_value.extend_from_slice(mc_block_id.root_hash.as_slice());
+        mc_value.extend_from_slice(mc_block_id.file_hash.as_slice());
+        mc_value.extend_from_slice(&start_lt.to_le_bytes());
+        mc_value.extend_from_slice(&end_lt.to_le_bytes());
+        mc_value.extend_from_slice(&1u32.to_le_bytes());
+        mc_value.push(block_id.shard.workchain() as i8 as u8);
+        mc_value.extend_from_slice(&block_id.shard.prefix().to_le_bytes());
+        mc_value.extend_from_slice(&block_id.seqno.to_le_bytes());
+        mc_value.extend_from_slice(block_id.root_hash.as_slice());
+        mc_value.extend_from_slice(block_id.file_hash.as_slice());
+        mc_value.extend_from_slice(&start_lt.to_le_bytes());
+        mc_value.extend_from_slice(&end_lt.to_le_bytes());
+        let mut mc_key = [0; tables::BlocksByMcSeqno::KEY_LEN];
+        mc_key[..4].copy_from_slice(&mc_block_id.seqno.to_be_bytes());
+        mc_key[4] = mc_block_id.shard.workchain() as i8 as u8;
+        mc_key[5..13].copy_from_slice(&mc_block_id.shard.prefix().to_be_bytes());
+        mc_key[13..17].copy_from_slice(&mc_block_id.seqno.to_be_bytes());
+        local_batch.put_cf(&lease.blocks_by_mc_seqno.cf(), mc_key, mc_value);
+
+        for (current_block_id, transaction_count, lsm_bytes) in [
+            (block_id, transactions.len() as u64, estimated_lsm_bytes),
+            (mc_block_id, 0, 0),
+        ] {
+            let commit = codec::PartitionCommit {
+                block_id: *current_block_id,
+                digest: current_block_id.root_hash,
+                transaction_count,
+                estimated_lsm_bytes: lsm_bytes,
+                estimated_blob_bytes: 0,
+                index_record_count: transaction_count * 4,
+                start_lt,
+                end_lt,
+                gen_utime: mc_block_id.seqno,
+            };
+            local_batch.put_cf(
+                &lease.partition_commits.cf(),
+                codec::partition_commit_key(
+                    mc_block_id.seqno,
+                    &current_block_id.as_short_id(),
+                ),
+                codec::encode_partition_commit(&commit),
+            );
+        }
+        lease
+            .rocksdb()
+            .write_opt(local_batch, lease.transactions.write_config())
+            .unwrap();
+        storage
+            .router
+            .rocksdb()
+            .write_opt(router_batch, storage.router.transactions.write_config())
+            .unwrap();
+        partition_id
+    }
+
+    fn first_transaction_with_inbound_message(
+        lease: &PartitionReadLease,
+    ) -> (StdAddr, u64, HashBytes, HashBytes) {
+        let mut iterator = lease
+            .rocksdb()
+            .raw_iterator_cf(&lease.transactions.cf());
+        iterator.seek_to_first();
+        while iterator.valid() {
+            let key = iterator.key().unwrap();
+            let value = iterator.value().unwrap();
+            let payload = codec::decode_transaction_value(value).unwrap().payload();
+            let mask = TransactionMask::from_bits_retain(payload[0]);
+            if mask.has_msg_hash() {
+                return (
+                    StdAddr::new(key[0] as i8, HashBytes::from_slice(&key[1..33])),
+                    u64::from_be_bytes(key[33..41].try_into().unwrap()),
+                    HashBytes::from_slice(&payload[1..33]),
+                    HashBytes::from_slice(&payload[33..65]),
+                );
+            }
+            iterator.next();
+        }
+        panic!("indexed block fixture must contain an inbound message");
+    }
+
+    fn delete_router_records(
+        storage: &RpcStorage,
+        transaction_hash: &HashBytes,
+        inbound_message_hash: &HashBytes,
+        block_id: &BlockId,
+    ) {
+        let mut batch = rocksdb::WriteBatch::default();
+        batch.delete_cf(&storage.router.transactions.cf(), transaction_hash);
+        batch.delete_cf(
+            &storage.router.inbound_messages.cf(),
+            inbound_message_hash,
+        );
+        batch.delete_cf(
+            &storage.router.blocks.cf(),
+            codec::encode_short_block_id(&block_id.as_short_id()),
+        );
+        storage
+            .router
+            .rocksdb()
+            .write_opt(batch, storage.router.transactions.write_config())
+            .unwrap();
+    }
+
+    async fn wait_for_sealed_partition(storage: &RpcStorage, id: PartitionId) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if storage
+                    .partitions
+                    .lock()
+                    .descriptors()
+                    .iter()
+                    .any(|descriptor| {
+                        descriptor.id == id
+                            && descriptor.lifecycle == codec::ManifestLifecycle::Sealed
+                    })
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    fn insert_masterchain_commit(
+        manager: &PartitionManager,
+        block_id: &BlockId,
+        estimated_lsm_bytes: u64,
+    ) {
+        let commit = codec::PartitionCommit {
+            block_id: *block_id,
+            digest: block_id.root_hash,
+            transaction_count: 0,
+            estimated_lsm_bytes,
+            estimated_blob_bytes: 0,
+            index_record_count: 0,
+            start_lt: block_id.seqno as u64,
+            end_lt: block_id.seqno as u64 + 1,
+            gen_utime: block_id.seqno,
+        };
+        let db = manager.active_db();
+        let mut batch = rocksdb::WriteBatch::default();
+        batch.put_cf(
+            &db.partition_commits.cf(),
+            codec::partition_commit_key(block_id.seqno, &block_id.as_short_id()),
+            codec::encode_partition_commit(&commit),
+        );
+        batch.put_cf(
+            &db.known_blocks.cf(),
+            known_block_key(block_id),
+            known_block_value(
+                block_id,
+                block_id,
+                block_id.seqno as u64,
+                block_id.seqno as u64 + 1,
+                0,
+            ),
+        );
+        db.rocksdb()
+            .write_opt(batch, db.partition_commits.write_config())
+            .unwrap();
+    }
 
     #[test]
     fn shard_prefix() {
@@ -2444,5 +3620,936 @@ mod tests {
         assert_eq!(shard, unsafe {
             ShardIdent::new_unchecked(0, 0xabe0000000000000)
         });
+    }
+
+    #[test]
+    fn block_write_stats_counts_blob_threshold_and_indices() {
+        let mut below = BlockWriteStats::default();
+        below.add_transaction((DEFAULT_MIN_BLOB_SIZE - 1) as usize, false).unwrap();
+        assert_eq!(below.transaction_count, 1);
+        assert_eq!(below.index_record_count, 3);
+        assert_eq!(below.estimated_blob_bytes, 0);
+        assert_eq!(below.estimated_lsm_bytes, (tables::Transactions::KEY_LEN + (DEFAULT_MIN_BLOB_SIZE - 1) as usize + 32 + tables::TransactionsByHash::VALUE_FULL_LEN + tables::BlockTransactions::KEY_LEN + 32) as u64);
+        let mut at = BlockWriteStats::default();
+        at.add_transaction(DEFAULT_MIN_BLOB_SIZE as usize, true).unwrap();
+        assert_eq!(at.transaction_count, 1);
+        assert_eq!(at.index_record_count, 4);
+        assert_eq!(at.estimated_blob_bytes, DEFAULT_MIN_BLOB_SIZE);
+        assert_eq!(at.estimated_lsm_bytes, (tables::Transactions::KEY_LEN + 32 + tables::TransactionsByHash::VALUE_FULL_LEN + 32 + tables::Transactions::KEY_LEN + tables::BlockTransactions::KEY_LEN + 32) as u64);
+    }
+
+    #[test]
+    fn block_write_stats_excludes_metadata() {
+        let stats = BlockWriteStats::default();
+        assert_eq!(stats.transaction_count, 0);
+        assert_eq!(stats.index_record_count, 0);
+        assert_eq!(stats.estimated_lsm_bytes, 0);
+        assert_eq!(stats.estimated_blob_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn sealing_worker_flushes_closes_and_publishes_read_only_partition() {
+        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
+        let mut manager = PartitionManager::open(
+            context,
+            RpcTransactionPartitionsConfig {
+                target_lsm_bytes: 1,
+                target_blob_bytes: 1,
+                target_index_records: 1,
+                max_open_sealed_partitions: 1,
+            },
+        )
+        .unwrap();
+        manager.request_rotation(super::super::partition::PartitionCounters {
+            estimated_lsm_bytes: 1,
+            ..Default::default()
+        });
+        let old = manager.rotate_if_requested().unwrap().unwrap().0;
+        let partitions = Arc::new(Mutex::new(manager));
+
+        seal_partition(
+            partitions.clone(),
+            Arc::new(SnapshotPublisher::default()),
+            old,
+            CancellationFlag::new(),
+        )
+            .await
+            .unwrap();
+
+        let manager = partitions.lock();
+        assert_eq!(manager.descriptors().into_iter().find(|entry| entry.id == old).unwrap().lifecycle, codec::ManifestLifecycle::Sealed);
+        assert!(manager.sealed_lease(old).unwrap().db().partition_commits.insert([1], [1]).is_err());
+    }
+
+    #[tokio::test]
+    async fn composite_snapshot_gate_releases_sealing_partition() {
+        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
+        let storage = Arc::new(RpcStorage::open(context, test_partitions_config()).unwrap());
+        let block_id = masterchain_block(1);
+        {
+            let mut manager = storage.partitions.lock();
+            insert_masterchain_commit(&manager, &block_id, 1);
+            manager.commit_masterchain_block_set(&block_id).unwrap();
+        }
+        storage.publish_snapshot(&block_id).unwrap();
+        storage.publish_snapshot(&masterchain_block(0)).unwrap();
+        assert_eq!(
+            storage.load_snapshot().unwrap().visible_frontier(),
+            &block_id
+        );
+        let mut different = block_id;
+        different.file_hash = HashBytes([0xff; 32]);
+        assert!(storage.publish_snapshot(&different).is_err());
+        let held_snapshot = storage.load_snapshot().unwrap();
+        assert_eq!(held_snapshot.0.writable_partitions.len(), 2);
+
+        storage.sealing_notify.notify_one();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(storage
+            .partitions
+            .lock()
+            .descriptors()
+            .iter()
+            .any(|descriptor| descriptor.lifecycle == codec::ManifestLifecycle::Sealing));
+
+        let publish_storage = storage.clone();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            tokio::task::spawn_blocking(move || publish_storage.publish_snapshot(&block_id)),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        let load_storage = storage.clone();
+        let latest = tokio::time::timeout(
+            Duration::from_secs(1),
+            tokio::task::spawn_blocking(move || load_storage.load_snapshot().unwrap()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(latest.visible_frontier(), &block_id);
+        drop(latest);
+
+        drop(held_snapshot);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if storage
+                    .partitions
+                    .lock()
+                    .descriptors()
+                    .iter()
+                    .any(|descriptor| descriptor.lifecycle == codec::ManifestLifecycle::Sealed)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let snapshot = storage.load_snapshot().unwrap();
+        assert_eq!(snapshot.visible_frontier(), &block_id);
+        assert_eq!(snapshot.0.writable_partitions.len(), 1);
+        assert_eq!(
+            snapshot.active_partition().descriptor.id,
+            storage.partitions.lock().active_id()
+        );
+    }
+
+    #[tokio::test]
+    async fn composite_snapshot_restores_missing_sealing_handle() {
+        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
+        let mut manager =
+            PartitionManager::open(context, test_partitions_config()).unwrap();
+        let block_id = masterchain_block(1);
+        let old = manager.active_id();
+        insert_masterchain_commit(&manager, &block_id, 1);
+        manager.commit_masterchain_block_set(&block_id).unwrap();
+
+        let worker = manager.begin_sealing(old).unwrap();
+        drop(worker);
+        let primary = manager.take_sealing_handle(old).unwrap();
+        drop(primary);
+        assert_eq!(manager.sealing_handle_strong_count(old), None);
+
+        let snapshot = build_composite_snapshot(&mut manager, block_id).unwrap();
+        assert!(snapshot.0.writable_partitions.contains_key(&old));
+        assert_eq!(manager.sealing_handle_strong_count(old), Some(2));
+    }
+
+    #[tokio::test]
+    async fn startup_reconciliation_validates_frontiers() {
+        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
+        let storage = RpcStorage::open(context, RpcTransactionPartitionsConfig::default()).unwrap();
+        let zerostate = masterchain_block(0);
+        let empty = storage.reconcile_startup(&zerostate).unwrap();
+        assert_eq!(empty.effective_frontier, zerostate);
+        assert!(!empty.rebuild_current_state);
+
+        let block_id = masterchain_block(1);
+        assert!(storage.reconcile_startup(&block_id).is_err());
+        {
+            let mut manager = storage.partitions.lock();
+            insert_masterchain_commit(&manager, &block_id, 0);
+            manager.commit_masterchain_block_set(&block_id).unwrap();
+        }
+
+        let current = storage.reconcile_startup(&block_id).unwrap();
+        assert_eq!(current.effective_frontier, block_id);
+        assert!(!current.rebuild_current_state);
+        assert!(storage.reconcile_startup(&zerostate).unwrap().rebuild_current_state);
+
+        let mut different = block_id;
+        different.root_hash = HashBytes([0xff; 32]);
+        assert!(storage.reconcile_startup(&different).is_err());
+        assert!(storage.reconcile_startup(&masterchain_block(2)).is_err());
+
+        let next = masterchain_block(2);
+        {
+            let mut manager = storage.partitions.lock();
+            insert_masterchain_commit(&manager, &next, 0);
+            manager.commit_masterchain_block_set(&next).unwrap();
+        }
+        let behind_control = storage.reconcile_startup(&block_id).unwrap();
+        assert_eq!(behind_control.effective_frontier, block_id);
+        assert!(behind_control.rebuild_current_state);
+    }
+
+    #[tokio::test]
+    async fn startup_reconciliation_detects_unpublished_commits_after_reopen() {
+        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
+        {
+            let manager =
+                PartitionManager::open(context.clone(), RpcTransactionPartitionsConfig::default())
+                    .unwrap();
+            insert_masterchain_commit(&manager, &masterchain_block(1), 0);
+        }
+        let storage = RpcStorage::open(context, RpcTransactionPartitionsConfig::default()).unwrap();
+        assert!(storage
+            .reconcile_startup(&masterchain_block(0))
+            .unwrap()
+            .rebuild_current_state);
+    }
+
+    #[tokio::test]
+    async fn startup_frontier_rejects_malformed_router_but_allows_missing_router() {
+        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
+        let storage = RpcStorage::open(
+            context,
+            RpcTransactionPartitionsConfig::default(),
+        )
+        .unwrap();
+        let account = StdAddr::new(0, HashBytes::ZERO);
+        let mc_block_id = masterchain_block(1);
+        let block_id = basechain_block(1);
+        let transaction_hash = HashBytes([1; 32]);
+        insert_read_test_block(
+            &storage,
+            &account,
+            &mc_block_id,
+            &block_id,
+            &[ReadTestTransaction {
+                lt: 1,
+                hash: transaction_hash,
+                in_msg_hash: HashBytes([2; 32]),
+                boc_byte: 3,
+            }],
+            0,
+        );
+        storage.commit_masterchain_block_set(&mc_block_id).unwrap();
+        storage
+            .router
+            .transactions
+            .insert(transaction_hash, [0])
+            .unwrap();
+
+        let error = storage
+            .reconcile_startup(&mc_block_id)
+            .err()
+            .expect("malformed visible-frontier router must fail startup reconciliation");
+        assert!(
+            format!("{error:#}")
+                .contains("malformed transaction router at RPC startup frontier")
+        );
+
+        let mut batch = rocksdb::WriteBatch::default();
+        batch.delete_cf(&storage.router.transactions.cf(), transaction_hash);
+        storage
+            .router
+            .rocksdb()
+            .write_opt(batch, storage.router.transactions.write_config())
+            .unwrap();
+        assert_eq!(
+            storage
+                .reconcile_startup(&mc_block_id)
+                .unwrap()
+                .effective_frontier,
+            mc_block_id
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_repairs_router_stages_before_and_after_partition_sealing() {
+        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
+        let storage = RpcStorage::open(
+            context,
+            RpcTransactionPartitionsConfig {
+                target_lsm_bytes: u64::MAX,
+                target_blob_bytes: u64::MAX,
+                target_index_records: 1,
+                max_open_sealed_partitions: 1,
+            },
+        )
+        .unwrap();
+        let subscriptions = super::super::subscriptions::RpcSubscriptions::new(
+            SubscriberManagerConfig::new(16, 4),
+            4,
+        );
+        let zerostate = masterchain_block(0);
+        let mc_block_id = masterchain_block(1);
+        let block = indexed_block();
+        storage.publish_snapshot(&zerostate).unwrap();
+
+        let first = storage
+            .update(&mc_block_id, block.clone(), None, &subscriptions)
+            .await
+            .unwrap();
+        assert!(first.newly_committed);
+        let old_id = PartitionId(first.partition_id);
+        let old_lease = storage.partitions.lock().active_lease();
+        let (account, _lt, transaction_hash, inbound_message_hash) =
+            first_transaction_with_inbound_message(&old_lease);
+        assert!(old_lease
+            .transactions_by_hash
+            .get(transaction_hash)
+            .unwrap()
+            .is_some());
+        drop(old_lease);
+
+        delete_router_records(
+            &storage,
+            &transaction_hash,
+            &inbound_message_hash,
+            block.id(),
+        );
+        storage.publish_snapshot(&zerostate).unwrap();
+        assert!(storage.get_transaction(&transaction_hash, None).unwrap().is_none());
+        assert!(storage
+            .get_dst_transaction(&inbound_message_hash, None)
+            .unwrap()
+            .is_none());
+        assert!(storage
+            .get_brief_block_info(&block.id().as_short_id(), None)
+            .unwrap()
+            .is_none());
+        assert!(storage
+            .get_transactions(&account, None, None, false, None)
+            .unwrap()
+            .map_ext(|lt, _, _| Some(lt))
+            .next()
+            .is_none());
+
+        let active_replay = storage
+            .update(&mc_block_id, block.clone(), None, &subscriptions)
+            .await
+            .unwrap();
+        assert!(!active_replay.newly_committed);
+        assert_eq!(active_replay.partition_id, old_id.0);
+        assert!(storage.router.transactions.get(transaction_hash).unwrap().is_some());
+        assert!(storage
+            .router
+            .inbound_messages
+            .get(inbound_message_hash)
+            .unwrap()
+            .is_some());
+        assert!(storage
+            .router
+            .blocks
+            .get(codec::encode_short_block_id(&block.id().as_short_id()))
+            .unwrap()
+            .is_some());
+        assert!(storage.get_transaction(&transaction_hash, None).unwrap().is_none());
+
+        {
+            let mut manager = storage.partitions.lock();
+            insert_masterchain_commit(&manager, &mc_block_id, 0);
+            manager.commit_masterchain_block_set(&mc_block_id).unwrap();
+        }
+        storage.publish_snapshot(&mc_block_id).unwrap();
+        assert_eq!(storage.partitions.lock().active_id(), PartitionId(2));
+        let expected_c1 = storage
+            .get_transactions(&account, None, None, false, None)
+            .unwrap()
+            .map_ext(|lt, hash, _| Some((lt, *hash)))
+            .collect::<Vec<_>>();
+        assert!(!expected_c1.is_empty());
+        assert_eq!(
+            storage
+                .get_transaction(&transaction_hash, None)
+                .unwrap()
+                .unwrap()
+                .tx_hash(),
+            transaction_hash
+        );
+        assert_eq!(
+            storage
+                .get_dst_transaction(&inbound_message_hash, None)
+                .unwrap()
+                .unwrap()
+                .tx_hash(),
+            transaction_hash
+        );
+        assert_eq!(
+            storage
+                .get_transaction_info(&transaction_hash, None)
+                .unwrap()
+                .unwrap()
+                .block_id,
+            *block.id()
+        );
+        assert_eq!(
+            storage
+                .get_brief_block_info(&block.id().as_short_id(), None)
+                .unwrap()
+                .unwrap()
+                .0,
+            *block.id()
+        );
+
+        delete_router_records(
+            &storage,
+            &transaction_hash,
+            &inbound_message_hash,
+            block.id(),
+        );
+        storage.publish_snapshot(&mc_block_id).unwrap();
+        assert!(storage.get_transaction(&transaction_hash, None).unwrap().is_none());
+        assert_eq!(
+            storage
+                .get_transactions(&account, None, None, false, None)
+                .unwrap()
+                .map_ext(|lt, hash, _| Some((lt, *hash)))
+                .collect::<Vec<_>>(),
+            expected_c1
+        );
+        let sealing_replay = storage
+            .update(&mc_block_id, block.clone(), None, &subscriptions)
+            .await
+            .unwrap();
+        assert!(!sealing_replay.newly_committed);
+        assert_eq!(sealing_replay.partition_id, old_id.0);
+        storage.publish_snapshot(&mc_block_id).unwrap();
+        assert!(storage.get_transaction(&transaction_hash, None).unwrap().is_some());
+
+        storage.sealing_notify.notify_one();
+        wait_for_sealed_partition(&storage, old_id).await;
+        delete_router_records(
+            &storage,
+            &transaction_hash,
+            &inbound_message_hash,
+            block.id(),
+        );
+        storage.publish_snapshot(&mc_block_id).unwrap();
+        assert!(storage.get_transaction(&transaction_hash, None).unwrap().is_none());
+        let sealed_replay = storage
+            .update(&mc_block_id, block.clone(), None, &subscriptions)
+            .await
+            .unwrap();
+        assert!(!sealed_replay.newly_committed);
+        assert_eq!(sealed_replay.partition_id, old_id.0);
+        storage.publish_snapshot(&mc_block_id).unwrap();
+
+        assert_eq!(
+            storage
+                .get_transactions(&account, None, None, false, None)
+                .unwrap()
+                .map_ext(|lt, hash, _| Some((lt, *hash)))
+                .collect::<Vec<_>>(),
+            expected_c1
+        );
+        assert_eq!(
+            storage
+                .get_transaction(&transaction_hash, None)
+                .unwrap()
+                .unwrap()
+                .tx_hash(),
+            transaction_hash
+        );
+        assert_eq!(
+            storage
+                .get_dst_transaction(&inbound_message_hash, None)
+                .unwrap()
+                .unwrap()
+                .tx_hash(),
+            transaction_hash
+        );
+        assert_eq!(
+            storage
+                .get_transaction_info(&transaction_hash, None)
+                .unwrap()
+                .unwrap()
+                .block_id,
+            *block.id()
+        );
+        assert!(storage
+            .get_brief_block_info(&block.id().as_short_id(), None)
+            .unwrap()
+            .is_some());
+        for location in [
+            storage.router.transactions.get(transaction_hash).unwrap().unwrap(),
+            storage
+                .router
+                .inbound_messages
+                .get(inbound_message_hash)
+                .unwrap()
+                .unwrap(),
+            storage
+                .router
+                .blocks
+                .get(codec::encode_short_block_id(&block.id().as_short_id()))
+                .unwrap()
+                .unwrap(),
+        ] {
+            assert_eq!(
+                codec::decode_router_location(location.as_ref()).unwrap(),
+                codec::RouterLocation {
+                    partition_id: old_id.0,
+                    mc_seqno: mc_block_id.seqno,
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn partition_aware_reads_cross_sealed_and_active_partitions() {
+        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
+        let storage = RpcStorage::open(
+            context,
+            RpcTransactionPartitionsConfig {
+                target_lsm_bytes: 1,
+                target_blob_bytes: u64::MAX,
+                target_index_records: u64::MAX,
+                max_open_sealed_partitions: 1,
+            },
+        )
+        .unwrap();
+        let account = StdAddr::new(0, HashBytes::ZERO);
+        let mc1 = masterchain_block(1);
+        let block1 = basechain_block(1);
+        let hash10 = HashBytes([10; 32]);
+        let hash11 = HashBytes([11; 32]);
+        let msg10 = HashBytes([110; 32]);
+        let msg11 = HashBytes([111; 32]);
+        let first_transactions = [
+            ReadTestTransaction {
+                lt: 10,
+                hash: hash10,
+                in_msg_hash: msg10,
+                boc_byte: 10,
+            },
+            ReadTestTransaction {
+                lt: 11,
+                hash: hash11,
+                in_msg_hash: msg11,
+                boc_byte: 11,
+            },
+        ];
+        let held_first_lease = storage.partitions.lock().active_lease();
+        let first_id = insert_read_test_block(
+            &storage,
+            &account,
+            &mc1,
+            &block1,
+            &first_transactions,
+            1,
+        );
+        storage.commit_masterchain_block_set(&mc1).unwrap();
+        let sealing_snapshot = storage.load_snapshot().unwrap();
+        assert_eq!(
+            storage
+                .get_transaction(&hash10, Some(&sealing_snapshot))
+                .unwrap()
+                .unwrap()
+                .as_ref(),
+            [10]
+        );
+        drop(sealing_snapshot);
+        drop(held_first_lease);
+        wait_for_sealed_partition(&storage, first_id).await;
+
+        let mc2 = masterchain_block(2);
+        let block2 = basechain_block(2);
+        let hash20 = HashBytes([20; 32]);
+        let msg20 = HashBytes([120; 32]);
+        let second_transactions = [ReadTestTransaction {
+            lt: 20,
+            hash: hash20,
+            in_msg_hash: msg20,
+            boc_byte: 20,
+        }];
+        let second_id = insert_read_test_block(
+            &storage,
+            &account,
+            &mc2,
+            &block2,
+            &second_transactions,
+            1,
+        );
+        storage.commit_masterchain_block_set(&mc2).unwrap();
+        wait_for_sealed_partition(&storage, second_id).await;
+
+        let mc3 = masterchain_block(3);
+        let block3 = basechain_block(3);
+        let hash30 = HashBytes([30; 32]);
+        let msg30 = HashBytes([130; 32]);
+        let third_transactions = [ReadTestTransaction {
+            lt: 30,
+            hash: hash30,
+            in_msg_hash: msg30,
+            boc_byte: 30,
+        }];
+        let third_id = insert_read_test_block(
+            &storage,
+            &account,
+            &mc3,
+            &block3,
+            &third_transactions,
+            0,
+        );
+        storage.commit_masterchain_block_set(&mc3).unwrap();
+        assert_ne!(third_id, first_id);
+        assert_ne!(third_id, second_id);
+
+        assert_eq!(storage.get_known_mc_blocks_range(None).unwrap(), Some((1, 3)));
+        let forward = storage
+            .get_transactions(&account, None, None, false, None)
+            .unwrap()
+            .map_ext(|lt, _, _| Some(lt))
+            .collect::<Vec<_>>();
+        assert_eq!(forward, [10, 11, 20, 30]);
+        let reverse = storage
+            .get_transactions(&account, Some(11), Some(20), true, None)
+            .unwrap()
+            .map_ext(|lt, _, _| Some(lt))
+            .collect::<Vec<_>>();
+        assert_eq!(reverse, [20, 11]);
+        let full_reverse = storage
+            .get_transactions(&account, None, None, true, None)
+            .unwrap()
+            .map_ext(|lt, _, _| Some(lt))
+            .collect::<Vec<_>>();
+        assert_eq!(full_reverse, [30, 20, 11, 10]);
+        let bounded_forward = storage
+            .get_transactions(&account, Some(11), Some(30), false, None)
+            .unwrap()
+            .map_ext(|lt, _, _| Some(lt))
+            .collect::<Vec<_>>();
+        assert_eq!(bounded_forward, [11, 20, 30]);
+        let bounded_reverse = storage
+            .get_transactions(&account, Some(11), Some(30), true, None)
+            .unwrap()
+            .map_ext(|lt, _, _| Some(lt))
+            .collect::<Vec<_>>();
+        assert_eq!(bounded_reverse, [30, 20, 11]);
+
+        for (hash, msg_hash, boc_byte, block_id) in [
+            (hash10, msg10, 10, block1),
+            (hash20, msg20, 20, block2),
+            (hash30, msg30, 30, block3),
+        ] {
+            assert_eq!(
+                storage
+                    .get_transaction(&hash, None)
+                    .unwrap()
+                    .unwrap()
+                    .as_ref(),
+                [boc_byte]
+            );
+            assert_eq!(
+                storage
+                    .get_dst_transaction(&msg_hash, None)
+                    .unwrap()
+                    .unwrap()
+                    .as_ref(),
+                [boc_byte]
+            );
+            assert_eq!(
+                storage
+                    .get_transaction_info(&hash, None)
+                    .unwrap()
+                    .unwrap()
+                    .block_id,
+                block_id
+            );
+        }
+        assert_eq!(
+            storage
+                .get_src_transaction(&account, 25, None)
+                .unwrap()
+                .unwrap()
+                .as_ref(),
+            [20]
+        );
+        assert_eq!(
+            storage
+                .get_src_transaction(&account, 11, None)
+                .unwrap()
+                .unwrap()
+                .as_ref(),
+            [10]
+        );
+        assert_eq!(
+            storage
+                .get_src_transaction(&account, 35, None)
+                .unwrap()
+                .unwrap()
+                .as_ref(),
+            [30]
+        );
+
+        let blocks = storage
+            .get_blocks_by_mc_seqno(1, None)
+            .unwrap()
+            .unwrap()
+            .collect::<Vec<_>>();
+        assert_eq!(blocks.len(), 2);
+        assert!(blocks.contains(&block1));
+        assert!(blocks.contains(&mc1));
+        let (brief_id, brief_mc_seqno, brief) = storage
+            .get_brief_block_info(&block1.as_short_id(), None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(brief_id, block1);
+        assert_eq!(brief_mc_seqno, 1);
+        assert_eq!(brief.tx_count, 2);
+        let shards = storage
+            .get_brief_shards_descr(1, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(shards.len(), 1);
+        assert_eq!(shards[0].shard_ident, ShardIdent::BASECHAIN);
+        assert_eq!(shards[0].seqno, block1.seqno);
+
+        let block_transactions = storage
+            .get_block_transactions(&block1.as_short_id(), false, None, None)
+            .unwrap()
+            .unwrap()
+            .map(|_, lt, boc| Some((lt, boc[0])))
+            .collect::<Vec<_>>();
+        assert_eq!(block_transactions, [(10, 10), (11, 11)]);
+        let reverse_block_transactions = storage
+            .get_block_transaction_ids(&block1.as_short_id(), true, None, None)
+            .unwrap()
+            .unwrap()
+            .map(|id| id.lt)
+            .collect::<Vec<_>>();
+        assert_eq!(reverse_block_transactions, [11, 10]);
+        let cursor = BlockTransactionsCursor {
+            hash: account.address,
+            lt: 10,
+        };
+        let after_cursor = storage
+            .get_block_transaction_ids(
+                &block1.as_short_id(),
+                false,
+                Some(&cursor),
+                None,
+            )
+            .unwrap()
+            .unwrap()
+            .map(|id| id.lt)
+            .collect::<Vec<_>>();
+        assert_eq!(after_cursor, [11]);
+        for (mc_seqno, block_id, mc_block_id, transaction_lt) in [
+            (2, block2, mc2, 20),
+            (3, block3, mc3, 30),
+        ] {
+            let blocks = storage
+                .get_blocks_by_mc_seqno(mc_seqno, None)
+                .unwrap()
+                .unwrap()
+                .collect::<Vec<_>>();
+            assert_eq!(blocks.len(), 2);
+            assert!(blocks.contains(&block_id));
+            assert!(blocks.contains(&mc_block_id));
+            assert_eq!(
+                storage
+                    .get_brief_block_info(&block_id.as_short_id(), None)
+                    .unwrap()
+                    .unwrap()
+                    .0,
+                block_id
+            );
+            let transactions = storage
+                .get_block_transaction_ids(
+                    &block_id.as_short_id(),
+                    false,
+                    None,
+                    None,
+                )
+                .unwrap()
+                .unwrap()
+                .map(|id| id.lt)
+                .collect::<Vec<_>>();
+            assert_eq!(transactions, [transaction_lt]);
+        }
+
+        let mut retained_first_partition = storage
+            .get_transactions(&account, None, None, false, None)
+            .unwrap()
+            .map_ext(|lt, _, _| Some(lt));
+        assert_eq!(retained_first_partition.visited_partitions, 0);
+        assert_eq!(retained_first_partition.next(), Some(10));
+        assert_eq!(retained_first_partition.visited_partitions, 1);
+        assert!(storage.get_transaction(&hash20, None).unwrap().is_some());
+        {
+            let manager = storage.partitions.lock();
+            manager.run_sealed_cache_pending_tasks();
+            assert!(manager.sealed_cache_entry_count() <= 1);
+        }
+        assert_eq!(retained_first_partition.next(), Some(11));
+        assert_eq!(
+            retained_first_partition.by_ref().collect::<Vec<_>>(),
+            [20, 30]
+        );
+        assert_eq!(retained_first_partition.visited_partitions, 3);
+
+        let mc4 = masterchain_block(4);
+        let block4 = basechain_block(4);
+        let future_hash = HashBytes([40; 32]);
+        let future_msg = HashBytes([140; 32]);
+        insert_read_test_block(
+            &storage,
+            &account,
+            &mc4,
+            &block4,
+            &[ReadTestTransaction {
+                lt: 40,
+                hash: future_hash,
+                in_msg_hash: future_msg,
+                boc_byte: 40,
+            }],
+            0,
+        );
+        storage.publish_snapshot(&mc3).unwrap();
+        assert!(storage.get_transaction(&future_hash, None).unwrap().is_none());
+        assert!(storage
+            .get_dst_transaction(&future_msg, None)
+            .unwrap()
+            .is_none());
+        assert!(storage
+            .get_brief_block_info(&block4.as_short_id(), None)
+            .unwrap()
+            .is_none());
+        assert!(storage
+            .get_block_transaction_ids(&block4.as_short_id(), false, None, None)
+            .unwrap()
+            .is_none());
+        assert!(storage
+            .get_blocks_by_mc_seqno(4, None)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            storage
+                .get_src_transaction(&account, 50, None)
+                .unwrap()
+                .unwrap()
+                .as_ref(),
+            [30]
+        );
+        let visible_lts = storage
+            .get_transactions(&account, None, None, false, None)
+            .unwrap()
+            .map_ext(|lt, _, _| Some(lt))
+            .collect::<Vec<_>>();
+        assert_eq!(visible_lts, [10, 11, 20, 30]);
+
+        let stale_hash = HashBytes([90; 32]);
+        storage
+            .router
+            .transactions
+            .insert(
+                stale_hash,
+                codec::encode_router_location(codec::RouterLocation {
+                    partition_id: second_id.0,
+                    mc_seqno: 1,
+                }),
+            )
+            .unwrap();
+        storage.publish_snapshot(&mc3).unwrap();
+        assert!(storage.get_transaction(&stale_hash, None).is_err());
+
+        let active_lease = storage.partitions.lock().active_lease();
+        let mut tx_info = active_lease
+            .transactions_by_hash
+            .get(hash30)
+            .unwrap()
+            .unwrap()
+            .as_ref()
+            .to_vec();
+        tx_info[110..114].copy_from_slice(&2u32.to_le_bytes());
+        active_lease
+            .transactions_by_hash
+            .insert(hash30, tx_info)
+            .unwrap();
+        storage.publish_snapshot(&mc3).unwrap();
+        assert!(storage.get_transaction(&hash30, None).is_err());
+    }
+
+    #[tokio::test]
+    async fn published_snapshot_hides_future_and_live_records() {
+        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
+        let storage = RpcStorage::open(context, RpcTransactionPartitionsConfig::default()).unwrap();
+        let account = StdAddr::new(0, HashBytes::ZERO);
+        assert!(storage
+            .get_transactions(&account, None, None, false, None)
+            .is_err());
+
+        let tx_hash = HashBytes([1; 32]);
+        let mut tx_key = [0; tables::Transactions::KEY_LEN];
+        tx_key[33..41].copy_from_slice(&1u64.to_be_bytes());
+        let mut payload = vec![0];
+        payload.extend_from_slice(tx_hash.as_slice());
+        payload.push(0);
+        let value = codec::encode_transaction_value(1, &payload).unwrap();
+        let mut tx_info = [0; tables::TransactionsByHash::VALUE_FULL_LEN];
+        tx_info[33..41].copy_from_slice(&1u64.to_be_bytes());
+        tx_info[110..114].copy_from_slice(&1u32.to_le_bytes());
+        {
+            let manager = storage.partitions.lock();
+            manager.active_db().transactions.insert(tx_key, value).unwrap();
+            manager
+                .active_db()
+                .transactions_by_hash
+                .insert(tx_hash, tx_info)
+                .unwrap();
+        }
+
+        let zerostate = masterchain_block(0);
+        storage.publish_snapshot(&zerostate).unwrap();
+        assert!(storage.get_transaction(&tx_hash, None).unwrap().is_none());
+        assert!(storage
+            .get_transactions(&account, None, None, false, None)
+            .unwrap()
+            .map(|_| Some(()))
+            .next()
+            .is_none());
+
+        let code_hash = HashBytes([2; 32]);
+        let mut code_hash_key = [0; tables::CodeHashes::KEY_LEN];
+        code_hash_key[..32].copy_from_slice(code_hash.as_slice());
+        storage
+            .current_state
+            .code_hashes
+            .insert(code_hash_key, [])
+            .unwrap();
+        assert!(storage
+            .get_accounts_by_code_hash(&code_hash, None, None)
+            .unwrap()
+            .next()
+            .is_none());
     }
 }

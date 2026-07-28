@@ -187,12 +187,67 @@ impl StorageContext {
         updated
     }
 
+    #[cfg(any(test, feature = "test"))]
+    pub fn rocksdb_instance_is_registered(
+        &self,
+        name: &str,
+        db: &weedb::WeeDbRaw,
+    ) -> bool {
+        let Some(known) = self.inner.rocksdb_instances.load().get(name).cloned() else {
+            return false;
+        };
+        let db = weedb::WeeDbRaw::downgrade(db);
+        weedb::WeakWeeDbRaw::ptr_eq(&db, &known.weak)
+    }
+
     pub fn open_preconfigured<P, T>(&self, subdir: P) -> Result<weedb::WeeDb<T>>
     where
         P: AsRef<Path>,
         T: NamedTables<Context = TableContext> + 'static,
     {
         self.open(subdir, |opts| self.apply_default_options(opts))
+    }
+
+    pub fn open_read_only<P, T>(&self, subdir: P) -> Result<weedb::WeeDb<T>>
+    where
+        P: AsRef<Path>,
+        T: NamedTables<Context = TableContext> + 'static,
+    {
+        let subdir = subdir.as_ref();
+        let db_dir = self.inner.root_dir.subdir_readonly(subdir);
+        if !db_dir.path().is_dir() {
+            anyhow::bail!(
+                "RocksDB directory does not exist for {}: {}",
+                T::NAME,
+                db_dir.path().display()
+            );
+        }
+
+        tracing::debug!(subdir = %subdir.display(), "opening read-only RocksDB instance");
+
+        let this = self.inner.as_ref();
+        this.fs_usage.add_path(db_dir.path());
+        let db = weedb::WeeDb::<T>::builder_prepared(db_dir.path(), this.rocksdb_table_context.clone())
+            .with_options(|opts, _| {
+                self.apply_default_options(opts);
+                opts.create_if_missing(false);
+                opts.create_missing_column_families(false);
+            })
+            .read_only(weedb::ReadOnly {
+                error_if_log_file_exist: false,
+            })
+            .build()
+            .with_context(|| {
+                format!(
+                    "failed to open read-only RocksDB instance {} ({})",
+                    T::NAME,
+                    db_dir.path().display()
+                )
+            })?;
+
+        tracing::debug!(current_rocksdb_buffer_usage = ?self.rocksdb_table_context().buffer_usage());
+
+        Ok(db)
     }
 
     pub fn open<P, T, F>(&self, subdir: P, configure: F) -> Result<weedb::WeeDb<T>>
@@ -329,6 +384,52 @@ impl KnownInstance {
             compaction_events,
             task_handle,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use weedb::{ColumnFamily, ColumnFamilyOptions};
+
+    struct TestTable;
+
+    impl ColumnFamily for TestTable {
+        const NAME: &'static str = "test";
+    }
+
+    impl ColumnFamilyOptions<TableContext> for TestTable {}
+
+    weedb::tables! {
+        struct TestTables<TableContext> {
+            test: TestTable,
+        }
+    }
+
+    impl NamedTables for TestTables {
+        const NAME: &'static str = "storage-context-read-only-test";
+    }
+
+    #[tokio::test]
+    async fn opens_existing_database_read_only() -> Result<()> {
+        let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
+        let db = ctx.open_preconfigured::<_, TestTables>("test-db")?;
+        db.tables().test.insert(b"key", b"value")?;
+        drop(db);
+
+        let db = ctx.open_read_only::<_, TestTables>("test-db")?;
+        assert_eq!(db.tables().test.get(b"key")?.as_deref(), Some(&b"value"[..]));
+        assert!(db.tables().test.insert(b"key", b"new-value").is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejects_missing_database_read_only() -> Result<()> {
+        let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
+        let error = ctx.open_read_only::<_, TestTables>("missing-db").unwrap_err();
+        assert!(error.to_string().contains(TestTables::NAME));
+        assert!(error.to_string().contains("missing-db"));
+        Ok(())
     }
 }
 
