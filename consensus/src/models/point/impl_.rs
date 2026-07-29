@@ -291,10 +291,9 @@ pub mod test_point {
                 (PeerId(rand::random()), Digest::random())
             })),
             evidence,
-            role: PointRole::Regular {
-                anchor_proof: AnchorLink::Indirect(indirect_link(prev_id.round - 7_u32)),
-                anchor_trigger: AnchorLink::Indirect(indirect_link(prev_id.round - 6_u32)),
-            },
+            anchor_proof: AnchorLink::Indirect(indirect_link(prev_id.round - 7_u32)),
+            anchor_trigger: AnchorLink::Indirect(indirect_link(prev_id.round - 6_u32)),
+            role: PointRole::Regular,
             time: anchor_time.next(),
             anchor_time,
         };

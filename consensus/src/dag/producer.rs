@@ -6,8 +6,8 @@ use crate::dag::{DagHead, DagRound};
 use crate::effects::{AltFormat, RoundCtx};
 use crate::engine::{InputBuffer, MempoolConfig};
 use crate::models::{
-    AnchorLink, AnchorStageRole, AnyLink, Digest, IndirectLink, PeerCount, Point, PointData,
-    PointInfo, PointRole, Round, Signature, Through, UnixTime,
+    AnchorLink, AnchorStageRole, Digest, IndirectLink, PeerCount, Point, PointData, PointInfo,
+    PointRole, Round, Signature, Through, UnixTime,
 };
 
 pub struct LastOwnPoint {
@@ -135,24 +135,12 @@ impl Producer {
                     PointRole::AnchorTrigger
                 }
             } else if is_leader && is_proof_far_enough {
-                PointRole::AnchorProof {
-                    anchor_proof: match anchor_proof {
-                        AnchorLink::Indirect(link) => link,
-                        AnchorLink::Direct(_) => unreachable!("guarded by bool check"),
-                    },
-                    anchor_trigger,
-                }
+                PointRole::AnchorProof
             } else {
-                PointRole::Regular {
-                    anchor_proof,
-                    anchor_trigger,
-                }
+                PointRole::Regular
             }
         } else {
-            PointRole::Regular {
-                anchor_proof,
-                anchor_trigger,
-            }
+            PointRole::Regular
         };
 
         let payload = input_buffer.fetch(last_own_point.as_ref().is_none_or(|last| {
@@ -166,8 +154,13 @@ impl Producer {
 
         Self::check_prev_point(prev_info, proven_vertex)?;
 
-        let (time, anchor_time) =
-            Self::get_time(&role.anchor_proof(&local_id), prev_info, includes, witness);
+        let (time, anchor_time) = Self::get_time(
+            role.is_anchor_proof(),
+            &anchor_proof,
+            prev_info,
+            includes,
+            witness,
+        );
 
         let includes = includes
             .values()
@@ -199,6 +192,8 @@ impl Producer {
                 includes,
                 witness,
                 evidence,
+                anchor_proof,
+                anchor_trigger,
                 role,
                 time,
                 anchor_time,
@@ -257,18 +252,19 @@ impl Producer {
     }
 
     fn get_time(
-        anchor_proof: &AnyLink<'_>,
+        is_proof: bool,
+        anchor_proof: &AnchorLink,
         prev_info: Option<&PointInfo>,
         includes: &FastHashMap<PeerId, PointInfo>,
         witness: &FastHashMap<PeerId, PointInfo>,
     ) -> (UnixTime, UnixTime) {
         let anchor_time = match anchor_proof {
-            AnyLink::ToSelf => {
+            _ if is_proof => {
                 let info = prev_info.expect("anchor candidate should exist");
 
                 info.time()
             }
-            AnyLink::Direct(path) | AnyLink::Indirect(IndirectLink { path, .. }) => {
+            AnchorLink::Direct(path) | AnchorLink::Indirect(IndirectLink { path, .. }) => {
                 let (peer_id, through) = match path {
                     Through::Includes(peer_id) => (peer_id, &includes),
                     Through::Witness(peer_id) => (peer_id, &witness),
@@ -338,8 +334,8 @@ mod link {
         let trigger_source = link_source(includes, witness, AnchorStageRole::Trigger);
         let max_proof_source = link_source(includes, witness, AnchorStageRole::Proof);
 
-        let proof_source = if trigger_source.info.anchor_round(AnchorStageRole::Trigger)
-            > max_proof_source.info.anchor_round(AnchorStageRole::Proof)
+        let proof_source = if trigger_source.info.anchor_proof().top().round()
+            >= max_proof_source.info.anchor_proof().top().round()
         {
             trigger_source
         } else {
@@ -364,14 +360,15 @@ mod link {
     ) -> LinkSource<'a> {
         let (_, incl_info) = includes
             .iter()
-            .max_by_key(|(_, info)| info.anchor_round(link_field))
+            .max_by_key(|(_, info)| info.anchor(link_field).top().round())
             .expect("non-empty list of includes for own point");
 
         let newer_witness = witness
             .iter()
-            .max_by_key(|(_, wit_info)| wit_info.anchor_round(link_field))
+            .max_by_key(|(_, wit_info)| wit_info.anchor(link_field).top().round())
             .filter(|(_, wit_info)| {
-                wit_info.anchor_round(link_field) > incl_info.anchor_round(link_field)
+                wit_info.anchor(link_field).top().round()
+                    > incl_info.anchor(link_field).top().round()
             });
 
         match newer_witness {
@@ -405,7 +402,7 @@ mod link {
             AnchorLink::Direct(source.path)
         } else {
             AnchorLink::Indirect(IndirectLink {
-                to: source.info.anchor_id(link_field),
+                to: source.info.anchor(link_field).top().id(),
                 path: source.path,
             })
         }

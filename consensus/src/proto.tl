@@ -5,6 +5,8 @@ consensus.pointData
     includes:(vector consensus.peerDigestPair)
     witness:(vector consensus.peerDigestPair)
     evidence:(vector consensus.peerSignaturePair)
+    anchor_proof:consensus.anchorLink
+    anchor_trigger:consensus.anchorLink
     role:consensus.pointRole
     time:int
     anchor_time:int
@@ -57,14 +59,8 @@ consensus.peerSignaturePair
 /**
 * Representation of Point Role enum
 */
-consensus.pointRole.regular
-    anchor_proof:consensus.anchorLink
-    anchor_trigger:consensus.anchorLink
-    = consensus.PointRole;
-consensus.pointRole.proof
-    anchor_proof:consensus.link.indirect
-    anchor_trigger:consensus.anchorLink
-    = consensus.PointRole;
+consensus.pointRole.regular                                           = consensus.PointRole;
+consensus.pointRole.proof                                             = consensus.PointRole;
 consensus.pointRole.trigger                                           = consensus.PointRole;
 consensus.pointRole.sticky                 seq_no:int                 = consensus.PointRole;
 consensus.pointRole.genesis                                           = consensus.PointRole;

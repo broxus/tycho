@@ -15,9 +15,8 @@ use crate::effects::{AltFormat, Ctx, TaskResult, ValidateCtx};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule, PeerScheduleStateless};
 use crate::models::{
-    AnchorStageRole, AnyLink, Cert, CertDirectDeps, DagPoint, Digest, EvidenceSigError,
-    IndirectLink, PeerCount, PointId, PointInfo, PointMap, Round, StructureIssue, Through,
-    UnixTime,
+    AnchorStageRole, Cert, CertDirectDeps, DagPoint, Digest, EvidenceSigError, IndirectLink,
+    PeerCount, PointId, PointInfo, PointMap, Round, StructureIssue, Through, UnixTime,
 };
 use crate::storage::MempoolStore;
 // Note on equivocation.
@@ -78,8 +77,6 @@ pub enum IllFormedReason {
     UnknownPeers((Vec<PeerId>, PointMap)),
     #[error("unknown peers in anchor {0:?} link target")]
     UnknownPeerInAnchorLink(AnchorStageRole),
-    #[error("unknown peers in chained proof target")]
-    UnknownPeerInChainedProof,
     #[error("{} peers is not enough in {:?} map for 3F+1={}", .0.0, .0.2, .0.1.full())]
     LackOfPeers((usize, PeerCount, PointMap)),
     // Errors below are thrown from `validate()` because they require DagRound
@@ -101,7 +98,7 @@ pub enum InvalidReason {
     TimeNotGreaterThanInPrevPoint(PointId),
     #[error("anchor proof does not inherit time from its candidate {:?}", .0.alt())]
     AnchorProofDoesntInheritAnchorTime(PointId),
-    #[error("anchor candidate's time is not inherited from its proof {:?}", .0.alt())]
+    #[error("anchor time is not inherited from anchor proof {:?}", .0.alt())]
     AnchorTimeNotInheritedFromProof(PointId),
     #[error("must have referenced prev point {:?}", .0.alt())]
     MustHaveReferencedPrevPoint(PointId),
@@ -117,14 +114,8 @@ pub enum InvalidReason {
     AnchorLinkRole((AnchorStageRole, PointId)),
     #[error("anchor {:?} link leads to other destination through {:?}", .0.0, .0.1.alt())]
     AnchorLinkBadPath((AnchorStageRole, PointId)),
-    #[error("chained proof links to other role")]
-    ChainedProofRole(PointId),
-    #[error("chained proof link leads to other destination through {:?}", .0.alt())]
-    ChainedProofBadPath(PointId),
     #[error("bad sticky sequence after {:?}: previous {:?}, current {}", .0.0.alt(), .0.1, .0.2)]
     BadStickySequence((PointId, Option<u8>, u8)),
-    #[error("newer proof to chain in dependency {:?}", .0.alt())]
-    NewerProofToChainInDependency(PointId),
     #[error("anchor_proof not inherited from {}{:?}", if .0.1 {"trigger "} else {""}, .0.0.alt())]
     TriggerProofMismatch((PointId, bool)), // `true` if trigger is a direct dependency
     #[error("dependency ill-formed {:?}: {}", .0.0.alt(), .0.1)]
@@ -388,12 +379,11 @@ impl Verifier {
         // If point under validation is so old, that any dependency download fails,
         // it will not be referenced by the current peer anyway, and it's ok to mark it as invalid
         // until the current peer makes a gap in its far outdated DAG.
-        let anchor_trigger_id = info.anchor_id(AnchorStageRole::Trigger);
-        let anchor_proof_id = info.anchor_id(AnchorStageRole::Proof);
-        let anchor_trigger_through = info.anchor_link_through(AnchorStageRole::Trigger);
-        let anchor_proof_through = info.anchor_link_through(AnchorStageRole::Proof);
-        let trigger_bound_proof_id = info.trigger_bound_proof_id();
-        let chained_proof_to_through = info.chained_anchor_proof_to_through();
+        let anchor_trigger_id = info.anchor_trigger().linked().id();
+        let anchor_proof_id = info.anchor_proof().linked().id();
+        let anchor_trigger_through = info.anchor_trigger().through().id();
+        let anchor_proof_through = info.anchor_proof().through().id();
+
         let max_allowed_dep_time =
             info.time() + UnixTime::from_millis(conf.consensus.clock_skew_millis.get() as _);
 
@@ -472,15 +462,30 @@ impl Verifier {
                 (AnchorStageRole::Trigger, anchor_trigger_id.round),
                 (AnchorStageRole::Proof, anchor_proof_id.round),
             ] {
-                if dep.anchor_round(anchor_role) > anchor_role_round {
+                if dep.anchor(anchor_role).top().round() > anchor_role_round {
                     let tuple = (anchor_role, dep_id);
                     invalid_reason = Some(InvalidReason::NewerAnchorInDependency(tuple));
                 }
             }
 
-            if dep_id == anchor_proof_id && !dep.is_anchor_proof() {
-                let tuple = (AnchorStageRole::Proof, dep_id);
-                invalid_reason = Some(InvalidReason::AnchorLink(tuple));
+            if dep_id == anchor_proof_id {
+                if !dep.is_anchor_proof() {
+                    let tuple = (AnchorStageRole::Proof, dep_id);
+                    invalid_reason = Some(InvalidReason::AnchorLink(tuple));
+                }
+                if let Some(sticky_anchors) = info.sticky_anchors() {
+                    let mut is_sticky_sequence_ok = sticky_anchors < conf.consensus.sticky_anchors;
+                    is_sticky_sequence_ok &= if let Some(prev_sticky) = dep.sticky_anchors() {
+                        prev_sticky.checked_add(1) == Some(sticky_anchors)
+                    } else {
+                        sticky_anchors == 0
+                    };
+
+                    if !is_sticky_sequence_ok {
+                        let tuple = (dep_id, dep.sticky_anchors(), sticky_anchors);
+                        invalid_reason = Some(InvalidReason::BadStickySequence(tuple));
+                    }
+                }
             }
             if dep_id == anchor_trigger_id
                 && let Some(reason) = Self::check_trigger_target(info, dep)
@@ -489,60 +494,25 @@ impl Verifier {
             }
 
             if dep_id == anchor_trigger_through {
-                if dep.anchor_id(AnchorStageRole::Trigger) != anchor_trigger_id {
+                if dep.anchor_trigger().top().id() != anchor_trigger_id {
                     let tuple = (AnchorStageRole::Trigger, dep_id);
                     invalid_reason = Some(InvalidReason::AnchorLinkBadPath(tuple));
-                } else if anchor_trigger_through != anchor_trigger_id
-                    && trigger_bound_proof_id
-                        .is_some_and(|proof_id| proof_id != dep.anchor_id(AnchorStageRole::Proof))
+                }
+                if anchor_trigger_through != anchor_trigger_id
+                    && let Some(reason) = Self::check_trigger_proof(info, dep, false)
                 {
-                    invalid_reason = Some(InvalidReason::TriggerProofMismatch((dep_id, false)));
+                    invalid_reason = Some(reason);
                 }
             }
 
             if dep_id == anchor_proof_through {
-                if dep.anchor_id(AnchorStageRole::Proof) != anchor_proof_id {
+                if dep.anchor_proof().top().id() != anchor_proof_id {
                     let tuple = (AnchorStageRole::Proof, dep_id);
                     invalid_reason = Some(InvalidReason::AnchorLinkBadPath(tuple));
                 }
-                if dep.anchor_time() != info.anchor_time() {
-                    // anchor candidate's time is not inherited from its proof
+                if !info.is_anchor_proof() && dep.anchor_time() != info.anchor_time() {
+                    // exclusion: anchor proof inherits time from candidate (its prev point)
                     invalid_reason = Some(InvalidReason::AnchorTimeNotInheritedFromProof(dep_id));
-                }
-            }
-
-            // "chained" and "proof through" branches are mutually exclusive
-            // because point struct allows "chained" value only if "proof through"==Link::ToSelf
-
-            if let Some((to, through)) = chained_proof_to_through {
-                let dep_anchor_proof_id = dep.anchor_id(AnchorStageRole::Proof);
-                if dep_anchor_proof_id.round > to.round {
-                    invalid_reason = Some(InvalidReason::NewerProofToChainInDependency(dep_id));
-                }
-
-                if let Some(through) = through {
-                    if dep_id == through && dep_anchor_proof_id != to {
-                        invalid_reason = Some(InvalidReason::ChainedProofBadPath(dep_id));
-                    }
-                } else if dep_id == to {
-                    if !dep.is_anchor_proof() {
-                        invalid_reason = Some(InvalidReason::ChainedProofBadPath(dep_id));
-                    }
-
-                    if let Some(sticky_anchors) = info.sticky_anchors() {
-                        let mut is_sticky_sequence_ok =
-                            sticky_anchors < conf.consensus.sticky_anchors;
-                        is_sticky_sequence_ok &= if let Some(prev_sticky) = dep.sticky_anchors() {
-                            prev_sticky.checked_add(1) == Some(sticky_anchors)
-                        } else {
-                            sticky_anchors == 0
-                        };
-
-                        if !is_sticky_sequence_ok {
-                            let tuple = (dep_id, dep.sticky_anchors(), sticky_anchors);
-                            invalid_reason = Some(InvalidReason::BadStickySequence(tuple));
-                        }
-                    }
                 }
             }
         }
@@ -558,17 +528,9 @@ impl Verifier {
         store: &MempoolStore,
         ctx: &ValidateCtx,
     ) -> TaskResult<Option<InvalidReason>> {
-        let anchor_trigger_link = match info.anchor_trigger() {
-            AnyLink::Indirect(link) => Some(link),
-            AnyLink::ToSelf | AnyLink::Direct(_) => None,
-        };
-        let anchor_proof_link = match info.anchor_proof() {
-            AnyLink::Indirect(link) => Some(link),
-            AnyLink::ToSelf | AnyLink::Direct(_) => None,
-        };
-        let chained_proof_link = info.indirect_anchor_proof();
+        let [anchor_proof_link, anchor_trigger_link] = info.indirect_anchor_links();
 
-        let mut rev_sorted = [anchor_trigger_link, anchor_proof_link, chained_proof_link];
+        let mut rev_sorted = [anchor_trigger_link, anchor_proof_link];
         rev_sorted.sort_unstable_by_key(|id_opt| id_opt.map(|link| cmp::Reverse(link.to.round)));
 
         let mut linked_deps = FuturesUnordered::new();
@@ -640,17 +602,10 @@ impl Verifier {
                 if !dep.is_anchor_proof() {
                     let tuple = (AnchorStageRole::Proof, dep_id);
                     invalid_reason = Some(InvalidReason::AnchorLinkRole(tuple));
-                } else if dep.anchor_time() != info.anchor_time() {
-                    // anchor candidate's time is not inherited from its proof
+                } else if !info.is_anchor_proof() && dep.anchor_time() != info.anchor_time() {
+                    // exclusion: anchor proof inherits time from candidate (its prev point)
                     invalid_reason = Some(InvalidReason::AnchorTimeNotInheritedFromProof(dep_id));
                 }
-            }
-
-            if let Some(chained_proof_link) = chained_proof_link
-                && dep_id == chained_proof_link.to
-                && !dep.is_anchor_proof()
-            {
-                invalid_reason = Some(InvalidReason::ChainedProofRole(dep_id));
             }
         }
 
@@ -662,10 +617,19 @@ impl Verifier {
             let tuple = (AnchorStageRole::Trigger, *anchor_trigger.id());
             return Some(InvalidReason::AnchorLink(tuple));
         }
+        Self::check_trigger_proof(info, anchor_trigger, true)
+    }
 
-        info.trigger_bound_proof_id()
-            .is_some_and(|proof_id| proof_id != anchor_trigger.anchor_id(AnchorStageRole::Proof))
-            .then(|| InvalidReason::TriggerProofMismatch((*anchor_trigger.id(), true)))
+    fn check_trigger_proof(
+        info: &PointInfo,
+        trigger_path: &PointInfo,
+        is_target: bool,
+    ) -> Option<InvalidReason> {
+        let proof = info.anchor_proof().linked();
+        let bound = trigger_path.anchor_proof().top();
+
+        (proof.round() <= bound.round() && proof.id() != bound.id())
+            .then(|| InvalidReason::TriggerProofMismatch((*trigger_path.id(), is_target)))
     }
 
     /// an equivalent to [`DagPoint::trusted`] that also breaks a chain of trans invalid points
@@ -794,10 +758,10 @@ impl<'a> BasicVerifier<'a> {
 }
 
 struct BasicVerifierInner<'a> {
-    info: &'a PointInfo,                                           // @ r+0
-    same_round_peers: (PeerCount, Arc<FastHashSet<PeerId>>),       // @ r+0
-    includes_peers: Option<(PeerCount, Arc<FastHashSet<PeerId>>)>, // @ r-1
-    witness_peers: Option<(PeerCount, Arc<FastHashSet<PeerId>>)>,  // @ r-2
+    info: &'a PointInfo,                                          // @ r+0
+    same_round_peers: (PeerCount, Arc<FastHashSet<PeerId>>),      // @ r+0
+    includes_peers: (PeerCount, Arc<FastHashSet<PeerId>>),        // @ r-1
+    witness_peers: Option<(PeerCount, Arc<FastHashSet<PeerId>>)>, // @ r-2
     conf: &'a MempoolConfig,
 }
 
@@ -835,8 +799,8 @@ impl<'a> BasicVerifierInner<'a> {
                 let peer_count_a = peer_count_genesis(a.len(), info.round(), PointMap::Evidence)?;
                 Self {
                     info,
-                    same_round_peers: (peer_count_a, a),
-                    includes_peers: None,
+                    same_round_peers: (peer_count_a, a.clone()),
+                    includes_peers: (peer_count_a, a),
                     witness_peers: None,
                     conf,
                 }
@@ -849,7 +813,7 @@ impl<'a> BasicVerifierInner<'a> {
                 Self {
                     info,
                     same_round_peers: (peer_count_a, a),
-                    includes_peers: Some((peer_count_b, b)),
+                    includes_peers: (peer_count_b, b),
                     witness_peers: None,
                     conf,
                 }
@@ -869,7 +833,7 @@ impl<'a> BasicVerifierInner<'a> {
                 Self {
                     info,
                     same_round_peers: (peer_count(a.len(), rounds[0], PointMap::Evidence)?, a),
-                    includes_peers: Some((peer_count(b.len(), rounds[1], PointMap::Includes)?, b)),
+                    includes_peers: (peer_count(b.len(), rounds[1], PointMap::Includes)?, b),
                     witness_peers: Some((peer_count_c, c)),
                     conf,
                 }
@@ -878,25 +842,16 @@ impl<'a> BasicVerifierInner<'a> {
 
         // short checks to not clone the arcs
 
-        if let Some(link) = info.indirect_anchor_proof()
-            && !(peer_schedule_stateless.peers_for(link.to.round)).contains(&link.to.author)
-        {
-            let reason = IllFormedReason::UnknownPeerInChainedProof;
-            return Err(VerifyError::IllFormed(reason));
-        }
-
-        if let AnyLink::Indirect(link) = info.anchor_proof()
-            && !(peer_schedule_stateless.peers_for(link.to.round)).contains(&link.to.author)
-        {
-            let reason = IllFormedReason::UnknownPeerInAnchorLink(AnchorStageRole::Proof);
-            return Err(VerifyError::IllFormed(reason));
-        }
-
-        if let AnyLink::Indirect(link) = info.anchor_trigger()
-            && !(peer_schedule_stateless.peers_for(link.to.round)).contains(&link.to.author)
-        {
-            let reason = IllFormedReason::UnknownPeerInAnchorLink(AnchorStageRole::Trigger);
-            return Err(VerifyError::IllFormed(reason));
+        let indirect_links = info.indirect_anchor_links().into_iter().zip([
+            IllFormedReason::UnknownPeerInAnchorLink(AnchorStageRole::Proof),
+            IllFormedReason::UnknownPeerInAnchorLink(AnchorStageRole::Trigger),
+        ]);
+        for (link, reason) in indirect_links {
+            if let Some(link) = link
+                && !(peer_schedule_stateless.peers_for(link.to.round)).contains(&link.to.author)
+            {
+                return Err(VerifyError::IllFormed(reason));
+            }
         }
 
         Ok(this)
@@ -926,10 +881,8 @@ impl<'a> BasicVerifierInner<'a> {
             return Err(IllFormedReason::TooManyStickyAnchors(sticky_anchors));
         }
 
-        if self.info.anchor_round(AnchorStageRole::Proof) < self.conf.genesis_round
-            || self.info.anchor_round(AnchorStageRole::Trigger) < self.conf.genesis_round
-            || (self.info.chained_anchor_proof_to_round())
-                .is_some_and(|to| to < self.conf.genesis_round)
+        if self.info.anchor_proof().linked().round() < self.conf.genesis_round
+            || self.info.anchor_trigger().linked().round() < self.conf.genesis_round
         {
             return Err(IllFormedReason::LinksAcrossGenesis);
         }
@@ -967,27 +920,21 @@ impl<'a> BasicVerifierInner<'a> {
             }
         }
 
-        match &self.includes_peers {
-            None => {
-                if !self.info.includes().is_empty() {
-                    return Err(IllFormedReason::MustBeEmpty(PointMap::Includes));
-                }
+        {
+            let (total, scheduled) = &self.includes_peers;
+            let includes = &self.info.includes();
+            let unknown = includes
+                .keys()
+                .filter(|id| !scheduled.contains(id))
+                .copied()
+                .collect::<Vec<_>>();
+            if !unknown.is_empty() {
+                return Err(IllFormedReason::UnknownPeers((unknown, PointMap::Includes)));
             }
-            Some((total, scheduled)) => {
-                let includes = &self.info.includes();
-                let unknown = includes
-                    .keys()
-                    .filter(|id| !scheduled.contains(id))
-                    .copied()
-                    .collect::<Vec<_>>();
-                if !unknown.is_empty() {
-                    return Err(IllFormedReason::UnknownPeers((unknown, PointMap::Includes)));
-                }
-                let len = includes.len();
-                if len < total.majority() {
-                    let reason = IllFormedReason::LackOfPeers((len, *total, PointMap::Includes));
-                    return Err(reason);
-                }
+            let len = includes.len();
+            if len < total.majority() {
+                let reason = IllFormedReason::LackOfPeers((len, *total, PointMap::Includes));
+                return Err(reason);
             }
         }
 

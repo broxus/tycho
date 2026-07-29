@@ -30,6 +30,10 @@ pub struct PointData {
     /// `>= 2F` neighbours @ r+0 (inside point @ r+0), order does not matter, author is excluded;
     #[tl(with = "signatures_map")]
     pub evidence: FastHashMap<PeerId, Signature>,
+    /// last included by author; defines author's last committed anchor
+    pub anchor_proof: AnchorLink,
+    /// last included by author; maintains anchor chain linked without explicit DAG traverse
+    pub anchor_trigger: AnchorLink,
     pub role: PointRole,
     /// local peer time at the moment of point creation, cannot be less than `anchor_time`
     pub time: UnixTime,
@@ -47,19 +51,9 @@ pub struct PointData {
 #[tl(boxed, scheme = "proto.tl")]
 pub enum PointRole {
     #[tl(id = "consensus.pointRole.regular")]
-    Regular {
-        /// last included by author; defines author's last committed anchor
-        anchor_proof: AnchorLink,
-        /// last included by author; maintains anchor chain linked without explicit DAG traverse
-        anchor_trigger: AnchorLink,
-    },
+    Regular,
     #[tl(id = "consensus.pointRole.proof")]
-    AnchorProof {
-        /// previous proof for anchor chain
-        anchor_proof: IndirectLink,
-        /// same as for Regular point
-        anchor_trigger: AnchorLink,
-    },
+    AnchorProof,
     /// the last trigger in sticky chain; the single one if no sticky anchors
     #[tl(id = "consensus.pointRole.trigger")]
     AnchorTrigger,
@@ -75,64 +69,26 @@ pub enum PointRole {
 }
 
 impl PointRole {
-    pub(super) const MAX_BYTE_SIZE: usize = 4 + 2 * AnchorLink::MAX_TL_BYTES;
-
-    pub fn anchor_proof(&self, author: &PeerId) -> AnyLink<'_> {
-        (self._anchor_proof()).unwrap_or(AnyLink::Direct(Through::Includes(*author)))
-    }
-
-    /// `None` must be replaced for `AnyLink::Direct(Through::Includes(author))`
-    fn _anchor_proof(&self) -> Option<AnyLink<'_>> {
-        match self {
-            Self::Regular { anchor_proof, .. } => match anchor_proof {
-                AnchorLink::Direct(through) => Some(AnyLink::Direct(*through)),
-                AnchorLink::Indirect(link) => Some(AnyLink::Indirect(link)),
-            },
-            Self::AnchorProof { .. } | Self::Sticky { .. } | Self::Genesis => Some(AnyLink::ToSelf),
-            Self::AnchorTrigger { .. } => None,
-        }
-    }
+    pub(super) const MAX_BYTE_SIZE: usize = 4 + 4;
 
     pub fn is_anchor_proof(&self) -> bool {
         match self {
-            Self::Regular { .. } | Self::AnchorTrigger { .. } => false,
-            Self::AnchorProof { .. } | Self::Sticky { .. } | Self::Genesis => true,
+            Self::Regular | Self::AnchorTrigger => false,
+            Self::AnchorProof | Self::Sticky { .. } | Self::Genesis => true,
         }
     }
 
     pub fn is_anchor_trigger(&self) -> bool {
         match self {
-            Self::Regular { .. } | Self::AnchorProof { .. } => false,
+            Self::Regular | Self::AnchorProof => false,
             Self::AnchorTrigger | Self::Sticky { .. } | Self::Genesis => true,
-        }
-    }
-
-    pub fn anchor_trigger(&self) -> AnyLink<'_> {
-        match self {
-            Self::Regular { anchor_trigger, .. } | Self::AnchorProof { anchor_trigger, .. } => {
-                match anchor_trigger {
-                    AnchorLink::Direct(through) => AnyLink::Direct(*through),
-                    AnchorLink::Indirect(link) => AnyLink::Indirect(link),
-                }
-            }
-            Self::AnchorTrigger | Self::Sticky { .. } | Self::Genesis => AnyLink::ToSelf,
-        }
-    }
-
-    pub fn chained_anchor_proof(&self) -> ChainedProofLink<'_> {
-        match self {
-            Self::Regular { .. } | Self::AnchorTrigger | Self::Genesis => {
-                ChainedProofLink::Inapplicable
-            }
-            Self::AnchorProof { anchor_proof, .. } => ChainedProofLink::Indirect(anchor_proof),
-            Self::Sticky { seq_no } => ChainedProofLink::PrevPoint { chained: *seq_no },
         }
     }
 
     fn requires_prev_point(&self) -> bool {
         match self {
-            Self::Regular { .. } | Self::Genesis => false,
-            Self::AnchorProof { .. } | Self::AnchorTrigger | Self::Sticky { .. } => true,
+            Self::Regular | Self::Genesis => false,
+            Self::AnchorProof | Self::AnchorTrigger | Self::Sticky { .. } => true,
         }
     }
 }
@@ -141,14 +97,14 @@ impl PointRole {
 pub enum StructureIssue {
     #[error("{}expected genesis", if *.0 { "" } else { "Un" })]
     ExpectedGenesis(bool),
+    #[error("genesis pseudo prev point links")]
+    BadGenesisPrevPoint,
     #[error("{0:?} map must not contain author")]
     AuthorInMap(PointMap),
+    #[error("{0:?} must have prev point")]
+    RolePrevPoint(AnchorStageRole),
     #[error("bad {0:?} link through {1:?} map")]
     Link(AnchorStageRole, PointMap),
-    #[error("Too close chained proof at round {}", .0.0)]
-    TooCloseChainedProof(Round),
-    #[error("bad chained proof through {0:?} map")]
-    ChainedProof(PointMap),
     #[error("anchor stage role {0:?}")]
     SelfAnchorStage(AnchorStageRole),
     #[error("anchor time")]
@@ -178,7 +134,10 @@ impl PointData {
                 + (PeerId::MAX_TL_BYTES + Signature::MAX_TL_BYTES)) // signatures map
             + 3 * proto_utils::MAP_LEN_BYTES; // maps lengths
 
-        4 + max_possible_maps + PointRole::MAX_BYTE_SIZE + 2 * UnixTime::MAX_TL_BYTES
+        4 + max_possible_maps
+            + 2 * AnchorLink::MAX_TL_BYTES
+            + PointRole::MAX_BYTE_SIZE
+            + 2 * UnixTime::MAX_TL_BYTES
     };
 
     pub(super) fn is_proof_link_ok(
@@ -197,13 +156,14 @@ impl PointData {
             }
         };
         match &self.role {
-            PointRole::Regular { .. } => !{
+            PointRole::Regular => !{
                 is_leader
                     && has_prev_point // optional for Regular and encoded for AnchorProof
-                    && is_proof_far_enough(self.anchor_round(AnchorStageRole::Proof, round))
+                    && is_proof_far_enough(self.linked_anchor_round(AnchorStageRole::Proof, round))
             },
-            PointRole::AnchorProof { anchor_proof, .. } => {
-                is_leader && is_proof_far_enough(anchor_proof.to.round)
+            PointRole::AnchorProof => {
+                is_leader
+                    && is_proof_far_enough(self.linked_anchor_round(AnchorStageRole::Proof, round))
             }
             // role encodes links
             PointRole::AnchorTrigger | PointRole::Sticky { .. } | PointRole::Genesis => true,
@@ -233,40 +193,44 @@ impl PointData {
             .map(StructureIssue::AuthorInMap)
             .map_or(Ok(()), Err)?;
 
-        match &self.role.chained_anchor_proof() {
-            ChainedProofLink::Inapplicable => {}
-            ChainedProofLink::PrevPoint { .. } => {
-                if !has_prev_point {
-                    return Err(StructureIssue::ChainedProof(PointMap::Includes));
-                }
-            }
-            ChainedProofLink::Indirect(indirect) => {
-                if indirect.to.round >= round.prev().prev() {
-                    return Err(StructureIssue::TooCloseChainedProof(indirect.to.round));
-                }
-                if let Some(map) = self.indirect_link_error(indirect, round) {
-                    return Err(StructureIssue::ChainedProof(map));
-                }
-            }
-        }
-
         for role in [AnchorStageRole::Proof, AnchorStageRole::Trigger] {
-            if let Some(map) = match self.anchor_link(role, author) {
-                AnyLink::ToSelf => (!has_prev_point).then_some(PointMap::Includes),
-                AnyLink::Direct(Through::Includes(peer)) => {
-                    (!self.includes.contains_key(&peer)).then_some(PointMap::Includes)
+            let is_in_role = match role {
+                AnchorStageRole::Trigger => self.role.is_anchor_trigger(),
+                AnchorStageRole::Proof => self.role.is_anchor_proof(),
+            };
+            if is_in_role {
+                if !has_prev_point {
+                    return Err(StructureIssue::RolePrevPoint(role));
                 }
-                AnyLink::Direct(Through::Witness(peer)) => {
-                    (!self.witness.contains_key(&peer)).then_some(PointMap::Witness)
+                // leader must maintain its chain of proofs,
+                // while others must link to previous points (checked at the end of this method)
+                if self.evidence.is_empty() {
+                    return Err(StructureIssue::SelfAnchorStage(role));
                 }
-                AnyLink::Indirect(indirect) => self.indirect_link_error(indirect, round),
+            }
+            let link = match role {
+                AnchorStageRole::Trigger => &self.anchor_trigger,
+                AnchorStageRole::Proof => &self.anchor_proof,
+            };
+            if let Some(map) = match link {
+                AnchorLink::Direct(Through::Includes(peer)) => {
+                    (!self.includes.contains_key(peer)).then_some(PointMap::Includes)
+                }
+                AnchorLink::Direct(Through::Witness(peer)) => {
+                    (!self.witness.contains_key(peer)).then_some(PointMap::Witness)
+                }
+                AnchorLink::Indirect(IndirectLink { to, path }) => match path {
+                    Through::Includes(peer) => {
+                        { !self.includes.contains_key(peer) || to.round >= round.prev() }
+                            .then_some(PointMap::Includes)
+                    }
+                    Through::Witness(peer) => {
+                        { !self.witness.contains_key(peer) || to.round >= round.prev().prev() }
+                            .then_some(PointMap::Witness)
+                    }
+                },
             } {
                 return Err(StructureIssue::Link(role, map));
-            }
-            // leader must maintain its chain of proofs,
-            // while others must link to previous points (checked at the end of this method)
-            if self.evidence.is_empty() && self.anchor_link(role, author) == AnyLink::ToSelf {
-                return Err(StructureIssue::SelfAnchorStage(role));
             }
         }
 
@@ -277,91 +241,17 @@ impl PointData {
         Ok(())
     }
 
-    fn indirect_link_error(&self, indirect: &IndirectLink, round: Round) -> Option<PointMap> {
-        let IndirectLink { to, path } = indirect;
-        match path {
-            Through::Includes(peer) => (!self.includes.contains_key(peer)
-                || to.round >= round.prev())
-            .then_some(PointMap::Includes),
-            Through::Witness(peer) => (!self.witness.contains_key(peer)
-                || to.round >= round.prev().prev())
-            .then_some(PointMap::Witness),
-        }
-    }
-
-    /// should be disclosed by wrapping point
-    pub(super) fn anchor_link(&self, link_field: AnchorStageRole, author: &PeerId) -> AnyLink<'_> {
-        match link_field {
-            AnchorStageRole::Trigger => self.role.anchor_trigger(),
-            AnchorStageRole::Proof => self.role.anchor_proof(author),
-        }
-    }
-
     /// param round - should come from wrapping point
     /// resulting None should be replaced with id of wrapping point
-    pub(super) fn anchor_round(&self, link_field: AnchorStageRole, round: Round) -> Round {
-        match link_field {
-            AnchorStageRole::Trigger => match self.role.anchor_trigger() {
-                AnyLink::ToSelf => round,
-                AnyLink::Direct(Through::Includes(_)) => round.prev(),
-                AnyLink::Direct(Through::Witness(_)) => round.prev().prev(),
-                AnyLink::Indirect(IndirectLink { to, .. }) => to.round,
-            },
-            AnchorStageRole::Proof => match self.role._anchor_proof() {
-                Some(AnyLink::ToSelf) => round,
-                None | Some(AnyLink::Direct(Through::Includes(_))) => round.prev(),
-                Some(AnyLink::Direct(Through::Witness(_))) => round.prev().prev(),
-                Some(AnyLink::Indirect(IndirectLink { to, .. })) => to.round,
-            },
-        }
-    }
-
-    /// param round - should come from wrapping point
-    /// resulting None should be replaced with id of wrapping point
-    pub(super) fn anchor_id(
-        &self,
-        link_field: AnchorStageRole,
-        author: &PeerId,
-        round: Round,
-    ) -> Option<PointId> {
-        match self.anchor_link(link_field, author) {
-            AnyLink::Indirect(IndirectLink { to, .. }) => Some(*to),
-            _direct => self.anchor_link_id(link_field, author, round),
-        }
-    }
-
-    /// param round - should come from wrapping point
-    /// resulting None should be replaced with id of wrapping point
-    pub(super) fn anchor_link_id(
-        &self,
-        link_field: AnchorStageRole,
-        author: &PeerId,
-        round: Round,
-    ) -> Option<PointId> {
-        let path = match self.anchor_link(link_field, author) {
-            AnyLink::ToSelf => return None,
-            AnyLink::Direct(path) => path,
-            AnyLink::Indirect(IndirectLink { path, .. }) => *path,
+    pub(super) fn linked_anchor_round(&self, link_field: AnchorStageRole, round: Round) -> Round {
+        let link = match link_field {
+            AnchorStageRole::Trigger => &self.anchor_trigger,
+            AnchorStageRole::Proof => &self.anchor_proof,
         };
-        let point_id = self
-            .through_id(&path, round)
-            .expect("Coding error: usage of ill-formed point");
-        Some(point_id)
-    }
-
-    /// Target of `Regular`'s inherited proof or `AnchorProof`'s chained proof.
-    /// I.e. returns `None` for all trigger points that have obvious proof link targets.
-    pub(super) fn inherited_anchor_proof_id(&self, round: Round) -> Option<PointId> {
-        match &self.role {
-            PointRole::AnchorTrigger | PointRole::Sticky { .. } | PointRole::Genesis => None,
-            PointRole::Regular { anchor_proof, .. } => match anchor_proof {
-                AnchorLink::Direct(through) => Some(
-                    self.through_id(through, round)
-                        .expect("Coding error: usage of ill-formed point"),
-                ),
-                AnchorLink::Indirect(link) => Some(link.to),
-            },
-            PointRole::AnchorProof { anchor_proof, .. } => Some(anchor_proof.to),
+        match link {
+            AnchorLink::Direct(Through::Includes(_)) => round.prev(),
+            AnchorLink::Direct(Through::Witness(_)) => round.prev().prev(),
+            AnchorLink::Indirect(IndirectLink { to, .. }) => to.round,
         }
     }
 
