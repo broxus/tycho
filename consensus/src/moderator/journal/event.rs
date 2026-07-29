@@ -246,10 +246,7 @@ impl JournalDagEvent {
             | InvalidReason::AnchorLink((_, point_id))
             | InvalidReason::AnchorLinkRole((_, point_id))
             | InvalidReason::AnchorLinkBadPath((_, point_id))
-            | InvalidReason::ChainedProofRole(point_id)
-            | InvalidReason::ChainedProofBadPath(point_id)
             | InvalidReason::BadStickySequence((point_id, _, _))
-            | InvalidReason::NewerProofToChainInDependency(point_id)
             | InvalidReason::TriggerProofMismatch((point_id, _))
             | InvalidReason::DepIllFormed((point_id, _)) => {
                 point_keys.push(point_id.key());

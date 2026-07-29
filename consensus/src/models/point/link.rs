@@ -7,20 +7,6 @@ use tycho_network::PeerId;
 use crate::effects::{AltFmt, AltFormat};
 use crate::models::{Digest, PointId, PointMap, Round};
 
-#[derive(Debug, PartialEq)]
-pub enum AnyLink<'a> {
-    ToSelf,
-    Direct(Through),
-    Indirect(&'a IndirectLink),
-}
-
-#[derive(Debug, PartialEq)]
-pub enum ChainedProofLink<'a> {
-    Inapplicable,
-    PrevPoint { chained: u8 },
-    Indirect(&'a IndirectLink),
-}
-
 #[derive(Clone, Debug, PartialEq, TlRead, TlWrite, Serialize)]
 #[tl(boxed, scheme = "proto.tl")]
 pub enum AnchorLink {
