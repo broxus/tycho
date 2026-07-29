@@ -410,10 +410,9 @@ mod test {
                 includes: Default::default(),
                 witness: Default::default(),
                 evidence: Default::default(),
-                role: PointRole::Regular {
-                    anchor_proof: AnchorLink::random(),
-                    anchor_trigger: AnchorLink::random(),
-                },
+                anchor_proof: AnchorLink::random(),
+                anchor_trigger: AnchorLink::random(),
+                role: PointRole::Regular,
                 time: now + delay,
                 anchor_time: UnixTime::now(),
             },
