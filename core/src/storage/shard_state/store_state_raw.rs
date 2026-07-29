@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::io::{BufWriter, Read, Seek, Write};
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 
 use anyhow::{Context, Result};
 use tycho_storage::fs::TempFileStorage;
@@ -26,6 +27,7 @@ pub struct StoreStateContext {
     pub cell_storage: Arc<CellStorage>,
     pub temp_file_storage: TempFileStorage,
     pub expected_root_hash: Option<HashBytes>,
+    pub shard_state_row_count: Arc<AtomicUsize>,
 }
 
 impl StoreStateContext {
@@ -222,9 +224,10 @@ impl StoreStateContext {
         }
         ctx.final_check(root_hash)?;
 
+        let shard_state_key = block_id.to_vec();
+        let state_row_exists = self.cells_db.shard_states.get(&shard_state_key)?.is_some();
         self.cell_storage
             .apply_temp_cell(HashBytes::wrap(root_hash))?;
-        let shard_state_key = block_id.to_vec();
         let mut finalize_batch = rocksdb::WriteBatch::default();
         finalize_batch.delete_range_cf(
             &self.cells_db.temp_cells.cf(),
@@ -237,6 +240,14 @@ impl StoreStateContext {
             root_hash.as_slice(),
         );
         self.cells_db.rocksdb().write(finalize_batch)?;
+        if !state_row_exists {
+            self.shard_state_row_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            metrics::gauge!("tycho_storage_shard_state_row_count").set(
+                self.shard_state_row_count
+                    .load(std::sync::atomic::Ordering::Relaxed) as f64,
+            );
+        }
 
         pg.complete();
 
@@ -608,6 +619,7 @@ mod test {
             cell_storage: cell_storage.clone(),
             temp_file_storage: storage.context().temp_files().clone(),
             expected_root_hash: None,
+            shard_state_row_count: storage.shard_state_storage().shard_state_row_count.clone(),
         };
 
         for file in std::fs::read_dir(current_test_path.join("states"))? {
@@ -800,12 +812,15 @@ mod test {
             )
             .await?;
         assert_eq!(root_hash, block_id.root_hash);
+        assert_eq!(
+            storage
+                .shard_state_storage()
+                .shard_state_row_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+        );
 
         let cells_db = storage.shard_state_storage().cells_db.clone();
-        anyhow::ensure!(
-            is_table_empty(&cells_db.temp_cells)?,
-            "temp cells were not cleared"
-        );
 
         // The first raw store creates CounterSnapshotLatest. Store the same
         // cell set again under another block id to ensure raw store can reuse
@@ -819,6 +834,17 @@ mod test {
             )
             .await?;
         assert_eq!(root_hash, next_block_id.root_hash);
+        assert_eq!(
+            storage
+                .shard_state_storage()
+                .shard_state_row_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            2,
+        );
+        anyhow::ensure!(
+            is_table_empty(&cells_db.temp_cells)?,
+            "temp cells were not cleared"
+        );
 
         drop(storage);
         let pool = Arc::new(
