@@ -61,6 +61,7 @@ struct BlacklistedAccountsInner {
 pub struct RpcStorage {
     partitions: Arc<Mutex<PartitionManager>>,
     router: RpcRouterDb,
+    router_commit_guard: Mutex<()>,
     current_state: RpcCurrentStateDb,
     min_tx_lt: AtomicU64,
     min_tx_lt_guard: tokio::sync::Mutex<()>,
@@ -336,6 +337,7 @@ impl RpcStorage {
         let this = Self {
             partitions,
             router,
+            router_commit_guard: Default::default(),
             current_state,
             min_tx_lt: AtomicU64::new(u64::MAX),
             min_tx_lt_guard: Default::default(),
@@ -401,10 +403,51 @@ impl RpcStorage {
             _ => {}
         }
 
+        let router_commit = self.load_router_commit()?;
+        match control_frontier {
+            None | Some(BlockId { seqno: 0, .. }) => match router_commit {
+                None => {}
+                Some(router_commit) if router_commit.seqno == 1 => {}
+                Some(router_commit) => anyhow::bail!(
+                    "router commit {} is more than one unpublished boundary ahead of zerostate; clear the RPC DB and reindex",
+                    router_commit
+                ),
+            },
+            Some(control_frontier) => {
+                let router_commit = router_commit.context(
+                    "RPC visible frontier has no router commit; clear the RPC DB and reindex",
+                )?;
+                if router_commit.seqno < control_frontier.seqno {
+                    anyhow::bail!(
+                        "router commit {} is behind RPC visible frontier {}; clear the RPC DB and reindex",
+                        router_commit,
+                        control_frontier
+                    );
+                }
+                if router_commit.seqno == control_frontier.seqno {
+                    anyhow::ensure!(
+                        router_commit == control_frontier,
+                        "router commit and RPC visible frontier have different full block ids at masterchain seqno {}",
+                        control_frontier.seqno
+                    );
+                } else {
+                    let next_seqno = control_frontier
+                        .seqno
+                        .checked_add(1)
+                        .context("router commit is ahead of the maximum masterchain sequence number")?;
+                    anyhow::ensure!(
+                        router_commit.seqno == next_seqno,
+                        "router commit {} is more than one unpublished boundary ahead of RPC visible frontier {}; clear the RPC DB and reindex",
+                        router_commit,
+                        control_frontier
+                    );
+                }
+            }
+        }
+
         if let Some(control_frontier) = control_frontier
             && control_frontier.seqno > 0
         {
-            self.validate_startup_frontier_router(&control_frontier)?;
             partitions
                 .validate_masterchain_commit(&control_frontier)
                 .context("invalid persisted RPC visible frontier")?;
@@ -416,18 +459,48 @@ impl RpcStorage {
         })
     }
 
-    fn validate_startup_frontier_router(&self, frontier: &BlockId) -> Result<()> {
-        let value = self
-            .router
-            .blocks
-            .get(codec::encode_short_block_id(&frontier.as_short_id()))?
-            .context("RPC visible frontier is missing its masterchain block router record")?;
-        let location = codec::decode_router_location(value.as_ref())
-            .context("malformed masterchain block router at RPC startup frontier")?;
+    fn load_router_commit(&self) -> Result<Option<BlockId>> {
+        self.router
+            .state
+            .get(codec::router_commit_key())?
+            .map(|value| {
+                let block_id = codec::decode_router_commit(value.as_ref())
+                    .context("invalid persisted router commit")?;
+                anyhow::ensure!(
+                    block_id.is_masterchain() && block_id.seqno > 0,
+                    "persisted router commit must be a non-zero masterchain block"
+                );
+                Ok(block_id)
+            })
+            .transpose()
+    }
+
+    fn commit_router_frontier(&self, block_id: &BlockId) -> Result<()> {
         anyhow::ensure!(
-            location.mc_seqno == frontier.seqno,
-            "masterchain block router has a different related masterchain seqno at RPC startup frontier"
+            block_id.is_masterchain() && block_id.seqno > 0,
+            "router commit must be a non-zero masterchain block"
         );
+        let _guard = self.router_commit_guard.lock();
+        let should_write = match self.load_router_commit()? {
+            None => true,
+            Some(current) if current.seqno < block_id.seqno => true,
+            Some(current) if current.seqno == block_id.seqno => {
+                anyhow::ensure!(
+                    current == *block_id,
+                    "router commit has a different full block id at masterchain seqno {}",
+                    block_id.seqno
+                );
+                false
+            }
+            Some(_) => false,
+        };
+        if should_write {
+            let _stage = HistogramGuard::begin("tycho_storage_rpc_write_router_commit_time");
+            self.router
+                .state
+                .insert(codec::router_commit_key(), codec::encode_router_commit(block_id))
+                .context("failed to write RPC router commit")?;
+        }
         Ok(())
     }
 
@@ -456,6 +529,7 @@ impl RpcStorage {
 
     /// Publishes a completed masterchain block set before exposing the following set to readers.
     pub fn commit_masterchain_block_set(&self, block_id: &BlockId) -> Result<()> {
+        self.commit_router_frontier(block_id)?;
         self.partitions.lock().commit_masterchain_block_set(block_id)?;
         self.publish_snapshot(block_id)?;
         if self.partitions.lock().next_sealing_partition().is_some() {
@@ -3435,21 +3509,6 @@ mod tests {
             .unwrap();
     }
 
-    fn insert_masterchain_router(storage: &RpcStorage, block_id: &BlockId, mc_seqno: u32) {
-        let partition_id = storage.partitions.lock().active_id();
-        storage
-            .router
-            .blocks
-            .insert(
-                codec::encode_short_block_id(&block_id.as_short_id()),
-                codec::encode_router_location(codec::RouterLocation {
-                    partition_id: partition_id.0,
-                    mc_seqno,
-                }),
-            )
-            .unwrap();
-    }
-
     fn reconciliation_error(storage: &RpcStorage, core_frontier: &BlockId) -> anyhow::Error {
         match storage.reconcile_startup(core_frontier) {
             Ok(_) => panic!("startup reconciliation unexpectedly succeeded"),
@@ -3467,6 +3526,24 @@ mod tests {
                 codec::visible_frontier_key(),
                 codec::encode_visible_frontier(block_id),
             )
+            .unwrap();
+    }
+
+    fn persist_router_commit(storage: &RpcStorage, block_id: &BlockId) {
+        storage
+            .router
+            .state
+            .insert(codec::router_commit_key(), codec::encode_router_commit(block_id))
+            .unwrap();
+    }
+
+    fn remove_router_commit(storage: &RpcStorage) {
+        let mut batch = rocksdb::WriteBatch::default();
+        batch.delete_cf(&storage.router.state.cf(), codec::router_commit_key());
+        storage
+            .router
+            .rocksdb()
+            .write_opt(batch, storage.router.state.write_config())
             .unwrap();
     }
 
@@ -3657,7 +3734,7 @@ mod tests {
             insert_masterchain_commit(&manager, &block_id, 0);
             manager.commit_masterchain_block_set(&block_id).unwrap();
         }
-        insert_masterchain_router(&storage, &block_id, block_id.seqno);
+        persist_router_commit(&storage, &block_id);
 
         let current = storage.reconcile_startup(&block_id).unwrap();
         assert_eq!(current.effective_frontier, block_id);
@@ -3675,12 +3752,168 @@ mod tests {
             insert_masterchain_commit(&manager, &next, 0);
             manager.commit_masterchain_block_set(&next).unwrap();
         }
-        insert_masterchain_router(&storage, &next, next.seqno);
+        persist_router_commit(&storage, &next);
         let behind_control = storage.reconcile_startup(&block_id).unwrap();
         assert_eq!(behind_control.effective_frontier, block_id);
         assert!(behind_control.rebuild_current_state);
         storage.publish_snapshot(&behind_control.effective_frontier).unwrap();
         assert_eq!(storage.load_snapshot().unwrap().visible_frontier(), &block_id);
+    }
+
+    #[tokio::test]
+    async fn router_commit_is_monotonic_and_durable() {
+        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
+        let storage = RpcStorage::open(context.clone(), RpcTransactionPartitionsConfig::default()).unwrap();
+        let first = masterchain_block(1);
+        storage.commit_router_frontier(&first).unwrap();
+        assert_eq!(storage.load_router_commit().unwrap(), Some(first));
+        storage.commit_router_frontier(&first).unwrap();
+        storage.commit_router_frontier(&masterchain_block(0)).unwrap_err();
+        storage.commit_router_frontier(&basechain_block(2)).unwrap_err();
+
+        let second = masterchain_block(2);
+        storage.commit_router_frontier(&second).unwrap();
+        storage.commit_router_frontier(&first).unwrap();
+        assert_eq!(storage.load_router_commit().unwrap(), Some(second));
+        let mut different = second;
+        different.file_hash = HashBytes([0xff; 32]);
+        assert!(storage.commit_router_frontier(&different).is_err());
+        drop(storage);
+        tokio::task::yield_now().await;
+
+        let storage = RpcStorage::open(context, RpcTransactionPartitionsConfig::default()).unwrap();
+        assert_eq!(storage.load_router_commit().unwrap(), Some(second));
+        storage.router.state.insert(codec::router_commit_key(), [0]).unwrap();
+        assert!(storage.load_router_commit().is_err());
+    }
+
+    #[tokio::test]
+    async fn router_commit_replay_completes_unpublished_control_frontier() {
+        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
+        let storage = RpcStorage::open(context.clone(), RpcTransactionPartitionsConfig::default()).unwrap();
+        let account = StdAddr::new(0, HashBytes::ZERO);
+        let mc_block_id = masterchain_block(1);
+        insert_read_test_block(
+            &storage,
+            &account,
+            &mc_block_id,
+            &basechain_block(1),
+            &[ReadTestTransaction {
+                lt: 1,
+                hash: HashBytes([1; 32]),
+                in_msg_hash: HashBytes([2; 32]),
+                boc_byte: 3,
+            }],
+            0,
+        );
+        storage.commit_router_frontier(&mc_block_id).unwrap();
+        drop(storage);
+        tokio::task::yield_now().await;
+
+        let storage = RpcStorage::open(context, RpcTransactionPartitionsConfig::default()).unwrap();
+        let reconciliation = storage.reconcile_startup(&masterchain_block(0)).unwrap();
+        assert_eq!(reconciliation.effective_frontier, masterchain_block(0));
+        assert!(reconciliation.rebuild_current_state);
+
+        storage.commit_masterchain_block_set(&mc_block_id).unwrap();
+        assert_eq!(storage.load_router_commit().unwrap(), Some(mc_block_id));
+        assert_eq!(
+            storage
+                .reconcile_startup(&mc_block_id)
+                .unwrap()
+                .effective_frontier,
+            mc_block_id
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_reconciliation_validates_router_commit_states() {
+        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
+        let storage = RpcStorage::open(context, RpcTransactionPartitionsConfig::default()).unwrap();
+        let first = masterchain_block(1);
+        let second = masterchain_block(2);
+        {
+            let manager = storage.partitions.lock();
+            insert_masterchain_commit(&manager, &first, 0);
+        }
+        storage.commit_masterchain_block_set(&first).unwrap();
+        {
+            let manager = storage.partitions.lock();
+            insert_masterchain_commit(&manager, &second, 0);
+        }
+        storage.commit_masterchain_block_set(&second).unwrap();
+        let reconciliation = storage.reconcile_startup(&first).unwrap();
+        assert_eq!(reconciliation.effective_frontier, first);
+        assert!(reconciliation.rebuild_current_state);
+
+        remove_router_commit(&storage);
+        assert!(format!("{:#}", reconciliation_error(&storage, &second))
+            .contains("clear the RPC DB and reindex"));
+        persist_router_commit(&storage, &first);
+        assert!(format!("{:#}", reconciliation_error(&storage, &second))
+            .contains("is behind RPC visible frontier"));
+        let mut different = second;
+        different.root_hash = HashBytes([0xff; 32]);
+        persist_router_commit(&storage, &different);
+        assert!(format!("{:#}", reconciliation_error(&storage, &second))
+            .contains("different full block ids"));
+        persist_router_commit(&storage, &masterchain_block(3));
+        assert_eq!(
+            storage
+                .reconcile_startup(&first)
+                .unwrap()
+                .effective_frontier,
+            first
+        );
+        persist_router_commit(&storage, &masterchain_block(4));
+        assert!(format!("{:#}", reconciliation_error(&storage, &second))
+            .contains("more than one unpublished boundary ahead"));
+        storage.router.state.insert(codec::router_commit_key(), [0]).unwrap();
+        assert!(format!("{:#}", reconciliation_error(&storage, &second))
+            .contains("invalid persisted router commit"));
+        persist_router_commit(&storage, &masterchain_block(0));
+        assert!(format!("{:#}", reconciliation_error(&storage, &second))
+            .contains("non-zero masterchain block"));
+        persist_router_commit(&storage, &basechain_block(2));
+        assert!(format!("{:#}", reconciliation_error(&storage, &second))
+            .contains("non-zero masterchain block"));
+    }
+
+    #[tokio::test]
+    async fn router_commit_replay_completes_one_ahead_control_frontier() {
+        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
+        let storage = RpcStorage::open(context.clone(), RpcTransactionPartitionsConfig::default()).unwrap();
+        let first = masterchain_block(1);
+        let second = masterchain_block(2);
+        let third = masterchain_block(3);
+        {
+            let manager = storage.partitions.lock();
+            insert_masterchain_commit(&manager, &first, 0);
+        }
+        storage.commit_masterchain_block_set(&first).unwrap();
+        {
+            let manager = storage.partitions.lock();
+            insert_masterchain_commit(&manager, &second, 0);
+        }
+        storage.commit_masterchain_block_set(&second).unwrap();
+        {
+            let manager = storage.partitions.lock();
+            insert_masterchain_commit(&manager, &third, 0);
+        }
+        persist_router_commit(&storage, &third);
+        drop(storage);
+        tokio::task::yield_now().await;
+
+        let storage = RpcStorage::open(context, RpcTransactionPartitionsConfig::default()).unwrap();
+        let reconciliation = storage.reconcile_startup(&first).unwrap();
+        assert_eq!(reconciliation.effective_frontier, first);
+        assert!(reconciliation.rebuild_current_state);
+        storage.publish_snapshot(&reconciliation.effective_frontier).unwrap();
+        assert_eq!(storage.load_snapshot().unwrap().visible_frontier(), &first);
+
+        storage.commit_masterchain_block_set(&third).unwrap();
+        assert_eq!(storage.load_router_commit().unwrap(), Some(third));
+        assert_eq!(storage.partitions.lock().visible_frontier(), Some(&third));
     }
 
     #[tokio::test]
@@ -3723,7 +3956,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_frontier_uses_only_masterchain_block_router_witness() {
+    async fn startup_frontier_uses_only_router_commit_witness() {
         let (context, _tmp) = StorageContext::new_temp().await.unwrap();
         let storage = RpcStorage::open(
             context,
@@ -3759,30 +3992,13 @@ mod tests {
         );
 
         storage.router.blocks.insert(witness_key, [0]).unwrap();
-
-        let error = storage
-            .reconcile_startup(&mc_block_id)
-            .err()
-            .expect("malformed masterchain block router must fail startup reconciliation");
-        assert!(
-            format!("{error:#}")
-                .contains("malformed masterchain block router at RPC startup frontier")
+        assert_eq!(
+            storage
+                .reconcile_startup(&mc_block_id)
+                .unwrap()
+                .effective_frontier,
+            mc_block_id
         );
-
-        let partition_id = storage.partitions.lock().active_id();
-        storage
-            .router
-            .blocks
-            .insert(
-                witness_key,
-                codec::encode_router_location(codec::RouterLocation {
-                    partition_id: partition_id.0,
-                    mc_seqno: mc_block_id.seqno + 1,
-                }),
-            )
-            .unwrap();
-        assert!(format!("{:#}", reconciliation_error(&storage, &mc_block_id))
-            .contains("masterchain block router has a different related masterchain seqno"));
 
         let mut batch = rocksdb::WriteBatch::default();
         batch.delete_cf(&storage.router.blocks.cf(), witness_key);
@@ -3791,9 +4007,6 @@ mod tests {
             .rocksdb()
             .write_opt(batch, storage.router.transactions.write_config())
             .unwrap();
-        assert!(format!("{:#}", reconciliation_error(&storage, &mc_block_id))
-            .contains("missing its masterchain block router record"));
-        insert_masterchain_router(&storage, &mc_block_id, mc_block_id.seqno);
         assert_eq!(
             storage
                 .reconcile_startup(&mc_block_id)
@@ -3804,7 +4017,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_reconciliation_requires_only_router_and_commit_witnesses() {
+    async fn startup_reconciliation_requires_router_commit_and_partition_commit_witnesses() {
         let (context, _tmp) = StorageContext::new_temp().await.unwrap();
         let storage = RpcStorage::open(context, RpcTransactionPartitionsConfig::default()).unwrap();
         let account = StdAddr::new(0, HashBytes::ZERO);
@@ -3949,7 +4162,8 @@ mod tests {
             let manager = storage.partitions.lock();
             insert_masterchain_commit(&manager, &mc_block_id, 0);
         }
-        insert_masterchain_router(&storage, &mc_block_id, mc_block_id.seqno);
+        persist_router_commit(&storage, &mc_block_id);
+        assert_eq!(storage.load_router_commit().unwrap(), Some(mc_block_id));
         storage.commit_masterchain_block_set(&mc_block_id).unwrap();
         assert!(storage.current_state.code_hashes.get(code_hash_key).unwrap().is_some());
         assert_eq!(
@@ -4019,6 +4233,7 @@ mod tests {
             .unwrap();
         assert!(!active_replay.newly_committed);
         assert_eq!(active_replay.partition_id, old_id.0);
+        assert_eq!(storage.load_router_commit().unwrap(), Some(mc_block_id));
         assert_eq!(storage.partitions.lock().visible_frontier(), Some(&mc_block_id));
         assert!(storage.current_state.code_hashes.get(code_hash_key).unwrap().is_some());
         assert_eq!(
@@ -4127,6 +4342,7 @@ mod tests {
             .unwrap();
         assert!(!sealing_replay.newly_committed);
         assert_eq!(sealing_replay.partition_id, old_id.0);
+        assert_eq!(storage.load_router_commit().unwrap(), Some(mc_block_id));
         storage.publish_snapshot(&mc_block_id).unwrap();
         assert!(storage.get_transaction(&transaction_hash, None).unwrap().is_some());
 
@@ -4146,6 +4362,7 @@ mod tests {
             .unwrap();
         assert!(!sealed_replay.newly_committed);
         assert_eq!(sealed_replay.partition_id, old_id.0);
+        assert_eq!(storage.load_router_commit().unwrap(), Some(mc_block_id));
         storage.publish_snapshot(&mc_block_id).unwrap();
 
         assert_eq!(

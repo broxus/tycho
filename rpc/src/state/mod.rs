@@ -1340,6 +1340,8 @@ mod test {
         let block = root.parse::<Block>().unwrap();
 
         let block_id = BlockId {
+            shard: ShardIdent::MASTERCHAIN,
+            seqno: 1,
             root_hash: *root.repr_hash(),
             ..Default::default()
         };
@@ -1501,7 +1503,7 @@ mod test {
 
         let (delayed_handle, delayed) = DelayedTasks::new();
         let ctx = BlockSubscriberContext {
-            mc_block_id: BlockId::default(),
+            mc_block_id: *block.id(),
             mc_is_key_block: false,
             is_key_block: false,
             is_top_block: false,

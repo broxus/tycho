@@ -10,6 +10,7 @@ pub const CONTROL_STATE_KEY: &[u8] = b"control_state";
 pub const ACTIVE_PARTITION_KEY: &[u8] = b"active_partition";
 pub const VISIBLE_FRONTIER_KEY: &[u8] = b"visible_frontier";
 pub const MANIFEST_EPOCH_KEY: &[u8] = b"manifest_epoch";
+pub const ROUTER_COMMIT_KEY: &[u8] = b"router_commit";
 pub const PARTITION_ID_LEN: usize = 8;
 pub const SHORT_BLOCK_ID_LEN: usize = 16;
 pub const BLOCK_ID_LEN: usize = 80;
@@ -18,6 +19,7 @@ const CONTROL_STATE_LEN: usize = 1 + 16 + 8 + 8;
 const ACTIVE_PARTITION_LEN: usize = 1 + PARTITION_ID_LEN;
 const VISIBLE_FRONTIER_LEN: usize = 1 + BLOCK_ID_LEN;
 const MANIFEST_EPOCH_LEN: usize = 1 + 8;
+const ROUTER_COMMIT_LEN: usize = 1 + BLOCK_ID_LEN;
 const ROUTER_LOCATION_LEN: usize = 1 + PARTITION_ID_LEN + 4;
 const MANIFEST_BOUND_LEN: usize = 1 + BLOCK_ID_LEN + 4 + 8 + 4;
 const MANIFEST_RECORD_LEN: usize = 1 + 1 + PARTITION_ID_LEN + MANIFEST_BOUND_LEN * 2 + 8 * 4 + 1 + 8 + 8;
@@ -116,6 +118,10 @@ pub fn manifest_epoch_key() -> &'static [u8] {
     MANIFEST_EPOCH_KEY
 }
 
+pub fn router_commit_key() -> &'static [u8] {
+    ROUTER_COMMIT_KEY
+}
+
 pub fn partition_manifest_key(partition_id: u64) -> [u8; PARTITION_ID_LEN] {
     partition_id.to_be_bytes()
 }
@@ -194,6 +200,18 @@ pub fn encode_visible_frontier(block_id: &BlockId) -> [u8; VISIBLE_FRONTIER_LEN]
 
 pub fn decode_visible_frontier(bytes: &[u8]) -> Result<BlockId> {
     ensure_version_and_len("visible frontier", bytes, VISIBLE_FRONTIER_LEN)?;
+    decode_block_id(&bytes[1..])
+}
+
+pub fn encode_router_commit(block_id: &BlockId) -> [u8; ROUTER_COMMIT_LEN] {
+    let mut result = [0; ROUTER_COMMIT_LEN];
+    result[0] = LAYOUT_VERSION;
+    encode_block_id(block_id, &mut result[1..]);
+    result
+}
+
+pub fn decode_router_commit(bytes: &[u8]) -> Result<BlockId> {
+    ensure_version_and_len("router commit", bytes, ROUTER_COMMIT_LEN)?;
     decode_block_id(&bytes[1..])
 }
 
@@ -442,6 +460,13 @@ mod tests {
         assert!(decode_control_state(&encode_control_state(state)).unwrap() == state);
         assert_eq!(decode_active_partition(&encode_active_partition(u64::MAX)).unwrap(), u64::MAX);
         assert_eq!(decode_visible_frontier(&encode_visible_frontier(&block_id(u32::MAX))).unwrap(), block_id(u32::MAX));
+        let router_commit = BlockId {
+            shard: ShardIdent::MASTERCHAIN,
+            seqno: u32::MAX,
+            root_hash: HashBytes([4; 32]),
+            file_hash: HashBytes([5; 32]),
+        };
+        assert_eq!(decode_router_commit(&encode_router_commit(&router_commit)).unwrap(), router_commit);
         assert_eq!(decode_manifest_epoch(&encode_manifest_epoch(u64::MAX)).unwrap(), u64::MAX);
         for value in [
             &[][..],
@@ -453,6 +478,8 @@ mod tests {
         assert!(decode_active_partition(&[LAYOUT_VERSION; ACTIVE_PARTITION_LEN - 1]).is_err());
         assert!(decode_active_partition(&[2; ACTIVE_PARTITION_LEN]).is_err());
         assert!(decode_visible_frontier(&[2; VISIBLE_FRONTIER_LEN]).is_err());
+        assert!(decode_router_commit(&[LAYOUT_VERSION; ROUTER_COMMIT_LEN - 1]).is_err());
+        assert!(decode_router_commit(&[2; ROUTER_COMMIT_LEN]).is_err());
         let mut invalid_block = encode_visible_frontier(&block_id(1));
         invalid_block[5..13].fill(0);
         assert!(decode_visible_frontier(&invalid_block).is_err());

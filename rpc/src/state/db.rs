@@ -34,6 +34,7 @@ weedb::tables! {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tycho_storage::StorageContext;
 
     #[test]
     fn writable_table_groups_have_distinct_metric_names() {
@@ -42,10 +43,20 @@ mod tests {
         assert_eq!(RpcCurrentStateTables::NAME, "rpc-current-state");
         assert_eq!(RpcTransactionsTables::NAME, "rpc-transactions");
     }
+
+    #[tokio::test]
+    async fn router_table_group_has_state_column_family() {
+        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
+        let db: RpcRouterDb = context.open_preconfigured("rpc/router").unwrap();
+        db.state.insert(b"router_commit", [1]).unwrap();
+        assert_eq!(db.state.get(b"router_commit").unwrap().as_deref(), Some(&[1][..]));
+        assert_eq!(RpcRouterTables::NAME, "rpc-router");
+    }
 }
 
 weedb::tables! {
     pub struct RpcRouterTables<TableContext> {
+        pub state: tables::State,
         pub transactions: tables::TransactionRouter,
         pub inbound_messages: tables::InboundMessageRouter,
         pub blocks: tables::BlockRouter,
