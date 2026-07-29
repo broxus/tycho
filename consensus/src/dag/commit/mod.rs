@@ -14,9 +14,7 @@ use crate::dag::dag_point_future::WeakDagPointFuture;
 use crate::effects::{AltFmt, AltFormat, Cancelled, TaskResult};
 use crate::engine::{EngineResult, MempoolConfig};
 use crate::intercom::StatsRanges;
-use crate::models::{
-    AnchorData, AnyLink, DagPoint, MempoolPeerStats, PointInfo, Round, ValidPoint,
-};
+use crate::models::{AnchorData, DagPoint, MempoolPeerStats, PointInfo, Round, ValidPoint};
 use crate::moderator::JournalDagEvent;
 
 #[derive(thiserror::Error, Debug)]
@@ -209,9 +207,8 @@ impl Committer {
             _ => return Ok(Vec::new()),
         };
 
-        assert_eq!(
-            trigger.anchor_trigger(),
-            AnyLink::ToSelf,
+        assert!(
+            trigger.is_anchor_trigger(),
             "passed point is not a trigger: {:?}",
             trigger.id().alt()
         );
@@ -306,9 +303,7 @@ impl Committer {
 
 pub(super) fn filter(trigger: &DagPoint) -> Option<Result<&ValidPoint, HistoryConflict>> {
     match trigger {
-        DagPoint::Valid(valid) => {
-            (valid.info().anchor_trigger() == AnyLink::ToSelf).then_some(Ok(valid))
-        }
+        DagPoint::Valid(valid) => (valid.info().is_anchor_trigger()).then_some(Ok(valid)),
         DagPoint::TransInvalid(invalid) => {
             (invalid.has_proof()).then_some(Err(HistoryConflict(invalid.info().round())))
         }

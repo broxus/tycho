@@ -14,7 +14,7 @@ use crate::intercom::{
     Broadcaster, BroadcasterSignal, Collector, CollectorStatus, Dispatcher, Downloader,
     PeerSchedule, Responder,
 };
-use crate::models::{AnyLink, Point, PointInfo};
+use crate::models::{Point, PointInfo};
 use crate::storage::MempoolStore;
 
 pub struct RoundTaskState {
@@ -318,8 +318,8 @@ impl RoundCtx {
                     digest = display(own_info.digest().alt()),
                     externals,
                     payload_bytes,
-                    is_proof = (own_info.anchor_proof() == AnyLink::ToSelf).then_some(true),
-                    is_trigger = (own_info.anchor_trigger() == AnyLink::ToSelf).then_some(true),
+                    is_proof = (own_info.is_anchor_proof()).then_some(true),
+                    is_trigger = (own_info.is_anchor_trigger()).then_some(true),
                     "produced point"
                 );
                 tracing::debug!(
