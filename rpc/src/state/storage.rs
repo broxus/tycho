@@ -404,15 +404,10 @@ impl RpcStorage {
         if let Some(control_frontier) = control_frontier
             && control_frontier.seqno > 0
         {
+            self.validate_startup_frontier_router(&control_frontier)?;
             partitions
                 .validate_masterchain_commit(&control_frontier)
                 .context("invalid persisted RPC visible frontier")?;
-        }
-        if core_frontier.seqno > 0 {
-            partitions
-                .validate_masterchain_commit(core_frontier)
-                .context("RPC indexing is incomplete at the core committed frontier")?;
-            self.validate_startup_frontier_routers(&partitions, core_frontier.seqno)?;
         }
 
         Ok(StartupReconciliation {
@@ -421,188 +416,17 @@ impl RpcStorage {
         })
     }
 
-    fn validate_startup_frontier_routers(
-        &self,
-        partitions: &PartitionManager,
-        mc_seqno: u32,
-    ) -> Result<()> {
-        let (partition_id, lease) = partitions.lease_for_mc_seqno(mc_seqno)?;
-        let expected_location = codec::RouterLocation {
-            partition_id: partition_id.0,
-            mc_seqno,
-        };
-        let prefix = mc_seqno.to_be_bytes();
-        let mut commits = lease
-            .rocksdb()
-            .raw_iterator_cf(&lease.partition_commits.cf());
-        commits.seek(prefix);
-        while commits.valid() {
-            let key = commits
-                .key()
-                .context("startup frontier commit iterator returned no key")?;
-            if !key.starts_with(&prefix) {
-                break;
-            }
-            let value = commits
-                .value()
-                .context("startup frontier commit iterator returned no value")?;
-            let (related_mc_seqno, block_id) =
-                codec::decode_partition_commit_key(key)
-                    .context("invalid commit key at RPC startup frontier")?;
-            let commit = codec::decode_partition_commit(value)
-                .context("invalid commit value at RPC startup frontier")?;
-            // commit key, full block id, and digest must describe the same durable local write
-            anyhow::ensure!(
-                related_mc_seqno == mc_seqno
-                    && commit.block_id.as_short_id() == block_id
-                    && commit.digest == commit.block_id.root_hash,
-                "invalid commit identity at RPC startup frontier"
-            );
-
-            if let Some(value) = self
-                .router
-                .blocks
-                .get(codec::encode_short_block_id(&block_id))?
-            {
-                Self::validate_startup_router_location(
-                    "block",
-                    value.as_ref(),
-                    expected_location,
-                )?;
-            }
-            self.validate_startup_block_transaction_routers(
-                lease.db(),
-                &block_id,
-                expected_location,
-            )?;
-            commits.next();
-        }
-        commits.status()?;
-        Ok(())
-    }
-
-    fn validate_startup_block_transaction_routers(
-        &self,
-        db: &RpcTransactionsDb,
-        block_id: &BlockIdShort,
-        expected_location: codec::RouterLocation,
-    ) -> Result<()> {
-        let workchain = i8::try_from(block_id.shard.workchain())
-            .context("startup frontier block workchain exceeds i8")?;
-        let mut prefix = [0; tables::KnownBlocks::KEY_LEN];
-        prefix[0] = workchain as u8;
-        prefix[1..9].copy_from_slice(&block_id.shard.prefix().to_be_bytes());
-        prefix[9..13].copy_from_slice(&block_id.seqno.to_be_bytes());
-        let known_block = db
-            .known_blocks
-            .get(prefix)?
-            .context("startup frontier commit is missing its local known-block record")?;
+    fn validate_startup_frontier_router(&self, frontier: &BlockId) -> Result<()> {
+        let value = self
+            .router
+            .blocks
+            .get(codec::encode_short_block_id(&frontier.as_short_id()))?
+            .context("RPC visible frontier is missing its masterchain block router record")?;
+        let location = codec::decode_router_location(value.as_ref())
+            .context("malformed masterchain block router at RPC startup frontier")?;
         anyhow::ensure!(
-            known_block.len() >= 68,
-            "invalid local known-block record at RPC startup frontier"
-        );
-        anyhow::ensure!(
-            u32::from_le_bytes(known_block[64..68].try_into().unwrap())
-                == expected_location.mc_seqno,
-            "local known-block record has a different related masterchain seqno at RPC startup frontier"
-        );
-        let mut transactions = db
-            .rocksdb()
-            .raw_iterator_cf(&db.block_transactions.cf());
-        transactions.seek(prefix);
-        while transactions.valid() {
-            let key = transactions
-                .key()
-                .context("startup frontier block-transaction iterator returned no key")?;
-            if !key.starts_with(&prefix) {
-                break;
-            }
-            anyhow::ensure!(
-                key.len() == tables::BlockTransactions::KEY_LEN,
-                "invalid block-transaction key length at RPC startup frontier"
-            );
-            let transaction_hash = transactions
-                .value()
-                .context("startup frontier block-transaction iterator returned no value")?;
-            anyhow::ensure!(
-                transaction_hash.len() == tables::BlockTransactions::VALUE_LEN,
-                "invalid transaction hash length at RPC startup frontier"
-            );
-            if let Some(value) = self.router.transactions.get(transaction_hash)? {
-                Self::validate_startup_router_location(
-                    "transaction",
-                    value.as_ref(),
-                    expected_location,
-                )?;
-            }
-
-            let locator = db
-                .transactions_by_hash
-                .get(transaction_hash)?
-                .context("startup frontier block transaction is missing its local hash locator")?;
-            anyhow::ensure!(
-                locator.len() == tables::TransactionsByHash::VALUE_FULL_LEN,
-                "invalid local hash locator length at RPC startup frontier"
-            );
-            anyhow::ensure!(
-                u32::from_le_bytes(locator[110..114].try_into().unwrap())
-                    == expected_location.mc_seqno,
-                "local hash locator has a different related masterchain seqno at RPC startup frontier"
-            );
-            let transaction = db
-                .transactions
-                .get(&locator[..tables::Transactions::KEY_LEN])?
-                .context("startup frontier hash locator points to a missing local transaction")?;
-            let transaction = codec::decode_transaction_value(transaction.as_ref())
-                .context("invalid local transaction at RPC startup frontier")?;
-            anyhow::ensure!(
-                transaction.mc_seqno() == expected_location.mc_seqno,
-                "local transaction has a different related masterchain seqno at RPC startup frontier"
-            );
-            let payload = transaction.payload();
-            anyhow::ensure!(
-                payload[1..33] == *transaction_hash,
-                "local transaction has a different hash at RPC startup frontier"
-            );
-            let mask = TransactionMask::from_bits_retain(payload[0]);
-            if mask.has_msg_hash() {
-                let inbound_message_hash = &payload[33..65];
-                let inbound_locator = db
-                    .transactions_by_in_msg
-                    .get(inbound_message_hash)?
-                    .context("startup frontier transaction is missing its local inbound-message locator")?;
-                anyhow::ensure!(
-                    inbound_locator.as_ref() == &locator[..tables::Transactions::KEY_LEN],
-                    "local inbound-message locator mismatch at RPC startup frontier"
-                );
-                if let Some(value) = self
-                    .router
-                    .inbound_messages
-                    .get(inbound_message_hash)?
-                {
-                    Self::validate_startup_router_location(
-                        "inbound-message",
-                        value.as_ref(),
-                        expected_location,
-                    )?;
-                }
-            }
-            transactions.next();
-        }
-        transactions.status()?;
-        Ok(())
-    }
-
-    fn validate_startup_router_location(
-        kind: &str,
-        value: &[u8],
-        expected: codec::RouterLocation,
-    ) -> Result<()> {
-        let actual = codec::decode_router_location(value)
-            .with_context(|| format!("malformed {kind} router at RPC startup frontier"))?;
-        anyhow::ensure!(
-            actual == expected,
-            "{kind} router points outside its local partition at RPC startup frontier"
+            location.mc_seqno == frontier.seqno,
+            "masterchain block router has a different related masterchain seqno at RPC startup frontier"
         );
         Ok(())
     }
@@ -1479,6 +1303,7 @@ impl RpcStorage {
             .map(|value| codec::decode_partition_commit(value.as_ref()))
             .transpose()?;
         if let Some(commit) = existing_commit {
+            // replay validates the local batch, then repeats the global router and current-state stages
             anyhow::ensure!(commit.block_id == *block.id() && commit.digest == block.id().root_hash, "partition commit marker identity mismatch for {}", block.id());
         } else if partition_lease.lifecycle() == codec::ManifestLifecycle::Sealed {
             anyhow::bail!("sealed transaction partition {} is missing commit marker for {}", partition_id.0, block.id());
@@ -2365,6 +2190,7 @@ impl RpcSnapshot {
         &self.0.router
     }
 
+    #[cfg(test)]
     fn active_partition(&self) -> &RpcTransactionPartitionSnapshot {
         self.0
             .writable_partitions
@@ -3609,6 +3435,41 @@ mod tests {
             .unwrap();
     }
 
+    fn insert_masterchain_router(storage: &RpcStorage, block_id: &BlockId, mc_seqno: u32) {
+        let partition_id = storage.partitions.lock().active_id();
+        storage
+            .router
+            .blocks
+            .insert(
+                codec::encode_short_block_id(&block_id.as_short_id()),
+                codec::encode_router_location(codec::RouterLocation {
+                    partition_id: partition_id.0,
+                    mc_seqno,
+                }),
+            )
+            .unwrap();
+    }
+
+    fn reconciliation_error(storage: &RpcStorage, core_frontier: &BlockId) -> anyhow::Error {
+        match storage.reconcile_startup(core_frontier) {
+            Ok(_) => panic!("startup reconciliation unexpectedly succeeded"),
+            Err(error) => error,
+        }
+    }
+
+    fn persist_visible_frontier(storage: &RpcStorage, block_id: &BlockId) {
+        storage
+            .partitions
+            .lock()
+            .control_db()
+            .state
+            .insert(
+                codec::visible_frontier_key(),
+                codec::encode_visible_frontier(block_id),
+            )
+            .unwrap();
+    }
+
     #[test]
     fn shard_prefix() {
         let prefix_len = 10;
@@ -3796,6 +3657,7 @@ mod tests {
             insert_masterchain_commit(&manager, &block_id, 0);
             manager.commit_masterchain_block_set(&block_id).unwrap();
         }
+        insert_masterchain_router(&storage, &block_id, block_id.seqno);
 
         let current = storage.reconcile_startup(&block_id).unwrap();
         assert_eq!(current.effective_frontier, block_id);
@@ -3813,9 +3675,35 @@ mod tests {
             insert_masterchain_commit(&manager, &next, 0);
             manager.commit_masterchain_block_set(&next).unwrap();
         }
+        insert_masterchain_router(&storage, &next, next.seqno);
         let behind_control = storage.reconcile_startup(&block_id).unwrap();
         assert_eq!(behind_control.effective_frontier, block_id);
         assert!(behind_control.rebuild_current_state);
+        storage.publish_snapshot(&behind_control.effective_frontier).unwrap();
+        assert_eq!(storage.load_snapshot().unwrap().visible_frontier(), &block_id);
+    }
+
+    #[tokio::test]
+    async fn zerostate_startup_accepts_only_matching_or_absent_frontier() {
+        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
+        let zerostate = masterchain_block(0);
+        let storage = RpcStorage::open(context.clone(), RpcTransactionPartitionsConfig::default()).unwrap();
+        assert_eq!(storage.reconcile_startup(&zerostate).unwrap().effective_frontier, zerostate);
+        persist_visible_frontier(&storage, &zerostate);
+        drop(storage);
+        tokio::task::yield_now().await;
+
+        let storage = RpcStorage::open(context.clone(), RpcTransactionPartitionsConfig::default()).unwrap();
+        assert_eq!(storage.reconcile_startup(&zerostate).unwrap().effective_frontier, zerostate);
+        let mut different = zerostate;
+        different.root_hash = HashBytes([0xff; 32]);
+        persist_visible_frontier(&storage, &different);
+        drop(storage);
+        tokio::task::yield_now().await;
+
+        let storage = RpcStorage::open(context, RpcTransactionPartitionsConfig::default()).unwrap();
+        assert!(format!("{:#}", reconciliation_error(&storage, &zerostate))
+            .contains("RPC and core frontiers have different full block ids"));
     }
 
     #[tokio::test]
@@ -3835,7 +3723,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_frontier_rejects_malformed_router_but_allows_missing_router() {
+    async fn startup_frontier_uses_only_masterchain_block_router_witness() {
         let (context, _tmp) = StorageContext::new_temp().await.unwrap();
         let storage = RpcStorage::open(
             context,
@@ -3860,27 +3748,115 @@ mod tests {
             0,
         );
         storage.commit_masterchain_block_set(&mc_block_id).unwrap();
-        storage
-            .router
-            .transactions
-            .insert(transaction_hash, [0])
-            .unwrap();
+        let witness_key = codec::encode_short_block_id(&mc_block_id.as_short_id());
+        storage.router.transactions.insert(transaction_hash, [0]).unwrap();
+        assert_eq!(
+            storage
+                .reconcile_startup(&mc_block_id)
+                .unwrap()
+                .effective_frontier,
+            mc_block_id
+        );
+
+        storage.router.blocks.insert(witness_key, [0]).unwrap();
 
         let error = storage
             .reconcile_startup(&mc_block_id)
             .err()
-            .expect("malformed visible-frontier router must fail startup reconciliation");
+            .expect("malformed masterchain block router must fail startup reconciliation");
         assert!(
             format!("{error:#}")
-                .contains("malformed transaction router at RPC startup frontier")
+                .contains("malformed masterchain block router at RPC startup frontier")
         );
 
+        let partition_id = storage.partitions.lock().active_id();
+        storage
+            .router
+            .blocks
+            .insert(
+                witness_key,
+                codec::encode_router_location(codec::RouterLocation {
+                    partition_id: partition_id.0,
+                    mc_seqno: mc_block_id.seqno + 1,
+                }),
+            )
+            .unwrap();
+        assert!(format!("{:#}", reconciliation_error(&storage, &mc_block_id))
+            .contains("masterchain block router has a different related masterchain seqno"));
+
         let mut batch = rocksdb::WriteBatch::default();
-        batch.delete_cf(&storage.router.transactions.cf(), transaction_hash);
+        batch.delete_cf(&storage.router.blocks.cf(), witness_key);
         storage
             .router
             .rocksdb()
             .write_opt(batch, storage.router.transactions.write_config())
+            .unwrap();
+        assert!(format!("{:#}", reconciliation_error(&storage, &mc_block_id))
+            .contains("missing its masterchain block router record"));
+        insert_masterchain_router(&storage, &mc_block_id, mc_block_id.seqno);
+        assert_eq!(
+            storage
+                .reconcile_startup(&mc_block_id)
+                .unwrap()
+                .effective_frontier,
+            mc_block_id
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_reconciliation_requires_only_router_and_commit_witnesses() {
+        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
+        let storage = RpcStorage::open(context, RpcTransactionPartitionsConfig::default()).unwrap();
+        let account = StdAddr::new(0, HashBytes::ZERO);
+        let mc_block_id = masterchain_block(1);
+        let block_id = basechain_block(1);
+        let transaction_hash = HashBytes([1; 32]);
+        let inbound_message_hash = HashBytes([2; 32]);
+        insert_read_test_block(
+            &storage,
+            &account,
+            &mc_block_id,
+            &block_id,
+            &[ReadTestTransaction {
+                lt: 1,
+                hash: transaction_hash,
+                in_msg_hash: inbound_message_hash,
+                boc_byte: 3,
+            }],
+            0,
+        );
+        storage.commit_masterchain_block_set(&mc_block_id).unwrap();
+
+        let lease = storage.partitions.lock().active_lease();
+        let mut transaction_key = [0; tables::Transactions::KEY_LEN];
+        transaction_key[0] = account.workchain as u8;
+        transaction_key[1..33].copy_from_slice(account.address.as_slice());
+        transaction_key[33..41].copy_from_slice(&1u64.to_be_bytes());
+        let mut block_transaction_key = [0; tables::BlockTransactions::KEY_LEN];
+        block_transaction_key[0] = block_id.shard.workchain() as i8 as u8;
+        block_transaction_key[1..9].copy_from_slice(&block_id.shard.prefix().to_be_bytes());
+        block_transaction_key[9..13].copy_from_slice(&block_id.seqno.to_be_bytes());
+        block_transaction_key[13..45].copy_from_slice(account.address.as_slice());
+        block_transaction_key[45..53].copy_from_slice(&1u64.to_be_bytes());
+        let mut batch = rocksdb::WriteBatch::default();
+        batch.delete_cf(&lease.known_blocks.cf(), known_block_key(&block_id));
+        batch.delete_cf(&lease.block_transactions.cf(), block_transaction_key);
+        batch.delete_cf(&lease.transactions_by_hash.cf(), transaction_hash);
+        batch.delete_cf(&lease.transactions_by_in_msg.cf(), inbound_message_hash);
+        batch.delete_cf(&lease.transactions.cf(), transaction_key);
+        lease
+            .rocksdb()
+            .write_opt(batch, lease.transactions.write_config())
+            .unwrap();
+        drop(lease);
+
+        let mut router_batch = rocksdb::WriteBatch::default();
+        router_batch.delete_cf(&storage.router.transactions.cf(), transaction_hash);
+        router_batch.delete_cf(&storage.router.inbound_messages.cf(), inbound_message_hash);
+        storage
+            .router
+            .rocksdb()
+            .write_opt(router_batch, storage.router.transactions.write_config())
             .unwrap();
         assert_eq!(
             storage
@@ -3889,6 +3865,31 @@ mod tests {
                 .effective_frontier,
             mc_block_id
         );
+
+        let lease = storage.partitions.lock().active_lease();
+        let commit_key = codec::partition_commit_key(mc_block_id.seqno, &mc_block_id.as_short_id());
+        let valid_commit = lease.partition_commits.get(commit_key).unwrap().unwrap().to_vec();
+        lease.partition_commits.insert(commit_key, [0]).unwrap();
+        assert!(format!("{:#}", reconciliation_error(&storage, &mc_block_id))
+            .contains("invalid persisted RPC visible frontier"));
+        lease.partition_commits.insert(commit_key, &valid_commit).unwrap();
+        let mut commit = codec::decode_partition_commit(&valid_commit).unwrap();
+        commit.block_id.root_hash = HashBytes([0xff; 32]);
+        commit.digest = commit.block_id.root_hash;
+        lease
+            .partition_commits
+            .insert(commit_key, codec::encode_partition_commit(&commit))
+            .unwrap();
+        assert!(format!("{:#}", reconciliation_error(&storage, &mc_block_id))
+            .contains("RPC frontier commit identity mismatch"));
+        let mut batch = rocksdb::WriteBatch::default();
+        batch.delete_cf(&lease.partition_commits.cf(), commit_key);
+        lease
+            .rocksdb()
+            .write_opt(batch, lease.partition_commits.write_config())
+            .unwrap();
+        assert!(format!("{:#}", reconciliation_error(&storage, &mc_block_id))
+            .contains("missing the RPC frontier commit"));
     }
 
     #[tokio::test]
@@ -3911,6 +3912,22 @@ mod tests {
         let zerostate = masterchain_block(0);
         let mc_block_id = masterchain_block(1);
         let block = indexed_block();
+        let code_hash = HashBytes::from_str(
+            "fc42205fe8c1c08846c1222c81eb416bdbf403253f6079691e04d52ce4400f8f",
+        )
+        .unwrap();
+        let code_hash_account = StdAddr::new(
+            0,
+            HashBytes::from_str("b06c29df56964af1aeb3bbda73ea5685bc54f4131c1c8559ba2c6f971976cd2b")
+                .unwrap(),
+        );
+        let mut code_hash_key = [0; tables::CodeHashes::KEY_LEN];
+        code_hash_key[..32].copy_from_slice(code_hash.as_slice());
+        code_hash_key[32] = code_hash_account.workchain as u8;
+        code_hash_key[33..].copy_from_slice(code_hash_account.address.as_slice());
+        let mut code_hash_by_address_key = [0; tables::CodeHashesByAddress::KEY_LEN];
+        code_hash_by_address_key[0] = code_hash_account.workchain as u8;
+        code_hash_by_address_key[1..].copy_from_slice(code_hash_account.address.as_slice());
         storage.publish_snapshot(&zerostate).unwrap();
 
         let first = storage
@@ -3928,6 +3945,50 @@ mod tests {
             .unwrap()
             .is_some());
         drop(old_lease);
+        {
+            let manager = storage.partitions.lock();
+            insert_masterchain_commit(&manager, &mc_block_id, 0);
+        }
+        insert_masterchain_router(&storage, &mc_block_id, mc_block_id.seqno);
+        storage.commit_masterchain_block_set(&mc_block_id).unwrap();
+        assert!(storage.current_state.code_hashes.get(code_hash_key).unwrap().is_some());
+        assert_eq!(
+            storage
+                .current_state
+                .code_hashes_by_address
+                .get(code_hash_by_address_key)
+                .unwrap()
+                .as_deref(),
+            Some(code_hash.as_slice())
+        );
+
+        {
+            let reconciliation = storage.reconcile_startup(&zerostate).unwrap();
+            assert_eq!(reconciliation.effective_frontier, zerostate);
+            assert!(reconciliation.rebuild_current_state);
+        }
+        *storage.snapshots.current.write() = None;
+        let mut current_state_batch = rocksdb::WriteBatch::default();
+        current_state_batch.delete_cf(&storage.current_state.code_hashes.cf(), code_hash_key);
+        current_state_batch.delete_cf(
+            &storage.current_state.code_hashes_by_address.cf(),
+            code_hash_by_address_key,
+        );
+        storage
+            .current_state
+            .rocksdb()
+            .write_opt(
+                current_state_batch,
+                storage.current_state.code_hashes.write_config(),
+            )
+            .unwrap();
+        storage.publish_snapshot(&zerostate).unwrap();
+        assert_eq!(storage.load_snapshot().unwrap().visible_frontier(), &zerostate);
+        assert!(storage
+            .get_accounts_by_code_hash(&code_hash, None, None)
+            .unwrap()
+            .next()
+            .is_none());
 
         delete_router_records(
             &storage,
@@ -3958,6 +4019,22 @@ mod tests {
             .unwrap();
         assert!(!active_replay.newly_committed);
         assert_eq!(active_replay.partition_id, old_id.0);
+        assert_eq!(storage.partitions.lock().visible_frontier(), Some(&mc_block_id));
+        assert!(storage.current_state.code_hashes.get(code_hash_key).unwrap().is_some());
+        assert_eq!(
+            storage
+                .current_state
+                .code_hashes_by_address
+                .get(code_hash_by_address_key)
+                .unwrap()
+                .as_deref(),
+            Some(code_hash.as_slice())
+        );
+        assert!(storage
+            .get_accounts_by_code_hash(&code_hash, None, None)
+            .unwrap()
+            .next()
+            .is_none());
         assert!(storage.router.transactions.get(transaction_hash).unwrap().is_some());
         assert!(storage
             .router
@@ -3979,6 +4056,15 @@ mod tests {
             manager.commit_masterchain_block_set(&mc_block_id).unwrap();
         }
         storage.publish_snapshot(&mc_block_id).unwrap();
+        assert_eq!(storage.load_snapshot().unwrap().visible_frontier(), &mc_block_id);
+        assert_eq!(
+            storage
+                .get_accounts_by_code_hash(&code_hash, None, None)
+                .unwrap()
+                .last()
+                .unwrap(),
+            code_hash_account
+        );
         assert_eq!(storage.partitions.lock().active_id(), PartitionId(2));
         let expected_c1 = storage
             .get_transactions(&account, None, None, false, None)

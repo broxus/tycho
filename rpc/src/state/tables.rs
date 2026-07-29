@@ -68,7 +68,7 @@ impl ColumnFamilyOptions<TableContext> for InboundMessageRouter {
     }
 }
 
-/// Short block id router keyed by `codec::encode_short_block_id`.
+/// Short block id router keyed by `codec::encode_short_block_id`, including every indexed masterchain block.
 ///
 /// Values use `codec::RouterLocation` and contain the partition id and related masterchain seqno.
 pub struct BlockRouter;
@@ -125,7 +125,6 @@ impl ColumnFamilyOptions<TableContext> for Transactions {
 pub struct TransactionsByHash;
 
 impl TransactionsByHash {
-    pub const VALUE_SHORT_LEN: usize = Transactions::KEY_LEN;
     pub const VALUE_FULL_LEN: usize = Transactions::KEY_LEN + 1 + 4 + 32 + 32 + 4;
 }
 
@@ -180,7 +179,6 @@ pub struct BlockTransactions;
 
 impl BlockTransactions {
     pub const KEY_LEN: usize = 1 + 8 + 4 + 32 + 8;
-    pub const VALUE_LEN: usize = 32;
 }
 
 impl ColumnFamily for BlockTransactions {

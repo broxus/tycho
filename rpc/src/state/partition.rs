@@ -276,6 +276,7 @@ impl PartitionManager {
         Ok(manager)
     }
 
+    #[cfg(test)]
     pub fn control_db(&self) -> &RpcControlDb {
         &self.control
     }
@@ -292,6 +293,7 @@ impl PartitionManager {
         self.active_id
     }
 
+    #[cfg(test)]
     pub fn active_db(&self) -> &RpcTransactionsDb {
         self.active.as_deref().expect("partition manager is initialized with an active DB")
     }
@@ -563,13 +565,6 @@ impl PartitionManager {
         self.sealed_cache.entry_count()
     }
 
-    pub fn writable_partition_can_close(&self, id: PartitionId) -> bool {
-        match id == self.active_id {
-            true => Arc::strong_count(self.active.as_ref().expect("partition manager is initialized with an active DB")) == 1,
-            false => self.sealing.get(&id).is_some_and(|db| Arc::strong_count(db) == 1),
-        }
-    }
-
     pub fn next_sealing_partition(&self) -> Option<PartitionId> {
         self.descriptors
             .values()
@@ -678,6 +673,7 @@ impl PartitionManager {
         self.rotation_requested
     }
 
+    #[cfg(test)]
     pub fn rotation_requested(&self) -> Option<RotationReason> {
         self.rotation_requested
     }
@@ -878,6 +874,7 @@ impl PartitionManager {
     }
 
     /// AB15 calls this after a complete masterchain block set commits.
+    #[cfg(test)]
     pub fn rotate_if_requested(&mut self) -> Result<Option<(PartitionId, RotationReason)>> {
         let Some(reason) = self.rotation_requested else {
             return Ok(None);
@@ -920,6 +917,7 @@ impl PartitionManager {
         let persisted_descriptor = self.descriptors.get(&id).unwrap().clone();
 
         if let Some(visible_frontier) = self.visible_frontier {
+            // replays at or below the visible frontier only validate the durable local commit
             if block_id.seqno < visible_frontier.seqno {
                 ensure!(persisted_descriptor.contains_mc_seqno(block_id.seqno), "older masterchain block-set replay is outside the persisted partition manifest");
                 return Ok(());
