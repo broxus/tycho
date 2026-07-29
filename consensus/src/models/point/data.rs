@@ -89,7 +89,21 @@ impl PointRole {
                 AnchorLink::Indirect(link) => Some(AnyLink::Indirect(link)),
             },
             Self::AnchorProof { .. } | Self::Sticky { .. } | Self::Genesis => Some(AnyLink::ToSelf),
-            Self::AnchorTrigger => None,
+            Self::AnchorTrigger { .. } => None,
+        }
+    }
+
+    pub fn is_anchor_proof(&self) -> bool {
+        match self {
+            Self::Regular { .. } | Self::AnchorTrigger { .. } => false,
+            Self::AnchorProof { .. } | Self::Sticky { .. } | Self::Genesis => true,
+        }
+    }
+
+    pub fn is_anchor_trigger(&self) -> bool {
+        match self {
+            Self::Regular { .. } | Self::AnchorProof { .. } => false,
+            Self::AnchorTrigger | Self::Sticky { .. } | Self::Genesis => true,
         }
     }
 

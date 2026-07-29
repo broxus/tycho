@@ -478,7 +478,7 @@ impl Verifier {
                 }
             }
 
-            if dep_id == anchor_proof_id && dep.anchor_proof() != AnyLink::ToSelf {
+            if dep_id == anchor_proof_id && !dep.is_anchor_proof() {
                 let tuple = (AnchorStageRole::Proof, dep_id);
                 invalid_reason = Some(InvalidReason::AnchorLink(tuple));
             }
@@ -525,7 +525,7 @@ impl Verifier {
                         invalid_reason = Some(InvalidReason::ChainedProofBadPath(dep_id));
                     }
                 } else if dep_id == to {
-                    if dep.anchor_proof() != AnyLink::ToSelf {
+                    if !dep.is_anchor_proof() {
                         invalid_reason = Some(InvalidReason::ChainedProofBadPath(dep_id));
                     }
 
@@ -637,7 +637,7 @@ impl Verifier {
             if let Some(anchor_proof_link) = anchor_proof_link
                 && dep_id == anchor_proof_link.to
             {
-                if dep.anchor_proof() != AnyLink::ToSelf {
+                if !dep.is_anchor_proof() {
                     let tuple = (AnchorStageRole::Proof, dep_id);
                     invalid_reason = Some(InvalidReason::AnchorLinkRole(tuple));
                 } else if dep.anchor_time() != info.anchor_time() {
@@ -648,7 +648,7 @@ impl Verifier {
 
             if let Some(chained_proof_link) = chained_proof_link
                 && dep_id == chained_proof_link.to
-                && dep.anchor_proof() != AnyLink::ToSelf
+                && !dep.is_anchor_proof()
             {
                 invalid_reason = Some(InvalidReason::ChainedProofRole(dep_id));
             }
@@ -658,7 +658,7 @@ impl Verifier {
     }
 
     fn check_trigger_target(info: &PointInfo, anchor_trigger: &PointInfo) -> Option<InvalidReason> {
-        if anchor_trigger.anchor_trigger() != AnyLink::ToSelf {
+        if !anchor_trigger.is_anchor_trigger() {
             let tuple = (AnchorStageRole::Trigger, *anchor_trigger.id());
             return Some(InvalidReason::AnchorLink(tuple));
         }
@@ -751,7 +751,7 @@ impl Verifier {
             proven.digest(),
             "Coding error: mismatched previous point of the same author, must have been checked before"
         );
-        if proven.anchor_proof() == AnyLink::ToSelf && info.anchor_trigger() != AnyLink::ToSelf {
+        if proven.is_anchor_proof() && !info.is_anchor_trigger() {
             return Some(InvalidReason::NotTrigger(*proven.id()));
         }
 
@@ -759,7 +759,7 @@ impl Verifier {
             // time must be increasing by the same author until it stops referencing previous points
             return Some(InvalidReason::TimeNotGreaterThanInPrevPoint(*proven.id()));
         }
-        if info.anchor_proof() == AnyLink::ToSelf && info.anchor_time() != proven.time() {
+        if info.is_anchor_proof() && info.anchor_time() != proven.time() {
             // anchor proof must inherit its candidate's time
             return Some(InvalidReason::AnchorProofDoesntInheritAnchorTime(
                 *proven.id(),

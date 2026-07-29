@@ -396,9 +396,12 @@ mod link {
             Through::Witness(_) => current_round.prev().prev(),
         };
 
-        if source.info.round() == direct_round
-            && source.info.anchor_link(link_field) == AnyLink::ToSelf
-        {
+        let is_anchor_role = match link_field {
+            AnchorStageRole::Trigger => source.info.is_anchor_trigger(),
+            AnchorStageRole::Proof => source.info.is_anchor_proof(),
+        };
+
+        if source.info.round() == direct_round && is_anchor_role {
             AnchorLink::Direct(source.path)
         } else {
             AnchorLink::Indirect(IndirectLink {

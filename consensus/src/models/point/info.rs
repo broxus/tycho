@@ -183,16 +183,20 @@ impl PointInfo {
         }
     }
 
+    pub fn is_anchor_proof(&self) -> bool {
+        self.0.data.role.is_anchor_proof()
+    }
+
+    pub fn is_anchor_trigger(&self) -> bool {
+        self.0.data.role.is_anchor_trigger()
+    }
+
     pub fn anchor_trigger(&self) -> AnyLink<'_> {
         self.0.data.role.anchor_trigger()
     }
 
     pub fn anchor_proof(&self) -> AnyLink<'_> {
         self.0.data.role.anchor_proof(self.author())
-    }
-
-    pub fn anchor_link(&self, link_field: AnchorStageRole) -> AnyLink<'_> {
-        (self.0.data).anchor_link(link_field, self.author())
     }
 
     pub fn anchor_round(&self, link_field: AnchorStageRole) -> Round {
