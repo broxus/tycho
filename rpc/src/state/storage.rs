@@ -1,13 +1,14 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use arc_swap::ArcSwap;
 use parking_lot::{Mutex, RwLock};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 use tokio::task::JoinHandle;
+use thiserror::Error;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_storage::StorageContext;
@@ -23,7 +24,8 @@ use weedb::rocksdb;
 
 use crate::config::RpcTransactionPartitionsConfig;
 
-use super::db::{RpcCurrentStateDb, RpcRouterDb, RpcTransactionsDb};
+use super::db::{RpcCurrentStateDb, RpcTransactionsDb};
+use super::filter::{FilterNamespace, FilterRegistry, FilterWorker, ValidatedFilterBundle};
 use super::partition::{PartitionDescriptor, PartitionId, PartitionManager, PartitionReadLease};
 use super::tables;
 use super::codec;
@@ -60,8 +62,7 @@ struct BlacklistedAccountsInner {
 
 pub struct RpcStorage {
     partitions: Arc<Mutex<PartitionManager>>,
-    router: RpcRouterDb,
-    router_commit_guard: Mutex<()>,
+    block_set_admission: Mutex<Option<BlockSetAdmission>>,
     current_state: RpcCurrentStateDb,
     min_tx_lt: AtomicU64,
     min_tx_lt_guard: tokio::sync::Mutex<()>,
@@ -69,12 +70,79 @@ pub struct RpcStorage {
     sealing_notify: Arc<Notify>,
     sealing_cancel: CancellationFlag,
     sealing_task: Option<JoinHandle<()>>,
+    filter_registry: Arc<FilterRegistry>,
+    filter_worker: Arc<FilterWorker>,
+    sealed_exact_lookup_semaphore: Arc<Semaphore>,
+    sealed_exact_lookup_metrics: Arc<SealedExactLookupMetrics>,
+    initial_snapshot_recorded: AtomicBool,
+    #[cfg(test)]
+    known_block_point_reads: AtomicU64,
+    #[cfg(test)]
+    sealed_exact_lookup_acquisitions: Arc<AtomicU64>,
+}
+
+#[derive(Clone, Copy)]
+struct BlockSetAdmission {
+    frontier: BlockId,
+    block_set: BlockId,
+    mode: BlockSetMode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BlockSetMode {
+    New,
+    Replay,
+    Same,
+}
+
+impl BlockSetMode {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::New => "new",
+            Self::Replay => "replay",
+            Self::Same => "same",
+        }
+    }
+}
+
+fn classify_admission_failure(error: &anyhow::Error) -> &'static str {
+    let message = format!("{error:#}");
+    if message.contains("sequence gap") || message.contains("sequence number overflow") {
+        "sequence_gap"
+    } else if message.contains("admitted token") || message.contains("admission is already held") {
+        "token_conflict"
+    } else if message.contains("full block id") || message.contains("different full") {
+        "full_identity_mismatch"
+    } else if message.contains("commit") {
+        "commit_invalid"
+    } else if message.contains("frontier") {
+        "frontier_mismatch"
+    } else if message.contains("lifecycle") || message.contains("creating") {
+        "lifecycle_continuation"
+    } else {
+        "other"
+    }
+}
+
+fn classify_predecessor_failure(error: &anyhow::Error) -> &'static str {
+    let message = format!("{error:#}");
+    if message.contains("missing") {
+        "commit_missing"
+    } else if message.contains("digest") {
+        "commit_digest_mismatch"
+    } else if message.contains("identity") || message.contains("different") || message.contains("predecessor") {
+        "full_identity_mismatch"
+    } else if message.contains("malformed") || message.contains("invalid") || message.contains("decode") {
+        "commit_malformed"
+    } else {
+        "other"
+    }
 }
 
 #[derive(Default)]
 struct SnapshotPublisher {
     /// Keeps publication and sealing lease removal in one lock order.
-    current: RwLock<Option<Arc<RpcSnapshotInner>>>,
+    current: RwLock<Option<RpcSnapshot>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -95,6 +163,259 @@ pub struct BlockWriteResult {
 pub(crate) struct StartupReconciliation {
     pub effective_frontier: BlockId,
     pub rebuild_current_state: bool,
+}
+
+struct LocatedTransaction {
+    partition: RpcTransactionPartitionRead,
+    info: TransactionInfo,
+    key: Vec<u8>,
+    sealed_exact_lookup_permit: Option<TrackedSealedExactLookupPermit>,
+}
+
+struct LocatedInboundTransaction {
+    partition: RpcTransactionPartitionRead,
+    transaction: TransactionData<'static>,
+    sealed_exact_lookup_permit: Option<TrackedSealedExactLookupPermit>,
+}
+
+struct LocatedBlock {
+    partition: RpcTransactionPartitionRead,
+    key: [u8; tables::KnownBlocks::KEY_LEN],
+    value: Vec<u8>,
+    sealed_exact_lookup_permit: Option<TrackedSealedExactLookupPermit>,
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+enum SealedExactLookupAvailabilityError {
+    #[error("RPC sealed exact lookup capacity is exhausted")]
+    Overloaded,
+    #[error("RPC sealed exact lookup limiter is closed")]
+    Closed,
+}
+
+#[derive(Default)]
+struct SealedExactLookupMetrics {
+    current: AtomicU64,
+    peak: AtomicU64,
+    filter_negative_skips: [AtomicU64; 3],
+    filter_false_positives: [AtomicU64; 3],
+}
+
+struct TrackedSealedExactLookupPermit {
+    _permit: OwnedSemaphorePermit,
+    metrics: Arc<SealedExactLookupMetrics>,
+}
+
+impl Drop for TrackedSealedExactLookupPermit {
+    fn drop(&mut self) {
+        let current = self.metrics.current.fetch_sub(1, Ordering::AcqRel) - 1;
+        metrics::gauge!("tycho_storage_rpc_sealed_exact_lookup_permits", "result" => "current")
+            .set(current as f64);
+    }
+}
+
+struct SealedExactLookupContext {
+    semaphore: Arc<Semaphore>,
+    metrics: Arc<SealedExactLookupMetrics>,
+    permit: Option<TrackedSealedExactLookupPermit>,
+    namespace: FilterNamespace,
+    started_at: Instant,
+    filters_checked: u64,
+    negative_skips: u64,
+    positives: u64,
+    false_positives: u64,
+    partitions_traversed: u64,
+    result: &'static str,
+    #[cfg(test)]
+    acquisitions: Arc<AtomicU64>,
+}
+
+impl SealedExactLookupContext {
+    fn new(
+        semaphore: Arc<Semaphore>,
+        metrics: Arc<SealedExactLookupMetrics>,
+        namespace: FilterNamespace,
+        #[cfg(test)] acquisitions: Arc<AtomicU64>,
+    ) -> Self {
+        Self {
+            semaphore,
+            metrics,
+            permit: None,
+            namespace,
+            started_at: Instant::now(),
+            filters_checked: 0,
+            negative_skips: 0,
+            positives: 0,
+            false_positives: 0,
+            partitions_traversed: 0,
+            result: "error",
+            #[cfg(test)]
+            acquisitions,
+        }
+    }
+
+    fn acquire(&mut self) -> Result<()> {
+        if self.permit.is_some() {
+            return Ok(());
+        }
+        let permit = match self.semaphore.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(TryAcquireError::NoPermits) => {
+                metrics::counter!(
+                    "tycho_storage_rpc_sealed_exact_lookup_overloads_total",
+                    "reason" => "exhausted",
+                )
+                .increment(1);
+                return Err(SealedExactLookupAvailabilityError::Overloaded.into());
+            }
+            Err(TryAcquireError::Closed) => {
+                metrics::counter!(
+                    "tycho_storage_rpc_sealed_exact_lookup_overloads_total",
+                    "reason" => "closed",
+                )
+                .increment(1);
+                return Err(SealedExactLookupAvailabilityError::Closed.into());
+            }
+        };
+        #[cfg(test)]
+        self.acquisitions.fetch_add(1, Ordering::AcqRel);
+        let current = self.metrics.current.fetch_add(1, Ordering::AcqRel) + 1;
+        let mut peak = self.metrics.peak.load(Ordering::Acquire);
+        while current > peak {
+            match self.metrics.peak.compare_exchange_weak(
+                peak,
+                current,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(actual) => peak = actual,
+            }
+        }
+        metrics::gauge!("tycho_storage_rpc_sealed_exact_lookup_permits", "result" => "current")
+            .set(current as f64);
+        metrics::gauge!("tycho_storage_rpc_sealed_exact_lookup_permits", "result" => "peak")
+            .set(self.metrics.peak.load(Ordering::Acquire) as f64);
+        self.permit = Some(TrackedSealedExactLookupPermit {
+            _permit: permit,
+            metrics: self.metrics.clone(),
+        });
+        Ok(())
+    }
+
+    fn into_permit(mut self) -> Option<TrackedSealedExactLookupPermit> {
+        self.permit.take()
+    }
+
+    fn consider_partition(&mut self) {
+        self.partitions_traversed += 1;
+    }
+
+    fn record_filter(&mut self, might_contain: bool) {
+        self.filters_checked += 1;
+        if might_contain {
+            self.positives += 1;
+        } else {
+            self.negative_skips += 1;
+        }
+    }
+
+    fn record_exact_probe(&self, lifecycle: &'static str, reason: &'static str) {
+        metrics::counter!(
+            "tycho_storage_rpc_exact_lookup_probes_total",
+            "namespace" => self.namespace.as_str(),
+            "lifecycle" => lifecycle,
+            "reason" => reason,
+        )
+        .increment(1);
+    }
+
+    fn record_false_positive(&mut self) {
+        self.false_positives += 1;
+    }
+
+    fn record_rejection(&self, lifecycle: &'static str, reason: &'static str) {
+        metrics::counter!(
+            "tycho_storage_rpc_exact_lookup_rejections_total",
+            "namespace" => self.namespace.as_str(),
+            "lifecycle" => lifecycle,
+            "reason" => reason,
+        )
+        .increment(1);
+    }
+
+    fn record_hit(&mut self, lifecycle: &'static str) {
+        self.result = "hit";
+        metrics::counter!(
+            "tycho_storage_rpc_exact_lookup_hits_total",
+            "namespace" => self.namespace.as_str(),
+            "lifecycle" => lifecycle,
+        )
+        .increment(1);
+    }
+
+    fn record_miss(&mut self) {
+        self.result = "miss";
+    }
+}
+
+impl Drop for SealedExactLookupContext {
+    fn drop(&mut self) {
+        let namespace = self.namespace.as_str();
+        metrics::counter!(
+            "tycho_storage_rpc_exact_lookup_requests_total",
+            "namespace" => namespace,
+            "result" => self.result,
+        )
+        .increment(1);
+        metrics::counter!(
+            "tycho_storage_rpc_filters_checked_total",
+            "namespace" => namespace,
+        )
+        .increment(self.filters_checked);
+        metrics::counter!(
+            "tycho_storage_rpc_filter_negative_skips_total",
+            "namespace" => namespace,
+        )
+        .increment(self.negative_skips);
+        metrics::counter!(
+            "tycho_storage_rpc_filter_positives_total",
+            "namespace" => namespace,
+        )
+        .increment(self.positives);
+        metrics::counter!(
+            "tycho_storage_rpc_filter_false_positives_total",
+            "namespace" => namespace,
+        )
+        .increment(self.false_positives);
+        metrics::histogram!(
+            "tycho_storage_rpc_exact_lookup_partitions_traversed",
+            "namespace" => namespace,
+        )
+        .record(self.partitions_traversed as f64);
+        metrics::histogram!(
+            "tycho_storage_rpc_exact_lookup_duration_seconds",
+            "namespace" => namespace,
+            "result" => self.result,
+        )
+        .record(self.started_at.elapsed());
+        let index = self.namespace as usize - 1;
+        let negative_skips = self.metrics.filter_negative_skips[index]
+            .fetch_add(self.negative_skips, Ordering::AcqRel)
+            + self.negative_skips;
+        let false_positives = self.metrics.filter_false_positives[index]
+            .fetch_add(self.false_positives, Ordering::AcqRel)
+            + self.false_positives;
+        metrics::gauge!(
+            "tycho_storage_rpc_filter_observed_error_ratio",
+            "namespace" => namespace,
+        )
+        .set(if negative_skips + false_positives == 0 {
+            0.0
+        } else {
+            false_positives as f64 / (negative_skips + false_positives) as f64
+        });
+    }
 }
 
 impl BlockWriteStats {
@@ -124,8 +445,10 @@ impl BlockWriteStats {
 fn spawn_sealing_worker(
     partitions: Arc<Mutex<PartitionManager>>,
     snapshots: Arc<SnapshotPublisher>,
+    filter_registry: Arc<FilterRegistry>,
     notify: Arc<Notify>,
     cancelled: CancellationFlag,
+    filter_worker: Arc<FilterWorker>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut retry_delay = Duration::from_secs(1);
@@ -139,8 +462,10 @@ fn spawn_sealing_worker(
                 let result = seal_partition(
                     partitions.clone(),
                     snapshots.clone(),
+                    filter_registry.clone(),
                     id,
                     cancelled.clone(),
+                    Some(filter_worker.clone()),
                 )
                 .await;
                 metrics::histogram!("tycho_storage_rpc_partition_sealing_time")
@@ -169,8 +494,10 @@ fn spawn_sealing_worker(
 async fn seal_partition(
     partitions: Arc<Mutex<PartitionManager>>,
     snapshots: Arc<SnapshotPublisher>,
+    filter_registry: Arc<FilterRegistry>,
     id: PartitionId,
     cancelled: CancellationFlag,
+    filter_worker: Option<Arc<FilterWorker>>,
 ) -> Result<()> {
     tokio::task::spawn_blocking(move || {
         let db = partitions.lock().begin_sealing(id)?;
@@ -192,15 +519,21 @@ async fn seal_partition(
                 if sealing_snapshot_can_be_withdrawn(&partitions, published.as_ref(), id) {
                     let previous = published.take();
                     let frontier =
-                        previous.as_ref().map(|snapshot| snapshot.visible_frontier);
+                        previous.as_ref().map(|snapshot| *snapshot.visible_frontier());
                     drop(previous);
 
                     // a lease acquired before closing may have written after the preliminary flush
                     let seal_result = flush_transaction_partition(&db)
                         .and_then(|()| finish_sealing_partition(&partitions, id, db));
+                    if seal_result.is_ok()
+                        && let Some(filter_worker) = &filter_worker
+                    {
+                        filter_worker.notify_sealed(id);
+                    }
                     let snapshot_result = match frontier {
                         Some(frontier) => rebuild_composite_snapshot_until_ready(
                             &partitions,
+                            &filter_registry,
                             frontier,
                             &cancelled,
                         )
@@ -209,7 +542,7 @@ async fn seal_partition(
                     };
                     let snapshot_error = match snapshot_result {
                         Ok(Some(snapshot)) => {
-                            *published = Some(snapshot.0);
+                            *published = Some(snapshot);
                             None
                         }
                         Ok(None) => None,
@@ -235,27 +568,28 @@ async fn seal_partition(
 
 fn sealing_snapshot_can_be_withdrawn(
     partitions: &Arc<Mutex<PartitionManager>>,
-    published: Option<&Arc<RpcSnapshotInner>>,
+    published: Option<&RpcSnapshot>,
     id: PartitionId,
 ) -> bool {
-    let current_is_unshared = published.is_none_or(|snapshot| Arc::strong_count(snapshot) == 1);
+    let current_is_unshared = published.is_none_or(|snapshot| Arc::strong_count(&snapshot.0) == 1);
     if !current_is_unshared {
         return false;
     }
     let current_has_lease = published
-        .is_some_and(|snapshot| snapshot.writable_partitions.contains_key(&id));
+        .is_some_and(|snapshot| snapshot.0.writable_partitions.contains_key(&id));
     let expected_handles = 2 + usize::from(current_has_lease);
     partitions.lock().sealing_handle_strong_count(id) == Some(expected_handles)
 }
 
 fn rebuild_composite_snapshot_until_ready(
     partitions: &Arc<Mutex<PartitionManager>>,
+    filter_registry: &Arc<FilterRegistry>,
     frontier: BlockId,
     cancelled: &CancellationFlag,
 ) -> Result<RpcSnapshot> {
     let mut retry_delay = Duration::from_millis(10);
     loop {
-        match build_composite_snapshot(&mut partitions.lock(), frontier) {
+        match build_composite_snapshot(&mut partitions.lock(), filter_registry, frontier) {
             Ok(snapshot) => return Ok(snapshot),
             Err(e) if cancelled.check() => {
                 return Err(e).context(
@@ -321,23 +655,53 @@ fn flush_transaction_partition(db: &RpcTransactionsDb) -> Result<()> {
 
 impl RpcStorage {
     pub fn open(context: StorageContext, config: RpcTransactionPartitionsConfig) -> Result<Self> {
+        let filter_context = context.clone();
+        let filter_config = config.filters.clone();
+        let sealed_exact_lookup_semaphore = Arc::new(Semaphore::new(
+            filter_config.max_concurrent_sealed_exact_lookups,
+        ));
+        let sealed_exact_lookup_metrics = Arc::new(SealedExactLookupMetrics::default());
+        #[cfg(test)]
+        let sealed_exact_lookup_acquisitions = Arc::new(AtomicU64::new(0));
         let partitions = Arc::new(Mutex::new(PartitionManager::open(context, config)?));
-        let router = partitions.lock().router_db().clone();
         let current_state = partitions.lock().current_state_db().clone();
         let persisted_min_lt = partitions.lock().min_transaction_lt();
         let snapshots = Arc::new(SnapshotPublisher::default());
+        let filter_registry = Arc::new(FilterRegistry::default());
+        let filter_publisher = {
+            let partitions = partitions.clone();
+            let snapshots = snapshots.clone();
+            let filter_registry = filter_registry.clone();
+            Arc::new(move |id, bundle| {
+                publish_filter_snapshot(
+                    &partitions,
+                    &snapshots,
+                    &filter_registry,
+                    id,
+                    bundle,
+                )
+            })
+        };
+        let filter_worker = Arc::new(FilterWorker::new(
+            filter_context,
+            filter_config,
+            partitions.clone(),
+            filter_registry.clone(),
+            filter_publisher,
+        ));
         let sealing_notify = Arc::new(Notify::new());
         let sealing_cancel = CancellationFlag::new();
         let sealing_task = Some(spawn_sealing_worker(
             partitions.clone(),
             snapshots.clone(),
+            filter_registry.clone(),
             sealing_notify.clone(),
             sealing_cancel.clone(),
+            filter_worker.clone(),
         ));
         let this = Self {
             partitions,
-            router,
-            router_commit_guard: Default::default(),
+            block_set_admission: Default::default(),
             current_state,
             min_tx_lt: AtomicU64::new(u64::MAX),
             min_tx_lt_guard: Default::default(),
@@ -345,6 +709,15 @@ impl RpcStorage {
             sealing_notify,
             sealing_cancel,
             sealing_task,
+            filter_registry,
+            filter_worker,
+            sealed_exact_lookup_semaphore,
+            sealed_exact_lookup_metrics,
+            initial_snapshot_recorded: AtomicBool::new(false),
+            #[cfg(test)]
+            known_block_point_reads: AtomicU64::new(0),
+            #[cfg(test)]
+            sealed_exact_lookup_acquisitions,
         };
 
         let state = &this.current_state.state;
@@ -359,9 +732,6 @@ impl RpcStorage {
 
         tracing::debug!(?min_lt, "rpc storage initialized");
 
-        if this.partitions.lock().next_sealing_partition().is_some() {
-            this.sealing_notify.notify_one();
-        }
         Ok(this)
     }
 
@@ -370,6 +740,29 @@ impl RpcStorage {
     }
 
     pub(crate) fn reconcile_startup(
+        &self,
+        core_frontier: &BlockId,
+    ) -> Result<StartupReconciliation> {
+        let started_at = Instant::now();
+        let sealed_before = self.partitions.lock().sealed_cache_entry_count();
+        let result = self.reconcile_startup_inner(core_frontier);
+        let sealed_after = self.partitions.lock().sealed_cache_entry_count();
+        debug_assert!(sealed_after.saturating_sub(sealed_before) <= 1);
+        let result_label = if result.is_ok() { "success" } else { "failure" };
+        metrics::histogram!(
+            "tycho_storage_rpc_startup_reconciliation_duration_seconds",
+            "result" => result_label,
+        )
+        .record(started_at.elapsed());
+        metrics::histogram!(
+            "tycho_storage_rpc_startup_synchronous_sealed_opens",
+            "result" => result_label,
+        )
+        .record(sealed_after.saturating_sub(sealed_before) as f64);
+        result
+    }
+
+    fn reconcile_startup_inner(
         &self,
         core_frontier: &BlockId,
     ) -> Result<StartupReconciliation> {
@@ -403,48 +796,6 @@ impl RpcStorage {
             _ => {}
         }
 
-        let router_commit = self.load_router_commit()?;
-        match control_frontier {
-            None | Some(BlockId { seqno: 0, .. }) => match router_commit {
-                None => {}
-                Some(router_commit) if router_commit.seqno == 1 => {}
-                Some(router_commit) => anyhow::bail!(
-                    "router commit {} is more than one unpublished boundary ahead of zerostate; clear the RPC DB and reindex",
-                    router_commit
-                ),
-            },
-            Some(control_frontier) => {
-                let router_commit = router_commit.context(
-                    "RPC visible frontier has no router commit; clear the RPC DB and reindex",
-                )?;
-                if router_commit.seqno < control_frontier.seqno {
-                    anyhow::bail!(
-                        "router commit {} is behind RPC visible frontier {}; clear the RPC DB and reindex",
-                        router_commit,
-                        control_frontier
-                    );
-                }
-                if router_commit.seqno == control_frontier.seqno {
-                    anyhow::ensure!(
-                        router_commit == control_frontier,
-                        "router commit and RPC visible frontier have different full block ids at masterchain seqno {}",
-                        control_frontier.seqno
-                    );
-                } else {
-                    let next_seqno = control_frontier
-                        .seqno
-                        .checked_add(1)
-                        .context("router commit is ahead of the maximum masterchain sequence number")?;
-                    anyhow::ensure!(
-                        router_commit.seqno == next_seqno,
-                        "router commit {} is more than one unpublished boundary ahead of RPC visible frontier {}; clear the RPC DB and reindex",
-                        router_commit,
-                        control_frontier
-                    );
-                }
-            }
-        }
-
         if let Some(control_frontier) = control_frontier
             && control_frontier.seqno > 0
         {
@@ -453,67 +804,56 @@ impl RpcStorage {
                 .context("invalid persisted RPC visible frontier")?;
         }
 
+        let rebuild_current_state = control_frontier.is_some_and(|frontier| frontier.seqno > core_frontier.seqno)
+            || partitions.active_has_commit_after(core_frontier.seqno)?;
         Ok(StartupReconciliation {
             effective_frontier: *core_frontier,
-            rebuild_current_state: partitions.has_commits_after(core_frontier.seqno),
+            rebuild_current_state,
         })
     }
 
-    fn load_router_commit(&self) -> Result<Option<BlockId>> {
-        self.router
-            .state
-            .get(codec::router_commit_key())?
-            .map(|value| {
-                let block_id = codec::decode_router_commit(value.as_ref())
-                    .context("invalid persisted router commit")?;
-                anyhow::ensure!(
-                    block_id.is_masterchain() && block_id.seqno > 0,
-                    "persisted router commit must be a non-zero masterchain block"
-                );
-                Ok(block_id)
-            })
-            .transpose()
-    }
-
-    fn commit_router_frontier(&self, block_id: &BlockId) -> Result<()> {
-        anyhow::ensure!(
-            block_id.is_masterchain() && block_id.seqno > 0,
-            "router commit must be a non-zero masterchain block"
-        );
-        let _guard = self.router_commit_guard.lock();
-        let should_write = match self.load_router_commit()? {
-            None => true,
-            Some(current) if current.seqno < block_id.seqno => true,
-            Some(current) if current.seqno == block_id.seqno => {
-                anyhow::ensure!(
-                    current == *block_id,
-                    "router commit has a different full block id at masterchain seqno {}",
-                    block_id.seqno
-                );
-                false
-            }
-            Some(_) => false,
+    pub fn continue_lifecycle(&self) -> Result<()> {
+        let started_at = Instant::now();
+        let (result, notify_sealing) = {
+            let mut partitions = self.partitions.lock();
+            let result = partitions.continue_lifecycle();
+            let notify_sealing = result.is_ok() && partitions.next_sealing_partition().is_some();
+            (result, notify_sealing)
         };
-        if should_write {
-            let _stage = HistogramGuard::begin("tycho_storage_rpc_write_router_commit_time");
-            self.router
-                .state
-                .insert(codec::router_commit_key(), codec::encode_router_commit(block_id))
-                .context("failed to write RPC router commit")?;
+        metrics::histogram!(
+            "tycho_storage_rpc_deferred_lifecycle_duration_seconds",
+            "result" => if result.is_ok() { "success" } else { "failure" },
+        )
+        .record(started_at.elapsed());
+        if notify_sealing {
+            self.sealing_notify.notify_one();
         }
-        Ok(())
+        result
     }
 
     pub fn publish_snapshot(&self, visible_frontier: &BlockId) -> Result<()> {
+        let started_at = Instant::now();
+        let result = self.publish_snapshot_inner(visible_frontier);
+        if !self.initial_snapshot_recorded.swap(true, Ordering::AcqRel) {
+            metrics::histogram!(
+                "tycho_storage_rpc_initial_local_snapshot_duration_seconds",
+                "result" => if result.is_ok() { "success" } else { "failure" },
+            )
+            .record(started_at.elapsed());
+        }
+        result
+    }
+
+    fn publish_snapshot_inner(&self, visible_frontier: &BlockId) -> Result<()> {
         let mut published = self.snapshots.current.write();
         // an older replay must not regress an already published effective frontier
         let visible_frontier = match published.as_ref() {
-            Some(current) if current.visible_frontier.seqno > visible_frontier.seqno => {
-                current.visible_frontier
+            Some(current) if current.visible_frontier().seqno > visible_frontier.seqno => {
+                *current.visible_frontier()
             }
-            Some(current) if current.visible_frontier.seqno == visible_frontier.seqno => {
+            Some(current) if current.visible_frontier().seqno == visible_frontier.seqno => {
                 anyhow::ensure!(
-                    current.visible_frontier == *visible_frontier,
+                    current.visible_frontier() == visible_frontier,
                     "cannot publish a different RPC snapshot frontier at masterchain seqno {}",
                     visible_frontier.seqno
                 );
@@ -521,15 +861,36 @@ impl RpcStorage {
             }
             _ => *visible_frontier,
         };
-        let snapshot =
-            build_composite_snapshot(&mut self.partitions.lock(), visible_frontier)?;
-        *published = Some(snapshot.0);
+        let snapshot = build_composite_snapshot(
+            &mut self.partitions.lock(),
+            &self.filter_registry,
+            visible_frontier,
+        )?;
+        *published = Some(snapshot);
         Ok(())
     }
 
-    /// Publishes a completed masterchain block set before exposing the following set to readers.
+    pub fn load_snapshot(&self) -> Option<RpcSnapshot> {
+        self.snapshots.current.read().clone()
+    }
+
+    pub(crate) fn start_filter_worker(&self) {
+        self.filter_worker.start();
+    }
+
+    #[cfg(test)]
+    fn reset_known_block_point_reads(&self) {
+        self.known_block_point_reads.store(0, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    fn known_block_point_reads(&self) -> u64 {
+        self.known_block_point_reads.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    /// Test-only boundary helper that bypasses admission after a fixture has written its commit.
     pub fn commit_masterchain_block_set(&self, block_id: &BlockId) -> Result<()> {
-        self.commit_router_frontier(block_id)?;
         self.partitions.lock().commit_masterchain_block_set(block_id)?;
         self.publish_snapshot(block_id)?;
         if self.partitions.lock().next_sealing_partition().is_some() {
@@ -538,8 +899,266 @@ impl RpcStorage {
         Ok(())
     }
 
-    pub fn load_snapshot(&self) -> Option<RpcSnapshot> {
-        self.snapshots.current.read().clone().map(RpcSnapshot)
+    pub(crate) fn commit_masterchain_block_set_with_predecessor(
+        &self,
+        block_id: &BlockId,
+        predecessor: &BlockId,
+    ) -> Result<()> {
+        let mut admission = self.block_set_admission.lock();
+        let mut published = self.snapshots.current.write();
+        let mut token = admission
+            .as_ref()
+            .copied()
+            .context("RPC block-set boundary has no admitted token")?;
+        ensure!(
+            token.block_set == *block_id,
+            "RPC block-set boundary does not match the admitted block set"
+        );
+        ensure!(
+            published.as_ref().map(|snapshot| *snapshot.visible_frontier()) == Some(token.frontier),
+            "RPC effective frontier changed after block-set admission"
+        );
+
+        let notify_sealing = {
+            let mut partitions = self.partitions.lock();
+            let persisted = partitions.visible_frontier().copied();
+            if token.mode == BlockSetMode::New && persisted == Some(*block_id) {
+                token.mode = BlockSetMode::Replay;
+                *admission = Some(token);
+            }
+            if matches!(token.mode, BlockSetMode::New | BlockSetMode::Replay) {
+                let started_at = Instant::now();
+                let predecessor_result = (|| {
+                    ensure!(
+                        predecessor == &token.frontier,
+                        "RPC masterchain block-set predecessor does not match the admitted frontier"
+                    );
+                    Ok(())
+                })();
+                metrics::histogram!(
+                    "tycho_storage_rpc_predecessor_validation_duration_seconds",
+                    "stage" => "full_identity",
+                    "result" => if predecessor_result.is_ok() { "success" } else { "failure" },
+                )
+                .record(started_at.elapsed());
+                if let Err(error) = &predecessor_result {
+                    metrics::counter!(
+                        "tycho_storage_rpc_predecessor_validation_failures_total",
+                        "reason" => classify_predecessor_failure(error),
+                    )
+                    .increment(1);
+                }
+                predecessor_result?;
+            }
+            match token.mode {
+                BlockSetMode::New => ensure!(
+                    persisted == Some(token.frontier) || (token.frontier.seqno == 0 && persisted.is_none()),
+                    "RPC persisted frontier changed before a new block-set boundary"
+                ),
+                BlockSetMode::Replay => {
+                    let persisted = persisted.context("RPC replay boundary is missing the durable frontier")?;
+                    ensure!(
+                        persisted.seqno >= block_id.seqno,
+                        "RPC replay boundary durable frontier is behind the admitted block set"
+                    );
+                    if persisted.seqno == block_id.seqno {
+                        ensure!(
+                            persisted == *block_id,
+                            "RPC replay boundary has a different full durable frontier id"
+                        );
+                    }
+                }
+                BlockSetMode::Same => ensure!(
+                    persisted.is_some_and(|persisted| {
+                        persisted.seqno > token.frontier.seqno || persisted == token.frontier
+                    }),
+                    "RPC same-boundary retry has an invalid durable frontier"
+                ),
+            }
+            partitions.commit_masterchain_block_set_after_admission(
+                block_id,
+                token.mode == BlockSetMode::Same,
+            )?;
+            if token.mode != BlockSetMode::Same {
+                let snapshot =
+                    build_composite_snapshot(&mut partitions, &self.filter_registry, *block_id)?;
+                *published = Some(snapshot);
+            }
+            partitions.next_sealing_partition().is_some()
+        };
+
+        admission.take();
+        drop(published);
+        drop(admission);
+        if notify_sealing {
+            self.sealing_notify.notify_one();
+        }
+        Ok(())
+    }
+    fn admit_block_set(&self, block_set: &BlockId) -> Result<BlockSetMode> {
+        let mode = {
+            let published = self.snapshots.current.read();
+            let effective = published.as_ref().map(|snapshot| *snapshot.visible_frontier());
+            let persisted = self.partitions.lock().visible_frontier().copied();
+            match effective {
+                Some(effective) if effective == *block_set => BlockSetMode::Same,
+                _ if persisted.is_some_and(|persisted| persisted.seqno >= block_set.seqno) => {
+                    BlockSetMode::Replay
+                }
+                _ => BlockSetMode::New,
+            }
+        };
+        let result = self.admit_block_set_inner(block_set);
+        let recorded_mode = result.as_ref().copied().unwrap_or(mode);
+        metrics::counter!(
+            "tycho_storage_rpc_block_set_admission_checks_total",
+            "stage" => recorded_mode.as_str(),
+            "result" => if result.is_ok() { "success" } else { "failure" },
+        )
+        .increment(1);
+        if let Err(error) = &result {
+            metrics::counter!(
+                "tycho_storage_rpc_block_set_admission_failures_total",
+                "stage" => recorded_mode.as_str(),
+                "reason" => classify_admission_failure(error),
+            )
+            .increment(1);
+        }
+        result
+    }
+
+    fn admit_block_set_inner(&self, block_set: &BlockId) -> Result<BlockSetMode> {
+        let mut admission = self.block_set_admission.lock();
+        let mut published = self.snapshots.current.write();
+        let mut frontier = published
+            .as_ref()
+            .context("RPC block-set admission requires a published snapshot")?
+            .0
+            .visible_frontier;
+        let mut partitions = self.partitions.lock();
+
+        if partitions.has_creating_partition() {
+            let started_at = Instant::now();
+            let result = partitions.continue_lifecycle();
+            metrics::histogram!(
+                "tycho_storage_rpc_deferred_lifecycle_duration_seconds",
+                "result" => if result.is_ok() { "success" } else { "failure" },
+            )
+            .record(started_at.elapsed());
+            result?;
+            let snapshot =
+                build_composite_snapshot(&mut partitions, &self.filter_registry, frontier)?;
+            *published = Some(snapshot);
+            frontier = *published.as_ref().unwrap().visible_frontier();
+            self.sealing_notify.notify_one();
+        }
+
+        if let Some(token) = admission.as_mut() {
+            ensure!(
+                token.block_set == *block_set,
+                "RPC block-set admission is already held for {}, cannot write {}",
+                token.block_set,
+                block_set
+            );
+            ensure!(
+                frontier == token.frontier,
+                "RPC effective frontier changed while a block set is admitted"
+            );
+            let persisted = partitions.visible_frontier().copied();
+            match token.mode {
+                BlockSetMode::New => match persisted {
+                    Some(persisted) if persisted == token.frontier => {}
+                    None if token.frontier.seqno == 0 => {}
+                    Some(persisted) if persisted == *block_set => {
+                        token.mode = BlockSetMode::Replay;
+                    }
+                    Some(_) | None => anyhow::bail!(
+                        "RPC durable frontier changed while a new block set is admitted"
+                    ),
+                },
+                BlockSetMode::Replay => match persisted {
+                    Some(persisted) if persisted.seqno > block_set.seqno => {}
+                    Some(persisted) if persisted == *block_set => {}
+                    Some(_) | None => anyhow::bail!(
+                        "RPC replay token has an invalid durable frontier"
+                    ),
+                },
+                BlockSetMode::Same => ensure!(
+                    persisted.is_some_and(|persisted| {
+                        persisted.seqno > token.frontier.seqno || persisted == token.frontier
+                    }),
+                    "RPC same-boundary token has an invalid durable frontier"
+                ),
+            }
+            return Ok(token.mode);
+        }
+
+        let persisted = partitions.visible_frontier().copied();
+        let mode = if block_set == &frontier {
+            ensure!(
+                persisted.is_some_and(|persisted| {
+                    persisted.seqno > frontier.seqno || persisted == frontier
+                }),
+                "RPC same-boundary retry has an invalid durable frontier"
+            );
+            if block_set.seqno != 0 {
+                partitions.validate_masterchain_commit(block_set)?;
+            }
+            BlockSetMode::Same
+        } else {
+            ensure!(
+                block_set.seqno
+                    == frontier
+                        .seqno
+                        .checked_add(1)
+                        .context("RPC visible frontier sequence number overflow")?,
+                "RPC block-set sequence gap: admitted frontier is {}, incoming set is {}",
+                frontier.seqno,
+                block_set.seqno
+            );
+            match persisted {
+                Some(persisted) if persisted.seqno == frontier.seqno => {
+                    ensure!(
+                        persisted == frontier,
+                        "RPC persisted and effective frontiers have different full block ids at masterchain seqno {}",
+                        frontier.seqno
+                    );
+                    BlockSetMode::New
+                }
+                Some(persisted) if persisted.seqno >= block_set.seqno => {
+                    if persisted.seqno == block_set.seqno {
+                        ensure!(
+                            persisted == *block_set,
+                            "RPC replay frontier has a different full block id at masterchain seqno {}",
+                            block_set.seqno
+                        );
+                    }
+                    BlockSetMode::Replay
+                }
+                Some(persisted) => anyhow::bail!(
+                    "RPC persisted frontier {} cannot admit block set {} from effective frontier {}",
+                    persisted.seqno,
+                    block_set.seqno,
+                    frontier.seqno
+                ),
+                None => {
+                    ensure!(
+                        frontier.seqno == 0,
+                        "RPC persisted frontier is missing for effective frontier {frontier}"
+                    );
+                    BlockSetMode::New
+                }
+            }
+        };
+        if matches!(mode, BlockSetMode::New | BlockSetMode::Replay) && frontier.seqno != 0 {
+            partitions.validate_masterchain_commit(&frontier)?;
+        }
+        *admission = Some(BlockSetAdmission {
+            frontier,
+            block_set: *block_set,
+            mode,
+        });
+        Ok(mode)
     }
 
     fn require_snapshot(&self, snapshot: Option<&RpcSnapshot>) -> Result<RpcSnapshot> {
@@ -549,86 +1168,272 @@ impl RpcStorage {
             .context("No RPC snapshot available")
     }
 
-    fn resolve_router_location(
+    fn sealed_exact_lookup_context(
         &self,
-        snapshot: RpcSnapshot,
-        location: codec::RouterLocation,
-    ) -> Result<Option<RpcTransactionPartitionRead>> {
-        if location.mc_seqno > snapshot.visible_frontier().seqno {
-            return Ok(None);
-        }
-        let id = PartitionId(location.partition_id);
-        let descriptor = snapshot
-            .descriptor(id)
-            .with_context(|| {
-                format!(
-                    "router location references transaction partition {} outside the RPC snapshot",
-                    id.0
-                )
-            })?;
-        anyhow::ensure!(
-            descriptor.first.block_id.is_some()
-                && descriptor.last.block_id.is_some()
-                && descriptor.first.mc_seqno <= location.mc_seqno
-                && location.mc_seqno <= descriptor.last.mc_seqno,
-            "router location masterchain seqno {} is outside transaction partition {} bounds",
-            location.mc_seqno,
-            id.0
-        );
-        acquire_partition_read(&self.partitions, snapshot, id).map(Some)
+        namespace: FilterNamespace,
+    ) -> SealedExactLookupContext {
+        SealedExactLookupContext::new(
+            self.sealed_exact_lookup_semaphore.clone(),
+            self.sealed_exact_lookup_metrics.clone(),
+            namespace,
+            #[cfg(test)]
+            self.sealed_exact_lookup_acquisitions.clone(),
+        )
     }
 
     fn transaction_partition(
         &self,
         hash: &HashBytes,
         snapshot: RpcSnapshot,
-    ) -> Result<Option<(codec::RouterLocation, RpcTransactionPartitionRead)>> {
-        let Some(value) = self.router.transactions.get_ext(hash, snapshot.router())? else {
-            return Ok(None);
-        };
-        let location = codec::decode_router_location(value.as_ref())
-            .context("invalid transaction router location")?;
-        drop(value);
-        Ok(self
-            .resolve_router_location(snapshot, location)?
-            .map(|partition| (location, partition)))
+    ) -> Result<Option<LocatedTransaction>> {
+        let mut exact_lookup = self.sealed_exact_lookup_context(FilterNamespace::Transactions);
+        for descriptor in snapshot.0.descriptors.iter().rev() {
+            if descriptor.first.block_id.is_none() || descriptor.first.mc_seqno > snapshot.visible_frontier().seqno {
+                continue;
+            }
+            exact_lookup.consider_partition();
+            let mut filtered_positive = false;
+            if descriptor.lifecycle == codec::ManifestLifecycle::Sealed {
+                if snapshot.filter_bundle(descriptor.id).is_some() {
+                    let might_contain = snapshot.filter_might_contain(
+                        descriptor.id,
+                        FilterNamespace::Transactions,
+                        hash.as_slice(),
+                    )?;
+                    exact_lookup.record_filter(might_contain);
+                    if !might_contain {
+                        continue;
+                    }
+                    filtered_positive = true;
+                }
+                exact_lookup.acquire()?;
+                exact_lookup.record_exact_probe(
+                    "sealed",
+                    if filtered_positive { "filter_positive" } else { "unfiltered" },
+                );
+            } else {
+                exact_lookup.record_exact_probe(
+                    if descriptor.lifecycle == codec::ManifestLifecycle::Active {
+                        "active"
+                    } else {
+                        "sealing"
+                    },
+                    "local_only",
+                );
+            }
+            let partition = acquire_partition_read(&self.partitions, snapshot.clone(), descriptor.id)?;
+            if let Some(value) = partition.get(&partition.lease.transactions_by_hash, hash)? {
+                let info = TransactionInfo::from_bytes(&value).context("invalid local transaction hash locator")?;
+                if info.mc_seqno <= snapshot.visible_frontier().seqno {
+                    exact_lookup.record_hit(if descriptor.lifecycle == codec::ManifestLifecycle::Sealed {
+                        "sealed"
+                    } else if descriptor.lifecycle == codec::ManifestLifecycle::Active {
+                        "active"
+                    } else {
+                        "sealing"
+                    });
+                    return Ok(Some(LocatedTransaction {
+                        partition,
+                        info,
+                        key: value[..tables::Transactions::KEY_LEN].to_vec(),
+                        sealed_exact_lookup_permit: exact_lookup.into_permit(),
+                    }));
+                }
+                exact_lookup.record_rejection(
+                    if descriptor.lifecycle == codec::ManifestLifecycle::Sealed {
+                        "sealed"
+                    } else if descriptor.lifecycle == codec::ManifestLifecycle::Active {
+                        "active"
+                    } else {
+                        "sealing"
+                    },
+                    "future_record",
+                );
+            } else if filtered_positive {
+                exact_lookup.record_false_positive();
+            }
+        }
+        exact_lookup.record_miss();
+        Ok(None)
     }
 
     fn inbound_message_partition(
         &self,
         hash: &HashBytes,
         snapshot: RpcSnapshot,
-    ) -> Result<Option<(codec::RouterLocation, RpcTransactionPartitionRead)>> {
-        let Some(value) = self
-            .router
-            .inbound_messages
-            .get_ext(hash, snapshot.router())?
-        else {
-            return Ok(None);
-        };
-        let location = codec::decode_router_location(value.as_ref())
-            .context("invalid inbound-message router location")?;
-        drop(value);
-        Ok(self
-            .resolve_router_location(snapshot, location)?
-            .map(|partition| (location, partition)))
+    ) -> Result<Option<LocatedInboundTransaction>> {
+        let mut exact_lookup = self.sealed_exact_lookup_context(FilterNamespace::InboundMessages);
+        for descriptor in snapshot.0.descriptors.iter().rev() {
+            if descriptor.first.block_id.is_none() || descriptor.first.mc_seqno > snapshot.visible_frontier().seqno {
+                continue;
+            }
+            exact_lookup.consider_partition();
+            let mut filtered_positive = false;
+            if descriptor.lifecycle == codec::ManifestLifecycle::Sealed {
+                if snapshot.filter_bundle(descriptor.id).is_some() {
+                    let might_contain = snapshot.filter_might_contain(
+                        descriptor.id,
+                        FilterNamespace::InboundMessages,
+                        hash.as_slice(),
+                    )?;
+                    exact_lookup.record_filter(might_contain);
+                    if !might_contain {
+                        continue;
+                    }
+                    filtered_positive = true;
+                }
+                exact_lookup.acquire()?;
+                exact_lookup.record_exact_probe(
+                    "sealed",
+                    if filtered_positive { "filter_positive" } else { "unfiltered" },
+                );
+            } else {
+                exact_lookup.record_exact_probe(
+                    if descriptor.lifecycle == codec::ManifestLifecycle::Active {
+                        "active"
+                    } else {
+                        "sealing"
+                    },
+                    "local_only",
+                );
+            }
+            let partition = acquire_partition_read(&self.partitions, snapshot.clone(), descriptor.id)?;
+            if let Some(key) = partition.get(&partition.lease.transactions_by_in_msg, hash)? {
+                anyhow::ensure!(key.len() == tables::Transactions::KEY_LEN, "invalid local inbound-message locator length");
+                let tx = partition.get(&partition.lease.transactions, &key)?.context("inbound-message locator points to a missing local transaction")?;
+                if TransactionData::related_mc_seqno(&tx)? <= snapshot.visible_frontier().seqno {
+                    let transaction = TransactionData::from_owned(tx);
+                    anyhow::ensure!(
+                        transaction.in_msg_hash().as_ref() == Some(hash),
+                        "inbound-message locator points to a transaction with a different message hash"
+                    );
+                    exact_lookup.record_hit(if descriptor.lifecycle == codec::ManifestLifecycle::Sealed {
+                        "sealed"
+                    } else if descriptor.lifecycle == codec::ManifestLifecycle::Active {
+                        "active"
+                    } else {
+                        "sealing"
+                    });
+                    return Ok(Some(LocatedInboundTransaction {
+                        partition,
+                        transaction,
+                        sealed_exact_lookup_permit: exact_lookup.into_permit(),
+                    }));
+                }
+                exact_lookup.record_rejection(
+                    if descriptor.lifecycle == codec::ManifestLifecycle::Sealed {
+                        "sealed"
+                    } else if descriptor.lifecycle == codec::ManifestLifecycle::Active {
+                        "active"
+                    } else {
+                        "sealing"
+                    },
+                    "future_record",
+                );
+            } else if filtered_positive {
+                exact_lookup.record_false_positive();
+            }
+        }
+        exact_lookup.record_miss();
+        Ok(None)
     }
 
     fn block_partition(
         &self,
         block_id: &BlockIdShort,
         snapshot: RpcSnapshot,
-    ) -> Result<Option<(codec::RouterLocation, RpcTransactionPartitionRead)>> {
-        let key = codec::encode_short_block_id(block_id);
-        let Some(value) = self.router.blocks.get_ext(key, snapshot.router())? else {
+    ) -> Result<Option<LocatedBlock>> {
+        let Ok(workchain) = i8::try_from(block_id.shard.workchain()) else {
             return Ok(None);
         };
-        let location =
-            codec::decode_router_location(value.as_ref()).context("invalid block router location")?;
-        drop(value);
-        Ok(self
-            .resolve_router_location(snapshot, location)?
-            .map(|partition| (location, partition)))
+        let mut key = [0; tables::KnownBlocks::KEY_LEN];
+        key[0] = workchain as u8;
+        key[1..9].copy_from_slice(&block_id.shard.prefix().to_be_bytes());
+        key[9..13].copy_from_slice(&block_id.seqno.to_be_bytes());
+        let is_masterchain = block_id.is_masterchain();
+        let descriptors = if is_masterchain {
+            let Some(descriptor) = snapshot.descriptor_for_mc_seqno(block_id.seqno) else {
+                return Ok(None);
+            };
+            std::slice::from_ref(descriptor)
+        } else {
+            snapshot.0.descriptors.as_slice()
+        };
+        let mut exact_lookup = self.sealed_exact_lookup_context(FilterNamespace::Blocks);
+        for descriptor in descriptors.iter().rev() {
+            if descriptor.first.block_id.is_none() || descriptor.first.mc_seqno > snapshot.visible_frontier().seqno {
+                continue;
+            }
+            exact_lookup.consider_partition();
+            let mut filtered_positive = false;
+            if descriptor.lifecycle == codec::ManifestLifecycle::Sealed {
+                if !is_masterchain && snapshot.filter_bundle(descriptor.id).is_some() {
+                    let might_contain = snapshot.filter_might_contain(
+                        descriptor.id,
+                        FilterNamespace::Blocks,
+                        &key,
+                    )?;
+                    exact_lookup.record_filter(might_contain);
+                    if !might_contain {
+                        continue;
+                    }
+                    filtered_positive = true;
+                }
+                exact_lookup.acquire()?;
+                exact_lookup.record_exact_probe(
+                    "sealed",
+                    if filtered_positive { "filter_positive" } else { "unfiltered" },
+                );
+            } else {
+                exact_lookup.record_exact_probe(
+                    if descriptor.lifecycle == codec::ManifestLifecycle::Active {
+                        "active"
+                    } else {
+                        "sealing"
+                    },
+                    "local_only",
+                );
+            }
+            let partition = acquire_partition_read(&self.partitions, snapshot.clone(), descriptor.id)?;
+            #[cfg(test)]
+            self.known_block_point_reads.fetch_add(1, Ordering::AcqRel);
+            if let Some(value) = partition.get(&partition.lease.known_blocks, key)? {
+                anyhow::ensure!(value.len() >= 68, "invalid known block value");
+                let related_mc_seqno = u32::from_le_bytes(value[64..68].try_into().unwrap());
+                if is_masterchain {
+                    anyhow::ensure!(related_mc_seqno == block_id.seqno, "known masterchain block has a different related masterchain seqno");
+                }
+                if related_mc_seqno <= snapshot.visible_frontier().seqno {
+                    exact_lookup.record_hit(if descriptor.lifecycle == codec::ManifestLifecycle::Sealed {
+                        "sealed"
+                    } else if descriptor.lifecycle == codec::ManifestLifecycle::Active {
+                        "active"
+                    } else {
+                        "sealing"
+                    });
+                    return Ok(Some(LocatedBlock {
+                        partition,
+                        key,
+                        value,
+                        sealed_exact_lookup_permit: exact_lookup.into_permit(),
+                    }));
+                }
+                exact_lookup.record_rejection(
+                    if descriptor.lifecycle == codec::ManifestLifecycle::Sealed {
+                        "sealed"
+                    } else if descriptor.lifecycle == codec::ManifestLifecycle::Active {
+                        "active"
+                    } else {
+                        "sealing"
+                    },
+                    "future_record",
+                );
+            } else if filtered_positive {
+                exact_lookup.record_false_positive();
+            }
+        }
+        exact_lookup.record_miss();
+        Ok(None)
     }
 
     pub fn store_instance_id(&self, id: InstanceId) {
@@ -731,27 +1536,17 @@ impl RpcStorage {
         let Ok(workchain) = i8::try_from(block_id.shard.workchain()) else {
             return Ok(None);
         };
-        let mut key = [0; tables::KnownBlocks::KEY_LEN];
-        key[0] = workchain as u8;
-        key[1..9].copy_from_slice(&block_id.shard.prefix().to_be_bytes());
-        key[9..13].copy_from_slice(&block_id.seqno.to_be_bytes());
-
         let snapshot = self.require_snapshot(snapshot)?;
-        let Some((location, partition)) =
-            self.block_partition(block_id, snapshot)?
+        let Some(LocatedBlock {
+            value,
+            sealed_exact_lookup_permit,
+            ..
+        }) =
+            self.block_partition(block_id, snapshot.clone())?
         else {
             return Ok(None);
         };
-        let table = &partition.lease.known_blocks;
-        let value = partition
-            .get(table, key)?
-            .context("block router points to a missing local known-block record")?;
-        anyhow::ensure!(value.len() >= 68, "invalid known block value");
         let mc_seqno = u32::from_le_bytes(value[64..68].try_into().unwrap());
-        anyhow::ensure!(
-            mc_seqno == location.mc_seqno,
-            "block router and local known-block record have different related masterchain seqnos"
-        );
 
         let brief_info = BriefBlockInfo::load_from_bytes(workchain as i32, &value[68..])
             .context("invalid brief info")?;
@@ -763,7 +1558,9 @@ impl RpcStorage {
             file_hash: HashBytes::from_slice(&value[32..64]),
         };
 
-        Ok(Some((block_id, mc_seqno, brief_info)))
+        let result = (block_id, mc_seqno, brief_info);
+        drop(sealed_exact_lookup_permit);
+        Ok(Some(result))
     }
 
     pub fn get_brief_shards_descr(
@@ -902,45 +1699,32 @@ impl RpcStorage {
         cursor: Option<&BlockTransactionsCursor>,
         snapshot: Option<RpcSnapshot>,
     ) -> Result<Option<BlockTransactionIdsIter>> {
-        let Ok(workchain) = i8::try_from(block_id.shard.workchain()) else {
-            return Ok(None);
-        };
-
         let snapshot = self.require_snapshot(snapshot.as_ref())?;
-        let Some((location, partition)) =
-            self.block_partition(block_id, snapshot)?
+        let Some(LocatedBlock {
+            partition,
+            key,
+            value,
+            sealed_exact_lookup_permit,
+        }) =
+            self.block_partition(block_id, snapshot.clone())?
         else {
             return Ok(None);
         };
 
         let mut range_from = [0x00; tables::BlockTransactions::KEY_LEN];
-        range_from[0] = workchain as u8;
-        range_from[1..9].copy_from_slice(&block_id.shard.prefix().to_be_bytes());
-        range_from[9..13].copy_from_slice(&block_id.seqno.to_be_bytes());
+        range_from[0..13].copy_from_slice(&key);
 
         if let Some(cursor) = cursor {
             range_from[13..45].copy_from_slice(cursor.hash.as_slice());
             range_from[45..53].copy_from_slice(&cursor.lt.to_be_bytes());
         }
 
-        let table = &partition.lease.known_blocks;
-        let ref_by_mc_seqno;
-        let block_id = match partition.get(table, &range_from[0..13])? {
-            Some(value) => {
-                anyhow::ensure!(value.len() >= 68, "invalid known block value");
-                ref_by_mc_seqno = u32::from_le_bytes(value[64..68].try_into().unwrap());
-                anyhow::ensure!(
-                    ref_by_mc_seqno == location.mc_seqno,
-                    "block router and local known-block record have different related masterchain seqnos"
-                );
-                BlockId {
-                    shard: block_id.shard,
-                    seqno: block_id.seqno,
-                    root_hash: HashBytes::from_slice(&value[0..32]),
-                    file_hash: HashBytes::from_slice(&value[32..64]),
-                }
-            }
-            None => return Ok(None),
+        let ref_by_mc_seqno = u32::from_le_bytes(value[64..68].try_into().unwrap());
+        let block_id = BlockId {
+            shard: block_id.shard,
+            seqno: block_id.seqno,
+            root_hash: HashBytes::from_slice(&value[0..32]),
+            file_hash: HashBytes::from_slice(&value[32..64]),
         };
 
         let mut range_to = [0xff; tables::BlockTransactions::KEY_LEN];
@@ -978,6 +1762,7 @@ impl RpcStorage {
             // SAFETY: Iterator was created from the same DB instance.
             inner: unsafe { weedb::OwnedRawIterator::new(rocksdb.clone(), iter) },
             partition,
+            _sealed_exact_lookup_permit: sealed_exact_lookup_permit,
         }))
     }
 
@@ -1044,36 +1829,35 @@ impl RpcStorage {
     where
         F: FnOnce(TransactionInfo, &[u8]) -> R,
     {
-        let Some((location, partition)) =
-            self.transaction_partition(hash, snapshot)?
+        let Some(LocatedTransaction {
+            partition,
+            info,
+            key,
+            sealed_exact_lookup_permit,
+        }) =
+            self.transaction_partition(hash, snapshot.clone())?
         else {
             return Ok(None);
         };
-        let tx_info = partition
-            .get_pinned(&partition.lease.transactions_by_hash, hash)?
-            .context("transaction router points to a missing local hash locator")?;
-        let info = TransactionInfo::from_bytes(tx_info.as_ref())
-            .context("transaction router points to an invalid local hash locator")?;
-        anyhow::ensure!(
-            info.mc_seqno == location.mc_seqno,
-            "transaction router and local hash locator have different related masterchain seqnos"
-        );
         let tx = partition
             .get_pinned(
                 &partition.lease.transactions,
-                &tx_info.as_ref()[..tables::Transactions::KEY_LEN],
+                &key,
             )?
             .context("transaction hash locator points to a missing local transaction")?;
         let transaction_mc_seqno = TransactionData::related_mc_seqno(tx.as_ref())?;
         anyhow::ensure!(
-            transaction_mc_seqno == location.mc_seqno,
-            "transaction router and local transaction have different related masterchain seqnos"
+            transaction_mc_seqno == info.mc_seqno,
+            "transaction hash locator and local transaction have different related masterchain seqnos"
         );
         anyhow::ensure!(
             TransactionData::read_tx_hash(tx.as_ref()) == *hash,
             "transaction hash locator points to a transaction with a different hash"
         );
-        Ok(Some(map(info, tx.as_ref())))
+        let result = map(info, tx.as_ref());
+        drop(tx);
+        drop(sealed_exact_lookup_permit);
+        Ok(Some(result))
     }
 
     pub fn get_transaction(
@@ -1171,31 +1955,18 @@ impl RpcStorage {
         snapshot: Option<&RpcSnapshot>,
     ) -> Result<Option<TransactionData<'db>>> {
         let snapshot = self.require_snapshot(snapshot)?;
-        let Some((location, partition)) =
-            self.inbound_message_partition(in_msg_hash, snapshot)?
+        let Some(LocatedInboundTransaction {
+            partition,
+            transaction,
+            sealed_exact_lookup_permit,
+        }) =
+            self.inbound_message_partition(in_msg_hash, snapshot.clone())?
         else {
             return Ok(None);
         };
-        let key = partition
-            .get(&partition.lease.transactions_by_in_msg, in_msg_hash)?
-            .context("inbound-message router points to a missing local message locator")?;
-        anyhow::ensure!(
-            key.len() == tables::Transactions::KEY_LEN,
-            "invalid local inbound-message locator length"
-        );
-        let tx = partition
-            .get(&partition.lease.transactions, &key)?
-            .context("inbound-message locator points to a missing local transaction")?;
-        anyhow::ensure!(
-            TransactionData::related_mc_seqno(&tx)? == location.mc_seqno,
-            "inbound-message router and local transaction have different related masterchain seqnos"
-        );
-        let tx = TransactionData::from_owned(tx);
-        anyhow::ensure!(
-            tx.in_msg_hash().as_ref() == Some(in_msg_hash),
-            "inbound-message locator points to a transaction with a different message hash"
-        );
-        Ok(Some(tx))
+        let _partition = partition;
+        drop(sealed_exact_lookup_permit);
+        Ok(Some(transaction))
     }
 
     #[tracing::instrument(
@@ -1363,6 +2134,8 @@ impl RpcStorage {
         let is_masterchain = block.id().is_masterchain();
         let mc_seqno = mc_block_id.seqno;
 
+        let admission_mode = self.admit_block_set(mc_block_id)?;
+
         let shard_hashes = is_masterchain
             .then(|| {
                 let custom = block.load_custom()?;
@@ -1377,8 +2150,18 @@ impl RpcStorage {
             .map(|value| codec::decode_partition_commit(value.as_ref()))
             .transpose()?;
         if let Some(commit) = existing_commit {
-            // replay validates the local batch, then repeats the global router and current-state stages
+            // replay validates the local batch, then repeats the current-state stage
             anyhow::ensure!(commit.block_id == *block.id() && commit.digest == block.id().root_hash, "partition commit marker identity mismatch for {}", block.id());
+        } else if admission_mode != BlockSetMode::New {
+            anyhow::bail!(
+                "{} block-set replay is missing commit marker for {}",
+                match admission_mode {
+                    BlockSetMode::Replay => "RPC",
+                    BlockSetMode::Same => "same-boundary",
+                    BlockSetMode::New => unreachable!(),
+                },
+                block.id()
+            );
         } else if partition_lease.lifecycle() == codec::ManifestLifecycle::Sealed {
             anyhow::bail!("sealed transaction partition {} is missing commit marker for {}", partition_id.0, block.id());
         } else {
@@ -1393,7 +2176,6 @@ impl RpcStorage {
         }
         let db = partition_lease.db().clone();
         let newly_committed = existing_commit.is_none();
-        let router = self.router.clone();
         let current_state = self.current_state.clone();
 
         let rpc_blacklist = rpc_blacklist.map(|x| x.load());
@@ -1439,7 +2221,6 @@ impl RpcStorage {
 
             let mut write_batch = rocksdb::WriteBatch::default();
             let mut stats = BlockWriteStats::default();
-            let mut router_batch = rocksdb::WriteBatch::default();
             let mut current_state_batch = rocksdb::WriteBatch::default();
             let tx_cf = &db.transactions.cf();
             let tx_by_hash_cf = &db.transactions_by_hash.cf();
@@ -1613,16 +2394,12 @@ impl RpcStorage {
                     // Write tx data and indices
                     write_batch.put_cf(tx_by_hash_cf, tx_hash.as_slice(), tx_info.as_slice());
                     write_batch.put_cf(block_txs_cf, block_tx.as_slice(), tx_hash.as_slice());
-                    let location = codec::encode_router_location(codec::RouterLocation { partition_id: partition_id.0, mc_seqno });
-                    router_batch.put_cf(&router.transactions.cf(), tx_hash.as_slice(), location);
-
                     if let Some(msg_hash) = msg_hash {
                         write_batch.put_cf(
                             tx_by_in_msg_cf,
                             msg_hash,
                             &tx_info[..tables::Transactions::KEY_LEN],
                         );
-                        router_batch.put_cf(&router.inbound_messages.cf(), msg_hash, location);
                     }
 
                     write_batch.put_cf(tx_cf, &tx_info[..tables::Transactions::KEY_LEN], &tx_value);
@@ -1668,8 +2445,6 @@ impl RpcStorage {
                 &block_tx[0..tables::KnownBlocks::KEY_LEN],
                 buffer.as_slice(),
             );
-            let location = codec::encode_router_location(codec::RouterLocation { partition_id: partition_id.0, mc_seqno });
-            router_batch.put_cf(&router.blocks.cf(), codec::encode_short_block_id(&block_id.as_short_id()), location);
 
             drop(prepare_batch_histogram);
 
@@ -1705,11 +2480,6 @@ impl RpcStorage {
                 let _stage = HistogramGuard::begin("tycho_storage_rpc_write_partition_time");
                 db.rocksdb().write_opt(write_batch, db.transactions.write_config()).context("failed to write RPC partition stage")?;
             }
-            let _stage = HistogramGuard::begin("tycho_storage_rpc_write_router_time");
-            router
-                .rocksdb()
-                .write_opt(router_batch, router.transactions.write_config()).context("failed to write RPC router stage")?;
-            drop(_stage);
             let _stage = HistogramGuard::begin("tycho_storage_rpc_write_current_state_time");
             current_state
                 .rocksdb()
@@ -2159,6 +2929,7 @@ impl Drop for RpcStorage {
         if let Some(task) = self.sealing_task.take() {
             task.abort();
         }
+        self.filter_worker.shutdown();
     }
 }
 
@@ -2173,16 +2944,83 @@ struct RpcSnapshotInner {
     manifest_epoch: u64,
     descriptors: Vec<PartitionDescriptor>,
     descriptor_indices: FastHashMap<PartitionId, usize>,
-    router: weedb::OwnedSnapshot,
     current_state: weedb::OwnedSnapshot,
     writable_partitions: BTreeMap<PartitionId, RpcTransactionPartitionSnapshot>,
 }
 
+fn snapshot_filter_bundles(
+    partitions: &PartitionManager,
+    filter_registry: &FilterRegistry,
+    descriptors: &[PartitionDescriptor],
+) -> Result<BTreeMap<PartitionId, Option<Arc<ValidatedFilterBundle>>>> {
+    let mut filter_bundles = BTreeMap::new();
+    for descriptor in descriptors {
+        let bundle = if descriptor.lifecycle == codec::ManifestLifecycle::Sealed {
+            let manifest_digest = partitions.sealed_manifest_digest(descriptor.id)?;
+            filter_registry
+                .get(descriptor.id)
+                .filter(|bundle| bundle.manifest_digest() == manifest_digest)
+        } else {
+            None
+        };
+        filter_bundles.insert(descriptor.id, bundle);
+    }
+    Ok(filter_bundles)
+}
+
+fn publish_filter_snapshot(
+    partitions: &Mutex<PartitionManager>,
+    snapshots: &SnapshotPublisher,
+    filter_registry: &FilterRegistry,
+    id: PartitionId,
+    bundle: Arc<ValidatedFilterBundle>,
+) -> Result<()> {
+    let mut published = snapshots.current.write();
+    let current = published
+        .as_ref()
+        .context("RPC filter publication requires a correctness-ready snapshot")?;
+    let partitions = partitions.lock();
+    anyhow::ensure!(
+        partitions.manifest_epoch() == current.manifest_epoch(),
+        "RPC partition manifest changed before filter-only snapshot publication"
+    );
+    let descriptor = current
+        .descriptor(id)
+        .with_context(|| format!("filtered partition {} is missing from the RPC snapshot", id.0))?;
+    anyhow::ensure!(
+        descriptor.lifecycle == codec::ManifestLifecycle::Sealed,
+        "RPC filters can only be published for a sealed partition"
+    );
+    anyhow::ensure!(
+        bundle.partition_id() == id.0
+            && partitions.sealed_manifest_digest(id)? == bundle.manifest_digest(),
+        "RPC filter bundle does not match the current sealed partition manifest"
+    );
+    let mut filter_bundles =
+        snapshot_filter_bundles(&partitions, filter_registry, &current.0.descriptors)?;
+    filter_bundles.insert(id, Some(bundle.clone()));
+    // filter-only publication must retain the exact immutable correctness base
+    let next = RpcSnapshot(current.0.clone(), Arc::new(filter_bundles));
+    anyhow::ensure!(
+        next.visible_frontier() == current.visible_frontier()
+            && next.manifest_epoch() == current.manifest_epoch(),
+        "filter-only RPC snapshot publication changed visibility"
+    );
+    filter_registry.install(id, bundle);
+    *published = Some(next);
+    Ok(())
+}
+
 fn build_composite_snapshot(
     partitions: &mut PartitionManager,
+    filter_registry: &FilterRegistry,
     visible_frontier: BlockId,
 ) -> Result<RpcSnapshot> {
-    let descriptors = partitions.descriptors();
+    let descriptors = partitions
+        .descriptors()
+        .into_iter()
+        .filter(|descriptor| descriptor.lifecycle != codec::ManifestLifecycle::Creating)
+        .collect::<Vec<_>>();
     let descriptor_indices = descriptors
         .iter()
         .enumerate()
@@ -2203,12 +3041,7 @@ fn build_composite_snapshot(
                     },
                 );
             }
-            codec::ManifestLifecycle::Creating => {
-                anyhow::bail!(
-                    "cannot publish RPC snapshot while transaction partition {} is creating",
-                    descriptor.id.0
-                );
-            }
+            codec::ManifestLifecycle::Creating => unreachable!(),
             // sealed partitions are immutable and opened through the bounded cache on demand
             codec::ManifestLifecycle::Sealed => {}
         }
@@ -2217,20 +3050,26 @@ fn build_composite_snapshot(
         writable_partitions.contains_key(&partitions.active_id()),
         "active transaction partition is missing from RPC snapshot"
     );
-    Ok(RpcSnapshot(Arc::new(RpcSnapshotInner {
-        visible_frontier,
-        manifest_epoch: partitions.manifest_epoch(),
-        descriptors,
-        descriptor_indices,
-        router: partitions.router_db().owned_snapshot(),
-        current_state: partitions.current_state_db().owned_snapshot(),
-        writable_partitions,
-    })))
+    let filter_bundles = snapshot_filter_bundles(partitions, filter_registry, &descriptors)?;
+    Ok(RpcSnapshot(
+        Arc::new(RpcSnapshotInner {
+            visible_frontier,
+            manifest_epoch: partitions.manifest_epoch(),
+            descriptors,
+            descriptor_indices,
+            current_state: partitions.current_state_db().owned_snapshot(),
+            writable_partitions,
+        }),
+        Arc::new(filter_bundles),
+    ))
 }
 
 #[derive(Clone)]
-#[repr(transparent)]
-pub struct RpcSnapshot(Arc<RpcSnapshotInner>);
+pub struct RpcSnapshot(
+    Arc<RpcSnapshotInner>,
+    // every visible partition has one frozen optional acceleration bundle
+    Arc<BTreeMap<PartitionId, Option<Arc<ValidatedFilterBundle>>>>,
+);
 
 impl RpcSnapshot {
     pub fn visible_frontier(&self) -> &BlockId {
@@ -2248,20 +3087,36 @@ impl RpcSnapshot {
             .map(|index| &self.0.descriptors[*index])
     }
 
+    fn filter_bundle(&self, id: PartitionId) -> Option<&Arc<ValidatedFilterBundle>> {
+        self.1.get(&id).and_then(Option::as_ref)
+    }
+
+    fn filter_might_contain(
+        &self,
+        id: PartitionId,
+        namespace: FilterNamespace,
+        key: &[u8],
+    ) -> Result<bool> {
+        match self.filter_bundle(id) {
+            Some(bundle) => bundle.filter(namespace).contains(key),
+            None => Ok(true),
+        }
+    }
+
     fn descriptor_for_mc_seqno(&self, mc_seqno: u32) -> Option<&PartitionDescriptor> {
         if mc_seqno > self.visible_frontier().seqno {
             return None;
         }
-        self.0.descriptors.iter().find(|descriptor| {
-            descriptor.first.block_id.is_some()
-                && descriptor.last.block_id.is_some()
-                && descriptor.first.mc_seqno <= mc_seqno
-                && mc_seqno <= descriptor.last.mc_seqno
-        })
-    }
-
-    fn router(&self) -> &weedb::OwnedSnapshot {
-        &self.0.router
+        // non-empty manifest ranges are ordered and precede any empty range
+        let index = self.0.descriptors.partition_point(|descriptor| {
+            descriptor.last.block_id.is_some() && descriptor.last.mc_seqno < mc_seqno
+        });
+        let descriptor = self.0.descriptors.get(index)?;
+        (descriptor.first.block_id.is_some()
+            && descriptor.last.block_id.is_some()
+            && descriptor.first.mc_seqno <= mc_seqno
+            && mc_seqno <= descriptor.last.mc_seqno)
+            .then_some(descriptor)
     }
 
     #[cfg(test)]
@@ -2492,6 +3347,7 @@ pub struct BlockTransactionIdsIter {
     is_reversed: bool,
     inner: weedb::OwnedRawIterator,
     partition: RpcTransactionPartitionRead,
+    _sealed_exact_lookup_permit: Option<TrackedSealedExactLookupPermit>,
 }
 
 impl BlockTransactionIdsIter {
@@ -3144,9 +4000,9 @@ const INSTANCE_ID: &[u8] = b"instance_id";
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::str::FromStr;
-    use tycho_rpc_subscriptions::SubscriberManagerConfig;
-    use tycho_types::boc::Boc;
+    use super::super::filter::{FilterBuilder, FilterCatalogStore, FilterFileIdentity};
+    use super::super::partition::tests::{TestMetricsRecorder, persist_initial_creating};
+    use std::sync::Barrier;
 
     fn test_partitions_config() -> RpcTransactionPartitionsConfig {
         RpcTransactionPartitionsConfig {
@@ -3154,7 +4010,22 @@ mod tests {
             target_blob_bytes: 1,
             target_index_records: 1,
             max_open_sealed_partitions: 1,
+            ..Default::default()
         }
+    }
+
+    fn assert_sealed_exact_lookup_error<T>(
+        result: Result<T>,
+        expected: SealedExactLookupAvailabilityError,
+    ) {
+        let error = match result {
+            Ok(_) => panic!("sealed exact lookup must fail"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.downcast_ref::<SealedExactLookupAvailabilityError>(),
+            Some(&expected),
+        );
     }
 
     fn masterchain_block(seqno: u32) -> BlockId {
@@ -3173,17 +4044,6 @@ mod tests {
             root_hash: HashBytes([(seqno as u8).wrapping_add(10); 32]),
             file_hash: HashBytes([(seqno as u8).wrapping_add(11); 32]),
         }
-    }
-
-    fn indexed_block() -> BlockStuff {
-        let block_data = include_bytes!("../../../core/tests/data/block.bin");
-        let root = Boc::decode(block_data).unwrap();
-        let block = root.parse::<Block>().unwrap();
-        let block_id = BlockId::from_str(
-            include_str!("../../../core/tests/data/block_id.txt").trim_end(),
-        )
-        .unwrap();
-        BlockStuff::from_block_and_root(&block_id, block, root, block_data.len())
     }
 
     struct ReadTestTransaction {
@@ -3239,6 +4099,79 @@ mod tests {
         value
     }
 
+    fn test_filter_bundle(
+        partition_id: PartitionId,
+        generation_id: u128,
+        manifest_digest: HashBytes,
+        transaction_keys: &[HashBytes],
+        inbound_message_keys: &[HashBytes],
+        block_keys: &[[u8; tables::KnownBlocks::KEY_LEN]],
+    ) -> Arc<ValidatedFilterBundle> {
+        fn build(
+            namespace: FilterNamespace,
+            partition_id: PartitionId,
+            generation_id: u128,
+            manifest_digest: HashBytes,
+            keys: &[&[u8]],
+        ) -> super::super::filter::ImmutableNamespaceFilter {
+            let mut builder = FilterBuilder::new(
+                FilterFileIdentity {
+                    namespace,
+                    partition_id: partition_id.0,
+                    generation_id,
+                    manifest_digest,
+                },
+                keys.len() as u64,
+                1_000,
+            )
+            .unwrap();
+            for key in keys {
+                builder.insert(key).unwrap();
+            }
+            builder.finish().unwrap()
+        }
+
+        let transaction_keys = transaction_keys
+            .iter()
+            .map(HashBytes::as_slice)
+            .collect::<Vec<_>>();
+        let inbound_message_keys = inbound_message_keys
+            .iter()
+            .map(HashBytes::as_slice)
+            .collect::<Vec<_>>();
+        let block_keys = block_keys
+            .iter()
+            .map(|key| key.as_slice())
+            .collect::<Vec<_>>();
+        Arc::new(
+            ValidatedFilterBundle::new(
+                build(
+                    FilterNamespace::Transactions,
+                    partition_id,
+                    generation_id,
+                    manifest_digest,
+                    &transaction_keys,
+                ),
+                build(
+                    FilterNamespace::InboundMessages,
+                    partition_id,
+                    generation_id,
+                    manifest_digest,
+                    &inbound_message_keys,
+                ),
+                build(
+                    FilterNamespace::Blocks,
+                    partition_id,
+                    generation_id,
+                    manifest_digest,
+                    &block_keys,
+                ),
+                u64::MAX,
+            )
+            .unwrap(),
+        )
+    }
+
     fn insert_read_test_block(
         storage: &RpcStorage,
         account: &StdAddr,
@@ -3252,7 +4185,6 @@ mod tests {
             (manager.active_id(), manager.active_lease())
         };
         let mut local_batch = rocksdb::WriteBatch::default();
-        let mut router_batch = rocksdb::WriteBatch::default();
         let start_lt = transactions.first().map_or(mc_block_id.seqno as u64 * 10, |tx| tx.lt);
         let end_lt = transactions.last().map_or(start_lt + 1, |tx| tx.lt + 1);
         for tx in transactions {
@@ -3292,16 +4224,6 @@ mod tests {
             block_tx_key[45..53].copy_from_slice(&tx.lt.to_be_bytes());
             local_batch.put_cf(&lease.block_transactions.cf(), block_tx_key, tx.hash);
 
-            let location = codec::encode_router_location(codec::RouterLocation {
-                partition_id: partition_id.0,
-                mc_seqno: mc_block_id.seqno,
-            });
-            router_batch.put_cf(&storage.router.transactions.cf(), tx.hash, location);
-            router_batch.put_cf(
-                &storage.router.inbound_messages.cf(),
-                tx.in_msg_hash,
-                location,
-            );
         }
 
         for current_block_id in [block_id, mc_block_id] {
@@ -3320,15 +4242,6 @@ mod tests {
                     end_lt,
                     tx_count,
                 ),
-            );
-            let location = codec::encode_router_location(codec::RouterLocation {
-                partition_id: partition_id.0,
-                mc_seqno: mc_block_id.seqno,
-            });
-            router_batch.put_cf(
-                &storage.router.blocks.cf(),
-                codec::encode_short_block_id(&current_block_id.as_short_id()),
-                location,
             );
         }
 
@@ -3392,60 +4305,7 @@ mod tests {
             .rocksdb()
             .write_opt(local_batch, lease.transactions.write_config())
             .unwrap();
-        storage
-            .router
-            .rocksdb()
-            .write_opt(router_batch, storage.router.transactions.write_config())
-            .unwrap();
         partition_id
-    }
-
-    fn first_transaction_with_inbound_message(
-        lease: &PartitionReadLease,
-    ) -> (StdAddr, u64, HashBytes, HashBytes) {
-        let mut iterator = lease
-            .rocksdb()
-            .raw_iterator_cf(&lease.transactions.cf());
-        iterator.seek_to_first();
-        while iterator.valid() {
-            let key = iterator.key().unwrap();
-            let value = iterator.value().unwrap();
-            let payload = codec::decode_transaction_value(value).unwrap().payload();
-            let mask = TransactionMask::from_bits_retain(payload[0]);
-            if mask.has_msg_hash() {
-                return (
-                    StdAddr::new(key[0] as i8, HashBytes::from_slice(&key[1..33])),
-                    u64::from_be_bytes(key[33..41].try_into().unwrap()),
-                    HashBytes::from_slice(&payload[1..33]),
-                    HashBytes::from_slice(&payload[33..65]),
-                );
-            }
-            iterator.next();
-        }
-        panic!("indexed block fixture must contain an inbound message");
-    }
-
-    fn delete_router_records(
-        storage: &RpcStorage,
-        transaction_hash: &HashBytes,
-        inbound_message_hash: &HashBytes,
-        block_id: &BlockId,
-    ) {
-        let mut batch = rocksdb::WriteBatch::default();
-        batch.delete_cf(&storage.router.transactions.cf(), transaction_hash);
-        batch.delete_cf(
-            &storage.router.inbound_messages.cf(),
-            inbound_message_hash,
-        );
-        batch.delete_cf(
-            &storage.router.blocks.cf(),
-            codec::encode_short_block_id(&block_id.as_short_id()),
-        );
-        storage
-            .router
-            .rocksdb()
-            .write_opt(batch, storage.router.transactions.write_config())
-            .unwrap();
     }
 
     async fn wait_for_sealed_partition(storage: &RpcStorage, id: PartitionId) {
@@ -3529,22 +4389,13 @@ mod tests {
             .unwrap();
     }
 
-    fn persist_router_commit(storage: &RpcStorage, block_id: &BlockId) {
-        storage
-            .router
-            .state
-            .insert(codec::router_commit_key(), codec::encode_router_commit(block_id))
-            .unwrap();
-    }
-
-    fn remove_router_commit(storage: &RpcStorage) {
-        let mut batch = rocksdb::WriteBatch::default();
-        batch.delete_cf(&storage.router.state.cf(), codec::router_commit_key());
-        storage
-            .router
-            .rocksdb()
-            .write_opt(batch, storage.router.state.write_config())
-            .unwrap();
+    fn publish_test_frontier(storage: &RpcStorage, block_id: &BlockId) {
+        if block_id.seqno != 0 {
+            let mut manager = storage.partitions.lock();
+            insert_masterchain_commit(&manager, block_id, 0);
+            manager.commit_masterchain_block_set(block_id).unwrap();
+        }
+        storage.publish_snapshot(block_id).unwrap();
     }
 
     #[test]
@@ -3586,6 +4437,178 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn open_constructs_filter_worker_without_opening_acceleration_storage() {
+        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
+        let root = context.root_dir().path().to_path_buf();
+        let _storage = RpcStorage::open(context, RpcTransactionPartitionsConfig::default()).unwrap();
+        assert!(!root.join("rpc/filter-catalog").exists());
+        assert!(!root.join("rpc/filters").exists());
+    }
+
+    #[tokio::test]
+    async fn startup_reconciliation_accepts_initial_creating_before_lifecycle() {
+        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
+        persist_initial_creating(&context);
+        let storage = RpcStorage::open(context, RpcTransactionPartitionsConfig::default()).unwrap();
+        let zerostate = masterchain_block(0);
+        let reconciliation = storage.reconcile_startup(&zerostate).unwrap();
+        assert_eq!(reconciliation.effective_frontier, zerostate);
+        assert!(!reconciliation.rebuild_current_state);
+        assert!(storage.partitions.lock().has_creating_partition());
+        storage.continue_lifecycle().unwrap();
+        storage.publish_snapshot(&zerostate).unwrap();
+        assert!(storage.load_snapshot().is_some());
+    }
+
+    #[tokio::test]
+    async fn lifecycle_continuation_wakes_persisted_sealing_after_reconciliation() {
+        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
+        let config = test_partitions_config();
+        let storage = RpcStorage::open(context.clone(), config.clone()).unwrap();
+        storage.sealing_cancel.cancel();
+        let masterchain = masterchain_block(1);
+        let sealing_id = insert_read_test_block(
+            &storage,
+            &StdAddr::new(0, HashBytes::ZERO),
+            &masterchain,
+            &basechain_block(1),
+            &[ReadTestTransaction {
+                lt: 10,
+                hash: HashBytes([1; 32]),
+                in_msg_hash: HashBytes([101; 32]),
+                boc_byte: 1,
+            }],
+            1,
+        );
+        storage.commit_masterchain_block_set(&masterchain).unwrap();
+        drop(storage);
+        tokio::task::yield_now().await;
+
+        let storage = RpcStorage::open(context, config).unwrap();
+        let before = {
+            let manager = storage.partitions.lock();
+            (
+                manager
+                    .control_db()
+                    .state
+                    .get(codec::manifest_epoch_key())
+                    .unwrap()
+                    .unwrap()
+                    .to_vec(),
+                manager
+                    .control_db()
+                    .manifests
+                    .get(codec::partition_manifest_key(sealing_id.0))
+                    .unwrap()
+                    .unwrap()
+                    .to_vec(),
+            )
+        };
+        assert_eq!(
+            storage
+                .partitions
+                .lock()
+                .descriptors()
+                .into_iter()
+                .find(|descriptor| descriptor.id == sealing_id)
+                .unwrap()
+                .lifecycle,
+            codec::ManifestLifecycle::Sealing,
+        );
+        let reconciliation = storage.reconcile_startup(&masterchain).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let after_reconciliation = {
+            let manager = storage.partitions.lock();
+            (
+                manager
+                    .control_db()
+                    .state
+                    .get(codec::manifest_epoch_key())
+                    .unwrap()
+                    .unwrap()
+                    .to_vec(),
+                manager
+                    .control_db()
+                    .manifests
+                    .get(codec::partition_manifest_key(sealing_id.0))
+                    .unwrap()
+                    .unwrap()
+                    .to_vec(),
+            )
+        };
+        assert_eq!(after_reconciliation, before);
+        let held_sealing_lease = storage.partitions.lock().read_lease(sealing_id).unwrap();
+        storage.continue_lifecycle().unwrap();
+        storage
+            .publish_snapshot(&reconciliation.effective_frontier)
+            .unwrap();
+        drop(held_sealing_lease);
+        wait_for_sealed_partition(&storage, sealing_id).await;
+    }
+
+    #[tokio::test]
+    async fn observability_records_startup_lifecycle_and_admission_results() {
+        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
+        let storage = RpcStorage::open(context, test_partitions_config()).unwrap();
+        let zerostate = masterchain_block(0);
+        let recorder = TestMetricsRecorder::default();
+
+        metrics::with_local_recorder(&recorder, || {
+            let reconciliation = storage.reconcile_startup(&zerostate).unwrap();
+            storage.continue_lifecycle().unwrap();
+            storage.publish_snapshot(&reconciliation.effective_frontier).unwrap();
+            assert_eq!(
+                storage.admit_block_set(&masterchain_block(1)).unwrap(),
+                BlockSetMode::New
+            );
+            assert!(storage.admit_block_set(&masterchain_block(3)).is_err());
+        });
+
+        assert_eq!(
+            recorder.histogram_len(
+                "tycho_storage_rpc_startup_reconciliation_duration_seconds|result=success"
+            ),
+            1
+        );
+        assert_eq!(
+            recorder.histogram_values(
+                "tycho_storage_rpc_startup_synchronous_sealed_opens|result=success"
+            ),
+            vec![0.0]
+        );
+        assert_eq!(
+            recorder.histogram_len(
+                "tycho_storage_rpc_active_tail_probe_duration_seconds|result=empty"
+            ),
+            1
+        );
+        assert_eq!(
+            recorder.histogram_len(
+                "tycho_storage_rpc_deferred_lifecycle_duration_seconds|result=success"
+            ),
+            1
+        );
+        assert_eq!(
+            recorder.histogram_len(
+                "tycho_storage_rpc_initial_local_snapshot_duration_seconds|result=success"
+            ),
+            1
+        );
+        assert_eq!(
+            recorder.counter(
+                "tycho_storage_rpc_block_set_admission_checks_total|stage=new|result=success"
+            ),
+            1
+        );
+        assert_eq!(
+            recorder.counter(
+                "tycho_storage_rpc_block_set_admission_failures_total|stage=new|reason=token_conflict"
+            ),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn sealing_worker_flushes_closes_and_publishes_read_only_partition() {
         let (context, _tmp) = StorageContext::new_temp().await.unwrap();
         let mut manager = PartitionManager::open(
@@ -3595,6 +4618,7 @@ mod tests {
                 target_blob_bytes: 1,
                 target_index_records: 1,
                 max_open_sealed_partitions: 1,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -3608,8 +4632,10 @@ mod tests {
         seal_partition(
             partitions.clone(),
             Arc::new(SnapshotPublisher::default()),
+            Arc::new(FilterRegistry::default()),
             old,
             CancellationFlag::new(),
+            None,
         )
             .await
             .unwrap();
@@ -3687,6 +4713,16 @@ mod tests {
         })
         .await
         .unwrap();
+        assert!(storage.filter_worker.pending_sealed_contains(
+            storage
+                .partitions
+                .lock()
+                .descriptors()
+                .iter()
+                .find(|descriptor| descriptor.lifecycle == codec::ManifestLifecycle::Sealed)
+                .unwrap()
+                .id,
+        ));
 
         let snapshot = storage.load_snapshot().unwrap();
         assert_eq!(snapshot.visible_frontier(), &block_id);
@@ -3713,7 +4749,8 @@ mod tests {
         drop(primary);
         assert_eq!(manager.sealing_handle_strong_count(old), None);
 
-        let snapshot = build_composite_snapshot(&mut manager, block_id).unwrap();
+        let snapshot =
+            build_composite_snapshot(&mut manager, &FilterRegistry::default(), block_id).unwrap();
         assert!(snapshot.0.writable_partitions.contains_key(&old));
         assert_eq!(manager.sealing_handle_strong_count(old), Some(2));
     }
@@ -3734,8 +4771,6 @@ mod tests {
             insert_masterchain_commit(&manager, &block_id, 0);
             manager.commit_masterchain_block_set(&block_id).unwrap();
         }
-        persist_router_commit(&storage, &block_id);
-
         let current = storage.reconcile_startup(&block_id).unwrap();
         assert_eq!(current.effective_frontier, block_id);
         assert!(!current.rebuild_current_state);
@@ -3752,168 +4787,11 @@ mod tests {
             insert_masterchain_commit(&manager, &next, 0);
             manager.commit_masterchain_block_set(&next).unwrap();
         }
-        persist_router_commit(&storage, &next);
         let behind_control = storage.reconcile_startup(&block_id).unwrap();
         assert_eq!(behind_control.effective_frontier, block_id);
         assert!(behind_control.rebuild_current_state);
         storage.publish_snapshot(&behind_control.effective_frontier).unwrap();
         assert_eq!(storage.load_snapshot().unwrap().visible_frontier(), &block_id);
-    }
-
-    #[tokio::test]
-    async fn router_commit_is_monotonic_and_durable() {
-        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
-        let storage = RpcStorage::open(context.clone(), RpcTransactionPartitionsConfig::default()).unwrap();
-        let first = masterchain_block(1);
-        storage.commit_router_frontier(&first).unwrap();
-        assert_eq!(storage.load_router_commit().unwrap(), Some(first));
-        storage.commit_router_frontier(&first).unwrap();
-        storage.commit_router_frontier(&masterchain_block(0)).unwrap_err();
-        storage.commit_router_frontier(&basechain_block(2)).unwrap_err();
-
-        let second = masterchain_block(2);
-        storage.commit_router_frontier(&second).unwrap();
-        storage.commit_router_frontier(&first).unwrap();
-        assert_eq!(storage.load_router_commit().unwrap(), Some(second));
-        let mut different = second;
-        different.file_hash = HashBytes([0xff; 32]);
-        assert!(storage.commit_router_frontier(&different).is_err());
-        drop(storage);
-        tokio::task::yield_now().await;
-
-        let storage = RpcStorage::open(context, RpcTransactionPartitionsConfig::default()).unwrap();
-        assert_eq!(storage.load_router_commit().unwrap(), Some(second));
-        storage.router.state.insert(codec::router_commit_key(), [0]).unwrap();
-        assert!(storage.load_router_commit().is_err());
-    }
-
-    #[tokio::test]
-    async fn router_commit_replay_completes_unpublished_control_frontier() {
-        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
-        let storage = RpcStorage::open(context.clone(), RpcTransactionPartitionsConfig::default()).unwrap();
-        let account = StdAddr::new(0, HashBytes::ZERO);
-        let mc_block_id = masterchain_block(1);
-        insert_read_test_block(
-            &storage,
-            &account,
-            &mc_block_id,
-            &basechain_block(1),
-            &[ReadTestTransaction {
-                lt: 1,
-                hash: HashBytes([1; 32]),
-                in_msg_hash: HashBytes([2; 32]),
-                boc_byte: 3,
-            }],
-            0,
-        );
-        storage.commit_router_frontier(&mc_block_id).unwrap();
-        drop(storage);
-        tokio::task::yield_now().await;
-
-        let storage = RpcStorage::open(context, RpcTransactionPartitionsConfig::default()).unwrap();
-        let reconciliation = storage.reconcile_startup(&masterchain_block(0)).unwrap();
-        assert_eq!(reconciliation.effective_frontier, masterchain_block(0));
-        assert!(reconciliation.rebuild_current_state);
-
-        storage.commit_masterchain_block_set(&mc_block_id).unwrap();
-        assert_eq!(storage.load_router_commit().unwrap(), Some(mc_block_id));
-        assert_eq!(
-            storage
-                .reconcile_startup(&mc_block_id)
-                .unwrap()
-                .effective_frontier,
-            mc_block_id
-        );
-    }
-
-    #[tokio::test]
-    async fn startup_reconciliation_validates_router_commit_states() {
-        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
-        let storage = RpcStorage::open(context, RpcTransactionPartitionsConfig::default()).unwrap();
-        let first = masterchain_block(1);
-        let second = masterchain_block(2);
-        {
-            let manager = storage.partitions.lock();
-            insert_masterchain_commit(&manager, &first, 0);
-        }
-        storage.commit_masterchain_block_set(&first).unwrap();
-        {
-            let manager = storage.partitions.lock();
-            insert_masterchain_commit(&manager, &second, 0);
-        }
-        storage.commit_masterchain_block_set(&second).unwrap();
-        let reconciliation = storage.reconcile_startup(&first).unwrap();
-        assert_eq!(reconciliation.effective_frontier, first);
-        assert!(reconciliation.rebuild_current_state);
-
-        remove_router_commit(&storage);
-        assert!(format!("{:#}", reconciliation_error(&storage, &second))
-            .contains("clear the RPC DB and reindex"));
-        persist_router_commit(&storage, &first);
-        assert!(format!("{:#}", reconciliation_error(&storage, &second))
-            .contains("is behind RPC visible frontier"));
-        let mut different = second;
-        different.root_hash = HashBytes([0xff; 32]);
-        persist_router_commit(&storage, &different);
-        assert!(format!("{:#}", reconciliation_error(&storage, &second))
-            .contains("different full block ids"));
-        persist_router_commit(&storage, &masterchain_block(3));
-        assert_eq!(
-            storage
-                .reconcile_startup(&first)
-                .unwrap()
-                .effective_frontier,
-            first
-        );
-        persist_router_commit(&storage, &masterchain_block(4));
-        assert!(format!("{:#}", reconciliation_error(&storage, &second))
-            .contains("more than one unpublished boundary ahead"));
-        storage.router.state.insert(codec::router_commit_key(), [0]).unwrap();
-        assert!(format!("{:#}", reconciliation_error(&storage, &second))
-            .contains("invalid persisted router commit"));
-        persist_router_commit(&storage, &masterchain_block(0));
-        assert!(format!("{:#}", reconciliation_error(&storage, &second))
-            .contains("non-zero masterchain block"));
-        persist_router_commit(&storage, &basechain_block(2));
-        assert!(format!("{:#}", reconciliation_error(&storage, &second))
-            .contains("non-zero masterchain block"));
-    }
-
-    #[tokio::test]
-    async fn router_commit_replay_completes_one_ahead_control_frontier() {
-        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
-        let storage = RpcStorage::open(context.clone(), RpcTransactionPartitionsConfig::default()).unwrap();
-        let first = masterchain_block(1);
-        let second = masterchain_block(2);
-        let third = masterchain_block(3);
-        {
-            let manager = storage.partitions.lock();
-            insert_masterchain_commit(&manager, &first, 0);
-        }
-        storage.commit_masterchain_block_set(&first).unwrap();
-        {
-            let manager = storage.partitions.lock();
-            insert_masterchain_commit(&manager, &second, 0);
-        }
-        storage.commit_masterchain_block_set(&second).unwrap();
-        {
-            let manager = storage.partitions.lock();
-            insert_masterchain_commit(&manager, &third, 0);
-        }
-        persist_router_commit(&storage, &third);
-        drop(storage);
-        tokio::task::yield_now().await;
-
-        let storage = RpcStorage::open(context, RpcTransactionPartitionsConfig::default()).unwrap();
-        let reconciliation = storage.reconcile_startup(&first).unwrap();
-        assert_eq!(reconciliation.effective_frontier, first);
-        assert!(reconciliation.rebuild_current_state);
-        storage.publish_snapshot(&reconciliation.effective_frontier).unwrap();
-        assert_eq!(storage.load_snapshot().unwrap().visible_frontier(), &first);
-
-        storage.commit_masterchain_block_set(&third).unwrap();
-        assert_eq!(storage.load_router_commit().unwrap(), Some(third));
-        assert_eq!(storage.partitions.lock().visible_frontier(), Some(&third));
     }
 
     #[tokio::test]
@@ -3956,474 +4834,204 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_frontier_uses_only_router_commit_witness() {
+    async fn same_boundary_retry_accepts_a_durable_replay_tail_ahead_of_visibility() {
         let (context, _tmp) = StorageContext::new_temp().await.unwrap();
-        let storage = RpcStorage::open(
-            context,
-            RpcTransactionPartitionsConfig::default(),
-        )
-        .unwrap();
-        let account = StdAddr::new(0, HashBytes::ZERO);
-        let mc_block_id = masterchain_block(1);
-        let block_id = basechain_block(1);
-        let transaction_hash = HashBytes([1; 32]);
-        insert_read_test_block(
-            &storage,
-            &account,
-            &mc_block_id,
-            &block_id,
-            &[ReadTestTransaction {
-                lt: 1,
-                hash: transaction_hash,
-                in_msg_hash: HashBytes([2; 32]),
-                boc_byte: 3,
-            }],
-            0,
-        );
-        storage.commit_masterchain_block_set(&mc_block_id).unwrap();
-        let witness_key = codec::encode_short_block_id(&mc_block_id.as_short_id());
-        storage.router.transactions.insert(transaction_hash, [0]).unwrap();
-        assert_eq!(
-            storage
-                .reconcile_startup(&mc_block_id)
-                .unwrap()
-                .effective_frontier,
-            mc_block_id
-        );
+        let first = masterchain_block(1);
+        let second = masterchain_block(2);
+        {
+            let storage = RpcStorage::open(context.clone(), RpcTransactionPartitionsConfig::default()).unwrap();
+            let mut manager = storage.partitions.lock();
+            insert_masterchain_commit(&manager, &first, 0);
+            manager.commit_masterchain_block_set(&first).unwrap();
+            insert_masterchain_commit(&manager, &second, 0);
+            manager.commit_masterchain_block_set(&second).unwrap();
+        }
+        tokio::task::yield_now().await;
 
-        storage.router.blocks.insert(witness_key, [0]).unwrap();
-        assert_eq!(
-            storage
-                .reconcile_startup(&mc_block_id)
-                .unwrap()
-                .effective_frontier,
-            mc_block_id
-        );
-
-        let mut batch = rocksdb::WriteBatch::default();
-        batch.delete_cf(&storage.router.blocks.cf(), witness_key);
+        let storage = RpcStorage::open(context, RpcTransactionPartitionsConfig::default()).unwrap();
+        let reconciliation = storage.reconcile_startup(&first).unwrap();
+        assert_eq!(reconciliation.effective_frontier, first);
+        assert!(reconciliation.rebuild_current_state);
+        storage.continue_lifecycle().unwrap();
         storage
-            .router
-            .rocksdb()
-            .write_opt(batch, storage.router.transactions.write_config())
+            .publish_snapshot(&reconciliation.effective_frontier)
             .unwrap();
+        assert_eq!(storage.load_snapshot().unwrap().visible_frontier(), &first);
+        assert_eq!(storage.admit_block_set(&first).unwrap(), BlockSetMode::Same);
+        storage
+            .commit_masterchain_block_set_with_predecessor(&first, &masterchain_block(0))
+            .unwrap();
+        assert_eq!(storage.load_snapshot().unwrap().visible_frontier(), &first);
         assert_eq!(
-            storage
-                .reconcile_startup(&mc_block_id)
-                .unwrap()
-                .effective_frontier,
-            mc_block_id
+            storage.partitions.lock().visible_frontier(),
+            Some(&second),
         );
     }
 
     #[tokio::test]
-    async fn startup_reconciliation_requires_router_commit_and_partition_commit_witnesses() {
+    async fn block_set_admission_enforces_new_replay_same_and_predecessor_identity() {
         let (context, _tmp) = StorageContext::new_temp().await.unwrap();
         let storage = RpcStorage::open(context, RpcTransactionPartitionsConfig::default()).unwrap();
-        let account = StdAddr::new(0, HashBytes::ZERO);
-        let mc_block_id = masterchain_block(1);
-        let block_id = basechain_block(1);
-        let transaction_hash = HashBytes([1; 32]);
-        let inbound_message_hash = HashBytes([2; 32]);
-        insert_read_test_block(
-            &storage,
-            &account,
-            &mc_block_id,
-            &block_id,
-            &[ReadTestTransaction {
-                lt: 1,
-                hash: transaction_hash,
-                in_msg_hash: inbound_message_hash,
-                boc_byte: 3,
-            }],
-            0,
-        );
-        storage.commit_masterchain_block_set(&mc_block_id).unwrap();
+        let zerostate = masterchain_block(0);
+        publish_test_frontier(&storage, &zerostate);
 
-        let lease = storage.partitions.lock().active_lease();
-        let mut transaction_key = [0; tables::Transactions::KEY_LEN];
-        transaction_key[0] = account.workchain as u8;
-        transaction_key[1..33].copy_from_slice(account.address.as_slice());
-        transaction_key[33..41].copy_from_slice(&1u64.to_be_bytes());
-        let mut block_transaction_key = [0; tables::BlockTransactions::KEY_LEN];
-        block_transaction_key[0] = block_id.shard.workchain() as i8 as u8;
-        block_transaction_key[1..9].copy_from_slice(&block_id.shard.prefix().to_be_bytes());
-        block_transaction_key[9..13].copy_from_slice(&block_id.seqno.to_be_bytes());
-        block_transaction_key[13..45].copy_from_slice(account.address.as_slice());
-        block_transaction_key[45..53].copy_from_slice(&1u64.to_be_bytes());
-        let mut batch = rocksdb::WriteBatch::default();
-        batch.delete_cf(&lease.known_blocks.cf(), known_block_key(&block_id));
-        batch.delete_cf(&lease.block_transactions.cf(), block_transaction_key);
-        batch.delete_cf(&lease.transactions_by_hash.cf(), transaction_hash);
-        batch.delete_cf(&lease.transactions_by_in_msg.cf(), inbound_message_hash);
-        batch.delete_cf(&lease.transactions.cf(), transaction_key);
-        lease
-            .rocksdb()
-            .write_opt(batch, lease.transactions.write_config())
-            .unwrap();
-        drop(lease);
-
-        let mut router_batch = rocksdb::WriteBatch::default();
-        router_batch.delete_cf(&storage.router.transactions.cf(), transaction_hash);
-        router_batch.delete_cf(&storage.router.inbound_messages.cf(), inbound_message_hash);
+        let first = masterchain_block(1);
+        assert_eq!(storage.admit_block_set(&first).unwrap(), BlockSetMode::New);
+        assert_eq!(storage.admit_block_set(&first).unwrap(), BlockSetMode::New);
+        {
+            let manager = storage.partitions.lock();
+            insert_masterchain_commit(&manager, &first, 0);
+        }
+        let mut wrong_predecessor = zerostate;
+        wrong_predecessor.root_hash = HashBytes([0xff; 32]);
+        assert!(storage
+            .commit_masterchain_block_set_with_predecessor(&first, &wrong_predecessor)
+            .is_err());
         storage
-            .router
-            .rocksdb()
-            .write_opt(router_batch, storage.router.transactions.write_config())
+            .commit_masterchain_block_set_with_predecessor(&first, &zerostate)
             .unwrap();
-        assert_eq!(
-            storage
-                .reconcile_startup(&mc_block_id)
-                .unwrap()
-                .effective_frontier,
-            mc_block_id
-        );
+        assert_eq!(storage.load_snapshot().unwrap().visible_frontier(), &first);
 
-        let lease = storage.partitions.lock().active_lease();
-        let commit_key = codec::partition_commit_key(mc_block_id.seqno, &mc_block_id.as_short_id());
-        let valid_commit = lease.partition_commits.get(commit_key).unwrap().unwrap().to_vec();
-        lease.partition_commits.insert(commit_key, [0]).unwrap();
-        assert!(format!("{:#}", reconciliation_error(&storage, &mc_block_id))
-            .contains("invalid persisted RPC visible frontier"));
-        lease.partition_commits.insert(commit_key, &valid_commit).unwrap();
-        let mut commit = codec::decode_partition_commit(&valid_commit).unwrap();
-        commit.block_id.root_hash = HashBytes([0xff; 32]);
-        commit.digest = commit.block_id.root_hash;
-        lease
-            .partition_commits
-            .insert(commit_key, codec::encode_partition_commit(&commit))
+        assert_eq!(storage.admit_block_set(&first).unwrap(), BlockSetMode::Same);
+        storage
+            .commit_masterchain_block_set_with_predecessor(&first, &wrong_predecessor)
             .unwrap();
-        assert!(format!("{:#}", reconciliation_error(&storage, &mc_block_id))
-            .contains("RPC frontier commit identity mismatch"));
+        assert!(storage.admit_block_set(&masterchain_block(3)).is_err());
+
+        let second = masterchain_block(2);
+        let third = masterchain_block(3);
+        {
+            let mut manager = storage.partitions.lock();
+            insert_masterchain_commit(&manager, &second, 0);
+            manager.commit_masterchain_block_set(&second).unwrap();
+            insert_masterchain_commit(&manager, &third, 0);
+            manager.commit_masterchain_block_set(&third).unwrap();
+        }
+        assert_eq!(storage.admit_block_set(&second).unwrap(), BlockSetMode::Replay);
+        storage
+            .commit_masterchain_block_set_with_predecessor(&second, &first)
+            .unwrap();
+        assert_eq!(storage.load_snapshot().unwrap().visible_frontier(), &second);
+    }
+
+    #[tokio::test]
+    async fn block_set_admission_rejects_missing_predecessor_commit_before_local_write() {
+        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
+        let storage = RpcStorage::open(context, RpcTransactionPartitionsConfig::default()).unwrap();
+        let first = masterchain_block(1);
+        publish_test_frontier(&storage, &first);
+        let lease = storage.partitions.lock().active_lease();
+        let key = codec::partition_commit_key(first.seqno, &first.as_short_id());
         let mut batch = rocksdb::WriteBatch::default();
-        batch.delete_cf(&lease.partition_commits.cf(), commit_key);
+        batch.delete_cf(&lease.partition_commits.cf(), key);
         lease
             .rocksdb()
             .write_opt(batch, lease.partition_commits.write_config())
             .unwrap();
-        assert!(format!("{:#}", reconciliation_error(&storage, &mc_block_id))
-            .contains("missing the RPC frontier commit"));
+        assert!(storage.admit_block_set(&masterchain_block(2)).is_err());
     }
 
     #[tokio::test]
-    async fn replay_repairs_router_stages_before_and_after_partition_sealing() {
+    async fn same_boundary_admission_rejects_missing_or_malformed_current_commit() {
         let (context, _tmp) = StorageContext::new_temp().await.unwrap();
-        let storage = RpcStorage::open(
-            context,
-            RpcTransactionPartitionsConfig {
-                target_lsm_bytes: u64::MAX,
-                target_blob_bytes: u64::MAX,
-                target_index_records: 1,
-                max_open_sealed_partitions: 1,
-            },
-        )
-        .unwrap();
-        let subscriptions = super::super::subscriptions::RpcSubscriptions::new(
-            SubscriberManagerConfig::new(16, 4),
-            4,
-        );
-        let zerostate = masterchain_block(0);
-        let mc_block_id = masterchain_block(1);
-        let block = indexed_block();
-        let code_hash = HashBytes::from_str(
-            "fc42205fe8c1c08846c1222c81eb416bdbf403253f6079691e04d52ce4400f8f",
-        )
-        .unwrap();
-        let code_hash_account = StdAddr::new(
-            0,
-            HashBytes::from_str("b06c29df56964af1aeb3bbda73ea5685bc54f4131c1c8559ba2c6f971976cd2b")
-                .unwrap(),
-        );
-        let mut code_hash_key = [0; tables::CodeHashes::KEY_LEN];
-        code_hash_key[..32].copy_from_slice(code_hash.as_slice());
-        code_hash_key[32] = code_hash_account.workchain as u8;
-        code_hash_key[33..].copy_from_slice(code_hash_account.address.as_slice());
-        let mut code_hash_by_address_key = [0; tables::CodeHashesByAddress::KEY_LEN];
-        code_hash_by_address_key[0] = code_hash_account.workchain as u8;
-        code_hash_by_address_key[1..].copy_from_slice(code_hash_account.address.as_slice());
-        storage.publish_snapshot(&zerostate).unwrap();
-
-        let first = storage
-            .update(&mc_block_id, block.clone(), None, &subscriptions)
-            .await
-            .unwrap();
-        assert!(first.newly_committed);
-        let old_id = PartitionId(first.partition_id);
-        let old_lease = storage.partitions.lock().active_lease();
-        let (account, _lt, transaction_hash, inbound_message_hash) =
-            first_transaction_with_inbound_message(&old_lease);
-        assert!(old_lease
-            .transactions_by_hash
-            .get(transaction_hash)
-            .unwrap()
-            .is_some());
-        drop(old_lease);
-        {
-            let manager = storage.partitions.lock();
-            insert_masterchain_commit(&manager, &mc_block_id, 0);
-        }
-        persist_router_commit(&storage, &mc_block_id);
-        assert_eq!(storage.load_router_commit().unwrap(), Some(mc_block_id));
-        storage.commit_masterchain_block_set(&mc_block_id).unwrap();
-        assert!(storage.current_state.code_hashes.get(code_hash_key).unwrap().is_some());
-        assert_eq!(
-            storage
-                .current_state
-                .code_hashes_by_address
-                .get(code_hash_by_address_key)
-                .unwrap()
-                .as_deref(),
-            Some(code_hash.as_slice())
-        );
-
-        {
-            let reconciliation = storage.reconcile_startup(&zerostate).unwrap();
-            assert_eq!(reconciliation.effective_frontier, zerostate);
-            assert!(reconciliation.rebuild_current_state);
-        }
-        *storage.snapshots.current.write() = None;
-        let mut current_state_batch = rocksdb::WriteBatch::default();
-        current_state_batch.delete_cf(&storage.current_state.code_hashes.cf(), code_hash_key);
-        current_state_batch.delete_cf(
-            &storage.current_state.code_hashes_by_address.cf(),
-            code_hash_by_address_key,
-        );
-        storage
-            .current_state
+        let storage = RpcStorage::open(context, RpcTransactionPartitionsConfig::default()).unwrap();
+        let first = masterchain_block(1);
+        publish_test_frontier(&storage, &first);
+        let lease = storage.partitions.lock().active_lease();
+        let key = codec::partition_commit_key(first.seqno, &first.as_short_id());
+        let valid = lease.partition_commits.get(key).unwrap().unwrap().to_vec();
+        let mut batch = rocksdb::WriteBatch::default();
+        batch.delete_cf(&lease.partition_commits.cf(), key);
+        lease
             .rocksdb()
-            .write_opt(
-                current_state_batch,
-                storage.current_state.code_hashes.write_config(),
-            )
+            .write_opt(batch, lease.partition_commits.write_config())
             .unwrap();
-        storage.publish_snapshot(&zerostate).unwrap();
-        assert_eq!(storage.load_snapshot().unwrap().visible_frontier(), &zerostate);
-        assert!(storage
-            .get_accounts_by_code_hash(&code_hash, None, None)
-            .unwrap()
-            .next()
-            .is_none());
+        assert!(storage.admit_block_set(&first).is_err());
+        lease.partition_commits.insert(key, [0]).unwrap();
+        assert!(storage.admit_block_set(&first).is_err());
+        lease.partition_commits.insert(key, valid).unwrap();
+    }
 
-        delete_router_records(
-            &storage,
-            &transaction_hash,
-            &inbound_message_hash,
-            block.id(),
-        );
-        storage.publish_snapshot(&zerostate).unwrap();
-        assert!(storage.get_transaction(&transaction_hash, None).unwrap().is_none());
-        assert!(storage
-            .get_dst_transaction(&inbound_message_hash, None)
-            .unwrap()
-            .is_none());
-        assert!(storage
-            .get_brief_block_info(&block.id().as_short_id(), None)
-            .unwrap()
-            .is_none());
-        assert!(storage
-            .get_transactions(&account, None, None, false, None)
-            .unwrap()
-            .map_ext(|lt, _, _| Some(lt))
-            .next()
-            .is_none());
-
-        let active_replay = storage
-            .update(&mc_block_id, block.clone(), None, &subscriptions)
-            .await
-            .unwrap();
-        assert!(!active_replay.newly_committed);
-        assert_eq!(active_replay.partition_id, old_id.0);
-        assert_eq!(storage.load_router_commit().unwrap(), Some(mc_block_id));
-        assert_eq!(storage.partitions.lock().visible_frontier(), Some(&mc_block_id));
-        assert!(storage.current_state.code_hashes.get(code_hash_key).unwrap().is_some());
-        assert_eq!(
-            storage
-                .current_state
-                .code_hashes_by_address
-                .get(code_hash_by_address_key)
-                .unwrap()
-                .as_deref(),
-            Some(code_hash.as_slice())
-        );
-        assert!(storage
-            .get_accounts_by_code_hash(&code_hash, None, None)
-            .unwrap()
-            .next()
-            .is_none());
-        assert!(storage.router.transactions.get(transaction_hash).unwrap().is_some());
-        assert!(storage
-            .router
-            .inbound_messages
-            .get(inbound_message_hash)
-            .unwrap()
-            .is_some());
-        assert!(storage
-            .router
-            .blocks
-            .get(codec::encode_short_block_id(&block.id().as_short_id()))
-            .unwrap()
-            .is_some());
-        assert!(storage.get_transaction(&transaction_hash, None).unwrap().is_none());
-
+    #[tokio::test]
+    async fn block_set_admission_reclassifies_durable_new_boundary_as_replay() {
+        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
+        let storage = RpcStorage::open(context, RpcTransactionPartitionsConfig::default()).unwrap();
+        let zerostate = masterchain_block(0);
+        let first = masterchain_block(1);
+        publish_test_frontier(&storage, &zerostate);
+        assert_eq!(storage.admit_block_set(&first).unwrap(), BlockSetMode::New);
         {
             let mut manager = storage.partitions.lock();
-            insert_masterchain_commit(&manager, &mc_block_id, 0);
-            manager.commit_masterchain_block_set(&mc_block_id).unwrap();
+            insert_masterchain_commit(&manager, &first, 0);
+            manager.commit_masterchain_block_set(&first).unwrap();
         }
-        storage.publish_snapshot(&mc_block_id).unwrap();
-        assert_eq!(storage.load_snapshot().unwrap().visible_frontier(), &mc_block_id);
-        assert_eq!(
-            storage
-                .get_accounts_by_code_hash(&code_hash, None, None)
-                .unwrap()
-                .last()
-                .unwrap(),
-            code_hash_account
-        );
-        assert_eq!(storage.partitions.lock().active_id(), PartitionId(2));
-        let expected_c1 = storage
-            .get_transactions(&account, None, None, false, None)
-            .unwrap()
-            .map_ext(|lt, hash, _| Some((lt, *hash)))
-            .collect::<Vec<_>>();
-        assert!(!expected_c1.is_empty());
-        assert_eq!(
-            storage
-                .get_transaction(&transaction_hash, None)
-                .unwrap()
-                .unwrap()
-                .tx_hash(),
-            transaction_hash
-        );
-        assert_eq!(
-            storage
-                .get_dst_transaction(&inbound_message_hash, None)
-                .unwrap()
-                .unwrap()
-                .tx_hash(),
-            transaction_hash
-        );
-        assert_eq!(
-            storage
-                .get_transaction_info(&transaction_hash, None)
-                .unwrap()
-                .unwrap()
-                .block_id,
-            *block.id()
-        );
-        assert_eq!(
-            storage
-                .get_brief_block_info(&block.id().as_short_id(), None)
-                .unwrap()
-                .unwrap()
-                .0,
-            *block.id()
-        );
-
-        delete_router_records(
-            &storage,
-            &transaction_hash,
-            &inbound_message_hash,
-            block.id(),
-        );
-        storage.publish_snapshot(&mc_block_id).unwrap();
-        assert!(storage.get_transaction(&transaction_hash, None).unwrap().is_none());
-        assert_eq!(
-            storage
-                .get_transactions(&account, None, None, false, None)
-                .unwrap()
-                .map_ext(|lt, hash, _| Some((lt, *hash)))
-                .collect::<Vec<_>>(),
-            expected_c1
-        );
-        let sealing_replay = storage
-            .update(&mc_block_id, block.clone(), None, &subscriptions)
-            .await
+        assert_eq!(storage.admit_block_set(&first).unwrap(), BlockSetMode::Replay);
+        storage
+            .commit_masterchain_block_set_with_predecessor(&first, &zerostate)
             .unwrap();
-        assert!(!sealing_replay.newly_committed);
-        assert_eq!(sealing_replay.partition_id, old_id.0);
-        assert_eq!(storage.load_router_commit().unwrap(), Some(mc_block_id));
-        storage.publish_snapshot(&mc_block_id).unwrap();
-        assert!(storage.get_transaction(&transaction_hash, None).unwrap().is_some());
+        assert_eq!(storage.load_snapshot().unwrap().visible_frontier(), &first);
+    }
 
-        storage.sealing_notify.notify_one();
-        wait_for_sealed_partition(&storage, old_id).await;
-        delete_router_records(
-            &storage,
-            &transaction_hash,
-            &inbound_message_hash,
-            block.id(),
-        );
-        storage.publish_snapshot(&mc_block_id).unwrap();
-        assert!(storage.get_transaction(&transaction_hash, None).unwrap().is_none());
-        let sealed_replay = storage
-            .update(&mc_block_id, block.clone(), None, &subscriptions)
-            .await
+    #[tokio::test]
+    async fn replay_boundary_requires_existing_current_commit() {
+        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
+        let storage = RpcStorage::open(context, RpcTransactionPartitionsConfig::default()).unwrap();
+        let first = masterchain_block(1);
+        let second = masterchain_block(2);
+        let third = masterchain_block(3);
+        publish_test_frontier(&storage, &first);
+        {
+            let mut manager = storage.partitions.lock();
+            insert_masterchain_commit(&manager, &second, 0);
+            manager.commit_masterchain_block_set(&second).unwrap();
+            insert_masterchain_commit(&manager, &third, 0);
+            manager.commit_masterchain_block_set(&third).unwrap();
+        }
+        let lease = storage.partitions.lock().active_lease();
+        let key = codec::partition_commit_key(second.seqno, &second.as_short_id());
+        let mut batch = rocksdb::WriteBatch::default();
+        batch.delete_cf(&lease.partition_commits.cf(), key);
+        lease
+            .rocksdb()
+            .write_opt(batch, lease.partition_commits.write_config())
             .unwrap();
-        assert!(!sealed_replay.newly_committed);
-        assert_eq!(sealed_replay.partition_id, old_id.0);
-        assert_eq!(storage.load_router_commit().unwrap(), Some(mc_block_id));
-        storage.publish_snapshot(&mc_block_id).unwrap();
-
-        assert_eq!(
-            storage
-                .get_transactions(&account, None, None, false, None)
-                .unwrap()
-                .map_ext(|lt, hash, _| Some((lt, *hash)))
-                .collect::<Vec<_>>(),
-            expected_c1
-        );
-        assert_eq!(
-            storage
-                .get_transaction(&transaction_hash, None)
-                .unwrap()
-                .unwrap()
-                .tx_hash(),
-            transaction_hash
-        );
-        assert_eq!(
-            storage
-                .get_dst_transaction(&inbound_message_hash, None)
-                .unwrap()
-                .unwrap()
-                .tx_hash(),
-            transaction_hash
-        );
-        assert_eq!(
-            storage
-                .get_transaction_info(&transaction_hash, None)
-                .unwrap()
-                .unwrap()
-                .block_id,
-            *block.id()
-        );
+        assert_eq!(storage.admit_block_set(&second).unwrap(), BlockSetMode::Replay);
         assert!(storage
-            .get_brief_block_info(&block.id().as_short_id(), None)
-            .unwrap()
-            .is_some());
-        for location in [
-            storage.router.transactions.get(transaction_hash).unwrap().unwrap(),
-            storage
-                .router
-                .inbound_messages
-                .get(inbound_message_hash)
-                .unwrap()
-                .unwrap(),
-            storage
-                .router
-                .blocks
-                .get(codec::encode_short_block_id(&block.id().as_short_id()))
-                .unwrap()
-                .unwrap(),
-        ] {
-            assert_eq!(
-                codec::decode_router_location(location.as_ref()).unwrap(),
-                codec::RouterLocation {
-                    partition_id: old_id.0,
-                    mc_seqno: mc_block_id.seqno,
-                }
-            );
+            .commit_masterchain_block_set_with_predecessor(&second, &first)
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn durable_boundary_survives_creation_activation_failure_and_retries_before_write() {
+        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
+        let storage = RpcStorage::open(context, test_partitions_config()).unwrap();
+        let zerostate = masterchain_block(0);
+        let first = masterchain_block(1);
+        publish_test_frontier(&storage, &zerostate);
+        assert_eq!(storage.admit_block_set(&first).unwrap(), BlockSetMode::New);
+        {
+            let mut manager = storage.partitions.lock();
+            insert_masterchain_commit(&manager, &first, 1);
+            manager.fail_next_creation_activation();
         }
+        storage
+            .commit_masterchain_block_set_with_predecessor(&first, &zerostate)
+            .unwrap();
+        let snapshot = storage.load_snapshot().unwrap();
+        assert_eq!(snapshot.visible_frontier(), &first);
+        assert!(snapshot
+            .0
+            .descriptors
+            .iter()
+            .all(|descriptor| descriptor.lifecycle != codec::ManifestLifecycle::Creating));
+        drop(snapshot);
+        assert!(storage.partitions.lock().has_creating_partition());
+
+        assert_eq!(
+            storage.admit_block_set(&masterchain_block(2)).unwrap(),
+            BlockSetMode::New
+        );
+        assert!(!storage.partitions.lock().has_creating_partition());
     }
 
     #[tokio::test]
@@ -4436,6 +5044,7 @@ mod tests {
                 target_blob_bytes: u64::MAX,
                 target_index_records: u64::MAX,
                 max_open_sealed_partitions: 1,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -4621,6 +5230,7 @@ mod tests {
         assert_eq!(blocks.len(), 2);
         assert!(blocks.contains(&block1));
         assert!(blocks.contains(&mc1));
+        storage.reset_known_block_point_reads();
         let (brief_id, brief_mc_seqno, brief) = storage
             .get_brief_block_info(&block1.as_short_id(), None)
             .unwrap()
@@ -4628,6 +5238,15 @@ mod tests {
         assert_eq!(brief_id, block1);
         assert_eq!(brief_mc_seqno, 1);
         assert_eq!(brief.tx_count, 2);
+        assert_eq!(storage.known_block_point_reads(), 3);
+        storage.reset_known_block_point_reads();
+        let (masterchain_brief_id, masterchain_mc_seqno, _) = storage
+            .get_brief_block_info(&mc1.as_short_id(), None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(masterchain_brief_id, mc1);
+        assert_eq!(masterchain_mc_seqno, mc1.seqno);
+        assert_eq!(storage.known_block_point_reads(), 1);
         let shards = storage
             .get_brief_shards_descr(1, None)
             .unwrap()
@@ -4636,6 +5255,7 @@ mod tests {
         assert_eq!(shards[0].shard_ident, ShardIdent::BASECHAIN);
         assert_eq!(shards[0].seqno, block1.seqno);
 
+        storage.reset_known_block_point_reads();
         let block_transactions = storage
             .get_block_transactions(&block1.as_short_id(), false, None, None)
             .unwrap()
@@ -4643,6 +5263,7 @@ mod tests {
             .map(|_, lt, boc| Some((lt, boc[0])))
             .collect::<Vec<_>>();
         assert_eq!(block_transactions, [(10, 10), (11, 11)]);
+        assert_eq!(storage.known_block_point_reads(), 3);
         let reverse_block_transactions = storage
             .get_block_transaction_ids(&block1.as_short_id(), true, None, None)
             .unwrap()
@@ -4734,9 +5355,22 @@ mod tests {
                 hash: future_hash,
                 in_msg_hash: future_msg,
                 boc_byte: 40,
+            }, ReadTestTransaction {
+                lt: 41,
+                hash: hash10,
+                in_msg_hash: msg10,
+                boc_byte: 41,
             }],
             0,
         );
+        let active_lease = storage.partitions.lock().active_lease();
+        active_lease
+            .known_blocks
+            .insert(
+                known_block_key(&block1),
+                known_block_value(&block1, &mc4, 10, 12, 2),
+            )
+            .unwrap();
         storage.publish_snapshot(&mc3).unwrap();
         assert!(storage.get_transaction(&future_hash, None).unwrap().is_none());
         assert!(storage
@@ -4751,6 +5385,22 @@ mod tests {
             .get_block_transaction_ids(&block4.as_short_id(), false, None, None)
             .unwrap()
             .is_none());
+        assert_eq!(
+            storage.get_transaction(&hash10, None).unwrap().unwrap().as_ref(),
+            [10]
+        );
+        assert_eq!(
+            storage.get_dst_transaction(&msg10, None).unwrap().unwrap().as_ref(),
+            [10]
+        );
+        assert_eq!(
+            storage
+                .get_brief_block_info(&block1.as_short_id(), None)
+                .unwrap()
+                .unwrap()
+                .1,
+            mc1.seqno
+        );
         assert!(storage
             .get_blocks_by_mc_seqno(4, None)
             .unwrap()
@@ -4770,21 +5420,6 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(visible_lts, [10, 11, 20, 30]);
 
-        let stale_hash = HashBytes([90; 32]);
-        storage
-            .router
-            .transactions
-            .insert(
-                stale_hash,
-                codec::encode_router_location(codec::RouterLocation {
-                    partition_id: second_id.0,
-                    mc_seqno: 1,
-                }),
-            )
-            .unwrap();
-        storage.publish_snapshot(&mc3).unwrap();
-        assert!(storage.get_transaction(&stale_hash, None).is_err());
-
         let active_lease = storage.partitions.lock().active_lease();
         let mut tx_info = active_lease
             .transactions_by_hash
@@ -4800,6 +5435,1176 @@ mod tests {
             .unwrap();
         storage.publish_snapshot(&mc3).unwrap();
         assert!(storage.get_transaction(&hash30, None).is_err());
+    }
+
+    #[tokio::test]
+    async fn v2_local_acceptance_fixture_builds_recovers_and_measures_filters() {
+        let mut config = test_partitions_config();
+        config.max_open_sealed_partitions = 3;
+        let sealed_cache_capacity = config.max_open_sealed_partitions;
+        let exact_lookup_limit = config.filters.max_concurrent_sealed_exact_lookups;
+        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
+        let root = context.root_dir().path().to_path_buf();
+        let storage = RpcStorage::open(context.clone(), config.clone()).unwrap();
+        storage.sealing_cancel.cancel();
+        let account = StdAddr::new(0, HashBytes::ZERO);
+        let mut sealed = Vec::new();
+        for seqno in 1..=3 {
+            let masterchain = masterchain_block(seqno);
+            let block = basechain_block(seqno);
+            let transaction = HashBytes([seqno as u8; 32]);
+            let inbound = HashBytes([(seqno as u8).wrapping_add(100); 32]);
+            let id = insert_read_test_block(
+                &storage,
+                &account,
+                &masterchain,
+                &block,
+                &[ReadTestTransaction {
+                    lt: seqno as u64 * 10,
+                    hash: transaction,
+                    in_msg_hash: inbound,
+                    boc_byte: seqno as u8,
+                }],
+                1,
+            );
+            storage.commit_masterchain_block_set(&masterchain).unwrap();
+            seal_partition(
+                storage.partitions.clone(),
+                storage.snapshots.clone(),
+                storage.filter_registry.clone(),
+                id,
+                CancellationFlag::new(),
+                None,
+            )
+            .await
+            .unwrap();
+            sealed.push((id, masterchain, block, transaction, inbound));
+        }
+        let active_masterchain = masterchain_block(4);
+        let active_block = basechain_block(4);
+        let active_transaction = HashBytes([4; 32]);
+        let active_inbound = HashBytes([104; 32]);
+        insert_read_test_block(
+            &storage,
+            &account,
+            &active_masterchain,
+            &active_block,
+            &[ReadTestTransaction {
+                lt: 40,
+                hash: active_transaction,
+                in_msg_hash: active_inbound,
+                boc_byte: 4,
+            }],
+            0,
+        );
+        storage
+            .commit_masterchain_block_set(&active_masterchain)
+            .unwrap();
+        assert_eq!(
+            storage
+                .partitions
+                .lock()
+                .descriptors()
+                .into_iter()
+                .filter(|descriptor| descriptor.lifecycle == codec::ManifestLifecycle::Sealed)
+                .count(),
+            3,
+        );
+        assert_eq!(
+            storage
+                .partitions
+                .lock()
+                .descriptors()
+                .into_iter()
+                .filter(|descriptor| descriptor.lifecycle == codec::ManifestLifecycle::Active)
+                .count(),
+            1,
+        );
+
+        let store = FilterCatalogStore::open(&context, config.filters.clone()).unwrap();
+        let cancelled = CancellationFlag::new();
+        let mut persisted_bytes = 0;
+        let mut resident_bytes = 0;
+        let mut build_elapsed = Duration::ZERO;
+        let mut validation_elapsed = Duration::ZERO;
+        let mut generations = BTreeMap::new();
+        for (id, ..) in &sealed {
+            let started_at = Instant::now();
+            let bundle = store
+                .build_and_publish(&storage.partitions, *id, &cancelled)
+                .unwrap();
+            build_elapsed += started_at.elapsed();
+            let started_at = Instant::now();
+            let loaded = store
+                .load_and_validate_sealed(&storage.partitions, *id, &cancelled)
+                .unwrap()
+                .unwrap();
+            validation_elapsed += started_at.elapsed();
+            assert_eq!(loaded.generation_id(), bundle.generation_id());
+            persisted_bytes += bundle
+                .bundle_bytes()
+                .checked_sub(bundle.resident_bytes())
+                .unwrap();
+            resident_bytes += bundle.resident_bytes();
+            generations.insert(*id, bundle.generation_id());
+            publish_filter_snapshot(
+                &storage.partitions,
+                &storage.snapshots,
+                &storage.filter_registry,
+                *id,
+                bundle,
+            )
+            .unwrap();
+        }
+        let filtered = storage.load_snapshot().unwrap();
+        for (id, _, block, transaction, inbound) in &sealed {
+            assert!(filtered.filter_bundle(*id).is_some());
+            assert!(storage
+                .get_transaction(transaction, Some(&filtered))
+                .unwrap()
+                .is_some());
+            assert!(storage
+                .get_dst_transaction(inbound, Some(&filtered))
+                .unwrap()
+                .is_some());
+            assert!(storage
+                .get_brief_block_info(&block.as_short_id(), Some(&filtered))
+                .unwrap()
+                .is_some());
+        }
+        assert!(storage
+            .get_transaction(&active_transaction, Some(&filtered))
+            .unwrap()
+            .is_some());
+        assert!(storage
+            .get_dst_transaction(&active_inbound, Some(&filtered))
+            .unwrap()
+            .is_some());
+        assert!(storage
+            .get_brief_block_info(&active_block.as_short_id(), Some(&filtered))
+            .unwrap()
+            .is_some());
+
+        let fully_filtered_absent = (0u64..)
+            .map(|value| {
+                let mut bytes = [0xa5; 32];
+                bytes[..8].copy_from_slice(&value.to_le_bytes());
+                HashBytes(bytes)
+            })
+            .find(|hash| {
+                sealed.iter().all(|(id, ..)| {
+                    !filtered
+                        .filter_might_contain(*id, FilterNamespace::Transactions, hash.as_slice())
+                        .unwrap()
+                })
+            })
+            .unwrap();
+        storage
+            .sealed_exact_lookup_acquisitions
+            .store(0, Ordering::Release);
+        let started_at = Instant::now();
+        assert!(storage
+            .get_transaction(&fully_filtered_absent, Some(&filtered))
+            .unwrap()
+            .is_none());
+        let filtered_first_elapsed = started_at.elapsed();
+        let started_at = Instant::now();
+        assert!(storage
+            .get_transaction(&fully_filtered_absent, Some(&filtered))
+            .unwrap()
+            .is_none());
+        let filtered_warm_elapsed = started_at.elapsed();
+        assert_eq!(
+            storage
+                .sealed_exact_lookup_acquisitions
+                .load(Ordering::Acquire),
+            0,
+        );
+
+        storage
+            .sealed_exact_lookup_acquisitions
+            .store(0, Ordering::Release);
+        let recorder = TestMetricsRecorder::default();
+        let probes = 100_000u64;
+        let started_at = Instant::now();
+        metrics::with_local_recorder(&recorder, || {
+            for value in 0..probes {
+                let mut bytes = [0x5a; 32];
+                bytes[..8].copy_from_slice(&value.to_le_bytes());
+                let hash = HashBytes(bytes);
+                assert!(storage
+                    .get_transaction(&hash, Some(&filtered))
+                    .unwrap()
+                    .is_none());
+            }
+        });
+        let filtered_probe_elapsed = started_at.elapsed();
+        let filter_checks = recorder.counter(
+            "tycho_storage_rpc_filters_checked_total|namespace=transactions",
+        );
+        let false_positives = recorder.counter(
+            "tycho_storage_rpc_filter_false_positives_total|namespace=transactions",
+        );
+        let filter_positives = recorder.counter(
+            "tycho_storage_rpc_filter_positives_total|namespace=transactions",
+        );
+        let sealed_positive_probes = recorder.counter(
+            "tycho_storage_rpc_exact_lookup_probes_total|namespace=transactions|lifecycle=sealed|reason=filter_positive",
+        );
+        let partitions_traversed = recorder.histogram_values(
+            "tycho_storage_rpc_exact_lookup_partitions_traversed|namespace=transactions",
+        );
+        assert_eq!(filter_positives, false_positives);
+        assert_eq!(sealed_positive_probes, false_positives);
+        assert_eq!(filter_checks, probes * sealed.len() as u64);
+        assert_eq!(partitions_traversed.len(), probes as usize);
+        assert!(partitions_traversed.iter().all(|value| *value == 4.0));
+        let observed_rate = false_positives as f64 / filter_checks as f64;
+        let target_rate = config.filters.transaction_false_positive_rate_ppm as f64 / 1_000_000.0;
+        let confidence_margin = 2.575_829_303_548_900_4
+            * (target_rate * (1.0 - target_rate) / filter_checks as f64).sqrt();
+        assert!(observed_rate <= target_rate * 2.0 + confidence_margin);
+        let filtered_sealed_opens = storage
+            .sealed_exact_lookup_acquisitions
+            .load(Ordering::Acquire);
+        assert!(filtered_sealed_opens <= false_positives);
+
+        let removed_id = sealed[0].0;
+        store.remove_descriptor_for_test(removed_id).unwrap();
+        assert!(store
+            .load_and_validate_sealed(&storage.partitions, removed_id, &cancelled)
+            .unwrap()
+            .is_none());
+        drop(store);
+        let corrupt_id = sealed[1].0;
+        let corrupt_generation = generations[&corrupt_id];
+        let corrupt_path = root
+            .join("rpc/filters")
+            .join(codec::format_filter_generation_directory(
+                corrupt_id.0,
+                corrupt_generation,
+            ))
+            .join(FilterNamespace::Transactions.file_name());
+        let mut corrupted = std::fs::read(&corrupt_path).unwrap();
+        *corrupted.last_mut().unwrap() ^= 1;
+        std::fs::write(&corrupt_path, corrupted).unwrap();
+        drop(filtered);
+        drop(storage);
+        tokio::task::yield_now().await;
+
+        let direct_storage = RpcStorage::open(context.clone(), config.clone()).unwrap();
+        let reconciliation = direct_storage.reconcile_startup(&active_masterchain).unwrap();
+        direct_storage.continue_lifecycle().unwrap();
+        direct_storage
+            .publish_snapshot(&reconciliation.effective_frontier)
+            .unwrap();
+        let direct = direct_storage.load_snapshot().unwrap();
+        assert!(sealed
+            .iter()
+            .all(|(id, ..)| direct.filter_bundle(*id).is_none()));
+        let started_at = Instant::now();
+        assert!(direct_storage
+            .get_transaction(&fully_filtered_absent, Some(&direct))
+            .unwrap()
+            .is_none());
+        let direct_cold_elapsed = started_at.elapsed();
+        let started_at = Instant::now();
+        assert!(direct_storage
+            .get_transaction(&fully_filtered_absent, Some(&direct))
+            .unwrap()
+            .is_none());
+        let direct_warm_elapsed = started_at.elapsed();
+        let direct_cache_entries = {
+            let manager = direct_storage.partitions.lock();
+            manager.run_sealed_cache_pending_tasks();
+            manager.sealed_cache_entry_count()
+        };
+        assert_eq!(direct_cache_entries, sealed_cache_capacity as u64);
+        for (_, _, block, transaction, inbound) in &sealed {
+            assert!(direct_storage
+                .get_transaction(transaction, Some(&direct))
+                .unwrap()
+                .is_some());
+            assert!(direct_storage
+                .get_dst_transaction(inbound, Some(&direct))
+                .unwrap()
+                .is_some());
+            assert!(direct_storage
+                .get_brief_block_info(&block.as_short_id(), Some(&direct))
+                .unwrap()
+                .is_some());
+        }
+        drop(direct);
+        drop(direct_storage);
+        tokio::task::yield_now().await;
+
+        let storage = RpcStorage::open(context, config).unwrap();
+        let reconciliation = storage.reconcile_startup(&active_masterchain).unwrap();
+        storage.continue_lifecycle().unwrap();
+        storage
+            .publish_snapshot(&reconciliation.effective_frontier)
+            .unwrap();
+        storage.start_filter_worker();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let snapshot = storage.load_snapshot().unwrap();
+                if sealed
+                    .iter()
+                    .all(|(id, ..)| snapshot.filter_bundle(*id).is_some())
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let restarted = storage.load_snapshot().unwrap();
+        assert_ne!(
+            restarted.filter_bundle(removed_id).unwrap().generation_id(),
+            generations[&removed_id],
+        );
+        assert_ne!(
+            restarted.filter_bundle(corrupt_id).unwrap().generation_id(),
+            corrupt_generation,
+        );
+        let valid_id = sealed[2].0;
+        assert_eq!(
+            restarted.filter_bundle(valid_id).unwrap().generation_id(),
+            generations[&valid_id],
+        );
+        for (_, _, block, transaction, inbound) in &sealed {
+            assert!(storage
+                .get_transaction(transaction, Some(&restarted))
+                .unwrap()
+                .is_some());
+            assert!(storage
+                .get_dst_transaction(inbound, Some(&restarted))
+                .unwrap()
+                .is_some());
+            assert!(storage
+                .get_brief_block_info(&block.as_short_id(), Some(&restarted))
+                .unwrap()
+                .is_some());
+        }
+        eprintln!(
+            "VT15 fixture: sealed=3 active=1 sealed_cache_capacity={sealed_cache_capacity} sealed_cache_entries={direct_cache_entries} exact_lookup_limit={} resident_bytes={resident_bytes} persisted_bytes={persisted_bytes} build_ms={} validation_ms={} filtered_first_us={} filtered_warm_us={} filtered_100k_ms={} filter_checks={filter_checks} partitions_traversed=4/request false_positives={false_positives} observed_rate={observed_rate:.9} confidence_margin={confidence_margin:.9} filtered_sealed_opens={filtered_sealed_opens} direct_cold_us={} direct_warm_us={}",
+            exact_lookup_limit,
+            build_elapsed.as_millis(),
+            validation_elapsed.as_millis(),
+            filtered_first_elapsed.as_micros(),
+            filtered_warm_elapsed.as_micros(),
+            filtered_probe_elapsed.as_millis(),
+            direct_cold_elapsed.as_micros(),
+            direct_warm_elapsed.as_micros(),
+        );
+    }
+
+    #[tokio::test]
+    async fn immutable_snapshots_use_optional_partition_filters_without_advancing_visibility() {
+        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
+        let storage = RpcStorage::open(
+            context,
+            RpcTransactionPartitionsConfig {
+                target_lsm_bytes: 1,
+                target_blob_bytes: u64::MAX,
+                target_index_records: u64::MAX,
+                max_open_sealed_partitions: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let account = StdAddr::new(0, HashBytes::ZERO);
+        let mc1 = masterchain_block(1);
+        let block1 = basechain_block(1);
+        let transaction_hash = HashBytes([10; 32]);
+        let inbound_message_hash = HashBytes([110; 32]);
+        let partition_id = insert_read_test_block(
+            &storage,
+            &account,
+            &mc1,
+            &block1,
+            &[ReadTestTransaction {
+                lt: 10,
+                hash: transaction_hash,
+                in_msg_hash: inbound_message_hash,
+                boc_byte: 10,
+            }],
+            1,
+        );
+        storage.commit_masterchain_block_set(&mc1).unwrap();
+        wait_for_sealed_partition(&storage, partition_id).await;
+
+        let local_only = storage.load_snapshot().unwrap();
+        assert!(local_only.filter_bundle(partition_id).is_none());
+        let manifest_digest = storage
+            .partitions
+            .lock()
+            .sealed_manifest_digest(partition_id)
+            .unwrap();
+        let transaction_positive_without_record = HashBytes([210; 32]);
+        let inbound_positive_without_record = HashBytes([211; 32]);
+        let block_positive_without_record = basechain_block(210);
+        let mismatched_bundle = test_filter_bundle(
+            partition_id,
+            0,
+            HashBytes::ZERO,
+            &[],
+            &[],
+            &[],
+        );
+        assert!(publish_filter_snapshot(
+            &storage.partitions,
+            &storage.snapshots,
+            &storage.filter_registry,
+            partition_id,
+            mismatched_bundle,
+        )
+        .is_err());
+        let after_failed_publication = storage.load_snapshot().unwrap();
+        assert!(Arc::ptr_eq(&local_only.0, &after_failed_publication.0));
+        assert!(after_failed_publication.filter_bundle(partition_id).is_none());
+        assert!(storage.filter_registry.get(partition_id).is_none());
+        let first_bundle = test_filter_bundle(
+            partition_id,
+            1,
+            manifest_digest,
+            &[transaction_hash, transaction_positive_without_record],
+            &[inbound_message_hash, inbound_positive_without_record],
+            &[
+                known_block_key(&block1),
+                known_block_key(&block_positive_without_record),
+            ],
+        );
+        publish_filter_snapshot(
+            &storage.partitions,
+            &storage.snapshots,
+            &storage.filter_registry,
+            partition_id,
+            first_bundle.clone(),
+        )
+        .unwrap();
+        let first_filtered = storage.load_snapshot().unwrap();
+        assert!(Arc::ptr_eq(&local_only.0, &first_filtered.0));
+        assert_eq!(first_filtered.visible_frontier(), local_only.visible_frontier());
+        assert_eq!(first_filtered.manifest_epoch(), local_only.manifest_epoch());
+        assert_eq!(
+            first_filtered
+                .filter_bundle(partition_id)
+                .unwrap()
+                .generation_id(),
+            1
+        );
+
+        let transaction_negative = (1u8..=u8::MAX)
+            .map(|byte| HashBytes([byte; 32]))
+            .find(|hash| {
+                !first_bundle
+                    .filter(FilterNamespace::Transactions)
+                    .contains(hash.as_slice())
+                    .unwrap()
+            })
+            .unwrap();
+        let inbound_negative = (1u8..=u8::MAX)
+            .rev()
+            .map(|byte| HashBytes([byte; 32]))
+            .find(|hash| {
+                !first_bundle
+                    .filter(FilterNamespace::InboundMessages)
+                    .contains(hash.as_slice())
+                    .unwrap()
+            })
+            .unwrap();
+        let block_negative = (220..u32::MAX)
+            .map(basechain_block)
+            .find(|block_id| {
+                !first_bundle
+                    .filter(FilterNamespace::Blocks)
+                    .contains(&known_block_key(block_id))
+                    .unwrap()
+            })
+            .unwrap();
+        let sealed_cache_entries_before = {
+            let manager = storage.partitions.lock();
+            manager.run_sealed_cache_pending_tasks();
+            manager.sealed_cache_entry_count()
+        };
+        assert!(storage
+            .get_transaction(&transaction_negative, Some(&first_filtered))
+            .unwrap()
+            .is_none());
+        assert!(storage
+            .get_dst_transaction(&inbound_negative, Some(&first_filtered))
+            .unwrap()
+            .is_none());
+        assert!(storage
+            .get_brief_block_info(&block_negative.as_short_id(), Some(&first_filtered))
+            .unwrap()
+            .is_none());
+        {
+            let manager = storage.partitions.lock();
+            manager.run_sealed_cache_pending_tasks();
+            assert_eq!(manager.sealed_cache_entry_count(), sealed_cache_entries_before);
+        }
+
+        assert_eq!(
+            storage
+                .get_transaction(&transaction_hash, Some(&local_only))
+                .unwrap()
+                .unwrap()
+                .as_ref(),
+            [10]
+        );
+        assert_eq!(
+            storage
+                .get_dst_transaction(&inbound_message_hash, Some(&local_only))
+                .unwrap()
+                .unwrap()
+                .as_ref(),
+            [10]
+        );
+        assert!(storage
+            .get_brief_block_info(&block1.as_short_id(), Some(&local_only))
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            storage
+                .get_transaction(&transaction_hash, Some(&first_filtered))
+                .unwrap()
+                .unwrap()
+                .as_ref(),
+            [10]
+        );
+        assert_eq!(
+            storage
+                .get_dst_transaction(&inbound_message_hash, Some(&first_filtered))
+                .unwrap()
+                .unwrap()
+                .as_ref(),
+            [10]
+        );
+        assert!(storage
+            .get_brief_block_info(&block1.as_short_id(), Some(&first_filtered))
+            .unwrap()
+            .is_some());
+        assert!(storage
+            .get_transaction(
+                &transaction_positive_without_record,
+                Some(&first_filtered),
+            )
+            .unwrap()
+            .is_none());
+        assert!(storage
+            .get_dst_transaction(
+                &inbound_positive_without_record,
+                Some(&first_filtered),
+            )
+            .unwrap()
+            .is_none());
+        assert!(storage
+            .get_brief_block_info(
+                &block_positive_without_record.as_short_id(),
+                Some(&first_filtered),
+            )
+            .unwrap()
+            .is_none());
+
+        let future_hash = HashBytes([30; 32]);
+        insert_read_test_block(
+            &storage,
+            &account,
+            &masterchain_block(2),
+            &basechain_block(2),
+            &[ReadTestTransaction {
+                lt: 20,
+                hash: future_hash,
+                in_msg_hash: HashBytes([130; 32]),
+                boc_byte: 20,
+            }],
+            0,
+        );
+        let second_bundle = test_filter_bundle(
+            partition_id,
+            2,
+            manifest_digest,
+            &[transaction_hash],
+            &[inbound_message_hash],
+            &[known_block_key(&block1)],
+        );
+        publish_filter_snapshot(
+            &storage.partitions,
+            &storage.snapshots,
+            &storage.filter_registry,
+            partition_id,
+            second_bundle,
+        )
+        .unwrap();
+        let second_filtered = storage.load_snapshot().unwrap();
+        assert!(Arc::ptr_eq(&first_filtered.0, &second_filtered.0));
+        assert_eq!(second_filtered.visible_frontier(), &mc1);
+        assert_eq!(second_filtered.manifest_epoch(), first_filtered.manifest_epoch());
+        assert_eq!(
+            first_filtered
+                .filter_bundle(partition_id)
+                .unwrap()
+                .generation_id(),
+            1
+        );
+        assert_eq!(
+            second_filtered
+                .filter_bundle(partition_id)
+                .unwrap()
+                .generation_id(),
+            2
+        );
+        assert!(storage
+            .get_transaction(&future_hash, Some(&second_filtered))
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn concurrent_filter_frontier_and_sealing_publications_complete_in_lock_order() {
+        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
+        let storage = Arc::new(RpcStorage::open(context, test_partitions_config()).unwrap());
+        storage.sealing_cancel.cancel();
+        let account = StdAddr::new(0, HashBytes::ZERO);
+        let mc1 = masterchain_block(1);
+        let block1 = basechain_block(1);
+        let first_id = insert_read_test_block(
+            &storage,
+            &account,
+            &mc1,
+            &block1,
+            &[ReadTestTransaction {
+                lt: 10,
+                hash: HashBytes([10; 32]),
+                in_msg_hash: HashBytes([110; 32]),
+                boc_byte: 10,
+            }],
+            1,
+        );
+        storage.commit_masterchain_block_set(&mc1).unwrap();
+        seal_partition(
+            storage.partitions.clone(),
+            storage.snapshots.clone(),
+            storage.filter_registry.clone(),
+            first_id,
+            CancellationFlag::new(),
+            None,
+        )
+        .await
+        .unwrap();
+        let first_digest = storage
+            .partitions
+            .lock()
+            .sealed_manifest_digest(first_id)
+            .unwrap();
+
+        let mc2 = masterchain_block(2);
+        let block2 = basechain_block(2);
+        let second_id = insert_read_test_block(
+            &storage,
+            &account,
+            &mc2,
+            &block2,
+            &[ReadTestTransaction {
+                lt: 20,
+                hash: HashBytes([20; 32]),
+                in_msg_hash: HashBytes([120; 32]),
+                boc_byte: 20,
+            }],
+            1,
+        );
+        storage.commit_masterchain_block_set(&mc2).unwrap();
+        let held_snapshot = storage.load_snapshot().unwrap();
+        let barrier = Arc::new(Barrier::new(4));
+        let filter_storage = storage.clone();
+        let filter_barrier = barrier.clone();
+        let filter_publication = tokio::task::spawn_blocking(move || {
+            filter_barrier.wait();
+            publish_filter_snapshot(
+                &filter_storage.partitions,
+                &filter_storage.snapshots,
+                &filter_storage.filter_registry,
+                first_id,
+                test_filter_bundle(first_id, 1, first_digest, &[], &[], &[]),
+            )
+        });
+        let frontier_storage = storage.clone();
+        let frontier_barrier = barrier.clone();
+        let frontier_publication = tokio::task::spawn_blocking(move || {
+            frontier_barrier.wait();
+            frontier_storage.publish_snapshot(&mc2)
+        });
+        let sealing_storage = storage.clone();
+        let sealing_barrier = barrier.clone();
+        let runtime = tokio::runtime::Handle::current();
+        let sealing_publication = tokio::task::spawn_blocking(move || {
+            sealing_barrier.wait();
+            runtime.block_on(seal_partition(
+                sealing_storage.partitions.clone(),
+                sealing_storage.snapshots.clone(),
+                sealing_storage.filter_registry.clone(),
+                second_id,
+                CancellationFlag::new(),
+                None,
+            ))
+        });
+        barrier.wait();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            filter_publication.await.unwrap().unwrap();
+            frontier_publication.await.unwrap().unwrap();
+            drop(held_snapshot);
+            sealing_publication.await.unwrap().unwrap();
+        })
+        .await
+        .unwrap();
+        let snapshot = storage.load_snapshot().unwrap();
+        assert_eq!(snapshot.visible_frontier(), &mc2);
+        assert_eq!(
+            snapshot.filter_bundle(first_id).unwrap().generation_id(),
+            1,
+        );
+        assert_eq!(
+            storage
+                .partitions
+                .lock()
+                .descriptors()
+                .into_iter()
+                .find(|descriptor| descriptor.id == second_id)
+                .unwrap()
+                .lifecycle,
+            codec::ManifestLifecycle::Sealed,
+        );
+    }
+
+    #[test]
+    fn sealed_exact_lookup_context_acquires_once_and_reports_availability() {
+        let semaphore = Arc::new(Semaphore::new(1));
+        let acquisitions = Arc::new(AtomicU64::new(0));
+        let mut first =
+            SealedExactLookupContext::new(
+                semaphore.clone(),
+                Arc::new(SealedExactLookupMetrics::default()),
+                FilterNamespace::Transactions,
+                acquisitions.clone(),
+            );
+        first.acquire().unwrap();
+        first.acquire().unwrap();
+        assert_eq!(semaphore.available_permits(), 0);
+        assert_eq!(acquisitions.load(Ordering::Acquire), 1);
+
+        let mut second =
+            SealedExactLookupContext::new(
+                semaphore.clone(),
+                Arc::new(SealedExactLookupMetrics::default()),
+                FilterNamespace::Transactions,
+                acquisitions.clone(),
+            );
+        assert_sealed_exact_lookup_error(
+            second.acquire(),
+            SealedExactLookupAvailabilityError::Overloaded,
+        );
+        drop(first);
+        second.acquire().unwrap();
+        assert_eq!(acquisitions.load(Ordering::Acquire), 2);
+        drop(second);
+        assert_eq!(semaphore.available_permits(), 1);
+
+        semaphore.close();
+        let mut closed = SealedExactLookupContext::new(
+            semaphore,
+            Arc::new(SealedExactLookupMetrics::default()),
+            FilterNamespace::Transactions,
+            acquisitions,
+        );
+        assert_sealed_exact_lookup_error(
+            closed.acquire(),
+            SealedExactLookupAvailabilityError::Closed,
+        );
+    }
+
+    #[test]
+    fn observability_records_request_traversal_permits_and_bounded_labels() {
+        let recorder = TestMetricsRecorder::default();
+        let semaphore = Arc::new(Semaphore::new(1));
+        let state = Arc::new(SealedExactLookupMetrics::default());
+        let acquisitions = Arc::new(AtomicU64::new(0));
+
+        metrics::with_local_recorder(&recorder, || {
+            let mut hit = SealedExactLookupContext::new(
+                semaphore.clone(),
+                state.clone(),
+                FilterNamespace::Transactions,
+                acquisitions.clone(),
+            );
+            hit.consider_partition();
+            hit.record_filter(true);
+            hit.record_exact_probe("sealed", "filter_positive");
+            hit.acquire().unwrap();
+            hit.record_hit("sealed");
+
+            let mut overloaded = SealedExactLookupContext::new(
+                semaphore.clone(),
+                state.clone(),
+                FilterNamespace::Transactions,
+                acquisitions.clone(),
+            );
+            assert_sealed_exact_lookup_error(
+                overloaded.acquire(),
+                SealedExactLookupAvailabilityError::Overloaded,
+            );
+            drop(overloaded);
+
+            let permit = hit.into_permit();
+            assert_eq!(
+                recorder.gauge(
+                    "tycho_storage_rpc_sealed_exact_lookup_permits|result=current"
+                ),
+                1.0
+            );
+            drop(permit);
+
+            let mut miss = SealedExactLookupContext::new(
+                semaphore,
+                state,
+                FilterNamespace::Transactions,
+                acquisitions,
+            );
+            miss.consider_partition();
+            miss.record_filter(false);
+            miss.consider_partition();
+            miss.record_filter(true);
+            miss.record_exact_probe("sealed", "filter_positive");
+            miss.record_false_positive();
+            miss.record_miss();
+        });
+
+        assert_eq!(
+            recorder.gauge("tycho_storage_rpc_sealed_exact_lookup_permits|result=current"),
+            0.0
+        );
+        assert_eq!(
+            recorder.gauge("tycho_storage_rpc_sealed_exact_lookup_permits|result=peak"),
+            1.0
+        );
+        assert_eq!(
+            recorder.counter(
+                "tycho_storage_rpc_sealed_exact_lookup_overloads_total|reason=exhausted"
+            ),
+            1
+        );
+        assert_eq!(
+            recorder.counter(
+                "tycho_storage_rpc_filter_negative_skips_total|namespace=transactions"
+            ),
+            1
+        );
+        assert_eq!(
+            recorder.counter(
+                "tycho_storage_rpc_filter_positives_total|namespace=transactions"
+            ),
+            2
+        );
+        assert_eq!(
+            recorder.counter(
+                "tycho_storage_rpc_filter_false_positives_total|namespace=transactions"
+            ),
+            1
+        );
+        assert_eq!(
+            recorder.gauge("tycho_storage_rpc_filter_observed_error_ratio|namespace=transactions"),
+            0.5
+        );
+        assert_eq!(
+            recorder.counter(
+                "tycho_storage_rpc_exact_lookup_hits_total|namespace=transactions|lifecycle=sealed"
+            ),
+            1
+        );
+        assert_eq!(
+            recorder.histogram_len(
+                "tycho_storage_rpc_exact_lookup_duration_seconds|namespace=transactions|result=miss"
+            ),
+            1
+        );
+        for key in recorder.keys() {
+            let labels = key.split_once('|').map_or("", |(_, labels)| labels);
+            for label in labels.split('|').filter(|label| !label.is_empty()) {
+                let label_key = label.split_once('=').unwrap().0;
+                assert!(matches!(
+                    label_key,
+                    "namespace" | "lifecycle" | "result" | "stage" | "reason"
+                ));
+            }
+            assert!(!labels.contains("partition"));
+            assert!(!labels.contains("generation"));
+            assert!(!labels.contains("hash"));
+            assert!(!labels.contains("path"));
+            assert!(!labels.contains("seqno"));
+            assert!(!key.contains("router"));
+        }
+    }
+
+    #[tokio::test]
+    async fn sealed_exact_lookup_backpressure_preserves_lookup_semantics() {
+        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
+        let mut config = RpcTransactionPartitionsConfig {
+            target_lsm_bytes: 1,
+            target_blob_bytes: u64::MAX,
+            target_index_records: u64::MAX,
+            max_open_sealed_partitions: 1,
+            ..Default::default()
+        };
+        config.filters.max_concurrent_sealed_exact_lookups = 1;
+        let storage = RpcStorage::open(context, config).unwrap();
+        assert_eq!(storage.sealed_exact_lookup_semaphore.available_permits(), 1);
+        let account = StdAddr::new(0, HashBytes::ZERO);
+
+        let mc1 = masterchain_block(1);
+        let block1 = basechain_block(1);
+        let hash10 = HashBytes([10; 32]);
+        let msg10 = HashBytes([110; 32]);
+        let held_first_lease = storage.partitions.lock().active_lease();
+        let first_id = insert_read_test_block(
+            &storage,
+            &account,
+            &mc1,
+            &block1,
+            &[ReadTestTransaction {
+                lt: 10,
+                hash: hash10,
+                in_msg_hash: msg10,
+                boc_byte: 10,
+            }],
+            1,
+        );
+        storage.commit_masterchain_block_set(&mc1).unwrap();
+        let sealing_snapshot = storage.load_snapshot().unwrap();
+        let saturated = storage
+            .sealed_exact_lookup_semaphore
+            .clone()
+            .try_acquire_owned()
+            .unwrap();
+        assert!(storage
+            .get_transaction(&hash10, Some(&sealing_snapshot))
+            .unwrap()
+            .is_some());
+        assert!(storage
+            .get_dst_transaction(&msg10, Some(&sealing_snapshot))
+            .unwrap()
+            .is_some());
+        assert!(storage
+            .get_brief_block_info(&block1.as_short_id(), Some(&sealing_snapshot))
+            .unwrap()
+            .is_some());
+        drop(saturated);
+        drop(sealing_snapshot);
+        drop(held_first_lease);
+        wait_for_sealed_partition(&storage, first_id).await;
+
+        let mc2 = masterchain_block(2);
+        let block2 = basechain_block(2);
+        let hash20 = HashBytes([20; 32]);
+        let msg20 = HashBytes([120; 32]);
+        let second_id = insert_read_test_block(
+            &storage,
+            &account,
+            &mc2,
+            &block2,
+            &[ReadTestTransaction {
+                lt: 20,
+                hash: hash20,
+                in_msg_hash: msg20,
+                boc_byte: 20,
+            }],
+            1,
+        );
+        storage.commit_masterchain_block_set(&mc2).unwrap();
+        wait_for_sealed_partition(&storage, second_id).await;
+        assert_ne!(first_id, second_id);
+
+        let mc3 = masterchain_block(3);
+        let block3 = basechain_block(3);
+        let hash30 = HashBytes([30; 32]);
+        let msg30 = HashBytes([130; 32]);
+        insert_read_test_block(
+            &storage,
+            &account,
+            &mc3,
+            &block3,
+            &[ReadTestTransaction {
+                lt: 30,
+                hash: hash30,
+                in_msg_hash: msg30,
+                boc_byte: 30,
+            }],
+            0,
+        );
+        storage.commit_masterchain_block_set(&mc3).unwrap();
+        let local_only = storage.load_snapshot().unwrap();
+
+        let acquisitions_before = storage
+            .sealed_exact_lookup_acquisitions
+            .load(Ordering::Acquire);
+        assert!(storage
+            .get_transaction(&hash10, Some(&local_only))
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            storage
+                .sealed_exact_lookup_acquisitions
+                .load(Ordering::Acquire)
+                - acquisitions_before,
+            1,
+        );
+
+        let block_iter = storage
+            .get_block_transaction_ids(&block1.as_short_id(), false, None, Some(local_only.clone()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(storage.sealed_exact_lookup_semaphore.available_permits(), 0);
+        assert_sealed_exact_lookup_error(
+            storage.get_transaction(&hash20, Some(&local_only)),
+            SealedExactLookupAvailabilityError::Overloaded,
+        );
+        drop(block_iter);
+        assert_eq!(storage.sealed_exact_lookup_semaphore.available_permits(), 1);
+
+        let saturated = storage
+            .sealed_exact_lookup_semaphore
+            .clone()
+            .try_acquire_owned()
+            .unwrap();
+        assert!(storage
+            .get_transaction(&hash30, Some(&local_only))
+            .unwrap()
+            .is_some());
+        assert!(storage
+            .get_dst_transaction(&msg30, Some(&local_only))
+            .unwrap()
+            .is_some());
+        assert!(storage
+            .get_brief_block_info(&block3.as_short_id(), Some(&local_only))
+            .unwrap()
+            .is_some());
+        assert_sealed_exact_lookup_error(
+            storage.get_transaction(&hash10, Some(&local_only)),
+            SealedExactLookupAvailabilityError::Overloaded,
+        );
+        assert_sealed_exact_lookup_error(
+            storage.get_dst_transaction(&msg10, Some(&local_only)),
+            SealedExactLookupAvailabilityError::Overloaded,
+        );
+        assert_sealed_exact_lookup_error(
+            storage.get_brief_block_info(&block1.as_short_id(), Some(&local_only)),
+            SealedExactLookupAvailabilityError::Overloaded,
+        );
+
+        for id in [first_id, second_id] {
+            let manifest_digest = storage
+                .partitions
+                .lock()
+                .sealed_manifest_digest(id)
+                .unwrap();
+            publish_filter_snapshot(
+                &storage.partitions,
+                &storage.snapshots,
+                &storage.filter_registry,
+                id,
+                test_filter_bundle(id, 1, manifest_digest, &[], &[], &[]),
+            )
+            .unwrap();
+        }
+        let negative_filtered = storage.load_snapshot().unwrap();
+        assert!(storage
+            .get_transaction(&HashBytes([200; 32]), Some(&negative_filtered))
+            .unwrap()
+            .is_none());
+        assert!(storage
+            .get_dst_transaction(&HashBytes([201; 32]), Some(&negative_filtered))
+            .unwrap()
+            .is_none());
+        assert!(storage
+            .get_brief_block_info(
+                &basechain_block(200).as_short_id(),
+                Some(&negative_filtered),
+            )
+            .unwrap()
+            .is_none());
+
+        let first_manifest_digest = storage
+            .partitions
+            .lock()
+            .sealed_manifest_digest(first_id)
+            .unwrap();
+        let positive_transaction_without_record = HashBytes([210; 32]);
+        let positive_inbound_without_record = HashBytes([211; 32]);
+        let positive_block_without_record = basechain_block(210);
+        publish_filter_snapshot(
+            &storage.partitions,
+            &storage.snapshots,
+            &storage.filter_registry,
+            first_id,
+            test_filter_bundle(
+                first_id,
+                2,
+                first_manifest_digest,
+                &[hash10, positive_transaction_without_record],
+                &[msg10, positive_inbound_without_record],
+                &[
+                    known_block_key(&block1),
+                    known_block_key(&positive_block_without_record),
+                ],
+            ),
+        )
+        .unwrap();
+        let positive_filtered = storage.load_snapshot().unwrap();
+        assert_sealed_exact_lookup_error(
+            storage.get_transaction(&hash10, Some(&positive_filtered)),
+            SealedExactLookupAvailabilityError::Overloaded,
+        );
+        assert_sealed_exact_lookup_error(
+            storage.get_dst_transaction(&msg10, Some(&positive_filtered)),
+            SealedExactLookupAvailabilityError::Overloaded,
+        );
+        assert_sealed_exact_lookup_error(
+            storage.get_brief_block_info(&block1.as_short_id(), Some(&positive_filtered)),
+            SealedExactLookupAvailabilityError::Overloaded,
+        );
+        assert_sealed_exact_lookup_error(
+            storage.get_transaction(
+                &positive_transaction_without_record,
+                Some(&positive_filtered),
+            ),
+            SealedExactLookupAvailabilityError::Overloaded,
+        );
+        assert_sealed_exact_lookup_error(
+            storage.get_dst_transaction(
+                &positive_inbound_without_record,
+                Some(&positive_filtered),
+            ),
+            SealedExactLookupAvailabilityError::Overloaded,
+        );
+        assert_sealed_exact_lookup_error(
+            storage.get_brief_block_info(
+                &positive_block_without_record.as_short_id(),
+                Some(&positive_filtered),
+            ),
+            SealedExactLookupAvailabilityError::Overloaded,
+        );
+        drop(saturated);
+        assert!(storage
+            .get_transaction(&hash10, Some(&positive_filtered))
+            .unwrap()
+            .is_some());
+        storage.reset_known_block_point_reads();
+        assert!(storage
+            .get_brief_block_info(&mc1.as_short_id(), Some(&positive_filtered))
+            .unwrap()
+            .is_some());
+        assert_eq!(storage.known_block_point_reads(), 1);
     }
 
     #[tokio::test]

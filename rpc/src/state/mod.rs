@@ -49,6 +49,7 @@ impl FromRef<RpcState> for jrpc::SubscriptionsState {
 
 mod db;
 mod codec;
+mod filter;
 mod partition;
 mod storage;
 mod subscriptions;
@@ -603,7 +604,18 @@ impl BlockSubscriber for RpcBlockSubscriber {
                 // NOTE: Update snapshot only for masterchain because it is handled last.
                 // It is updated only after processing all shards and mc block.
                 if let Some(rpc_storage) = &self.inner.rpc_storage {
-                    rpc_storage.commit_masterchain_block_set(ctx.block.id())?;
+                    let info = ctx.block.load_info()?;
+                    let predecessor = match info.load_prev_ref()? {
+                        PrevBlockRef::Single(block_ref) => block_ref.as_block_id(info.shard),
+                        PrevBlockRef::AfterMerge { .. } => anyhow::bail!(
+                            "masterchain block {} has an invalid merge predecessor",
+                            ctx.block.id()
+                        ),
+                    };
+                    rpc_storage.commit_masterchain_block_set_with_predecessor(
+                        ctx.block.id(),
+                        &predecessor,
+                    )?;
                 }
             }
             Ok(())
@@ -814,10 +826,14 @@ impl Inner {
                     .insert(block_id.shard, make_cached_accounts(&state)?);
             }
 
+            rpc_storage.continue_lifecycle()?;
             rpc_storage.publish_snapshot(&reconciliation.effective_frontier)?;
         }
 
         self.is_ready.store(true, Ordering::Release);
+        if let Some(rpc_storage) = &self.rpc_storage {
+            rpc_storage.start_filter_worker();
+        }
         Ok(())
     }
 
@@ -1424,7 +1440,11 @@ mod test {
 
         let (delayed_handle, delayed) = DelayedTasks::new();
         let ctx = BlockSubscriberContext {
-            mc_block_id: BlockId::default(),
+            mc_block_id: BlockId {
+                shard: ShardIdent::MASTERCHAIN,
+                seqno: 1,
+                ..Default::default()
+            },
             mc_is_key_block: false,
             is_key_block: false,
             is_top_block: false,
@@ -1434,13 +1454,19 @@ mod test {
         };
 
         let (block_subscriber, _) = rpc_state.clone().split();
+        // publish explicitly because this unit fixture bypasses RpcState::init
+        rpc_state
+            .inner
+            .rpc_storage
+            .as_ref()
+            .unwrap()
+            .publish_snapshot(&BlockId::default())?;
         let delayed_handle = delayed_handle.spawn();
         let prepared = block_subscriber.prepare_block(&ctx).await?;
 
         block_subscriber.handle_block(&ctx, prepared).await?;
         delayed_handle.join().await?;
 
-        // publish explicitly because this unit fixture bypasses RpcState::init
         rpc_state
             .inner
             .rpc_storage
@@ -1500,6 +1526,11 @@ mod test {
             .build()?;
 
         let block = get_empty_block();
+        let info = block.load_info()?;
+        let predecessor = match info.load_prev_ref()? {
+            PrevBlockRef::Single(block_ref) => block_ref.as_block_id(info.shard),
+            PrevBlockRef::AfterMerge { .. } => unreachable!(),
+        };
 
         let (delayed_handle, delayed) = DelayedTasks::new();
         let ctx = BlockSubscriberContext {
@@ -1513,6 +1544,13 @@ mod test {
         };
 
         let (block_subscriber, _) = rpc_state.clone().split();
+        // publish explicitly because this unit fixture bypasses RpcState::init
+        rpc_state
+            .inner
+            .rpc_storage
+            .as_ref()
+            .unwrap()
+            .publish_snapshot(&predecessor)?;
         let delayed_handle = delayed_handle.spawn();
         let prepared = block_subscriber.prepare_block(&ctx).await?;
 

@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -8,6 +9,7 @@ use anyhow::{Context, Result, bail, ensure};
 use moka::sync::Cache;
 use tycho_storage::StorageContext;
 use tycho_storage::kv::{InstanceId, NamedTables};
+use tycho_types::prelude::HashBytes;
 use weedb::rocksdb;
 
 use crate::config::RpcTransactionPartitionsConfig;
@@ -16,12 +18,12 @@ use super::codec::{
     self, ControlState, ManifestBound, ManifestLifecycle, ManifestTransition, PartitionManifest,
 };
 use super::db::{
-    RpcControlDb, RpcCurrentStateDb, RpcRouterDb, RpcTransactionsDb, RpcTransactionsTables,
+    RpcControlDb, RpcCurrentStateDb, RpcTransactionsDb,
+    RpcTransactionsTables,
 };
 
 const RPC_ROOT: &str = "rpc";
 const CONTROL_SUBDIR: &str = "rpc/control";
-const ROUTER_SUBDIR: &str = "rpc/router";
 const CURRENT_STATE_SUBDIR: &str = "rpc/current-state";
 const TRANSACTIONS_SUBDIR: &str = "rpc/transactions";
 const MAX_PARTITION_ID: u64 = 9_999_999_999_999_999;
@@ -176,6 +178,18 @@ pub struct SealedPartitionLeaseOpener {
     cache: Cache<PartitionId, Arc<RpcTransactionsDb>>,
 }
 
+/// Opens a sealed partition for one maintenance job without using the request cache.
+pub(super) struct MaintenanceSealedPartitionOpener {
+    context: StorageContext,
+    subdir: PathBuf,
+}
+
+impl MaintenanceSealedPartitionOpener {
+    pub(super) fn open(self) -> Result<Arc<RpcTransactionsDb>> {
+        Ok(Arc::new(self.context.open_read_only(self.subdir)?))
+    }
+}
+
 impl SealedPartitionLeaseOpener {
     pub fn open(self) -> Result<PartitionReadLease> {
         let db = match self.cache.get(&self.id) {
@@ -210,7 +224,6 @@ pub struct PartitionManager {
     config: RpcTransactionPartitionsConfig,
     root: PathBuf,
     control: RpcControlDb,
-    router: RpcRouterDb,
     current_state: RpcCurrentStateDb,
     control_state: ControlState,
     visible_frontier: Option<tycho_types::models::BlockId>,
@@ -223,6 +236,8 @@ pub struct PartitionManager {
     sealed_cache: Cache<PartitionId, Arc<RpcTransactionsDb>>,
     rotation_requested: Option<RotationReason>,
     sealer_busy: bool,
+    #[cfg(test)]
+    fail_next_creation_activation: bool,
 }
 
 impl PartitionManager {
@@ -236,8 +251,20 @@ impl PartitionManager {
             legacy_marker.display()
         );
 
+        let rpc_root = root.join(RPC_ROOT);
+        let root_was_nonempty = rpc_root
+            .try_exists()?
+            && fs::read_dir(&rpc_root)?.next().transpose()?.is_some();
+
         let control: RpcControlDb = context.open_preconfigured(CONTROL_SUBDIR)?;
-        let router: RpcRouterDb = context.open_preconfigured(ROUTER_SUBDIR)?;
+        match control.state.get(codec::rpc_layout_marker_key())? {
+            Some(value) => codec::decode_rpc_layout_marker(value.as_ref())?,
+            None if root_was_nonempty => bail!(
+                "unsupported pre-V2 RPC layout detected at {}; clear the RPC DB and perform a full reindex",
+                rpc_root.display()
+            ),
+            None => {}
+        }
         let current_state: RpcCurrentStateDb = context.open_preconfigured(CURRENT_STATE_SUBDIR)?;
         let sealed_cache = Cache::builder()
             .max_capacity(config.max_open_sealed_partitions as u64)
@@ -257,7 +284,6 @@ impl PartitionManager {
             config,
             root,
             control,
-            router,
             current_state,
             control_state,
             visible_frontier: None,
@@ -270,6 +296,8 @@ impl PartitionManager {
             sealed_cache,
             rotation_requested: None,
             sealer_busy: false,
+            #[cfg(test)]
+            fail_next_creation_activation: false,
         };
         manager.load_or_bootstrap()?;
         manager.refresh_lifecycle_metrics();
@@ -279,10 +307,6 @@ impl PartitionManager {
     #[cfg(test)]
     pub fn control_db(&self) -> &RpcControlDb {
         &self.control
-    }
-
-    pub fn router_db(&self) -> &RpcRouterDb {
-        &self.router
     }
 
     pub fn current_state_db(&self) -> &RpcCurrentStateDb {
@@ -302,13 +326,103 @@ impl PartitionManager {
         self.visible_frontier.as_ref()
     }
 
-    pub fn has_commits_after(&self, mc_seqno: u32) -> bool {
-        self.descriptors.values().any(|descriptor| {
-            descriptor.last.block_id.is_some() && descriptor.last.mc_seqno > mc_seqno
-        })
+    pub fn has_creating_partition(&self) -> bool {
+        self.descriptors
+            .values()
+            .any(|descriptor| descriptor.lifecycle == ManifestLifecycle::Creating)
+    }
+
+    #[cfg(test)]
+    pub fn fail_next_creation_activation(&mut self) {
+        self.fail_next_creation_activation = true;
+    }
+
+    pub fn active_has_commit_after(&self, mc_seqno: u32) -> Result<bool> {
+        let started_at = Instant::now();
+        let result = self.active_has_commit_after_inner(mc_seqno);
+        metrics::histogram!(
+            "tycho_storage_rpc_active_tail_probe_duration_seconds",
+            "result" => match &result {
+                Ok(true) => "found",
+                Ok(false) => "empty",
+                Err(_) => "failure",
+            },
+        )
+        .record(started_at.elapsed());
+        result
+    }
+
+    fn active_has_commit_after_inner(&self, mc_seqno: u32) -> Result<bool> {
+        let Some(active) = self.active.as_ref() else {
+            let initial = self.descriptors.get(&PartitionId::FIRST);
+            // only the durable bootstrap state has no active database before lifecycle continuation
+            ensure!(
+                self.descriptors.len() == 1
+                    && initial.is_some_and(|descriptor| {
+                        descriptor.lifecycle == ManifestLifecycle::Creating
+                            && descriptor.counters == PartitionCounters::default()
+                            && descriptor.last_transition.epoch == self.manifest_epoch
+                    })
+                    && self.visible_frontier.is_none(),
+                "partition manager is missing an active DB outside the initial creating state"
+            );
+            return Ok(false);
+        };
+        let Some(next_mc_seqno) = mc_seqno.checked_add(1) else {
+            return Ok(false);
+        };
+        let mut iterator = active
+            .rocksdb()
+            .raw_iterator_cf(&active.partition_commits.cf());
+        iterator.seek(next_mc_seqno.to_be_bytes());
+        if !iterator.valid() {
+            iterator.status()?;
+            return Ok(false);
+        }
+        let key = iterator
+            .key()
+            .context("partition commit iterator returned no key")?;
+        let (found_mc_seqno, _) = codec::decode_partition_commit_key(key)?;
+        ensure!(found_mc_seqno >= next_mc_seqno, "partition commit lower-bound seek returned an earlier masterchain sequence number");
+        iterator.status()?;
+        Ok(true)
     }
 
     pub fn validate_masterchain_commit(
+        &self,
+        block_id: &tycho_types::models::BlockId,
+    ) -> Result<()> {
+        let started_at = Instant::now();
+        let result = self.validate_masterchain_commit_inner(block_id);
+        metrics::histogram!(
+            "tycho_storage_rpc_predecessor_validation_duration_seconds",
+            "stage" => "partition_commit",
+            "result" => if result.is_ok() { "success" } else { "failure" },
+        )
+        .record(started_at.elapsed());
+        if let Err(error) = &result {
+            let message = format!("{error:#}");
+            let reason = if message.contains("missing") {
+                "commit_missing"
+            } else if message.contains("digest") {
+                "commit_digest_mismatch"
+            } else if message.contains("identity") {
+                "full_identity_mismatch"
+            } else if message.contains("invalid") || message.contains("decode") {
+                "commit_malformed"
+            } else {
+                "other"
+            };
+            metrics::counter!(
+                "tycho_storage_rpc_predecessor_validation_failures_total",
+                "reason" => reason,
+            )
+            .increment(1);
+        }
+        result
+    }
+
+    fn validate_masterchain_commit_inner(
         &self,
         block_id: &tycho_types::models::BlockId,
     ) -> Result<()> {
@@ -326,8 +440,12 @@ impl PartitionManager {
             })?;
         let commit = codec::decode_partition_commit(value.as_ref())?;
         ensure!(
-            commit.block_id == *block_id && commit.digest == block_id.root_hash,
+            commit.block_id == *block_id,
             "RPC frontier commit identity mismatch for {block_id}"
+        );
+        ensure!(
+            commit.digest == block_id.root_hash,
+            "RPC frontier commit digest mismatch for {block_id}"
         );
         Ok(())
     }
@@ -550,9 +668,23 @@ impl PartitionManager {
         Ok(SealedPartitionLeaseOpener {
             id,
             context: self.context.clone(),
-            subdir: self.partition_subdir(id),
+            subdir: Self::partition_subdir(id),
             cache: self.sealed_cache.clone(),
         })
+    }
+
+    pub(super) fn maintenance_sealed_opener(&self, id: PartitionId) -> Result<MaintenanceSealedPartitionOpener> {
+        ensure!(self.descriptors.get(&id).map(|entry| entry.lifecycle) == Some(ManifestLifecycle::Sealed), "partition {} is not sealed", id.0);
+        Ok(MaintenanceSealedPartitionOpener {
+            context: self.context.clone(),
+            subdir: Self::partition_subdir(id),
+        })
+    }
+
+    pub(super) fn sealed_manifest_digest(&self, id: PartitionId) -> Result<HashBytes> {
+        let descriptor = self.descriptors.get(&id).context("sealed transaction partition is missing")?;
+        ensure!(descriptor.lifecycle == ManifestLifecycle::Sealed, "partition {} is not sealed", id.0);
+        Ok(HashBytes::from_slice(blake3::hash(&codec::encode_manifest(&descriptor.to_manifest())).as_bytes()))
     }
 
     #[cfg(test)]
@@ -560,9 +692,23 @@ impl PartitionManager {
         self.sealed_cache.run_pending_tasks();
     }
 
-    #[cfg(test)]
-    pub fn sealed_cache_entry_count(&self) -> u64 {
+    pub(super) fn sealed_cache_entry_count(&self) -> u64 {
         self.sealed_cache.entry_count()
+    }
+
+    #[cfg(test)]
+    pub(super) fn mutate_sealed_manifest_for_test(&mut self, id: PartitionId) -> Result<()> {
+        let descriptor = self
+            .descriptors
+            .get_mut(&id)
+            .context("sealed transaction partition is missing")?;
+        ensure!(descriptor.lifecycle == ManifestLifecycle::Sealed, "partition {} is not sealed", id.0);
+        descriptor.last_transition.epoch = descriptor
+            .last_transition
+            .epoch
+            .checked_add(1)
+            .context("sealed manifest test epoch overflow")?;
+        Ok(())
     }
 
     pub fn next_sealing_partition(&self) -> Option<PartitionId> {
@@ -597,11 +743,11 @@ impl PartitionManager {
     }
 
     pub fn open_sealed_read_only(&self, id: PartitionId) -> Result<Arc<RpcTransactionsDb>> {
-        Ok(Arc::new(self.context.open_read_only(self.partition_subdir(id))?))
+        Ok(Arc::new(self.context.open_read_only(Self::partition_subdir(id))?))
     }
 
     pub fn reopen_sealing_writable(&self, id: PartitionId) -> Result<Arc<RpcTransactionsDb>> {
-        let db = Arc::new(self.context.open_preconfigured(self.partition_subdir(id))?);
+        let db = Arc::new(self.context.open_preconfigured(Self::partition_subdir(id))?);
         let validation = Self::validate_partition_db(&db, id);
         self.register_active_rocksdb_metrics();
         validation?;
@@ -695,6 +841,13 @@ impl PartitionManager {
         let manifest_epoch = self.manifest_epoch.checked_add(1).context("manifest epoch overflow")?;
         let descriptor = Self::empty_descriptor(id, ManifestLifecycle::Creating, manifest_epoch);
         let mut batch = rocksdb::WriteBatch::default();
+        if !has_active {
+            batch.put_cf(
+                &self.control.state.cf(),
+                codec::rpc_layout_marker_key(),
+                codec::rpc_layout_marker_value(),
+            );
+        }
         batch.put_cf(&self.control.state.cf(), codec::control_state_key(), codec::encode_control_state(control_state));
         batch.put_cf(&self.control.manifests.cf(), codec::partition_manifest_key(id.0), codec::encode_manifest(&descriptor.to_manifest()));
         batch.put_cf(&self.control.state.cf(), codec::manifest_epoch_key(), codec::encode_manifest_epoch(manifest_epoch));
@@ -713,63 +866,26 @@ impl PartitionManager {
 
     /// Completes the second, atomic half of the two-step creation protocol.
     pub fn complete_partition_creation(&mut self, id: PartitionId) -> Result<()> {
-        let (old_descriptor, visible_frontier) = self.recover_creating_activation()?;
-        self.activate_creating_partition(id, old_descriptor, visible_frontier.as_ref())
-    }
-
-    /// Rebuilds the data which must be atomically published when startup resumes `Creating`.
-    fn recover_creating_activation(&self) -> Result<(Option<PartitionDescriptor>, Option<tycho_types::models::BlockId>)> {
-        let Some(old_active) = self
-            .descriptors
-            .values()
-            .find(|descriptor| descriptor.lifecycle == ManifestLifecycle::Active)
-            .map(|descriptor| descriptor.id)
-        else {
-            return Ok((None, None));
-        };
-        let temporary_db = if self.active.is_none() {
-            Some(self.context.open_preconfigured(self.partition_subdir(old_active))?)
-        } else {
-            None
-        };
-        let db = self
-            .active
-            .as_deref()
-            .or(temporary_db.as_ref())
-            .expect("partition manager is initialized with an active DB");
-        Self::validate_partition_db(db, old_active)?;
-        let descriptor = Self::reconstruct_descriptor(db, self.descriptors.get(&old_active).unwrap())?;
-        let recovered_frontier = Self::latest_masterchain_commit(db)?;
-        drop(temporary_db);
-        let visible_frontier = match (self.visible_frontier, recovered_frontier) {
-            (Some(persisted), Some(recovered)) => {
-                ensure!(recovered.seqno >= persisted.seqno, "creating transaction partition recovery would regress visible frontier from {} to {}", persisted.seqno, recovered.seqno);
-                if recovered.seqno == persisted.seqno {
-                    ensure!(recovered == persisted, "creating transaction partition recovery found a different full block id at visible frontier seqno {}", persisted.seqno);
-                }
-                Some(recovered)
-            }
-            (Some(persisted), None) => Some(persisted),
-            (None, recovered) => recovered,
-        };
-        Ok((Some(descriptor), visible_frontier))
+        self.activate_creating_partition(id, None, None)
     }
 
     /// Creates the DB for a persisted `Creating` entry and publishes the new active partition.
     ///
-    /// The caller supplies the fully reconstructed old descriptor and the boundary frontier when
-    /// activation is part of a block-set commit. This keeps all externally visible control state
-    /// in the second write of the creation protocol.
+    /// The old active descriptor and visible frontier are durable before creation starts.
     fn activate_creating_partition(
         &mut self,
         id: PartitionId,
         old_descriptor: Option<PartitionDescriptor>,
         visible_frontier: Option<&tycho_types::models::BlockId>,
     ) -> Result<()> {
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_next_creation_activation) {
+            bail!("test transaction partition activation failure");
+        }
         let started_at = Instant::now();
         let reason = self.rotation_requested;
         ensure!(self.descriptors.get(&id).map(|entry| entry.lifecycle) == Some(ManifestLifecycle::Creating), "partition {} is not creating", id.0);
-        let db: Arc<RpcTransactionsDb> = Arc::new(self.context.open_preconfigured(self.partition_subdir(id))?);
+        let db: Arc<RpcTransactionsDb> = Arc::new(self.context.open_preconfigured(Self::partition_subdir(id))?);
         let registration_context = self.context.clone();
         let registration_active = self.active.clone();
         let registration_restore = scopeguard::guard((), move |()| {
@@ -786,25 +902,9 @@ impl PartitionManager {
         let threshold_reason = reason
             .map(RotationReason::as_str)
             .unwrap_or(if old_exists { "recovery" } else { "bootstrap" });
-        let recovered_old_active = if old_exists && self.active.is_none() {
-            let old: RpcTransactionsDb = self.context.open_preconfigured(self.partition_subdir(old_active))?;
-            Self::validate_partition_db(&old, old_active)?;
-            Some(Arc::new(old))
-        } else {
-            None
-        };
         let old_descriptor = match old_descriptor {
             Some(descriptor) => Some(descriptor),
-            None if old_exists => {
-                let old_db = recovered_old_active
-                    .as_ref()
-                    .or(self.active.as_ref())
-                    .expect("partition manager is initialized with an active DB");
-                Some(Self::reconstruct_descriptor(
-                    old_db,
-                    self.descriptors.get(&old_active).unwrap(),
-                )?)
-            }
+            None if old_exists => Some(self.descriptors.get(&old_active).unwrap().clone()),
             None => None,
         };
         let mut descriptors = self.descriptors.clone();
@@ -843,7 +943,7 @@ impl PartitionManager {
         self.write_control(batch)?;
 
         if old_exists {
-            let old = recovered_old_active.or_else(|| self.active.clone()).expect("partition manager is initialized with an active DB");
+            let old = self.active.clone().expect("partition manager is initialized with an active DB");
             self.sealing.insert(old_active, old);
             self.sealer_busy = true;
         }
@@ -896,7 +996,16 @@ impl PartitionManager {
     }
 
     /// Commits a complete masterchain block set after all related local writes succeeded.
+    #[cfg(test)]
     pub fn commit_masterchain_block_set(&mut self, block_id: &tycho_types::models::BlockId) -> Result<()> {
+        self.commit_masterchain_block_set_after_admission(block_id, false)
+    }
+
+    pub(crate) fn commit_masterchain_block_set_after_admission(
+        &mut self,
+        block_id: &tycho_types::models::BlockId,
+        current_commit_prevalidated: bool,
+    ) -> Result<()> {
         ensure!(block_id.is_masterchain(), "block-set boundary must be a masterchain block");
         if let Some(visible_frontier) = self.visible_frontier
             && block_id.seqno == visible_frontier.seqno
@@ -910,10 +1019,12 @@ impl PartitionManager {
             ManifestLifecycle::Sealed => self.sealed_lease(id)?,
             ManifestLifecycle::Creating => bail!("selected partition is creating"),
         };
-        let key = codec::partition_commit_key(block_id.seqno, &block_id.as_short_id());
-        let value = lease.db().partition_commits.get(key)?.context("masterchain partition commit is missing")?;
-        let commit = codec::decode_partition_commit(value.as_ref())?;
-        ensure!(commit.block_id == *block_id && commit.digest == block_id.root_hash, "masterchain partition commit identity mismatch");
+        if !current_commit_prevalidated {
+            let key = codec::partition_commit_key(block_id.seqno, &block_id.as_short_id());
+            let value = lease.db().partition_commits.get(key)?.context("masterchain partition commit is missing")?;
+            let commit = codec::decode_partition_commit(value.as_ref())?;
+            ensure!(commit.block_id == *block_id && commit.digest == block_id.root_hash, "masterchain partition commit identity mismatch");
+        }
         let persisted_descriptor = self.descriptors.get(&id).unwrap().clone();
 
         if let Some(visible_frontier) = self.visible_frontier {
@@ -930,21 +1041,12 @@ impl PartitionManager {
 
         ensure!(id == self.active_id, "cannot publish a newer masterchain block set through non-active partition {}", id.0);
 
-        // startup reconstruction can run ahead of the visible frontier and miss later same-seq writes
-        let recovery_ahead = persisted_descriptor.last.block_id.is_some()
-            && self
-                .visible_frontier
-                .is_none_or(|frontier| persisted_descriptor.last.mc_seqno > frontier.seqno);
-        let descriptor = if recovery_ahead {
-            Self::reconstruct_descriptor(lease.db(), &persisted_descriptor)?
-        } else {
-            Self::aggregate_commits_after_descriptor(
-                lease.db(),
-                &persisted_descriptor,
-                block_id.seqno,
-            )?
-            .0
-        };
+        let descriptor = Self::aggregate_commits_after_descriptor(
+            lease.db(),
+            &persisted_descriptor,
+            block_id.seqno,
+        )?
+        .0;
         let rotation_reason = if descriptor.last.block_id.is_some()
             && descriptor.last.mc_seqno <= block_id.seqno
         {
@@ -952,22 +1054,6 @@ impl PartitionManager {
         } else {
             None
         };
-        if let Some(reason) = rotation_reason
-            && !self.sealer_busy
-        {
-            let started_at = Instant::now();
-            let result = (|| {
-                let new_id = self.begin_partition_creation()?;
-                self.activate_creating_partition(new_id, Some(descriptor), Some(block_id))
-            })();
-            record_rotation_result(reason, started_at.elapsed(), result.is_ok());
-            result?;
-            return Ok(());
-        }
-        if self.rotation_requested.is_some() {
-            metrics::counter!("tycho_storage_rpc_partition_rotation_deferred_total").increment(1);
-        }
-
         let epoch = self.manifest_epoch.checked_add(1).context("manifest epoch overflow")?;
         let mut batch = rocksdb::WriteBatch::default();
         batch.put_cf(&self.control.manifests.cf(), codec::partition_manifest_key(id.0), codec::encode_manifest(&descriptor.to_manifest()));
@@ -978,6 +1064,21 @@ impl PartitionManager {
         self.visible_frontier = Some(*block_id);
         self.manifest_epoch = epoch;
         self.refresh_progress_metrics();
+        if let Some(reason) = rotation_reason
+            && !self.sealer_busy
+        {
+            let started_at = Instant::now();
+            let result = (|| {
+                let new_id = self.begin_partition_creation()?;
+                self.activate_creating_partition(new_id, None, None)
+            })();
+            record_rotation_result(reason, started_at.elapsed(), result.is_ok());
+            if let Err(e) = result {
+                tracing::error!("failed to start RPC transaction partition rotation after durable boundary publication: {e:#}");
+            }
+        } else if self.rotation_requested.is_some() {
+            metrics::counter!("tycho_storage_rpc_partition_rotation_deferred_total").increment(1);
+        }
         Ok(())
     }
 
@@ -1002,16 +1103,23 @@ impl PartitionManager {
         self.descriptors = self.read_descriptors()?;
         self.validate_descriptors(true)?;
         self.validate_directories()?;
-        self.resume_creating()?;
-        self.validate_descriptors(false)?;
+        let initial_creating = self.descriptors.len() == 1
+            && self.descriptors.contains_key(&PartitionId::FIRST)
+            && self.descriptors[&PartitionId::FIRST].lifecycle == ManifestLifecycle::Creating;
+        if initial_creating {
+            ensure!(self.visible_frontier.is_none(), "initial creating transaction partition has a visible frontier");
+            ensure!(self.descriptors[&PartitionId::FIRST].counters == PartitionCounters::default(), "initial creating transaction partition has non-empty counters");
+            ensure!(self.descriptors[&PartitionId::FIRST].last_transition.epoch == self.manifest_epoch, "initial creating transaction partition has an inconsistent transition epoch");
+            ensure!(self.control.state.get(codec::active_partition_key())?.is_none(), "initial creating transaction partition has an active pointer");
+            return Ok(());
+        }
         self.validate_active_pointer()?;
         self.validate_directories()?;
         self.open_existing_partitions()?;
-        self.reconstruct_partitions()?;
         Ok(())
     }
 
-    fn resume_creating(&mut self) -> Result<()> {
+    pub fn continue_lifecycle(&mut self) -> Result<()> {
         let creating = self.descriptors.values().filter(|entry| entry.lifecycle == ManifestLifecycle::Creating).map(|entry| entry.id).collect::<Vec<_>>();
         ensure!(creating.len() <= 1, "more than one transaction partition is creating");
         if let Some(id) = creating.first().copied() {
@@ -1023,7 +1131,7 @@ impl PartitionManager {
     fn open_existing_partitions(&mut self) -> Result<()> {
         let active = self.descriptors.values().find(|entry| entry.lifecycle == ManifestLifecycle::Active).context("active partition manifest is missing")?.id;
         if self.active.is_none() {
-            self.active = Some(Arc::new(self.context.open_preconfigured(self.partition_subdir(active))?));
+            self.active = Some(Arc::new(self.context.open_preconfigured(Self::partition_subdir(active))?));
         }
         Self::validate_partition_db(self.active.as_ref().unwrap(), active)?;
         self.active_id = active;
@@ -1036,50 +1144,10 @@ impl PartitionManager {
                     }
                     self.sealer_busy = true;
                 }
-                ManifestLifecycle::Sealed => {
-                    let db = self.context.open_read_only(self.partition_subdir(descriptor.id))?;
-                    Self::validate_partition_db(&db, descriptor.id)?;
-                }
+                ManifestLifecycle::Sealed => {}
                 ManifestLifecycle::Creating | ManifestLifecycle::Active => {}
             }
         }
-        Ok(())
-    }
-
-    fn reconstruct_partitions(&mut self) -> Result<()> {
-        let ids = self.descriptors.keys().copied().collect::<Vec<_>>();
-        for id in ids {
-            let descriptor = self.descriptors.get(&id).unwrap().clone();
-            if descriptor.lifecycle == ManifestLifecycle::Creating {
-                continue;
-            }
-            let db = if id == self.active_id {
-                self.active.as_ref().expect("partition manager is initialized with an active DB").clone()
-            } else if let Some(db) = self.sealing.get(&id) {
-                db.clone()
-            } else {
-                Arc::new(self.context.open_read_only(self.partition_subdir(id))?)
-            };
-            let reconstructed = Self::reconstruct_descriptor(&db, &descriptor)?;
-            if reconstructed != descriptor {
-                if id != self.active_id {
-                    bail!("partition {} manifest counters or bounds do not match partition commits", id.0);
-                }
-                self.persist_active_reconstruction(reconstructed)?;
-            }
-        }
-        self.validate_descriptors(false)
-    }
-
-    fn persist_active_reconstruction(&mut self, descriptor: PartitionDescriptor) -> Result<()> {
-        let manifest_epoch = self.manifest_epoch.checked_add(1).context("manifest epoch overflow")?;
-        let mut batch = rocksdb::WriteBatch::default();
-        batch.put_cf(&self.control.manifests.cf(), codec::partition_manifest_key(descriptor.id.0), codec::encode_manifest(&descriptor.to_manifest()));
-        batch.put_cf(&self.control.state.cf(), codec::manifest_epoch_key(), codec::encode_manifest_epoch(manifest_epoch));
-        self.write_control(batch)?;
-        self.manifest_epoch = manifest_epoch;
-        self.descriptors.insert(descriptor.id, descriptor);
-        self.refresh_progress_metrics();
         Ok(())
     }
 
@@ -1153,92 +1221,6 @@ impl PartitionManager {
         }
         iterator.status()?;
         Ok((result, scanned_commits))
-    }
-
-    fn reconstruct_descriptor(db: &RpcTransactionsDb, original: &PartitionDescriptor) -> Result<PartitionDescriptor> {
-        let mut commits = Vec::new();
-        let mut iterator = db.rocksdb().raw_iterator_cf(&db.partition_commits.cf());
-        iterator.seek_to_first();
-        while iterator.valid() {
-            let key = iterator.key().context("partition commit iterator returned no key")?;
-            let value = iterator.value().context("partition commit iterator returned no value")?;
-            let (mc_seqno, short_id) = codec::decode_partition_commit_key(key)?;
-            let commit = codec::decode_partition_commit(value)?;
-            ensure!(commit.block_id.as_short_id() == short_id, "partition commit key does not match its full block id");
-            ensure!(commit.digest == commit.block_id.root_hash, "partition commit digest does not match block root hash");
-            commits.push((mc_seqno, short_id, commit));
-            iterator.next();
-        }
-        iterator.status()?;
-        let mut result = original.clone();
-        result.counters = PartitionCounters::default();
-        result.first = empty_bound();
-        result.last = empty_bound();
-        let mut first_mc_seqno = u32::MAX;
-        let mut first_transaction_lt = u64::MAX;
-        let mut first_gen_utime = u32::MAX;
-        let mut last_mc_seqno = 0;
-        let mut last_transaction_lt = 0;
-        let mut last_gen_utime = 0;
-        let mut first_block = None;
-        let mut last_block = None;
-        for (mc_seqno, _, commit) in commits.iter() {
-            result.counters.transaction_count = result.counters.transaction_count.checked_add(commit.transaction_count).context("transaction count overflow while reconstructing partition")?;
-            result.counters.estimated_lsm_bytes = result.counters.estimated_lsm_bytes.checked_add(commit.estimated_lsm_bytes).context("LSM byte counter overflow while reconstructing partition")?;
-            result.counters.estimated_blob_bytes = result.counters.estimated_blob_bytes.checked_add(commit.estimated_blob_bytes).context("blob byte counter overflow while reconstructing partition")?;
-            result.counters.index_record_count = result.counters.index_record_count.checked_add(commit.index_record_count).context("index record counter overflow while reconstructing partition")?;
-            first_mc_seqno = first_mc_seqno.min(*mc_seqno);
-            first_transaction_lt = first_transaction_lt.min(commit.start_lt);
-            first_gen_utime = first_gen_utime.min(commit.gen_utime);
-            last_mc_seqno = last_mc_seqno.max(*mc_seqno);
-            last_transaction_lt = last_transaction_lt.max(commit.end_lt);
-            last_gen_utime = last_gen_utime.max(commit.gen_utime);
-            let block_key = (*mc_seqno, commit.block_id);
-            if first_block.as_ref().is_none_or(|key| block_key < *key) {
-                first_block = Some(block_key);
-            }
-            if last_block.as_ref().is_none_or(|key| block_key > *key) {
-                last_block = Some(block_key);
-            }
-        }
-        if let (Some((_, first_block)), Some((_, last_block))) = (first_block, last_block) {
-            result.first = ManifestBound {
-                block_id: Some(first_block),
-                mc_seqno: first_mc_seqno,
-                transaction_lt: first_transaction_lt,
-                gen_utime: first_gen_utime,
-            };
-            result.last = ManifestBound {
-                block_id: Some(last_block),
-                mc_seqno: last_mc_seqno,
-                transaction_lt: last_transaction_lt,
-                gen_utime: last_gen_utime,
-            };
-        }
-        Ok(result)
-    }
-
-    fn latest_masterchain_commit(db: &RpcTransactionsDb) -> Result<Option<tycho_types::models::BlockId>> {
-        let mut latest = None;
-        let mut iterator = db.rocksdb().raw_iterator_cf(&db.partition_commits.cf());
-        iterator.seek_to_first();
-        while iterator.valid() {
-            let key = iterator.key().context("partition commit iterator returned no key")?;
-            let value = iterator.value().context("partition commit iterator returned no value")?;
-            let (mc_seqno, short_id) = codec::decode_partition_commit_key(key)?;
-            let commit = codec::decode_partition_commit(value)?;
-            ensure!(commit.block_id.as_short_id() == short_id, "partition commit key does not match its full block id");
-            ensure!(commit.digest == commit.block_id.root_hash, "partition commit digest does not match block root hash");
-            if commit.block_id.is_masterchain() {
-                ensure!(commit.block_id.seqno == mc_seqno, "masterchain partition commit seqno does not match related masterchain seqno");
-                if latest.as_ref().is_none_or(|current: &tycho_types::models::BlockId| commit.block_id.seqno > current.seqno) {
-                    latest = Some(commit.block_id);
-                }
-            }
-            iterator.next();
-        }
-        iterator.status()?;
-        Ok(latest)
     }
 
     fn read_descriptors(&self) -> Result<BTreeMap<PartitionId, PartitionDescriptor>> {
@@ -1327,7 +1309,7 @@ impl PartitionManager {
         Ok(())
     }
 
-    fn partition_subdir(&self, id: PartitionId) -> PathBuf {
+    fn partition_subdir(id: PartitionId) -> PathBuf {
         Path::new(TRANSACTIONS_SUBDIR).join(id.directory_name())
     }
 
@@ -1381,12 +1363,10 @@ fn now_unix_time() -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use super::codec::PartitionCommit;
-    use super::super::db::{
-        RpcControlTables, RpcCurrentStateTables, RpcRouterTables,
-    };
+    use super::super::db::{RpcControlTables, RpcCurrentStateTables};
     use metrics::{
         Counter, CounterFn, Gauge, GaugeFn, Histogram, HistogramFn, Key, KeyName, Metadata,
         Recorder, SharedString, Unit,
@@ -1436,7 +1416,7 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct TestMetricsRecorder {
+    pub(crate) struct TestMetricsRecorder {
         counters: StdMutex<BTreeMap<String, Arc<TestCounter>>>,
         gauges: StdMutex<BTreeMap<String, Arc<TestGauge>>>,
         histograms: StdMutex<BTreeMap<String, Arc<TestHistogram>>>,
@@ -1454,7 +1434,7 @@ mod tests {
             result
         }
 
-        fn counter(&self, key: &str) -> u64 {
+        pub(crate) fn counter(&self, key: &str) -> u64 {
             self.counters
                 .lock()
                 .unwrap()
@@ -1463,7 +1443,7 @@ mod tests {
                 .unwrap_or_default()
         }
 
-        fn gauge(&self, key: &str) -> f64 {
+        pub(crate) fn gauge(&self, key: &str) -> f64 {
             self.gauges
                 .lock()
                 .unwrap()
@@ -1472,7 +1452,7 @@ mod tests {
                 .unwrap_or_default()
         }
 
-        fn histogram_len(&self, key: &str) -> usize {
+        pub(crate) fn histogram_len(&self, key: &str) -> usize {
             self.histograms
                 .lock()
                 .unwrap()
@@ -1481,7 +1461,16 @@ mod tests {
                 .unwrap_or_default()
         }
 
-        fn keys(&self) -> Vec<String> {
+        pub(crate) fn histogram_values(&self, key: &str) -> Vec<f64> {
+            self.histograms
+                .lock()
+                .unwrap()
+                .get(key)
+                .map(|value| value.0.lock().unwrap().clone())
+                .unwrap_or_default()
+        }
+
+        pub(crate) fn keys(&self) -> Vec<String> {
             let mut result = self.counters.lock().unwrap().keys().cloned().collect::<Vec<_>>();
             result.extend(self.gauges.lock().unwrap().keys().cloned());
             result.extend(self.histograms.lock().unwrap().keys().cloned());
@@ -1554,6 +1543,7 @@ mod tests {
             target_blob_bytes: 10,
             target_index_records: 10,
             max_open_sealed_partitions: 1,
+            ..Default::default()
         }
     }
 
@@ -1573,6 +1563,42 @@ mod tests {
             root_hash: HashBytes([seqno as u8; 32]),
             file_hash: HashBytes([9; 32]),
         }
+    }
+
+    pub(crate) fn persist_initial_creating(context: &StorageContext) {
+        let control: RpcControlDb = context.open_preconfigured(CONTROL_SUBDIR).unwrap();
+        let state = ControlState {
+            node_instance_id: rand::random::<InstanceId>(),
+            next_partition_id: 2,
+            min_transaction_lt: u64::MAX,
+        };
+        let descriptor =
+            PartitionManager::empty_descriptor(PartitionId::FIRST, ManifestLifecycle::Creating, 1);
+        let mut batch = rocksdb::WriteBatch::default();
+        batch.put_cf(
+            &control.state.cf(),
+            codec::rpc_layout_marker_key(),
+            codec::rpc_layout_marker_value(),
+        );
+        batch.put_cf(
+            &control.state.cf(),
+            codec::control_state_key(),
+            codec::encode_control_state(state),
+        );
+        batch.put_cf(
+            &control.state.cf(),
+            codec::manifest_epoch_key(),
+            codec::encode_manifest_epoch(1),
+        );
+        batch.put_cf(
+            &control.manifests.cf(),
+            codec::partition_manifest_key(PartitionId::FIRST.0),
+            codec::encode_manifest(&descriptor.to_manifest()),
+        );
+        control
+            .rocksdb()
+            .write_opt(batch, control.state.write_config())
+            .unwrap();
     }
 
     fn write_commit(
@@ -1613,10 +1639,6 @@ mod tests {
             manager.control.raw(),
         ));
         assert!(context.rocksdb_instance_is_registered(
-            RpcRouterTables::NAME,
-            manager.router.raw(),
-        ));
-        assert!(context.rocksdb_instance_is_registered(
             RpcCurrentStateTables::NAME,
             manager.current_state.raw(),
         ));
@@ -1632,12 +1654,31 @@ mod tests {
         let manager = PartitionManager::open(context.clone(), config()).unwrap();
         assert_eq!(manager.active_id(), PartitionId::FIRST);
         assert_eq!(manager.descriptors().len(), 1);
+        assert_eq!(
+            manager
+                .control_db()
+                .state
+                .get(codec::rpc_layout_marker_key())
+                .unwrap()
+                .as_deref(),
+            Some(codec::rpc_layout_marker_value())
+        );
         assert_writable_metrics_registration(&context, &manager);
         drop(manager);
         let reopened = PartitionManager::open(context.clone(), config()).unwrap();
         assert_eq!(reopened.active_id(), PartitionId::FIRST);
         assert_eq!(reopened.descriptors().len(), 1);
         assert_writable_metrics_registration(&context, &reopened);
+    }
+
+    #[tokio::test]
+    async fn nonempty_root_without_v2_marker_requires_reindex() {
+        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
+        let control: RpcControlDb = context.open_preconfigured(CONTROL_SUBDIR).unwrap();
+        control.state.insert(b"legacy", [1]).unwrap();
+        drop(control);
+        let error = PartitionManager::open(context, config()).err().unwrap();
+        assert!(format!("{error:#}").contains("clear the RPC DB and perform a full reindex"));
     }
 
     #[tokio::test]
@@ -1663,14 +1704,48 @@ mod tests {
         };
         let descriptor = PartitionManager::empty_descriptor(PartitionId::FIRST, ManifestLifecycle::Creating, 1);
         let mut batch = rocksdb::WriteBatch::default();
+        batch.put_cf(
+            &control.state.cf(),
+            codec::rpc_layout_marker_key(),
+            codec::rpc_layout_marker_value(),
+        );
         batch.put_cf(&control.state.cf(), codec::control_state_key(), codec::encode_control_state(state));
         batch.put_cf(&control.state.cf(), codec::manifest_epoch_key(), codec::encode_manifest_epoch(1));
         batch.put_cf(&control.manifests.cf(), codec::partition_manifest_key(1), codec::encode_manifest(&descriptor.to_manifest()));
         control.rocksdb().write_opt(batch, control.state.write_config()).unwrap();
         drop(control);
-        let manager = PartitionManager::open(context, config()).unwrap();
+        let mut manager = PartitionManager::open(context, config()).unwrap();
+        manager.continue_lifecycle().unwrap();
         assert_eq!(manager.active_id(), PartitionId::FIRST);
         assert_eq!(manager.descriptors()[0].lifecycle, ManifestLifecycle::Active);
+    }
+
+    #[tokio::test]
+    async fn initial_creating_rejects_non_bootstrap_metadata() {
+        for case in ["frontier", "counters", "epoch"] {
+            let (context, _tmp) = StorageContext::new_temp().await.unwrap();
+            let control: RpcControlDb = context.open_preconfigured(CONTROL_SUBDIR).unwrap();
+            let state = ControlState {
+                node_instance_id: rand::random::<InstanceId>(),
+                next_partition_id: 2,
+                min_transaction_lt: u64::MAX,
+            };
+            let mut descriptor = PartitionManager::empty_descriptor(PartitionId::FIRST, ManifestLifecycle::Creating, 1);
+            let mut batch = rocksdb::WriteBatch::default();
+            batch.put_cf(&control.state.cf(), codec::rpc_layout_marker_key(), codec::rpc_layout_marker_value());
+            batch.put_cf(&control.state.cf(), codec::control_state_key(), codec::encode_control_state(state));
+            batch.put_cf(&control.state.cf(), codec::manifest_epoch_key(), codec::encode_manifest_epoch(1));
+            match case {
+                "frontier" => batch.put_cf(&control.state.cf(), codec::visible_frontier_key(), codec::encode_visible_frontier(&masterchain_block_id(1))),
+                "counters" => descriptor.counters.transaction_count = 1,
+                "epoch" => descriptor.last_transition.epoch = 0,
+                _ => unreachable!(),
+            }
+            batch.put_cf(&control.manifests.cf(), codec::partition_manifest_key(1), codec::encode_manifest(&descriptor.to_manifest()));
+            control.rocksdb().write_opt(batch, control.state.write_config()).unwrap();
+            drop(control);
+            assert!(PartitionManager::open(context, config()).is_err());
+        }
     }
 
     #[tokio::test]
@@ -1715,7 +1790,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_malformed_partition_commit_on_startup() {
+    async fn startup_ignores_unselected_malformed_partition_commit() {
         let (context, _tmp) = StorageContext::new_temp().await.unwrap();
         let manager = PartitionManager::open(context.clone(), config()).unwrap();
         manager
@@ -1728,10 +1803,7 @@ mod tests {
             .unwrap();
         drop(manager);
 
-        let error = PartitionManager::open(context, config())
-            .err()
-            .expect("malformed partition commit must fail startup");
-        assert!(format!("{error:#}").contains("partition commit"));
+        assert!(PartitionManager::open(context, config()).is_ok());
     }
 
     #[tokio::test]
@@ -1835,7 +1907,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn creating_partition_resumes_and_replay_selection_uses_existing_range() {
+    async fn creating_partition_requires_explicit_lifecycle_continuation() {
         let (context, _tmp) = StorageContext::new_temp().await.unwrap();
         let mut manager = PartitionManager::open(context.clone(), config()).unwrap();
         let masterchain = masterchain_block_id(1);
@@ -1846,14 +1918,17 @@ mod tests {
         let mut manager = PartitionManager::open(context.clone(), config()).unwrap();
         let creating = manager.begin_partition_creation().unwrap();
         drop(manager);
-        let reopened = PartitionManager::open(context, config()).unwrap();
-        assert_eq!(reopened.active_id(), creating);
+        let mut reopened = PartitionManager::open(context, config()).unwrap();
+        assert_eq!(reopened.active_id(), PartitionId::FIRST);
+        assert!(reopened.has_creating_partition());
         assert_eq!(reopened.visible_frontier(), Some(&masterchain));
+        reopened.continue_lifecycle().unwrap();
+        assert_eq!(reopened.active_id(), creating);
         assert_eq!(reopened.select_partition(1), PartitionId::FIRST);
     }
 
     #[tokio::test]
-    async fn creating_recovery_publishes_reconstructed_boundary_frontier() {
+    async fn creating_recovery_keeps_unpublished_commits_out_of_persisted_state() {
         let (context, _tmp) = StorageContext::new_temp().await.unwrap();
         let manager = PartitionManager::open(context.clone(), config()).unwrap();
         let masterchain = masterchain_block_id(10);
@@ -1865,36 +1940,23 @@ mod tests {
             manager.begin_partition_creation().unwrap()
         };
 
-        let reopened = PartitionManager::open(context, config()).unwrap();
+        let mut reopened = PartitionManager::open(context, config()).unwrap();
 
+        assert_eq!(reopened.active_id(), PartitionId::FIRST);
+        assert!(reopened.has_creating_partition());
+        assert_eq!(reopened.visible_frontier(), None);
+        assert_eq!(reopened.descriptors.get(&PartitionId::FIRST).unwrap().counters, PartitionCounters::default());
+        assert!(reopened.descriptors.get(&PartitionId::FIRST).unwrap().first.block_id.is_none());
+        reopened.continue_lifecycle().unwrap();
         assert_eq!(reopened.active_id(), creating);
-        assert_eq!(reopened.visible_frontier(), Some(&masterchain));
-        assert_eq!(reopened.select_partition(10), PartitionId::FIRST);
-        assert_eq!(reopened.select_partition(11), creating);
         let old = reopened.descriptors.get(&PartitionId::FIRST).unwrap();
         assert_eq!(old.lifecycle, ManifestLifecycle::Sealing);
-        assert_eq!(old.counters.estimated_lsm_bytes, 12);
-        assert_eq!(old.counters.index_record_count, 6);
-        assert_eq!(old.first.mc_seqno, 10);
-        assert_eq!(old.last.mc_seqno, 10);
-        assert_eq!(
-            codec::decode_active_partition(
-                reopened.control_db().state.get(codec::active_partition_key()).unwrap().unwrap().as_ref(),
-            )
-            .unwrap(),
-            creating.0,
-        );
-        assert_eq!(
-            codec::decode_visible_frontier(
-                reopened.control_db().state.get(codec::visible_frontier_key()).unwrap().unwrap().as_ref(),
-            )
-            .unwrap(),
-            masterchain,
-        );
+        assert_eq!(old.counters, PartitionCounters::default());
+        assert!(old.last.block_id.is_none());
     }
 
     #[tokio::test]
-    async fn creating_completion_reuses_open_old_partition_handle() {
+    async fn creating_completion_does_not_infer_frontier_from_commit_data() {
         let (context, _tmp) = StorageContext::new_temp().await.unwrap();
         let mut manager = PartitionManager::open(context, config()).unwrap();
         let masterchain = masterchain_block_id(10);
@@ -1904,11 +1966,11 @@ mod tests {
         manager.complete_partition_creation(creating).unwrap();
 
         assert_eq!(manager.active_id(), creating);
-        assert_eq!(manager.visible_frontier(), Some(&masterchain));
+        assert_eq!(manager.visible_frontier(), None);
     }
 
     #[tokio::test]
-    async fn reconstructs_active_counters_from_partition_commits() {
+    async fn startup_keeps_active_descriptor_without_commit_reconstruction() {
         let (context, _tmp) = StorageContext::new_temp().await.unwrap();
         let manager = PartitionManager::open(context.clone(), config()).unwrap();
         let block_id = block_id(1);
@@ -1926,19 +1988,41 @@ mod tests {
         let mut batch = rocksdb::WriteBatch::default();
         batch.put_cf(&manager.active_db().partition_commits.cf(), codec::partition_commit_key(9, &block_id.as_short_id()), codec::encode_partition_commit(&commit));
         manager.active_db().rocksdb().write_opt(batch, manager.active_db().partition_commits.write_config()).unwrap();
+        let persisted_manifest = manager
+            .control_db()
+            .manifests
+            .get(codec::partition_manifest_key(PartitionId::FIRST.0))
+            .unwrap()
+            .unwrap()
+            .to_vec();
         drop(manager);
         let reopened = PartitionManager::open(context, config()).unwrap();
         let descriptor = reopened.descriptors().pop().unwrap();
-        assert_eq!(descriptor.counters.transaction_count, 2);
-        assert_eq!(descriptor.first.mc_seqno, 9);
-        assert_eq!(descriptor.last.transaction_lt, 7);
+        assert_eq!(descriptor.counters, PartitionCounters::default());
+        assert!(descriptor.first.block_id.is_none());
+        assert_eq!(
+            reopened
+                .control_db()
+                .manifests
+                .get(codec::partition_manifest_key(PartitionId::FIRST.0))
+                .unwrap()
+                .unwrap()
+                .as_ref(),
+            persisted_manifest,
+        );
     }
 
     #[tokio::test]
-    async fn reconstruction_uses_mc_lt_time_extrema_and_preserves_transition() {
+    async fn startup_ignores_unselected_historical_commit_extrema() {
         let (context, _tmp) = StorageContext::new_temp().await.unwrap();
         let manager = PartitionManager::open(context.clone(), config()).unwrap();
-        let transition = manager.descriptors()[0].last_transition;
+        let persisted_manifest = manager
+            .control_db()
+            .manifests
+            .get(codec::partition_manifest_key(PartitionId::FIRST.0))
+            .unwrap()
+            .unwrap()
+            .to_vec();
         let commits = [
             (2, block_id(1), 90, 91, 9),
             (1, block_id(9), 50, 300, 100),
@@ -1964,15 +2048,19 @@ mod tests {
         drop(manager);
         let reopened = PartitionManager::open(context, config()).unwrap();
         let descriptor = reopened.descriptors().pop().unwrap();
-        assert_eq!(descriptor.first.mc_seqno, 1);
-        assert_eq!(descriptor.first.transaction_lt, 1);
-        assert_eq!(descriptor.first.gen_utime, 1);
-        assert_eq!(descriptor.first.block_id, Some(block_id(9)));
-        assert_eq!(descriptor.last.mc_seqno, 3);
-        assert_eq!(descriptor.last.transaction_lt, 300);
-        assert_eq!(descriptor.last.gen_utime, 100);
-        assert_eq!(descriptor.last.block_id, Some(block_id(8)));
-        assert_eq!(descriptor.last_transition, transition);
+        assert_eq!(descriptor.counters, PartitionCounters::default());
+        assert!(descriptor.first.block_id.is_none());
+        assert!(descriptor.last.block_id.is_none());
+        assert_eq!(
+            reopened
+                .control_db()
+                .manifests
+                .get(codec::partition_manifest_key(PartitionId::FIRST.0))
+                .unwrap()
+                .unwrap()
+                .as_ref(),
+            persisted_manifest,
+        );
     }
 
     #[tokio::test]
@@ -2014,7 +2102,7 @@ mod tests {
         let next_path = context
             .root_dir()
             .path()
-            .join(manager.partition_subdir(PartitionId(2)));
+            .join(PartitionManager::partition_subdir(PartitionId(2)));
         std::fs::write(next_path, []).unwrap();
         manager.request_rotation(PartitionCounters {
             estimated_lsm_bytes: 10,
@@ -2316,6 +2404,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn observability_records_predecessor_commit_validation_results() {
+        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
+        let manager = PartitionManager::open(context, config()).unwrap();
+        let predecessor = masterchain_block_id(1);
+        let recorder = TestMetricsRecorder::default();
+
+        metrics::with_local_recorder(&recorder, || {
+            assert!(manager.validate_masterchain_commit(&predecessor).is_err());
+            write_commit(manager.active_db(), 1, predecessor, 0, 0, 0);
+            let key = codec::partition_commit_key(1, &predecessor.as_short_id());
+            let value = manager.active_db().partition_commits.get(key).unwrap().unwrap();
+            let mut wrong_digest = codec::decode_partition_commit(value.as_ref()).unwrap();
+            wrong_digest.digest = HashBytes([0xff; 32]);
+            manager
+                .active_db()
+                .partition_commits
+                .insert(key, codec::encode_partition_commit(&wrong_digest))
+                .unwrap();
+            assert!(manager.validate_masterchain_commit(&predecessor).is_err());
+            write_commit(manager.active_db(), 1, predecessor, 0, 0, 0);
+            manager.validate_masterchain_commit(&predecessor).unwrap();
+        });
+
+        assert_eq!(
+            recorder.counter(
+                "tycho_storage_rpc_predecessor_validation_failures_total|reason=commit_missing"
+            ),
+            1
+        );
+        assert_eq!(
+            recorder.counter(
+                "tycho_storage_rpc_predecessor_validation_failures_total|reason=commit_digest_mismatch"
+            ),
+            1
+        );
+        assert_eq!(
+            recorder.counter(
+                "tycho_storage_rpc_predecessor_validation_failures_total|reason=full_identity_mismatch"
+            ),
+            0
+        );
+        assert_eq!(
+            recorder.histogram_len(
+                "tycho_storage_rpc_predecessor_validation_duration_seconds|stage=partition_commit|result=failure"
+            ),
+            2
+        );
+        assert_eq!(
+            recorder.histogram_len(
+                "tycho_storage_rpc_predecessor_validation_duration_seconds|stage=partition_commit|result=success"
+            ),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn block_set_replay_does_not_double_count_or_repartition() {
         let (context, _tmp) = StorageContext::new_temp().await.unwrap();
         let mut manager = PartitionManager::open(context, config()).unwrap();
@@ -2383,13 +2527,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_recovery_reconstructs_same_seq_commits_added_after_open() {
+    async fn replay_boundary_aggregates_unpublished_active_tail_after_read_only_startup() {
         let (context, _tmp) = StorageContext::new_temp().await.unwrap();
         let manager = PartitionManager::open(context.clone(), config()).unwrap();
         write_commit(manager.active_db(), 2, block_id(1), 6, 0, 2);
         drop(manager);
         let mut manager = PartitionManager::open(context, config()).unwrap();
-        assert_eq!(manager.descriptors.get(&PartitionId::FIRST).unwrap().counters.estimated_lsm_bytes, 6);
+        assert_eq!(manager.descriptors.get(&PartitionId::FIRST).unwrap().counters, PartitionCounters::default());
         assert_eq!(manager.visible_frontier(), None);
         assert_eq!(manager.select_partition(2), PartitionId::FIRST);
         let masterchain = masterchain_block_id(2);
@@ -2410,7 +2554,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_recovered_future_commits_defer_rotation_until_last_boundary() {
+    async fn replay_boundaries_advance_persisted_active_tail_without_startup_reconstruction() {
         let (context, _tmp) = StorageContext::new_temp().await.unwrap();
         let manager = PartitionManager::open(context.clone(), config()).unwrap();
         let first = masterchain_block_id(1);
@@ -2421,8 +2565,8 @@ mod tests {
         write_commit(manager.active_db(), 2, second, 0, 0, 0);
         drop(manager);
         let mut manager = PartitionManager::open(context, config()).unwrap();
-        assert_eq!(manager.descriptors.get(&PartitionId::FIRST).unwrap().last.mc_seqno, 2);
-        assert_eq!(manager.descriptors.get(&PartitionId::FIRST).unwrap().counters.estimated_lsm_bytes, 12);
+        assert!(manager.descriptors.get(&PartitionId::FIRST).unwrap().last.block_id.is_none());
+        assert_eq!(manager.descriptors.get(&PartitionId::FIRST).unwrap().counters, PartitionCounters::default());
 
         manager.commit_masterchain_block_set(&first).unwrap();
 
@@ -2544,7 +2688,7 @@ mod tests {
         let second = PartitionId(2);
         let third = PartitionId(3);
         for id in [second, third] {
-            let _: RpcTransactionsDb = context.open_preconfigured(manager.partition_subdir(id)).unwrap();
+            let _: RpcTransactionsDb = context.open_preconfigured(PartitionManager::partition_subdir(id)).unwrap();
         }
         let mut control_state = manager.control_state;
         control_state.next_partition_id = 4;

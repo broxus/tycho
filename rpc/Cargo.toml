@@ -16,7 +16,9 @@ arc-swap = { workspace = true }
 axum = { workspace = true }
 axum-client-ip = { workspace = true }
 base64 = { workspace = true }
+bincode = { workspace = true }
 bitflags = { workspace = true }
+blake3 = { workspace = true }
 bytes = { workspace = true }
 futures-util = { workspace = true }
 humantime = { workspace = true }
@@ -24,6 +26,7 @@ metrics = { workspace = true }
 moka = { workspace = true }
 parking_lot = { workspace = true }
 prost = { workspace = true }
+qfilter = { workspace = true, features = ["serde"] }
 rand = { workspace = true }
 scopeguard = { workspace = true }
 serde = { workspace = true }

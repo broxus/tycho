@@ -1,4 +1,4 @@
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use tycho_storage::kv::InstanceId;
 use tycho_types::models::{BlockId, BlockIdShort, ShardIdent};
 use tycho_types::prelude::HashBytes;
@@ -10,7 +10,8 @@ pub const CONTROL_STATE_KEY: &[u8] = b"control_state";
 pub const ACTIVE_PARTITION_KEY: &[u8] = b"active_partition";
 pub const VISIBLE_FRONTIER_KEY: &[u8] = b"visible_frontier";
 pub const MANIFEST_EPOCH_KEY: &[u8] = b"manifest_epoch";
-pub const ROUTER_COMMIT_KEY: &[u8] = b"router_commit";
+pub const RPC_LAYOUT_MARKER_KEY: &[u8] = b"rpc_layout_marker";
+pub const RPC_LAYOUT_MARKER_VALUE: &[u8] = b"tycho-rpc-layout-v2";
 pub const PARTITION_ID_LEN: usize = 8;
 pub const SHORT_BLOCK_ID_LEN: usize = 16;
 pub const BLOCK_ID_LEN: usize = 80;
@@ -19,11 +20,11 @@ const CONTROL_STATE_LEN: usize = 1 + 16 + 8 + 8;
 const ACTIVE_PARTITION_LEN: usize = 1 + PARTITION_ID_LEN;
 const VISIBLE_FRONTIER_LEN: usize = 1 + BLOCK_ID_LEN;
 const MANIFEST_EPOCH_LEN: usize = 1 + 8;
-const ROUTER_COMMIT_LEN: usize = 1 + BLOCK_ID_LEN;
-const ROUTER_LOCATION_LEN: usize = 1 + PARTITION_ID_LEN + 4;
 const MANIFEST_BOUND_LEN: usize = 1 + BLOCK_ID_LEN + 4 + 8 + 4;
 const MANIFEST_RECORD_LEN: usize = 1 + 1 + PARTITION_ID_LEN + MANIFEST_BOUND_LEN * 2 + 8 * 4 + 1 + 8 + 8;
 const PARTITION_COMMIT_VALUE_LEN: usize = 1 + BLOCK_ID_LEN + 32 + 8 * 6 + 4;
+const FILTER_NAMESPACE_DESCRIPTOR_LEN: usize = 1 + 1 + 1 + 1 + 4 + 8 + 8 + 8 + 1 + 8 + 8 + 32;
+const FILTER_CATALOG_DESCRIPTOR_LEN: usize = 1 + PARTITION_ID_LEN + 16 + 32 + FILTER_NAMESPACE_DESCRIPTOR_LEN * 3;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct ControlState {
@@ -69,12 +70,6 @@ pub struct ManifestTransition {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RouterLocation {
-    pub partition_id: u64,
-    pub mc_seqno: u32,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PartitionCommit {
     pub block_id: BlockId,
     pub digest: HashBytes,
@@ -85,6 +80,32 @@ pub struct PartitionCommit {
     pub start_lt: u64,
     pub end_lt: u64,
     pub gen_utime: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FilterNamespaceDescriptor {
+    pub algorithm_id: u8,
+    pub hash_scheme_id: u8,
+    pub key_codec_id: u8,
+    pub key_len: u8,
+    pub false_positive_rate_ppm: u32,
+    pub source_key_count: u64,
+    pub fingerprint_count: u64,
+    pub capacity: u64,
+    pub fingerprint_size: u8,
+    pub resident_bytes: u64,
+    pub payload_len: u64,
+    pub payload_digest: HashBytes,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FilterCatalogDescriptor {
+    pub partition_id: u64,
+    pub generation_id: u128,
+    pub manifest_digest: HashBytes,
+    pub transactions: FilterNamespaceDescriptor,
+    pub inbound_messages: FilterNamespaceDescriptor,
+    pub blocks: FilterNamespaceDescriptor,
 }
 
 pub struct TransactionValueRef<'a> {
@@ -118,8 +139,17 @@ pub fn manifest_epoch_key() -> &'static [u8] {
     MANIFEST_EPOCH_KEY
 }
 
-pub fn router_commit_key() -> &'static [u8] {
-    ROUTER_COMMIT_KEY
+pub fn rpc_layout_marker_key() -> &'static [u8] {
+    RPC_LAYOUT_MARKER_KEY
+}
+
+pub fn rpc_layout_marker_value() -> &'static [u8] {
+    RPC_LAYOUT_MARKER_VALUE
+}
+
+pub fn decode_rpc_layout_marker(bytes: &[u8]) -> Result<()> {
+    ensure!(bytes == RPC_LAYOUT_MARKER_VALUE, "unsupported RPC layout marker");
+    Ok(())
 }
 
 pub fn partition_manifest_key(partition_id: u64) -> [u8; PARTITION_ID_LEN] {
@@ -203,18 +233,6 @@ pub fn decode_visible_frontier(bytes: &[u8]) -> Result<BlockId> {
     decode_block_id(&bytes[1..])
 }
 
-pub fn encode_router_commit(block_id: &BlockId) -> [u8; ROUTER_COMMIT_LEN] {
-    let mut result = [0; ROUTER_COMMIT_LEN];
-    result[0] = LAYOUT_VERSION;
-    encode_block_id(block_id, &mut result[1..]);
-    result
-}
-
-pub fn decode_router_commit(bytes: &[u8]) -> Result<BlockId> {
-    ensure_version_and_len("router commit", bytes, ROUTER_COMMIT_LEN)?;
-    decode_block_id(&bytes[1..])
-}
-
 pub fn encode_manifest_epoch(epoch: u64) -> [u8; MANIFEST_EPOCH_LEN] {
     let mut result = [0; MANIFEST_EPOCH_LEN];
     result[0] = LAYOUT_VERSION;
@@ -265,22 +283,6 @@ pub fn decode_manifest(bytes: &[u8]) -> Result<PartitionManifest> {
     })
 }
 
-pub fn encode_router_location(value: RouterLocation) -> [u8; ROUTER_LOCATION_LEN] {
-    let mut result = [0; ROUTER_LOCATION_LEN];
-    result[0] = LAYOUT_VERSION;
-    result[1..9].copy_from_slice(&value.partition_id.to_be_bytes());
-    result[9..].copy_from_slice(&value.mc_seqno.to_be_bytes());
-    result
-}
-
-pub fn decode_router_location(bytes: &[u8]) -> Result<RouterLocation> {
-    ensure_version_and_len("router location", bytes, ROUTER_LOCATION_LEN)?;
-    Ok(RouterLocation {
-        partition_id: u64::from_be_bytes(bytes[1..9].try_into().unwrap()),
-        mc_seqno: u32::from_be_bytes(bytes[9..].try_into().unwrap()),
-    })
-}
-
 pub fn encode_partition_commit(value: &PartitionCommit) -> [u8; PARTITION_COMMIT_VALUE_LEN] {
     let mut result = [0; PARTITION_COMMIT_VALUE_LEN];
     result[0] = LAYOUT_VERSION;
@@ -321,6 +323,112 @@ pub fn decode_partition_commit(bytes: &[u8]) -> Result<PartitionCommit> {
         start_lt: next_u64(),
         end_lt: next_u64(),
         gen_utime: u32::from_be_bytes(bytes[offset..].try_into().unwrap()),
+    })
+}
+
+pub fn encode_filter_catalog_descriptor(value: &FilterCatalogDescriptor) -> [u8; FILTER_CATALOG_DESCRIPTOR_LEN] {
+    let mut result = [0; FILTER_CATALOG_DESCRIPTOR_LEN];
+    result[0] = LAYOUT_VERSION;
+    result[1..9].copy_from_slice(&value.partition_id.to_be_bytes());
+    result[9..25].copy_from_slice(&value.generation_id.to_be_bytes());
+    result[25..57].copy_from_slice(value.manifest_digest.as_ref());
+    encode_filter_namespace_descriptor(value.transactions, &mut result[57..57 + FILTER_NAMESPACE_DESCRIPTOR_LEN]);
+    encode_filter_namespace_descriptor(value.inbound_messages, &mut result[57 + FILTER_NAMESPACE_DESCRIPTOR_LEN..57 + FILTER_NAMESPACE_DESCRIPTOR_LEN * 2]);
+    encode_filter_namespace_descriptor(value.blocks, &mut result[57 + FILTER_NAMESPACE_DESCRIPTOR_LEN * 2..]);
+    result
+}
+
+pub fn decode_filter_catalog_descriptor(bytes: &[u8]) -> Result<FilterCatalogDescriptor> {
+    ensure_version_and_len("filter catalog descriptor", bytes, FILTER_CATALOG_DESCRIPTOR_LEN)?;
+    let transactions = decode_filter_namespace_descriptor(
+        &bytes[57..57 + FILTER_NAMESPACE_DESCRIPTOR_LEN],
+        32,
+    )?;
+    let inbound_messages = decode_filter_namespace_descriptor(
+        &bytes[57 + FILTER_NAMESPACE_DESCRIPTOR_LEN..57 + FILTER_NAMESPACE_DESCRIPTOR_LEN * 2],
+        32,
+    )?;
+    let blocks = decode_filter_namespace_descriptor(
+        &bytes[57 + FILTER_NAMESPACE_DESCRIPTOR_LEN * 2..],
+        13,
+    )?;
+    Ok(FilterCatalogDescriptor {
+        partition_id: u64::from_be_bytes(bytes[1..9].try_into().unwrap()),
+        generation_id: u128::from_be_bytes(bytes[9..25].try_into().unwrap()),
+        manifest_digest: HashBytes::from_slice(&bytes[25..57]),
+        transactions,
+        inbound_messages,
+        blocks,
+    })
+}
+
+pub fn format_filter_generation_directory(partition_id: u64, generation_id: u128) -> String {
+    format!("{:016}/{generation_id:032x}", partition_id)
+}
+
+pub fn format_filter_temporary_generation_directory(partition_id: u64, generation_id: u128) -> String {
+    format!("{:016}/.tmp-{generation_id:032x}", partition_id)
+}
+
+pub fn parse_filter_generation_directory(path: &str) -> Result<(u64, u128, bool)> {
+    let (partition, generation) = path
+        .split_once('/')
+        .context("invalid filter generation directory")?;
+    ensure!(partition.len() == 16 && partition.bytes().all(|byte| byte.is_ascii_digit()), "invalid filter generation partition id");
+    let temporary = generation.starts_with(".tmp-");
+    let generation = generation.strip_prefix(".tmp-").unwrap_or(generation);
+    ensure!(generation.len() == 32 && generation.bytes().all(|byte| byte.is_ascii_digit() || byte.is_ascii_lowercase()), "invalid filter generation id");
+    Ok((
+        partition.parse().context("invalid filter generation partition id")?,
+        u128::from_str_radix(generation, 16).context("invalid filter generation id")?,
+        temporary,
+    ))
+}
+
+fn encode_filter_namespace_descriptor(value: FilterNamespaceDescriptor, target: &mut [u8]) {
+    target[0] = value.algorithm_id;
+    target[1] = value.hash_scheme_id;
+    target[2] = value.key_codec_id;
+    target[3] = value.key_len;
+    target[4..8].copy_from_slice(&value.false_positive_rate_ppm.to_be_bytes());
+    target[8..16].copy_from_slice(&value.source_key_count.to_be_bytes());
+    target[16..24].copy_from_slice(&value.fingerprint_count.to_be_bytes());
+    target[24..32].copy_from_slice(&value.capacity.to_be_bytes());
+    target[32] = value.fingerprint_size;
+    target[33..41].copy_from_slice(&value.resident_bytes.to_be_bytes());
+    target[41..49].copy_from_slice(&value.payload_len.to_be_bytes());
+    target[49..].copy_from_slice(value.payload_digest.as_ref());
+}
+
+fn decode_filter_namespace_descriptor(bytes: &[u8], expected_key_len: u8) -> Result<FilterNamespaceDescriptor> {
+    ensure_exact_len("filter namespace descriptor", bytes, FILTER_NAMESPACE_DESCRIPTOR_LEN)?;
+    ensure!(bytes[0] == 1, "unsupported filter algorithm id: {}", bytes[0]);
+    ensure!(bytes[1] == 1, "unsupported filter hash scheme id: {}", bytes[1]);
+    ensure!(bytes[2] == 1, "unsupported filter key codec id: {}", bytes[2]);
+    ensure!(bytes[3] == expected_key_len, "invalid filter key length: expected {expected_key_len}, got {}", bytes[3]);
+    let false_positive_rate_ppm = u32::from_be_bytes(bytes[4..8].try_into().unwrap());
+    ensure!((1..=500_000).contains(&false_positive_rate_ppm), "invalid filter false-positive rate: {false_positive_rate_ppm}");
+    let source_key_count = u64::from_be_bytes(bytes[8..16].try_into().unwrap());
+    let fingerprint_count = u64::from_be_bytes(bytes[16..24].try_into().unwrap());
+    let capacity = u64::from_be_bytes(bytes[24..32].try_into().unwrap());
+    ensure!(capacity > 0, "invalid filter capacity");
+    ensure!(fingerprint_count <= source_key_count, "filter fingerprint count exceeds source key count");
+    ensure!(fingerprint_count <= capacity, "filter fingerprint count exceeds capacity");
+    let fingerprint_size = bytes[32];
+    ensure!(fingerprint_size > 0, "invalid filter fingerprint size");
+    Ok(FilterNamespaceDescriptor {
+        algorithm_id: bytes[0],
+        hash_scheme_id: bytes[1],
+        key_codec_id: bytes[2],
+        key_len: bytes[3],
+        false_positive_rate_ppm,
+        source_key_count,
+        fingerprint_count,
+        capacity,
+        fingerprint_size,
+        resident_bytes: u64::from_be_bytes(bytes[33..41].try_into().unwrap()),
+        payload_len: u64::from_be_bytes(bytes[41..49].try_into().unwrap()),
+        payload_digest: HashBytes::from_slice(&bytes[49..]),
     })
 }
 
@@ -460,13 +568,6 @@ mod tests {
         assert!(decode_control_state(&encode_control_state(state)).unwrap() == state);
         assert_eq!(decode_active_partition(&encode_active_partition(u64::MAX)).unwrap(), u64::MAX);
         assert_eq!(decode_visible_frontier(&encode_visible_frontier(&block_id(u32::MAX))).unwrap(), block_id(u32::MAX));
-        let router_commit = BlockId {
-            shard: ShardIdent::MASTERCHAIN,
-            seqno: u32::MAX,
-            root_hash: HashBytes([4; 32]),
-            file_hash: HashBytes([5; 32]),
-        };
-        assert_eq!(decode_router_commit(&encode_router_commit(&router_commit)).unwrap(), router_commit);
         assert_eq!(decode_manifest_epoch(&encode_manifest_epoch(u64::MAX)).unwrap(), u64::MAX);
         for value in [
             &[][..],
@@ -478,8 +579,6 @@ mod tests {
         assert!(decode_active_partition(&[LAYOUT_VERSION; ACTIVE_PARTITION_LEN - 1]).is_err());
         assert!(decode_active_partition(&[2; ACTIVE_PARTITION_LEN]).is_err());
         assert!(decode_visible_frontier(&[2; VISIBLE_FRONTIER_LEN]).is_err());
-        assert!(decode_router_commit(&[LAYOUT_VERSION; ROUTER_COMMIT_LEN - 1]).is_err());
-        assert!(decode_router_commit(&[2; ROUTER_COMMIT_LEN]).is_err());
         let mut invalid_block = encode_visible_frontier(&block_id(1));
         invalid_block[5..13].fill(0);
         assert!(decode_visible_frontier(&invalid_block).is_err());
@@ -519,17 +618,12 @@ mod tests {
     }
 
     #[test]
-    fn router_and_commit_formats_round_trip_and_reject_malformed_values() {
+    fn partition_commit_formats_round_trip_and_reject_malformed_values() {
         let short = block_id(u32::MAX).as_short_id();
         assert_eq!(decode_short_block_id(&encode_short_block_id(&short)).unwrap(), short);
         let key = partition_commit_key(u32::MAX, &short);
         assert_eq!(decode_partition_commit_key(&key).unwrap(), (u32::MAX, short));
         assert_eq!(partition_manifest_key(u64::MAX), u64::MAX.to_be_bytes());
-        let router = RouterLocation {
-            partition_id: u64::MAX,
-            mc_seqno: u32::MAX,
-        };
-        assert_eq!(decode_router_location(&encode_router_location(router)).unwrap(), router);
         let commit = PartitionCommit {
             block_id: block_id(2),
             digest: HashBytes([4; 32]),
@@ -545,10 +639,62 @@ mod tests {
         assert!(decode_short_block_id(&[0; SHORT_BLOCK_ID_LEN - 1]).is_err());
         assert!(decode_short_block_id(&[0; SHORT_BLOCK_ID_LEN]).is_err());
         assert!(decode_partition_commit_key(&key[..key.len() - 1]).is_err());
-        assert!(decode_router_location(&[LAYOUT_VERSION; ROUTER_LOCATION_LEN - 1]).is_err());
-        assert!(decode_router_location(&[2; ROUTER_LOCATION_LEN]).is_err());
         assert!(decode_partition_commit(&[LAYOUT_VERSION; PARTITION_COMMIT_VALUE_LEN - 1]).is_err());
         assert!(decode_partition_commit(&[2; PARTITION_COMMIT_VALUE_LEN]).is_err());
+    }
+
+    #[test]
+    fn filter_catalog_descriptor_and_generation_directories_are_validated() {
+        let namespace = FilterNamespaceDescriptor {
+            algorithm_id: 1,
+            hash_scheme_id: 1,
+            key_codec_id: 1,
+            key_len: 32,
+            false_positive_rate_ppm: 1_000,
+            source_key_count: 1,
+            fingerprint_count: 1,
+            capacity: 1,
+            fingerprint_size: 8,
+            resident_bytes: 1,
+            payload_len: 1,
+            payload_digest: HashBytes([3; 32]),
+        };
+        let descriptor = FilterCatalogDescriptor {
+            partition_id: 42,
+            generation_id: 7,
+            manifest_digest: HashBytes([4; 32]),
+            transactions: namespace,
+            inbound_messages: namespace,
+            blocks: FilterNamespaceDescriptor { key_len: 13, ..namespace },
+        };
+        let encoded = encode_filter_catalog_descriptor(&descriptor);
+        assert_eq!(decode_filter_catalog_descriptor(&encoded).unwrap(), descriptor);
+        assert!(decode_filter_catalog_descriptor(&encoded[..encoded.len() - 1]).is_err());
+        let mut trailing = encoded.to_vec();
+        trailing.push(0);
+        assert!(decode_filter_catalog_descriptor(&trailing).is_err());
+        let mut invalid = encoded;
+        invalid[0] = 2;
+        assert!(decode_filter_catalog_descriptor(&invalid).is_err());
+        let mut invalid = encoded;
+        invalid[57] = 2;
+        assert!(decode_filter_catalog_descriptor(&invalid).is_err());
+        let mut invalid = encoded;
+        invalid[60] = 31;
+        assert!(decode_filter_catalog_descriptor(&invalid).is_err());
+        let mut invalid = encoded;
+        invalid[61..65].fill(0);
+        assert!(decode_filter_catalog_descriptor(&invalid).is_err());
+        let mut invalid = encoded;
+        invalid[73..81].copy_from_slice(&2u64.to_be_bytes());
+        assert!(decode_filter_catalog_descriptor(&invalid).is_err());
+        let final_name = format_filter_generation_directory(42, 7);
+        assert_eq!(parse_filter_generation_directory(&final_name).unwrap(), (42, 7, false));
+        let temporary_name = format_filter_temporary_generation_directory(42, 7);
+        assert_eq!(parse_filter_generation_directory(&temporary_name).unwrap(), (42, 7, true));
+        assert!(parse_filter_generation_directory("unknown").is_err());
+        assert!(parse_filter_generation_directory("0000000000000042/not-a-generation").is_err());
+        assert!(parse_filter_generation_directory("0000000000000042/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").is_err());
     }
 
     #[test]

@@ -36,48 +36,14 @@ impl ColumnFamilyOptions<TableContext> for PartitionManifests {
     }
 }
 
-/// Transaction hash router keyed by the 32-byte transaction hash.
-///
-/// Values use `codec::RouterLocation` and contain the partition id and related masterchain seqno.
-pub struct TransactionRouter;
+/// Immutable filter bundle descriptors keyed by a big-endian eight-byte partition id.
+pub struct FilterCatalog;
 
-impl ColumnFamily for TransactionRouter {
-    const NAME: &'static str = "transaction_router";
+impl ColumnFamily for FilterCatalog {
+    const NAME: &'static str = "filter_catalog";
 }
 
-impl ColumnFamilyOptions<TableContext> for TransactionRouter {
-    fn options(opts: &mut Options, ctx: &mut TableContext) {
-        zstd_block_based_table_factory(opts, ctx);
-        optimize_for_point_lookup(opts, ctx);
-    }
-}
-
-/// Inbound message hash router keyed by the 32-byte inbound-message hash.
-///
-/// Values use `codec::RouterLocation` and contain the partition id and related masterchain seqno.
-pub struct InboundMessageRouter;
-
-impl ColumnFamily for InboundMessageRouter {
-    const NAME: &'static str = "inbound_message_router";
-}
-
-impl ColumnFamilyOptions<TableContext> for InboundMessageRouter {
-    fn options(opts: &mut Options, ctx: &mut TableContext) {
-        zstd_block_based_table_factory(opts, ctx);
-        optimize_for_point_lookup(opts, ctx);
-    }
-}
-
-/// Short block id router keyed by `codec::encode_short_block_id`, including every indexed masterchain block.
-///
-/// Values use `codec::RouterLocation` and contain the partition id and related masterchain seqno.
-pub struct BlockRouter;
-
-impl ColumnFamily for BlockRouter {
-    const NAME: &'static str = "block_router";
-}
-
-impl ColumnFamilyOptions<TableContext> for BlockRouter {
+impl ColumnFamilyOptions<TableContext> for FilterCatalog {
     fn options(opts: &mut Options, ctx: &mut TableContext) {
         zstd_block_based_table_factory(opts, ctx);
         optimize_for_point_lookup(opts, ctx);

@@ -191,6 +191,8 @@ pub struct RpcTransactionPartitionsConfig {
     pub target_blob_bytes: u64,
     pub target_index_records: u64,
     pub max_open_sealed_partitions: usize,
+    #[serde(default)]
+    pub filters: RpcTransactionFiltersConfig,
 }
 
 impl RpcTransactionPartitionsConfig {
@@ -207,6 +209,7 @@ impl RpcTransactionPartitionsConfig {
         if self.max_open_sealed_partitions == 0 {
             return Err("rpc transaction partition max_open_sealed_partitions must be positive");
         }
+        self.filters.validate()?;
         Ok(())
     }
 }
@@ -218,6 +221,68 @@ impl Default for RpcTransactionPartitionsConfig {
             target_blob_bytes: 16 * 1024 * 1024 * 1024,
             target_index_records: 50_000_000,
             max_open_sealed_partitions: 8,
+            filters: Default::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RpcTransactionFiltersConfig {
+    pub transaction_false_positive_rate_ppm: u32,
+    pub inbound_message_false_positive_rate_ppm: u32,
+    pub block_false_positive_rate_ppm: u32,
+    pub max_false_positive_rate_ppm: u32,
+    pub max_concurrent_sealed_exact_lookups: usize,
+    pub max_filter_bundle_bytes: u64,
+}
+
+impl RpcTransactionFiltersConfig {
+    pub const MIN_FALSE_POSITIVE_RATE_PPM: u32 = 1;
+    pub const MAX_FALSE_POSITIVE_RATE_PPM: u32 = 500_000;
+
+    pub fn validate(&self) -> Result<(), &'static str> {
+        for rate in [
+            self.transaction_false_positive_rate_ppm,
+            self.inbound_message_false_positive_rate_ppm,
+            self.block_false_positive_rate_ppm,
+            self.max_false_positive_rate_ppm,
+        ] {
+            if !(Self::MIN_FALSE_POSITIVE_RATE_PPM..=Self::MAX_FALSE_POSITIVE_RATE_PPM)
+                .contains(&rate)
+            {
+                return Err("rpc transaction filter false-positive rate must be in 1..=500000 ppm");
+            }
+        }
+        if [
+            self.transaction_false_positive_rate_ppm,
+            self.inbound_message_false_positive_rate_ppm,
+            self.block_false_positive_rate_ppm,
+        ]
+        .into_iter()
+        .any(|rate| rate > self.max_false_positive_rate_ppm)
+        {
+            return Err("rpc transaction filter false-positive rate must not exceed max_false_positive_rate_ppm");
+        }
+        if self.max_concurrent_sealed_exact_lookups == 0 {
+            return Err("rpc transaction filter max_concurrent_sealed_exact_lookups must be positive");
+        }
+        if self.max_filter_bundle_bytes == 0 {
+            return Err("rpc transaction filter max_filter_bundle_bytes must be positive");
+        }
+        Ok(())
+    }
+}
+
+impl Default for RpcTransactionFiltersConfig {
+    fn default() -> Self {
+        Self {
+            transaction_false_positive_rate_ppm: 1_000,
+            inbound_message_false_positive_rate_ppm: 1_000,
+            block_false_positive_rate_ppm: 1_000,
+            max_false_positive_rate_ppm: 100_000,
+            max_concurrent_sealed_exact_lookups: 8,
+            max_filter_bundle_bytes: 1024 * 1024 * 1024,
         }
     }
 }
@@ -312,6 +377,51 @@ mod tests {
         assert!(config.validate().is_err());
         config = RpcTransactionPartitionsConfig::default();
         config.max_open_sealed_partitions = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn transaction_filters_deserialize_with_defaults() {
+        let config: RpcTransactionPartitionsConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.filters, RpcTransactionFiltersConfig::default());
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn transaction_filters_accept_valid_boundaries() {
+        let mut config = RpcTransactionFiltersConfig::default();
+        config.transaction_false_positive_rate_ppm = 1;
+        config.inbound_message_false_positive_rate_ppm = 500_000;
+        config.block_false_positive_rate_ppm = 500_000;
+        config.max_false_positive_rate_ppm = 500_000;
+        assert!(config.validate().is_ok());
+        let round_trip: RpcTransactionFiltersConfig =
+            serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert_eq!(round_trip, config);
+    }
+
+    #[test]
+    fn transaction_filters_reject_invalid_values() {
+        let mut config = RpcTransactionFiltersConfig::default();
+        config.transaction_false_positive_rate_ppm = 0;
+        assert!(config.validate().is_err());
+        config = RpcTransactionFiltersConfig::default();
+        config.inbound_message_false_positive_rate_ppm = 500_001;
+        assert!(config.validate().is_err());
+        config = RpcTransactionFiltersConfig::default();
+        config.block_false_positive_rate_ppm = 0;
+        assert!(config.validate().is_err());
+        config = RpcTransactionFiltersConfig::default();
+        config.max_false_positive_rate_ppm = 0;
+        assert!(config.validate().is_err());
+        config = RpcTransactionFiltersConfig::default();
+        config.max_false_positive_rate_ppm = 999;
+        assert!(config.validate().is_err());
+        config = RpcTransactionFiltersConfig::default();
+        config.max_concurrent_sealed_exact_lookups = 0;
+        assert!(config.validate().is_err());
+        config = RpcTransactionFiltersConfig::default();
+        config.max_filter_bundle_bytes = 0;
         assert!(config.validate().is_err());
     }
 }

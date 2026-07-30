@@ -4,7 +4,7 @@ use weedb::WeeDb;
 use super::tables;
 
 pub type RpcControlDb = WeeDb<RpcControlTables>;
-pub type RpcRouterDb = WeeDb<RpcRouterTables>;
+pub type RpcFilterCatalogDb = WeeDb<RpcFilterCatalogTables>;
 pub type RpcCurrentStateDb = WeeDb<RpcCurrentStateTables>;
 pub type RpcTransactionsDb = WeeDb<RpcTransactionsTables>;
 
@@ -12,8 +12,8 @@ impl NamedTables for RpcControlTables {
     const NAME: &'static str = "rpc-control";
 }
 
-impl NamedTables for RpcRouterTables {
-    const NAME: &'static str = "rpc-router";
+impl NamedTables for RpcFilterCatalogTables {
+    const NAME: &'static str = "rpc-filter-catalog";
 }
 
 impl NamedTables for RpcCurrentStateTables {
@@ -31,6 +31,12 @@ weedb::tables! {
     }
 }
 
+weedb::tables! {
+    pub struct RpcFilterCatalogTables<TableContext> {
+        pub descriptors: tables::FilterCatalog,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -39,27 +45,18 @@ mod tests {
     #[test]
     fn writable_table_groups_have_distinct_metric_names() {
         assert_eq!(RpcControlTables::NAME, "rpc-control");
-        assert_eq!(RpcRouterTables::NAME, "rpc-router");
+        assert_eq!(RpcFilterCatalogTables::NAME, "rpc-filter-catalog");
         assert_eq!(RpcCurrentStateTables::NAME, "rpc-current-state");
         assert_eq!(RpcTransactionsTables::NAME, "rpc-transactions");
     }
 
     #[tokio::test]
-    async fn router_table_group_has_state_column_family() {
+    async fn filter_catalog_has_only_descriptor_column_family() {
         let (context, _tmp) = StorageContext::new_temp().await.unwrap();
-        let db: RpcRouterDb = context.open_preconfigured("rpc/router").unwrap();
-        db.state.insert(b"router_commit", [1]).unwrap();
-        assert_eq!(db.state.get(b"router_commit").unwrap().as_deref(), Some(&[1][..]));
-        assert_eq!(RpcRouterTables::NAME, "rpc-router");
-    }
-}
-
-weedb::tables! {
-    pub struct RpcRouterTables<TableContext> {
-        pub state: tables::State,
-        pub transactions: tables::TransactionRouter,
-        pub inbound_messages: tables::InboundMessageRouter,
-        pub blocks: tables::BlockRouter,
+        let db: RpcFilterCatalogDb = context.open_preconfigured("rpc/filter-catalog").unwrap();
+        db.descriptors.insert(1u64.to_be_bytes(), [1]).unwrap();
+        assert_eq!(db.descriptors.get(1u64.to_be_bytes()).unwrap().as_deref(), Some(&[1][..]));
+        assert_eq!(RpcFilterCatalogTables::NAME, "rpc-filter-catalog");
     }
 }
 
