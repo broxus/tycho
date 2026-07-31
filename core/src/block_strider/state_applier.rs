@@ -364,7 +364,8 @@ impl<S> Inner<S> {
                 .await?;
             blocks_gc_handles.extend_from_slice(&queue_deps);
 
-            block_handles.set_skip_states_gc(&block_handle);
+            self.prepare_persistent_shard_state(&block_handle, mc_block_id.seqno)
+                .await?;
             state_gc_handles.push(block_handle);
         }
 
@@ -373,13 +374,57 @@ impl<S> Inner<S> {
             .await?;
         blocks_gc_handles.extend_from_slice(&queue_deps);
 
-        block_handles.set_skip_states_gc(&mc_block_handle);
+        self.prepare_persistent_shard_state(&mc_block_handle, mc_block_id.seqno)
+            .await?;
         state_gc_handles.push(mc_block_handle);
 
         Ok(StorePersistentStateDeps {
             state_gc_handles,
             blocks_gc_handles,
         })
+    }
+
+    async fn prepare_persistent_shard_state(
+        &self,
+        handle: &BlockHandle,
+        mc_seqno: u32,
+    ) -> Result<()> {
+        let state_storage = self.storage.shard_state_storage();
+
+        // Ensure skipped state is stored in DB before saving persistent state.
+        if !state_storage.protect_state_from_gc(handle).await? {
+            let state = state_storage
+                .load_state(mc_seqno, handle.id())
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to reconstruct shard state for persistent save: {}",
+                        handle.id()
+                    )
+                })?;
+
+            state_storage
+                .store_state_ignore_cache(handle, &state, StoreStateHint {
+                    is_top_block: Some(true),
+                    ..Default::default()
+                })
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to store reconstructed shard state for persistent save: {}",
+                        handle.id()
+                    )
+                })?;
+        }
+
+        anyhow::ensure!(
+            state_storage
+                .load_state_root_hash_opt(handle.id())?
+                .is_some(),
+            "shard state row is missing after persistent-state preparation: {}",
+            handle.id(),
+        );
+        Ok(())
     }
 
     async fn save_persistent_states(
@@ -389,6 +434,7 @@ impl<S> Inner<S> {
     ) -> Result<()> {
         let node_state = self.storage.node_state();
         let block_handles = self.storage.block_handle_storage();
+        let state_storage = self.storage.shard_state_storage();
 
         let Some(mc_block_handle) = block_handles.load_handle(mc_block.id()) else {
             bail!("masterchain block handle not found: {}", mc_block.id());
@@ -411,7 +457,7 @@ impl<S> Inner<S> {
         tracing::debug!("saved persistent state for {}", mc_block_handle.id());
 
         for handle in deps.state_gc_handles {
-            block_handles.set_skip_states_gc_finished(&handle);
+            state_storage.set_skip_states_gc_finished(&handle).await;
         }
         for handle in deps.blocks_gc_handles {
             block_handles.set_skip_blocks_gc_finished(&handle);
@@ -428,7 +474,6 @@ impl<S> Inner<S> {
     ) -> Result<()> {
         let block_handles = self.storage.block_handle_storage();
         let persistent_states = self.storage.persistent_state_storage();
-        let state_storage = self.storage.shard_state_storage();
 
         let mc_seqno = mc_block_handle.id().seqno;
 
@@ -437,22 +482,6 @@ impl<S> Inner<S> {
             let Some(block_handle) = block_handles.load_handle(&block_id) else {
                 anyhow::bail!("top shard block handle not found: {block_id}");
             };
-
-            // Ensure skipped state is stored in DB before saving persistent state.
-            if !block_handle.has_state() {
-                let state = state_storage
-                    .load_state(mc_seqno, &block_id)
-                    .await
-                    .context("failed to load skipped shard state for persistent save")?;
-
-                state_storage
-                    .store_state_ignore_cache(&block_handle, &state, StoreStateHint {
-                        is_top_block: Some(true),
-                        ..Default::default()
-                    })
-                    .await
-                    .context("failed to store skipped shard state for persistent save")?;
-            }
 
             // NOTE: We could have also called the `set_block_persistent` here, but we
             //       only do this in the first part of the `save_persistent_queue_states`.

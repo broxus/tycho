@@ -99,6 +99,10 @@ impl CoreStorage {
     }
 
     pub async fn open(ctx: StorageContext, config: CoreStorageConfig) -> Result<Self> {
+        if let Some(states_gc) = &config.states_gc {
+            states_gc.validate()?;
+        }
+
         let db: CoreDb = ctx.open_preconfigured(CORE_DB_SUBDIR)?;
         db.normalize_version()?;
         db.apply_migrations().await?;

@@ -143,6 +143,24 @@ pub struct StatesGcConfig {
     /// Default: 1s
     #[serde(with = "serde_helpers::humantime")]
     pub interval: Duration,
+
+    /// Above this value, a GC pass holds the state-write lock while scanning and sweeping.
+    pub high_watermark: usize,
+
+    /// An exclusive GC pass stops sweeping when it reaches this value.
+    pub low_watermark: usize,
+}
+
+impl StatesGcConfig {
+    pub(super) fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.low_watermark <= self.high_watermark,
+            "states GC low watermark ({}) exceeds high watermark ({})",
+            self.low_watermark,
+            self.high_watermark,
+        );
+        Ok(())
+    }
 }
 
 impl Default for StatesGcConfig {
@@ -153,6 +171,8 @@ impl Default for StatesGcConfig {
         Self {
             random_offset: false,
             interval: Duration::from_secs(1),
+            high_watermark: 100,
+            low_watermark: 50,
         }
     }
 }
@@ -241,5 +261,35 @@ impl Default for BlobDbConfig {
         Self {
             pre_create_cas_tree: true,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn states_gc_config_defaults_and_validation() {
+        let defaults = StatesGcConfig::default();
+        assert_eq!(defaults.high_watermark, 100);
+        assert_eq!(defaults.low_watermark, 50);
+        defaults.validate().unwrap();
+
+        StatesGcConfig {
+            low_watermark: 0,
+            ..Default::default()
+        }
+        .validate()
+        .unwrap();
+
+        let invalid = StatesGcConfig {
+            high_watermark: 7,
+            low_watermark: 8,
+            ..Default::default()
+        };
+        assert_eq!(
+            invalid.validate().unwrap_err().to_string(),
+            "states GC low watermark (8) exceeds high watermark (7)"
+        );
     }
 }
