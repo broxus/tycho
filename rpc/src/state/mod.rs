@@ -50,9 +50,12 @@ impl FromRef<RpcState> for jrpc::SubscriptionsState {
 mod db;
 mod codec;
 mod filter;
+mod gc;
+mod maintenance;
 mod partition;
 mod storage;
 mod subscriptions;
+mod tail;
 pub mod tables;
 
 pub struct RpcStateBuilder<MandatoryFields = (CoreStorage, BlockchainRpcClient, ZerostateId)> {
@@ -72,10 +75,8 @@ impl RpcStateBuilder {
             RpcStorageConfig::Full {
                 gc, blacklist_path, ..
             } => {
-                if gc.is_some() {
-                    anyhow::bail!(
-                        "transactions GC is unsupported with partitioned Full RPC storage; set rpc.storage.gc to null"
-                    );
+                if let Some(gc) = gc {
+                    gc.validate().map_err(anyhow::Error::msg)?;
                 }
                 config
                     .storage
@@ -83,9 +84,10 @@ impl RpcStateBuilder {
                     .expect("Full RPC storage has transaction partitions")
                     .validate()
                     .map_err(anyhow::Error::msg)?;
-                let rpc_storage = Arc::new(RpcStorage::open(
+                let rpc_storage = Arc::new(RpcStorage::open_full(
                     core_storage.context().clone(),
                     config.storage.transaction_partitions().expect("Full RPC storage has transaction partitions").clone(),
+                    gc.clone(),
                 )?);
 
                 if let Some(path) = blacklist_path {
@@ -269,6 +271,11 @@ impl RpcState {
 
     pub fn is_ready(&self) -> bool {
         self.inner.is_ready.load(Ordering::Acquire)
+            && self
+                .inner
+                .rpc_storage
+                .as_ref()
+                .is_none_or(|storage| !storage.is_resync_required())
     }
 
     pub fn is_full(&self) -> bool {
@@ -744,6 +751,7 @@ impl Inner {
             .context("failed to load state on rpc init")?;
         self.update_timings(mc_state.as_ref().gen_utime, mc_state.as_ref().seqno);
 
+        let mut startup_frontier = None;
         if let Some(rpc_storage) = &self.rpc_storage {
             let reconciliation = rpc_storage.reconcile_startup(mc_block_id)?;
             let node_instance_id = self.core_storage.node_state().load_instance_id();
@@ -828,11 +836,16 @@ impl Inner {
 
             rpc_storage.continue_lifecycle()?;
             rpc_storage.publish_snapshot(&reconciliation.effective_frontier)?;
+            startup_frontier = Some(reconciliation.effective_frontier);
         }
 
         self.is_ready.store(true, Ordering::Release);
         if let Some(rpc_storage) = &self.rpc_storage {
-            rpc_storage.start_filter_worker();
+            rpc_storage.start_maintenance(
+                startup_frontier
+                    .as_ref()
+                    .expect("RPC storage startup frontier must be reconciled before readiness"),
+            )?;
         }
         Ok(())
     }
@@ -1367,7 +1380,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn rpc_state_rejects_transaction_gc_with_partitioned_full_storage() -> Result<()> {
+    async fn rpc_state_accepts_transaction_gc_with_partitioned_full_storage() -> Result<()> {
         let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
         let storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
         let network = make_network()?;
@@ -1388,18 +1401,40 @@ mod test {
         let RpcStorageConfig::Full { gc, .. } = &mut config.storage else {
             unreachable!()
         };
-        *gc = Some(Default::default());
+        let gc_config = crate::config::TransactionsGcConfig::default();
+        *gc = Some(gc_config.clone());
 
-        let error = RpcState::builder()
+        let state = RpcState::builder()
             .with_config(config)
             .with_storage(storage)
             .with_blockchain_rpc_client(blockchain_rpc_client)
             .with_zerostate_id(ZerostateId::default())
-            .build()
-            .err()
-            .expect("transaction GC must be rejected for partitioned Full RPC storage");
+            .build()?;
 
-        assert!(format!("{error:#}").contains("transactions GC is unsupported"));
+        assert!(state.is_full());
+        let rpc_storage = state.inner.rpc_storage.as_ref().unwrap();
+        assert_eq!(rpc_storage.gc_config(), Some(&gc_config));
+        let frontier = BlockId {
+            shard: ShardIdent::MASTERCHAIN,
+            ..Default::default()
+        };
+        rpc_storage.publish_snapshot(&frontier)?;
+        state.inner.is_ready.store(true, Ordering::Release);
+        let old_snapshot = state.rpc_storage_snapshot().unwrap();
+        assert!(state.is_ready());
+
+        rpc_storage.transition_to_resync_required_for_test(
+            super::tail::AuthoritativeErrorKind::MissingCommittedData,
+        );
+        assert!(!state.is_ready());
+        assert!(state.rpc_storage_snapshot().is_none());
+        assert!(rpc_storage
+            .get_known_mc_blocks_range(Some(&old_snapshot))
+            .is_err());
+        rpc_storage.transition_to_resync_required_for_test(
+            super::tail::AuthoritativeErrorKind::ConflictingCommittedData,
+        );
+        assert!(!state.is_ready());
         Ok(())
     }
 

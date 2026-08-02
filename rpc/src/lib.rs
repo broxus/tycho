@@ -2,7 +2,7 @@
 
 pub use self::config::{
     BlackListConfig, RpcConfig, RpcStorageConfig, RpcTransactionFiltersConfig,
-    RpcTransactionPartitionsConfig,
+    RpcTransactionMaintenanceConfig, RpcTransactionPartitionsConfig,
     RunGetMethodConfig, TransactionsGcConfig,
 };
 pub use self::endpoint::{RpcEndpoint, RpcEndpointBuilder, jrpc, proto};

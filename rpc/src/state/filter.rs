@@ -21,7 +21,10 @@ use crate::config::RpcTransactionFiltersConfig;
 
 use super::codec::{self, FilterCatalogDescriptor, FilterNamespaceDescriptor, ManifestLifecycle};
 use super::db::RpcFilterCatalogDb;
-use super::partition::{PartitionId, PartitionManager};
+use super::maintenance::{MaintenanceCoordinator, MaintenancePermit, MaintenancePriority};
+use super::partition::{PartitionId, PartitionLifetimeToken, PartitionManager};
+use super::storage::SnapshotPublisher;
+use super::tail::classify_authoritative_error;
 
 const FILTER_FILE_MAGIC: [u8; 8] = *b"TYCHQF02";
 const FILTER_FILE_VERSION: u8 = 1;
@@ -30,6 +33,8 @@ const FILTER_FILE_DIGEST_LEN: usize = 32;
 const FILTER_SERIALIZED_FIXED_LEN: u64 = 19;
 const FILTERS_SUBDIR: &str = "rpc/filters";
 const FILTER_CATALOG_SUBDIR: &str = "rpc/filter-catalog";
+const FILTER_WORKER_SCAN_KEYS_PER_CHUNK: usize = 4096;
+const FILTER_INELIGIBLE_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 // Bump algorithm_id when membership algorithm or semantics change; hash_scheme_id when the
 // hasher, seed, raw-key framing, or hash input changes; key_codec_id when canonical key encoding
@@ -63,16 +68,18 @@ pub(super) enum FilterNamespace {
     Transactions = 1,
     InboundMessages = 2,
     Blocks = 3,
+    Accounts = 4,
 }
 
 impl FilterNamespace {
-    pub(super) const ALL: [Self; 3] = [Self::Transactions, Self::InboundMessages, Self::Blocks];
+    pub(super) const ALL: [Self; 4] = [Self::Transactions, Self::InboundMessages, Self::Blocks, Self::Accounts];
 
     fn from_wire(value: u8) -> Result<Self> {
         match value {
             1 => Ok(Self::Transactions),
             2 => Ok(Self::InboundMessages),
             3 => Ok(Self::Blocks),
+            4 => Ok(Self::Accounts),
             _ => bail!("unsupported filter namespace id: {value}"),
         }
     }
@@ -81,6 +88,7 @@ impl FilterNamespace {
         match self {
             Self::Transactions | Self::InboundMessages => 32,
             Self::Blocks => 13,
+            Self::Accounts => 33,
         }
     }
 
@@ -89,6 +97,7 @@ impl FilterNamespace {
             Self::Transactions => "transactions.qfilter",
             Self::InboundMessages => "inbound-messages.qfilter",
             Self::Blocks => "blocks.qfilter",
+            Self::Accounts => "accounts.qfilter",
         }
     }
 
@@ -97,6 +106,7 @@ impl FilterNamespace {
             Self::Transactions => "transactions",
             Self::InboundMessages => "inbound_messages",
             Self::Blocks => "blocks",
+            Self::Accounts => "accounts",
         }
     }
 }
@@ -388,41 +398,70 @@ pub(super) struct ValidatedFilterBundle {
     partition_id: u64,
     generation_id: u128,
     manifest_digest: HashBytes,
+    _lifetime: PartitionLifetimeToken,
     transactions: ImmutableNamespaceFilter,
     inbound_messages: ImmutableNamespaceFilter,
     blocks: ImmutableNamespaceFilter,
+    accounts: ImmutableNamespaceFilter,
 }
 
 impl ValidatedFilterBundle {
+    #[cfg(test)]
     pub(super) fn new(
         transactions: ImmutableNamespaceFilter,
         inbound_messages: ImmutableNamespaceFilter,
         blocks: ImmutableNamespaceFilter,
+        accounts: ImmutableNamespaceFilter,
         max_bundle_bytes: u64,
+    ) -> Result<Self> {
+        let lifetime = PartitionLifetimeToken::for_test(PartitionId(
+            transactions.metadata().identity.partition_id,
+        ));
+        Self::new_with_lifetime(
+            transactions,
+            inbound_messages,
+            blocks,
+            accounts,
+            max_bundle_bytes,
+            lifetime,
+        )
+    }
+
+    fn new_with_lifetime(
+        transactions: ImmutableNamespaceFilter,
+        inbound_messages: ImmutableNamespaceFilter,
+        blocks: ImmutableNamespaceFilter,
+        accounts: ImmutableNamespaceFilter,
+        max_bundle_bytes: u64,
+        lifetime: PartitionLifetimeToken,
     ) -> Result<Self> {
         let transactions_metadata = transactions.metadata();
         let inbound_messages_metadata = inbound_messages.metadata();
         let blocks_metadata = blocks.metadata();
+        let accounts_metadata = accounts.metadata();
         let identity = transactions_metadata.identity;
         ensure!(identity.namespace == FilterNamespace::Transactions, "invalid transactions filter namespace");
         ensure!(inbound_messages_metadata.identity.namespace == FilterNamespace::InboundMessages, "invalid inbound-message filter namespace");
         ensure!(blocks_metadata.identity.namespace == FilterNamespace::Blocks, "invalid blocks filter namespace");
-        for metadata in [inbound_messages_metadata, blocks_metadata] {
+        ensure!(accounts_metadata.identity.namespace == FilterNamespace::Accounts, "invalid accounts filter namespace");
+        for metadata in [inbound_messages_metadata, blocks_metadata, accounts_metadata] {
             ensure!(metadata.identity.partition_id == identity.partition_id, "filter bundle partition id mismatch");
             ensure!(metadata.identity.generation_id == identity.generation_id, "filter bundle generation id mismatch");
             ensure!(metadata.identity.manifest_digest == identity.manifest_digest, "filter bundle manifest digest mismatch");
         }
         checked_bundle_bytes(
-            &[transactions_metadata, inbound_messages_metadata, blocks_metadata],
+            &[transactions_metadata, inbound_messages_metadata, blocks_metadata, accounts_metadata],
             max_bundle_bytes,
         )?;
         Ok(Self {
             partition_id: identity.partition_id,
             generation_id: identity.generation_id,
             manifest_digest: identity.manifest_digest,
+            _lifetime: lifetime,
             transactions,
             inbound_messages,
             blocks,
+            accounts,
         })
     }
 
@@ -445,6 +484,7 @@ impl ValidatedFilterBundle {
             .resident_bytes
             .checked_add(self.inbound_messages.metadata().resident_bytes)
             .and_then(|value| value.checked_add(self.blocks.metadata().resident_bytes))
+            .and_then(|value| value.checked_add(self.accounts.metadata().resident_bytes))
             .expect("validated filter bundle resident size")
     }
 
@@ -455,6 +495,7 @@ impl ValidatedFilterBundle {
                 self.transactions.metadata(),
                 self.inbound_messages.metadata(),
                 self.blocks.metadata(),
+                self.accounts.metadata(),
             ],
             u64::MAX,
         )
@@ -466,6 +507,7 @@ impl ValidatedFilterBundle {
             FilterNamespace::Transactions => &self.transactions,
             FilterNamespace::InboundMessages => &self.inbound_messages,
             FilterNamespace::Blocks => &self.blocks,
+            FilterNamespace::Accounts => &self.accounts,
         }
     }
 
@@ -477,6 +519,7 @@ impl ValidatedFilterBundle {
             transactions: self.transactions.metadata().to_descriptor(),
             inbound_messages: self.inbound_messages.metadata().to_descriptor(),
             blocks: self.blocks.metadata().to_descriptor(),
+            accounts: self.accounts.metadata().to_descriptor(),
         }
     }
 
@@ -536,7 +579,7 @@ impl ValidatedFilterBundle {
 
 #[derive(Default)]
 struct FilterSelectedRateMetrics {
-    rates: [AtomicU32; 3],
+    rates: [AtomicU32; 4],
 }
 
 impl FilterSelectedRateMetrics {
@@ -550,6 +593,7 @@ fn record_configured_namespace_metrics(config: &RpcTransactionFiltersConfig) {
         (FilterNamespace::Transactions, config.transaction_false_positive_rate_ppm),
         (FilterNamespace::InboundMessages, config.inbound_message_false_positive_rate_ppm),
         (FilterNamespace::Blocks, config.block_false_positive_rate_ppm),
+        (FilterNamespace::Accounts, config.account_false_positive_rate_ppm),
     ] {
         metrics::gauge!(
             "tycho_storage_rpc_filter_configured_error_ratio",
@@ -588,8 +632,14 @@ pub(super) struct FilterWorker {
     partitions: Arc<Mutex<PartitionManager>>,
     registry: Arc<FilterRegistry>,
     publisher: FilterPublisher,
+    snapshots: Arc<SnapshotPublisher>,
+    maintenance: Arc<MaintenanceCoordinator>,
     pending_sealed: Arc<Mutex<BTreeSet<PartitionId>>>,
+    pending_ineligible: Arc<Mutex<BTreeSet<PartitionId>>>,
+    ineligible: Arc<Mutex<BTreeSet<PartitionId>>>,
+    completed_ineligible: Arc<Mutex<BTreeSet<PartitionId>>>,
     notify: Arc<Notify>,
+    ineligible_complete: Arc<Notify>,
     cancelled: CancellationFlag,
     publication_gate: Arc<FilterPublicationGate>,
     selected_rate_metrics: Arc<FilterSelectedRateMetrics>,
@@ -603,6 +653,8 @@ impl FilterWorker {
         partitions: Arc<Mutex<PartitionManager>>,
         registry: Arc<FilterRegistry>,
         publisher: FilterPublisher,
+        snapshots: Arc<SnapshotPublisher>,
+        maintenance: Arc<MaintenanceCoordinator>,
     ) -> Self {
         Self {
             context,
@@ -610,8 +662,14 @@ impl FilterWorker {
             partitions,
             registry,
             publisher,
+            snapshots,
+            maintenance,
             pending_sealed: Default::default(),
+            pending_ineligible: Default::default(),
+            ineligible: Default::default(),
+            completed_ineligible: Default::default(),
             notify: Arc::new(Notify::new()),
+            ineligible_complete: Arc::new(Notify::new()),
             cancelled: CancellationFlag::new(),
             publication_gate: Default::default(),
             selected_rate_metrics: Default::default(),
@@ -630,8 +688,14 @@ impl FilterWorker {
             self.partitions.clone(),
             self.registry.clone(),
             self.publisher.clone(),
+            self.snapshots.clone(),
+            self.maintenance.clone(),
             self.pending_sealed.clone(),
+            self.pending_ineligible.clone(),
+            self.ineligible.clone(),
+            self.completed_ineligible.clone(),
             self.notify.clone(),
+            self.ineligible_complete.clone(),
             self.cancelled.clone(),
             self.publication_gate.clone(),
             self.selected_rate_metrics.clone(),
@@ -639,12 +703,46 @@ impl FilterWorker {
     }
 
     pub(super) fn notify_sealed(&self, id: PartitionId) {
+        if self.ineligible.lock().contains(&id) {
+            return;
+        }
         self.pending_sealed.lock().insert(id);
         self.notify.notify_one();
     }
 
+    /// Prevents new publication and removes acceleration after a durable Retired/Deleting transition.
+    pub(super) async fn retire_partition(&self, id: PartitionId) -> Result<()> {
+        let publication_gate = self.publication_gate.clone();
+        let cancelled = self.cancelled.clone();
+        let ineligible = self.ineligible.clone();
+        let completed_ineligible = self.completed_ineligible.clone();
+        let pending_sealed = self.pending_sealed.clone();
+        let pending_ineligible = self.pending_ineligible.clone();
+        tokio::task::spawn_blocking(move || {
+            publication_gate.publish(&cancelled, || {
+                ineligible.lock().insert(id);
+                completed_ineligible.lock().remove(&id);
+                pending_sealed.lock().remove(&id);
+                pending_ineligible.lock().insert(id);
+                Ok(())
+            })
+        })
+        .await
+        .context("RPC filter retirement publication fence task failed")??;
+        self.notify.notify_one();
+        loop {
+            let notified = self.ineligible_complete.notified();
+            if self.completed_ineligible.lock().contains(&id) {
+                return Ok(());
+            }
+            ensure!(!self.cancelled.check(), "RPC filter retirement handoff cancelled");
+            notified.await;
+        }
+    }
+
     pub(super) fn shutdown(&self) {
         self.publication_gate.cancel(&self.cancelled);
+        self.ineligible_complete.notify_waiters();
         if let Some(task) = self.task.lock().take() {
             task.abort();
         }
@@ -680,6 +778,79 @@ struct FilterWorkQueue {
     retry_deadlines: BTreeMap<PartitionId, Instant>,
     retry_delays: BTreeMap<PartitionId, Duration>,
     enqueued_at: BTreeMap<PartitionId, Instant>,
+}
+
+/// Cooperatively yields worker-only scans while preserving their iterator and builder state.
+struct FilterMaintenanceBudget {
+    permit: MaintenancePermit,
+    keys_since_yield: usize,
+}
+
+impl FilterMaintenanceBudget {
+    fn new(permit: MaintenancePermit) -> Self {
+        Self {
+            permit,
+            keys_since_yield: 0,
+        }
+    }
+
+    fn after_key(&mut self) -> Result<()> {
+        self.keys_since_yield += 1;
+        if self.keys_since_yield < FILTER_WORKER_SCAN_KEYS_PER_CHUNK {
+            return Ok(());
+        }
+        self.keys_since_yield = 0;
+        self.permit
+            .yield_background_blocking()
+            .context("RPC filter maintenance budget closed while yielding between key chunks")
+    }
+}
+
+#[derive(Default)]
+struct IneligibleCleanupSchedule {
+    pending: BTreeSet<PartitionId>,
+    retry_deadlines: BTreeMap<PartitionId, Instant>,
+}
+
+impl IneligibleCleanupSchedule {
+    fn enqueue(&mut self, ids: impl IntoIterator<Item = PartitionId>) {
+        for id in ids {
+            self.retry_deadlines.remove(&id);
+            self.pending.insert(id);
+        }
+    }
+
+    fn next_ready(&mut self, now: Instant) -> Option<PartitionId> {
+        let retry = self
+            .retry_deadlines
+            .iter()
+            .filter(|(_, deadline)| **deadline <= now)
+            .map(|(id, _)| *id)
+            .max();
+        let id = self.pending.last().copied().max(retry)?;
+        self.pending.remove(&id);
+        self.retry_deadlines.remove(&id);
+        Some(id)
+    }
+
+    fn retry(&mut self, id: PartitionId, now: Instant) {
+        self.retry_deadlines
+            .insert(id, now + FILTER_INELIGIBLE_RETRY_DELAY);
+    }
+
+    fn next_deadline(&self) -> Option<Instant> {
+        self.retry_deadlines.values().copied().min()
+    }
+}
+
+fn next_filter_worker_deadline(
+    queue: &FilterWorkQueue,
+    ineligible_cleanup: &IneligibleCleanupSchedule,
+) -> Option<Instant> {
+    [queue.next_deadline(), ineligible_cleanup.next_deadline()]
+        .into_iter()
+        .flatten()
+        .min()
 }
 
 #[derive(Clone, Copy)]
@@ -850,6 +1021,8 @@ impl FilterWorkQueue {
     }
 
     fn complete(&mut self, id: PartitionId) {
+        self.priority.remove(&id);
+        self.pending.remove(&id);
         self.retry_deadlines.remove(&id);
         self.retry_delays.remove(&id);
         self.enqueued_at.remove(&id);
@@ -1007,7 +1180,7 @@ pub(super) fn decode_filter_file(
 }
 
 pub(super) fn checked_bundle_bytes(
-    filters: &[FilterFileMetadata; 3],
+    filters: &[FilterFileMetadata; 4],
     max_bundle_bytes: u64,
 ) -> Result<u64> {
     let total = filters.iter().try_fold(0u64, |total, metadata| {
@@ -1025,7 +1198,7 @@ pub(super) fn checked_bundle_bytes(
 }
 
 fn checked_descriptor_bundle_bytes(
-    filters: &[FilterNamespaceDescriptor; 3],
+    filters: &[FilterNamespaceDescriptor; 4],
     max_bundle_bytes: u64,
 ) -> Result<u64> {
     let total = filters.iter().try_fold(0u64, |total, metadata| {
@@ -1192,14 +1365,16 @@ struct EncodedFilterBundle {
     transactions: EncodedFilterFile,
     inbound_messages: EncodedFilterFile,
     blocks: EncodedFilterFile,
+    accounts: EncodedFilterFile,
 }
 
 impl EncodedFilterBundle {
-    fn metadata(&self) -> [FilterFileMetadata; 3] {
+    fn metadata(&self) -> [FilterFileMetadata; 4] {
         [
             self.transactions.metadata,
             self.inbound_messages.metadata,
             self.blocks.metadata,
+            self.accounts.metadata,
         ]
     }
 
@@ -1212,14 +1387,16 @@ impl EncodedFilterBundle {
             transactions: self.transactions.metadata.to_descriptor(),
             inbound_messages: self.inbound_messages.metadata.to_descriptor(),
             blocks: self.blocks.metadata.to_descriptor(),
+            accounts: self.accounts.metadata.to_descriptor(),
         }
     }
 
-    fn files(&self) -> [(FilterNamespace, &EncodedFilterFile); 3] {
+    fn files(&self) -> [(FilterNamespace, &EncodedFilterFile); 4] {
         [
             (FilterNamespace::Transactions, &self.transactions),
             (FilterNamespace::InboundMessages, &self.inbound_messages),
             (FilterNamespace::Blocks, &self.blocks),
+            (FilterNamespace::Accounts, &self.accounts),
         ]
     }
 }
@@ -1314,6 +1491,17 @@ impl FilterCatalogStore {
         id: PartitionId,
         cancelled: &CancellationFlag,
     ) -> Result<Arc<ValidatedFilterBundle>> {
+        self.build_and_publish_inner(partitions, id, cancelled, None, None)
+    }
+
+    fn build_and_publish_inner(
+        &self,
+        partitions: &parking_lot::Mutex<PartitionManager>,
+        id: PartitionId,
+        cancelled: &CancellationFlag,
+        mut budget: Option<&mut FilterMaintenanceBudget>,
+        ineligible: Option<&Mutex<BTreeSet<PartitionId>>>,
+    ) -> Result<Arc<ValidatedFilterBundle>> {
         check_cancelled(cancelled)?;
         let (manifest_digest, opener) = {
             let partitions = partitions.lock();
@@ -1326,6 +1514,7 @@ impl FilterCatalogStore {
         publication_stage(FilterPublicationStage::Vp1, cancelled)?;
 
         let db = opener.open()?;
+        let lifetime = db.lifetime_token();
         let generation_id = self.next_generation_id(id)?;
         let identity = |namespace| FilterFileIdentity {
             namespace,
@@ -1334,9 +1523,10 @@ impl FilterCatalogStore {
             manifest_digest,
         };
         let source_key_counts = [
-            count_source_keys(&db, FilterNamespace::Transactions, cancelled)?,
-            count_source_keys(&db, FilterNamespace::InboundMessages, cancelled)?,
-            count_source_keys(&db, FilterNamespace::Blocks, cancelled)?,
+            count_source_keys(&db, FilterNamespace::Transactions, cancelled, budget.as_deref_mut())?,
+            count_source_keys(&db, FilterNamespace::InboundMessages, cancelled, budget.as_deref_mut())?,
+            count_source_keys(&db, FilterNamespace::Blocks, cancelled, budget.as_deref_mut())?,
+            count_source_keys(&db, FilterNamespace::Accounts, cancelled, budget.as_deref_mut())?,
         ];
         let selection = select_false_positive_rates(
             source_key_counts,
@@ -1344,6 +1534,7 @@ impl FilterCatalogStore {
                 self.config.transaction_false_positive_rate_ppm,
                 self.config.inbound_message_false_positive_rate_ppm,
                 self.config.block_false_positive_rate_ppm,
+                self.config.account_false_positive_rate_ppm,
             ],
             self.config.max_false_positive_rate_ppm,
             self.config.max_filter_bundle_bytes,
@@ -1355,6 +1546,7 @@ impl FilterCatalogStore {
                 self.config.transaction_false_positive_rate_ppm,
                 self.config.inbound_message_false_positive_rate_ppm,
                 self.config.block_false_positive_rate_ppm,
+                self.config.account_false_positive_rate_ppm,
             ],
             selected_false_positive_rates_ppm = ?selection.rates,
             preferred_bundle_bytes = selection.preferred_bundle_bytes,
@@ -1363,26 +1555,37 @@ impl FilterCatalogStore {
             "selected RPC transaction filter false-positive rates"
         );
         let encoded = EncodedFilterBundle {
-            transactions: build_filter_file(
+            transactions: build_filter_file_inner(
                 &db,
                 identity(FilterNamespace::Transactions),
                 source_key_counts[0],
                 selection.rates[0],
                 cancelled,
+                budget.as_deref_mut(),
             )?,
-            inbound_messages: build_filter_file(
+            inbound_messages: build_filter_file_inner(
                 &db,
                 identity(FilterNamespace::InboundMessages),
                 source_key_counts[1],
                 selection.rates[1],
                 cancelled,
+                budget.as_deref_mut(),
             )?,
-            blocks: build_filter_file(
+            blocks: build_filter_file_inner(
                 &db,
                 identity(FilterNamespace::Blocks),
                 source_key_counts[2],
                 selection.rates[2],
                 cancelled,
+                budget.as_deref_mut(),
+            )?,
+            accounts: build_filter_file_inner(
+                &db,
+                identity(FilterNamespace::Accounts),
+                source_key_counts[3],
+                selection.rates[3],
+                cancelled,
+                budget.as_deref_mut(),
             )?,
         };
         checked_bundle_bytes(&encoded.metadata(), self.config.max_filter_bundle_bytes)
@@ -1394,6 +1597,9 @@ impl FilterCatalogStore {
         let final_dir = self.final_generation_path(id, generation_id);
         let publication_started_at = Instant::now();
         let result = self.publish(cancelled, || {
+            if let Some(ineligible) = ineligible {
+                ensure!(!ineligible.lock().contains(&id), "RPC filter source became ineligible before catalog generation publication");
+            }
             let partition_root = self.partition_root(id);
             let partition_root_exists = partition_root.exists();
             fs::create_dir_all(&partition_root)?;
@@ -1430,6 +1636,7 @@ impl FilterCatalogStore {
                 descriptor,
                 manifest_digest,
                 self.config.max_filter_bundle_bytes,
+                lifetime,
             )
             .map_err(generated_filter_validation_error)?;
             publication_stage(FilterPublicationStage::Vp6, cancelled)?;
@@ -1449,19 +1656,29 @@ impl FilterCatalogStore {
             sync_directory(self.partition_root(id))?;
             publication_stage(FilterPublicationStage::Vp9, cancelled)?;
 
-            Self::ensure_current_sealed_manifest(partitions, id, manifest_digest)
-                .map_err(|error| irreparable_filter_error(FilterIrreparableReason::ManifestInvariant, error))?;
-            check_cancelled(cancelled)?;
-            let mut batch = rocksdb::WriteBatch::default();
-            batch.put_cf(
-                &self.catalog.descriptors.cf(),
-                id.0.to_be_bytes(),
-                codec::encode_filter_catalog_descriptor(&descriptor),
-            );
-            self.catalog
-                .rocksdb()
-                .write_opt(batch, self.catalog.descriptors.write_config())
-                .context("failed to publish RPC filter catalog descriptor")?;
+            {
+                let partition_manager = partitions.lock();
+                let current_manifest_digest = partition_manager
+                    .sealed_manifest_digest(id)
+                    .map_err(|error| irreparable_filter_error(FilterIrreparableReason::ManifestInvariant, error))?;
+                if current_manifest_digest != manifest_digest {
+                    return Err(irreparable_filter_error(
+                        FilterIrreparableReason::ManifestInvariant,
+                        anyhow::anyhow!("sealed partition manifest changed during filter publication"),
+                    ));
+                }
+                check_cancelled(cancelled)?;
+                let mut batch = rocksdb::WriteBatch::default();
+                batch.put_cf(
+                    &self.catalog.descriptors.cf(),
+                    id.0.to_be_bytes(),
+                    codec::encode_filter_catalog_descriptor(&descriptor),
+                );
+                self.catalog
+                    .rocksdb()
+                    .write_opt(batch, self.catalog.descriptors.write_config())
+                    .context("failed to publish RPC filter catalog descriptor")?;
+            }
             publication_stage(FilterPublicationStage::Vp10, cancelled)?;
 
             Self::ensure_current_sealed_manifest(partitions, id, manifest_digest)
@@ -1481,6 +1698,19 @@ impl FilterCatalogStore {
         id: PartitionId,
         manifest_digest: HashBytes,
     ) -> Result<Option<Arc<ValidatedFilterBundle>>> {
+        self.load_and_validate_with_lifetime(
+            id,
+            manifest_digest,
+            PartitionLifetimeToken::for_test(id),
+        )
+    }
+
+    fn load_and_validate_with_lifetime(
+        &self,
+        id: PartitionId,
+        manifest_digest: HashBytes,
+        lifetime: PartitionLifetimeToken,
+    ) -> Result<Option<Arc<ValidatedFilterBundle>>> {
         let Some(value) = self.catalog.descriptors.get(id.0.to_be_bytes())? else {
             return Ok(None);
         };
@@ -1492,8 +1722,19 @@ impl FilterCatalogStore {
             descriptor,
             manifest_digest,
             u64::MAX,
+            lifetime,
         )?;
         Ok(Some(Arc::new(bundle)))
+    }
+
+    fn remove_partition_acceleration(&self, id: PartitionId) -> Result<()> {
+        let mut batch = rocksdb::WriteBatch::default();
+        batch.delete_cf(&self.catalog.descriptors.cf(), id.0.to_be_bytes());
+        self.catalog
+            .rocksdb()
+            .write_opt(batch, self.catalog.descriptors.write_config())
+            .context("failed to remove RPC filter catalog descriptor")?;
+        self.cleanup_owned_generations(id, None)
     }
 
     #[cfg(test)]
@@ -1514,11 +1755,11 @@ impl FilterCatalogStore {
         cancelled: &CancellationFlag,
     ) -> Result<Option<Arc<ValidatedFilterBundle>>> {
         check_cancelled(cancelled)?;
-        let manifest_digest = {
+        let (manifest_digest, lifetime) = {
             let partitions = partitions.lock();
-            partitions.sealed_manifest_digest(id)?
+            partitions.sealed_manifest_and_lifetime(id)?
         };
-        let bundle = self.load_and_validate(id, manifest_digest)?;
+        let bundle = self.load_and_validate_with_lifetime(id, manifest_digest, lifetime)?;
         Self::ensure_current_sealed_manifest(partitions, id, manifest_digest)?;
         Ok(bundle)
     }
@@ -1531,9 +1772,9 @@ impl FilterCatalogStore {
         cancelled: &CancellationFlag,
     ) -> Result<Arc<ValidatedFilterBundle>> {
         check_cancelled(cancelled)?;
-        let manifest_digest = {
+        let (manifest_digest, lifetime) = {
             let partitions = partitions.lock();
-            partitions.sealed_manifest_digest(id)?
+            partitions.sealed_manifest_and_lifetime(id)?
         };
         ensure!(descriptor.partition_id == id.0, "filter catalog descriptor partition id mismatch");
         ensure!(descriptor.manifest_digest == manifest_digest, "filter catalog manifest digest mismatch");
@@ -1542,12 +1783,13 @@ impl FilterCatalogStore {
             descriptor,
             manifest_digest,
             u64::MAX,
+            lifetime,
         )?;
         Self::ensure_current_sealed_manifest(partitions, id, manifest_digest)?;
         Ok(Arc::new(bundle))
     }
 
-    /// Deletes only generation names produced by the V2 formatter under this known partition.
+    /// Deletes only generation names produced by the V3 formatter under this known partition.
     pub(super) fn cleanup_owned_generations(
         &self,
         id: PartitionId,
@@ -1594,6 +1836,7 @@ impl FilterCatalogStore {
         descriptor: FilterCatalogDescriptor,
         manifest_digest: HashBytes,
         max_bundle_bytes: u64,
+        lifetime: PartitionLifetimeToken,
     ) -> Result<ValidatedFilterBundle> {
         let started_at = Instant::now();
         let result = (|| {
@@ -1603,6 +1846,7 @@ impl FilterCatalogStore {
                     descriptor.transactions,
                     descriptor.inbound_messages,
                     descriptor.blocks,
+                    descriptor.accounts,
                 ],
                 max_bundle_bytes,
             )?;
@@ -1630,11 +1874,19 @@ impl FilterCatalogStore {
                 descriptor.blocks,
                 structural_bundle_bytes,
             )?;
-            let bundle = ValidatedFilterBundle::new(
+            let accounts = Self::read_namespace_filter(
+                directory,
+                identity(FilterNamespace::Accounts),
+                descriptor.accounts,
+                structural_bundle_bytes,
+            )?;
+            let bundle = ValidatedFilterBundle::new_with_lifetime(
                 transactions,
                 inbound_messages,
                 blocks,
+                accounts,
                 structural_bundle_bytes,
+                lifetime,
             )?;
             Ok(bundle)
         })();
@@ -1686,13 +1938,17 @@ impl FilterCatalogStore {
     fn next_generation_id(&self, id: PartitionId) -> Result<u128> {
         for _ in 0..16 {
             let generation_id = rand::random();
-            if !self.temporary_generation_path(id, generation_id).exists()
-                && !self.final_generation_path(id, generation_id).exists()
-            {
+            if self.generation_id_is_available(id, generation_id) {
                 return Ok(generation_id);
             }
         }
         bail!("failed to allocate an unused RPC filter generation id")
+    }
+
+    fn generation_id_is_available(&self, id: PartitionId, generation_id: u128) -> bool {
+        generation_id != 0
+            && !self.temporary_generation_path(id, generation_id).exists()
+            && !self.final_generation_path(id, generation_id).exists()
     }
 
     fn partition_root(&self, id: PartitionId) -> PathBuf {
@@ -1728,14 +1984,37 @@ impl FilterCatalogStore {
     }
 }
 
+async fn acquire_filter_maintenance(
+    maintenance: &MaintenanceCoordinator,
+    cancelled: &CancellationFlag,
+) -> Option<MaintenancePermit> {
+    if cancelled.check() {
+        return None;
+    }
+    let permit = match maintenance.acquire(MaintenancePriority::Background).await {
+        Ok(permit) => permit,
+        Err(_) => {
+            cancelled.cancel();
+            return None;
+        }
+    };
+    (!cancelled.check()).then_some(permit)
+}
+
 async fn run_filter_worker(
     context: StorageContext,
     config: RpcTransactionFiltersConfig,
     partitions: Arc<Mutex<PartitionManager>>,
     registry: Arc<FilterRegistry>,
     publisher: FilterPublisher,
+    snapshots: Arc<SnapshotPublisher>,
+    maintenance: Arc<MaintenanceCoordinator>,
     pending_sealed: Arc<Mutex<BTreeSet<PartitionId>>>,
+    pending_ineligible: Arc<Mutex<BTreeSet<PartitionId>>>,
+    ineligible: Arc<Mutex<BTreeSet<PartitionId>>>,
+    completed_ineligible: Arc<Mutex<BTreeSet<PartitionId>>>,
     notify: Arc<Notify>,
+    ineligible_complete: Arc<Notify>,
     cancelled: CancellationFlag,
     publication_gate: Arc<FilterPublicationGate>,
     selected_rate_metrics: Arc<FilterSelectedRateMetrics>,
@@ -1744,18 +2023,29 @@ async fn run_filter_worker(
     if cancelled.check() {
         return;
     }
-    let sealed = partitions
-        .lock()
-        .descriptors()
-        .into_iter()
+    let partition_descriptors = partitions.lock().descriptors();
+    let sealed = partition_descriptors
+        .iter()
         .filter(|descriptor| descriptor.lifecycle == ManifestLifecycle::Sealed)
         .map(|descriptor| descriptor.id)
         .collect::<Vec<_>>();
+    let initially_ineligible = partition_descriptors
+        .into_iter()
+        .filter(|descriptor| matches!(descriptor.lifecycle, ManifestLifecycle::Retired | ManifestLifecycle::Deleting))
+        .map(|descriptor| descriptor.id)
+        .collect::<Vec<_>>();
+    ineligible.lock().extend(initially_ineligible.iter().copied());
+    pending_ineligible.lock().extend(initially_ineligible);
     let mut queue = FilterWorkQueue::new(sealed.iter().copied());
+    let Some(catalog_permit) = acquire_filter_maintenance(&maintenance, &cancelled).await else {
+        ineligible_complete.notify_waiters();
+        return;
+    };
     let catalog_cancelled = cancelled.clone();
     let catalog_publication_gate = publication_gate.clone();
     let catalog_config = config.clone();
     let catalog = tokio::task::spawn_blocking(move || {
+        let _permit = catalog_permit;
         let store = Arc::new(catalog_publication_gate.publish(&catalog_cancelled, || {
             FilterCatalogStore::open(&context, catalog_config)
         })?);
@@ -1764,7 +2054,9 @@ async fn run_filter_worker(
         Ok::<_, anyhow::Error>((store, descriptors))
     })
     .await;
+    tokio::task::yield_now().await;
     if cancelled.check() {
+        ineligible_complete.notify_waiters();
         return;
     }
     let (store, mut descriptors) = match catalog {
@@ -1776,6 +2068,8 @@ async fn run_filter_worker(
             )
             .record(warmup_started_at.elapsed());
             disable_filter_worker(&e);
+            cancelled.cancel();
+            ineligible_complete.notify_waiters();
             return;
         }
         Err(e) => {
@@ -1785,6 +2079,8 @@ async fn run_filter_worker(
             )
             .record(warmup_started_at.elapsed());
             disable_filter_worker(&anyhow::Error::new(e).context("RPC filter catalog maintenance task failed"));
+            cancelled.cancel();
+            ineligible_complete.notify_waiters();
             return;
         }
     };
@@ -1803,12 +2099,57 @@ async fn run_filter_worker(
         .collect::<BTreeMap<_, _>>();
     refresh_catalog_metrics(&statuses);
     let mut irreparable = BTreeSet::new();
+    let mut ineligible_cleanup = IneligibleCleanupSchedule::default();
     let mut warmup_recorded = false;
 
-    loop {
+    'worker: loop {
         if cancelled.check() {
             break;
         }
+        ineligible_cleanup.enqueue(std::mem::take(&mut *pending_ineligible.lock()));
+        while let Some(id) = ineligible_cleanup.next_ready(Instant::now()) {
+            queue.complete(id);
+            statuses.remove(&id);
+            descriptors.remove(&id);
+            irreparable.remove(&id);
+            let Some(cleanup_permit) = acquire_filter_maintenance(&maintenance, &cancelled).await else {
+                break 'worker;
+            };
+            let cleanup_store = store.clone();
+            let cleanup_registry = registry.clone();
+            let cleanup_cancelled = cancelled.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                let _permit = cleanup_permit;
+                cleanup_store.publish(&cleanup_cancelled, || {
+                    cleanup_registry.remove(id);
+                    cleanup_store.remove_partition_acceleration(id)
+                })
+            })
+            .await;
+            tokio::task::yield_now().await;
+            if cancelled.check() {
+                break 'worker;
+            }
+            let cleanup_failed = match result {
+                Ok(Ok(())) => {
+                    completed_ineligible.lock().insert(id);
+                    ineligible_complete.notify_waiters();
+                    false
+                }
+                Ok(Err(e)) => {
+                    tracing::error!(partition_id = id.0, "failed to retire RPC transaction filters: {e:#}");
+                    true
+                }
+                Err(e) => {
+                    tracing::error!(partition_id = id.0, "RPC transaction filter retirement task failed: {e}");
+                    true
+                }
+            };
+            if cleanup_failed {
+                ineligible_cleanup.retry(id, Instant::now());
+            }
+        }
+        refresh_catalog_metrics(&statuses);
         let just_sealed = std::mem::take(&mut *pending_sealed.lock());
         prioritize_filter_work(&mut queue, &mut statuses, &irreparable, just_sealed);
         refresh_catalog_metrics(&statuses);
@@ -1823,7 +2164,7 @@ async fn run_filter_worker(
                 .record(warmup_started_at.elapsed());
                 warmup_recorded = true;
             }
-            match queue.next_deadline() {
+            match next_filter_worker_deadline(&queue, &ineligible_cleanup) {
                 Some(deadline) => {
                     tokio::select! {
                         _ = notify.notified() => {}
@@ -1835,6 +2176,11 @@ async fn run_filter_worker(
             continue;
         };
 
+        if ineligible.lock().contains(&id) {
+            queue.complete(id);
+            continue;
+        }
+
         let descriptor = descriptors.get(&id).copied();
         let registry_matches_descriptor = registry.get(id).zip(descriptor).is_some_and(
             |(bundle, descriptor)| {
@@ -1842,34 +2188,47 @@ async fn run_filter_worker(
                     && bundle.manifest_digest() == descriptor.manifest_digest
             },
         );
-        if !registry_matches_descriptor {
-            if publication_gate
-                .publish(&cancelled, || {
-                    registry.remove(id);
-                    Ok(())
-                })
-                .is_err()
-            {
-                break;
-            }
-        }
+        let Some(maintenance_permit) = acquire_filter_maintenance(&maintenance, &cancelled).await else {
+            break;
+        };
         let worker_store = store.clone();
         let worker_partitions = partitions.clone();
+        let worker_registry = registry.clone();
+        let worker_ineligible = ineligible.clone();
+        let worker_publication_gate = publication_gate.clone();
         let worker_cancelled = cancelled.clone();
         let result = tokio::task::spawn_blocking(move || {
-            maintain_filter_partition(
+            let mut budget = FilterMaintenanceBudget::new(maintenance_permit);
+            if !registry_matches_descriptor {
+                worker_publication_gate.publish(&worker_cancelled, || {
+                    worker_registry.remove(id);
+                    Ok(())
+                })?;
+            }
+            maintain_filter_partition_inner(
                 &worker_store,
                 &worker_partitions,
                 id,
                 descriptor,
                 &worker_cancelled,
+                Some(&mut budget),
+                Some(&worker_ineligible),
             )
         })
         .await;
+        tokio::task::yield_now().await;
+        if cancelled.check() {
+            break;
+        }
         let bundle = match result {
             Ok(Ok(bundle)) => bundle,
             Ok(Err(e)) => {
                 if cancelled.check() {
+                    break;
+                }
+                if let Some(kind) = classify_authoritative_error(&e) {
+                    snapshots.transition_to_resync_required(kind, &e);
+                    cancelled.cancel();
                     break;
                 }
                 if let Some(reason) = irreparable_filter_reason(&e) {
@@ -1908,6 +2267,10 @@ async fn run_filter_worker(
                 continue;
             }
         };
+        if ineligible.lock().contains(&id) {
+            queue.complete(id);
+            continue;
+        }
         bundle.record_namespace_metrics();
         retain_maintained_descriptor(&mut descriptors, id, &bundle);
 
@@ -1932,9 +2295,32 @@ async fn run_filter_worker(
             );
             continue;
         }
+        let Some(publication_permit) = acquire_filter_maintenance(&maintenance, &cancelled).await else {
+            break;
+        };
         let publication_started_at = Instant::now();
-        if let Err(e) = publication_gate.publish(&cancelled, || publisher(id, bundle.clone())) {
-            let publication_result = Err::<(), _>(e);
+        let worker_publication_gate = publication_gate.clone();
+        let publication_cancelled = cancelled.clone();
+        let publication_ineligible = ineligible.clone();
+        let publication_publisher = publisher.clone();
+        let publication_bundle = bundle.clone();
+        let publication = tokio::task::spawn_blocking(move || {
+            let _permit = publication_permit;
+            worker_publication_gate.publish(&publication_cancelled, || {
+                ensure!(!publication_ineligible.lock().contains(&id), "RPC filter source became ineligible before snapshot publication");
+                publication_publisher(id, publication_bundle)
+            })
+        })
+        .await;
+        tokio::task::yield_now().await;
+        if cancelled.check() {
+            break;
+        }
+        let publication_result = match publication {
+            Ok(result) => result,
+            Err(e) => Err(anyhow::Error::new(e).context("RPC filter snapshot publication task failed")),
+        };
+        if let Err(e) = &publication_result {
             record_filter_operation("snapshot_publication", publication_started_at, &publication_result);
             if publisher_failure_has_manifest_invariant(&partitions, id, &bundle) {
                 complete_irreparable_filter_work(
@@ -1947,7 +2333,7 @@ async fn run_filter_worker(
                 tracing::error!(
                     partition_id = id.0,
                     "RPC filter snapshot publication observed a sealed manifest invariant failure: {:#}",
-                    publication_result.as_ref().unwrap_err()
+                    e
                 );
                 continue;
             }
@@ -1958,7 +2344,7 @@ async fn run_filter_worker(
                 partition_id = id.0,
                 retry_delay_secs = retry_delay.as_secs(),
                 "failed to publish RPC transaction filters into the request snapshot: {:#}",
-                publication_result.as_ref().unwrap_err()
+                e
             );
             continue;
         }
@@ -1969,14 +2355,20 @@ async fn run_filter_worker(
         if cancelled.check() {
             break;
         }
+        let Some(owned_cleanup_permit) = acquire_filter_maintenance(&maintenance, &cancelled).await else {
+            break;
+        };
         let cleanup_store = store.clone();
         let cleanup_cancelled = cancelled.clone();
+        let generation_id = bundle.generation_id();
         let cleanup = tokio::task::spawn_blocking(move || {
+            let _permit = owned_cleanup_permit;
             cleanup_store.publish(&cleanup_cancelled, || {
-                cleanup_store.cleanup_owned_generations(id, Some(bundle.generation_id()))
+                cleanup_store.cleanup_owned_generations(id, Some(generation_id))
             })
         })
         .await;
+        tokio::task::yield_now().await;
         if cancelled.check() {
             break;
         }
@@ -2011,6 +2403,7 @@ async fn run_filter_worker(
         .record(warmup_started_at.elapsed());
     }
     metrics::gauge!("tycho_storage_rpc_filter_worker_enabled").set(0.0);
+    ineligible_complete.notify_waiters();
 }
 
 fn retain_maintained_descriptor(
@@ -2027,6 +2420,18 @@ fn maintain_filter_partition(
     id: PartitionId,
     descriptor: Option<FilterCatalogDescriptor>,
     cancelled: &CancellationFlag,
+) -> Result<Arc<ValidatedFilterBundle>> {
+    maintain_filter_partition_inner(store, partitions, id, descriptor, cancelled, None, None)
+}
+
+fn maintain_filter_partition_inner(
+    store: &FilterCatalogStore,
+    partitions: &Mutex<PartitionManager>,
+    id: PartitionId,
+    descriptor: Option<FilterCatalogDescriptor>,
+    cancelled: &CancellationFlag,
+    budget: Option<&mut FilterMaintenanceBudget>,
+    ineligible: Option<&Mutex<BTreeSet<PartitionId>>>,
 ) -> Result<Arc<ValidatedFilterBundle>> {
     check_cancelled(cancelled)?;
     store.publish(cancelled, || {
@@ -2055,7 +2460,7 @@ fn maintain_filter_partition(
     }
     let stage = if descriptor.is_some() { "rebuild" } else { "build" };
     let started_at = Instant::now();
-    let result = store.build_and_publish(partitions, id, cancelled);
+    let result = store.build_and_publish_inner(partitions, id, cancelled, budget, ineligible);
     record_filter_operation(stage, started_at, &result);
     result
 }
@@ -2080,9 +2485,27 @@ fn build_filter_file(
     false_positive_rate_ppm: u32,
     cancelled: &CancellationFlag,
 ) -> Result<EncodedFilterFile> {
+    build_filter_file_inner(
+        db,
+        identity,
+        source_key_count,
+        false_positive_rate_ppm,
+        cancelled,
+        None,
+    )
+}
+
+fn build_filter_file_inner(
+    db: &super::db::RpcTransactionsDb,
+    identity: FilterFileIdentity,
+    source_key_count: u64,
+    false_positive_rate_ppm: u32,
+    cancelled: &CancellationFlag,
+    budget: Option<&mut FilterMaintenanceBudget>,
+) -> Result<EncodedFilterFile> {
     let mut builder = FilterBuilder::new(identity, source_key_count, false_positive_rate_ppm)
         .map_err(|error| irreparable_filter_error(FilterIrreparableReason::Oversized, error))?;
-    scan_source_keys(db, identity.namespace, cancelled, |key| {
+    scan_source_keys(db, identity.namespace, cancelled, budget, |key| {
         let _ = builder.insert(key)?;
         Ok(())
     })?;
@@ -2097,9 +2520,10 @@ fn count_source_keys(
     db: &super::db::RpcTransactionsDb,
     namespace: FilterNamespace,
     cancelled: &CancellationFlag,
+    budget: Option<&mut FilterMaintenanceBudget>,
 ) -> Result<u64> {
     let mut source_key_count = 0u64;
-    scan_source_keys(db, namespace, cancelled, |_| {
+    scan_source_keys(db, namespace, cancelled, budget, |_| {
         source_key_count = source_key_count
             .checked_add(1)
             .context("filter source key count overflow")
@@ -2110,21 +2534,21 @@ fn count_source_keys(
 }
 
 struct FalsePositiveRateSelection {
-    rates: [u32; 3],
+    rates: [u32; 4],
     preferred_bundle_bytes: u64,
     selected_bundle_bytes: u64,
     reached_maximum: bool,
 }
 
 fn select_false_positive_rates(
-    source_key_counts: [u64; 3],
-    preferred_rates_ppm: [u32; 3],
+    source_key_counts: [u64; 4],
+    preferred_rates_ppm: [u32; 4],
     max_false_positive_rate_ppm: u32,
     max_bundle_bytes: u64,
 ) -> Result<FalsePositiveRateSelection> {
     validate_false_positive_rate(max_false_positive_rate_ppm)?;
     ensure!(preferred_rates_ppm.into_iter().all(|rate| rate <= max_false_positive_rate_ppm), "filter preferred false-positive rate exceeds configured maximum");
-    let bundle_bytes = |rates: [u32; 3]| {
+    let bundle_bytes = |rates: [u32; 4]| {
         source_key_counts.into_iter().zip(rates).try_fold(0u64, |total, (source_key_count, false_positive_rate_ppm)| {
             total.checked_add(estimated_filter_bundle_bytes(source_key_count, false_positive_rate_ppm)?)
                 .context("estimated filter bundle size overflow")
@@ -2140,7 +2564,7 @@ fn select_false_positive_rates(
         });
     }
 
-    let mut order = [0usize, 1, 2];
+    let mut order = [0usize, 1, 2, 3];
     order.sort_by(|left, right| {
         estimated_filter_bundle_bytes(source_key_counts[*right], preferred_rates_ppm[*right])
             .expect("validated filter rate estimate")
@@ -2150,7 +2574,7 @@ fn select_false_positive_rates(
     });
     let mut rates = preferred_rates_ppm;
     let mut next = 0usize;
-    let mut exhausted = [false; 3];
+    let mut exhausted = [false; 4];
     loop {
         let index = order[next];
         next = (next + 1) % order.len();
@@ -2234,6 +2658,7 @@ fn scan_source_keys(
     db: &super::db::RpcTransactionsDb,
     namespace: FilterNamespace,
     cancelled: &CancellationFlag,
+    mut budget: Option<&mut FilterMaintenanceBudget>,
     mut f: impl FnMut(&[u8]) -> Result<()>,
 ) -> Result<()> {
     macro_rules! scan_table {
@@ -2246,6 +2671,9 @@ fn scan_source_keys(
                 validate_key(namespace, key).map_err(invalid_source_filter_error)?;
                 f(key)?;
                 iterator.next();
+                if let Some(budget) = budget.as_deref_mut() {
+                    budget.after_key()?;
+                }
             }
             iterator.status()?;
             Ok(())
@@ -2255,6 +2683,7 @@ fn scan_source_keys(
         FilterNamespace::Transactions => scan_table!(transactions_by_hash),
         FilterNamespace::InboundMessages => scan_table!(transactions_by_in_msg),
         FilterNamespace::Blocks => scan_table!(known_blocks),
+        FilterNamespace::Accounts => scan_table!(accounts),
     }
 }
 
@@ -2288,9 +2717,10 @@ fn publication_stage(_stage: FilterPublicationStage, cancelled: &CancellationFla
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
     use std::hash::Hasher;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Barrier};
 
     use super::*;
     use crate::config::RpcTransactionPartitionsConfig;
@@ -2300,6 +2730,7 @@ mod tests {
     thread_local! {
         static FAIL_PUBLICATION_STAGE: std::cell::Cell<Option<FilterPublicationStage>> = const { std::cell::Cell::new(None) };
         static MANIFEST_MUTATION_PARTITIONS: std::cell::RefCell<Option<Arc<parking_lot::Mutex<PartitionManager>>>> = const { std::cell::RefCell::new(None) };
+        static RETIRE_BEFORE_PUBLICATION_BARRIERS: std::cell::RefCell<Option<(Arc<Barrier>, Arc<Barrier>)>> = const { std::cell::RefCell::new(None) };
     }
 
     fn fail_selected_publication_stage(stage: FilterPublicationStage) -> Result<()> {
@@ -2327,10 +2758,24 @@ mod tests {
         Ok(())
     }
 
+    fn pause_before_catalog_generation_publication(stage: FilterPublicationStage) -> Result<()> {
+        if stage == FilterPublicationStage::Vp2 {
+            let (entered, release) = RETIRE_BEFORE_PUBLICATION_BARRIERS.with(|barriers| {
+                barriers
+                    .borrow()
+                    .clone()
+                    .context("missing retire-before-publication barriers")
+            })?;
+            entered.wait();
+            release.wait();
+        }
+        Ok(())
+    }
+
     fn seal_partition(manager: &mut PartitionManager) -> PartitionId {
         let id = manager.active_id();
         manager.request_rotation(PartitionCounters {
-            estimated_lsm_bytes: u64::MAX,
+            estimated_transaction_lsm_bytes: u64::MAX,
             ..Default::default()
         });
         manager.rotate_if_requested().unwrap();
@@ -2352,6 +2797,7 @@ mod tests {
         [u8; 32],
         [u8; 32],
         [u8; 13],
+        [u8; 33],
     ) {
         let (context, temp) = StorageContext::new_temp().await.unwrap();
         let mut manager = PartitionManager::open(
@@ -2362,10 +2808,12 @@ mod tests {
         let transaction_key = [0x11; 32];
         let inbound_key = [0x22; 32];
         let block_key = [0x33; 13];
+        let account_key = [0x44; 33];
         manager.active_db().transactions.insert([0; 41], [0xff]).unwrap();
         manager.active_db().transactions_by_hash.insert(transaction_key, [1]).unwrap();
         manager.active_db().transactions_by_in_msg.insert(inbound_key, [2]).unwrap();
         manager.active_db().known_blocks.insert(block_key, [3]).unwrap();
+        manager.active_db().accounts.insert(account_key, []).unwrap();
         let id = seal_partition(&mut manager);
         let store = FilterCatalogStore::open(&context, Default::default()).unwrap();
         (
@@ -2377,6 +2825,7 @@ mod tests {
             transaction_key,
             inbound_key,
             block_key,
+            account_key,
         )
     }
 
@@ -2395,6 +2844,17 @@ mod tests {
             builder.insert(key).unwrap();
         }
         builder.finish().unwrap().encode().unwrap()
+    }
+
+    #[tokio::test]
+    async fn generation_allocator_rejects_zero_and_existing_paths() {
+        let (context, _temp) = StorageContext::new_temp().await.unwrap();
+        let store = FilterCatalogStore::open(&context, Default::default()).unwrap();
+        let id = PartitionId::FIRST;
+        assert!(!store.generation_id_is_available(id, 0));
+        assert!(store.generation_id_is_available(id, 1));
+        fs::create_dir_all(store.temporary_generation_path(id, 1)).unwrap();
+        assert!(!store.generation_id_is_available(id, 1));
     }
 
     #[test]
@@ -2477,15 +2937,20 @@ mod tests {
         let transaction_key = [0x11; 32];
         let inbound_message_key = [0x12; 32];
         let block_key = [0x22; 13];
+        let account_key = [0x33; 33];
         for (namespace, key) in [
             (FilterNamespace::Transactions, transaction_key.as_slice()),
             (FilterNamespace::InboundMessages, inbound_message_key.as_slice()),
             (FilterNamespace::Blocks, block_key.as_slice()),
+            (FilterNamespace::Accounts, account_key.as_slice()),
         ] {
             let encoded = make_file(namespace, &[key]);
             let decoded = decode_filter_file(&encoded.bytes, identity(namespace), u64::MAX).unwrap();
             assert!(decoded.into_filter().contains(key).unwrap());
         }
+        let encoded_account = make_file(FilterNamespace::Accounts, &[&account_key]);
+        assert_eq!(encoded_account.bytes[9], FilterNamespace::Accounts as u8);
+        assert_eq!(encoded_account.bytes[69], 33);
 
         let empty = make_file(FilterNamespace::InboundMessages, &[]);
         let arbitrary_key = [0x99; 32];
@@ -2571,8 +3036,10 @@ mod tests {
         metadata.identity.namespace = FilterNamespace::InboundMessages;
         let mut blocks = encoded.metadata;
         blocks.identity.namespace = FilterNamespace::Blocks;
-        let total = checked_bundle_bytes(&[encoded.metadata, metadata, blocks], u64::MAX).unwrap();
-        assert!(checked_bundle_bytes(&[encoded.metadata, metadata, blocks], total - 1).is_err());
+        let mut accounts = encoded.metadata;
+        accounts.identity.namespace = FilterNamespace::Accounts;
+        let total = checked_bundle_bytes(&[encoded.metadata, metadata, blocks, accounts], u64::MAX).unwrap();
+        assert!(checked_bundle_bytes(&[encoded.metadata, metadata, blocks, accounts], total - 1).is_err());
     }
 
     #[test]
@@ -2580,16 +3047,21 @@ mod tests {
         let transaction_key = [0x11; 32];
         let inbound_message_key = [0x12; 32];
         let block_key = [0x13; 13];
+        let account_key = [0x14; 33];
         let transactions = make_file(FilterNamespace::Transactions, &[&transaction_key]);
         let inbound_messages = make_file(FilterNamespace::InboundMessages, &[&inbound_message_key]);
         let blocks = make_file(FilterNamespace::Blocks, &[&block_key]);
+        let accounts = make_file(FilterNamespace::Accounts, &[&account_key]);
         let transactions = decode_filter_file(&transactions.bytes, identity(FilterNamespace::Transactions), u64::MAX).unwrap().into_filter();
         let inbound_messages = decode_filter_file(&inbound_messages.bytes, identity(FilterNamespace::InboundMessages), u64::MAX).unwrap().into_filter();
         let blocks = decode_filter_file(&blocks.bytes, identity(FilterNamespace::Blocks), u64::MAX).unwrap().into_filter();
-        let bundle = ValidatedFilterBundle::new(transactions, inbound_messages, blocks, u64::MAX).unwrap();
+        let accounts = decode_filter_file(&accounts.bytes, identity(FilterNamespace::Accounts), u64::MAX).unwrap().into_filter();
+        let bundle = ValidatedFilterBundle::new(transactions, inbound_messages, blocks, accounts, u64::MAX).unwrap();
         assert!(bundle.filter(FilterNamespace::Transactions).contains(&transaction_key).unwrap());
         assert!(bundle.filter(FilterNamespace::InboundMessages).contains(&inbound_message_key).unwrap());
         assert!(bundle.filter(FilterNamespace::Blocks).contains(&block_key).unwrap());
+        assert!(bundle.filter(FilterNamespace::Accounts).contains(&account_key).unwrap());
+        assert_eq!(bundle.filter(FilterNamespace::Accounts).metadata().source_key_count, 1);
     }
 
     #[test]
@@ -2599,12 +3071,15 @@ mod tests {
         let transactions = make_file(FilterNamespace::Transactions, &[&transaction_key]);
         let inbound_messages = make_file(FilterNamespace::InboundMessages, &[]);
         let blocks = make_file(FilterNamespace::Blocks, &[&block_key]);
+        let accounts = make_file(FilterNamespace::Accounts, &[]);
         let transactions = decode_filter_file(&transactions.bytes, identity(FilterNamespace::Transactions), u64::MAX).unwrap().into_filter();
         let inbound_messages = decode_filter_file(&inbound_messages.bytes, identity(FilterNamespace::InboundMessages), u64::MAX).unwrap().into_filter();
         let blocks = decode_filter_file(&blocks.bytes, identity(FilterNamespace::Blocks), u64::MAX).unwrap().into_filter();
-        let bundle = ValidatedFilterBundle::new(transactions, inbound_messages, blocks, u64::MAX).unwrap();
+        let accounts = decode_filter_file(&accounts.bytes, identity(FilterNamespace::Accounts), u64::MAX).unwrap().into_filter();
+        let bundle = ValidatedFilterBundle::new(transactions, inbound_messages, blocks, accounts, u64::MAX).unwrap();
         assert_eq!(bundle.filter(FilterNamespace::InboundMessages).metadata().source_key_count, 0);
         assert!(!bundle.filter(FilterNamespace::InboundMessages).contains(&[0x22; 32]).unwrap());
+        assert!(!bundle.filter(FilterNamespace::Accounts).contains(&[0x22; 33]).unwrap());
     }
 
     #[test]
@@ -2612,17 +3087,21 @@ mod tests {
         let transaction_key = [0x11; 32];
         let inbound_message_key = [0x12; 32];
         let block_key = [0x13; 13];
+        let account_key = [0x14; 33];
         let transactions = make_file(FilterNamespace::Transactions, &[&transaction_key]);
         let inbound_messages = make_file(FilterNamespace::InboundMessages, &[&inbound_message_key]);
         let blocks = make_file(FilterNamespace::Blocks, &[&block_key]);
+        let accounts = make_file(FilterNamespace::Accounts, &[&account_key]);
         let transactions = decode_filter_file(&transactions.bytes, identity(FilterNamespace::Transactions), u64::MAX).unwrap().into_filter();
         let inbound_messages = decode_filter_file(&inbound_messages.bytes, identity(FilterNamespace::InboundMessages), u64::MAX).unwrap().into_filter();
         let blocks = decode_filter_file(&blocks.bytes, identity(FilterNamespace::Blocks), u64::MAX).unwrap().into_filter();
-        let bundle = ValidatedFilterBundle::new(transactions, inbound_messages, blocks, u64::MAX).unwrap();
+        let accounts = decode_filter_file(&accounts.bytes, identity(FilterNamespace::Accounts), u64::MAX).unwrap().into_filter();
+        let bundle = ValidatedFilterBundle::new(transactions, inbound_messages, blocks, accounts, u64::MAX).unwrap();
         let recorder = TestMetricsRecorder::default();
         let selected_rates = FilterSelectedRateMetrics::default();
 
         metrics::with_local_recorder(&recorder, || {
+            record_configured_namespace_metrics(&RpcTransactionFiltersConfig::default());
             bundle.record_namespace_metrics();
             bundle.record_selected_rate_metrics(&selected_rates);
             let mut queue = FilterWorkQueue::new([PartitionId(1), PartitionId(2)]);
@@ -2669,6 +3148,18 @@ mod tests {
             ),
             1
         );
+        assert_eq!(
+            recorder.gauge("tycho_storage_rpc_filter_configured_error_ratio|namespace=accounts"),
+            0.001
+        );
+        assert_eq!(
+            recorder.gauge("tycho_storage_rpc_filter_selected_error_ratio|namespace=accounts"),
+            0.001
+        );
+        assert_eq!(
+            recorder.histogram_len("tycho_storage_rpc_filter_source_keys|namespace=accounts"),
+            1
+        );
         for key in recorder.keys() {
             let labels = key.split_once('|').map_or("", |(_, labels)| labels);
             for label in labels.split('|').filter(|label| !label.is_empty()) {
@@ -2710,6 +3201,60 @@ mod tests {
         }
         assert_eq!(delay, Duration::from_secs(30));
         assert!(queue.retry_delays[&PartitionId(3)] <= Duration::from_secs(30));
+    }
+
+    #[test]
+    fn ineligible_cleanup_deadline_does_not_block_ready_filter_work() {
+        let now = Instant::now();
+        let retired = PartitionId(1);
+        let sealed = PartitionId(2);
+        let mut cleanup = IneligibleCleanupSchedule::default();
+        cleanup.enqueue([retired]);
+        assert_eq!(cleanup.next_ready(now), Some(retired));
+        cleanup.retry(retired, now);
+
+        let mut queue = FilterWorkQueue::new([sealed]);
+        assert_eq!(queue.next_ready(now), Some(sealed));
+        assert_eq!(cleanup.next_ready(now), None);
+        assert_eq!(
+            next_filter_worker_deadline(&queue, &cleanup),
+            Some(now + FILTER_INELIGIBLE_RETRY_DELAY),
+        );
+        assert_eq!(
+            cleanup.next_ready(now + FILTER_INELIGIBLE_RETRY_DELAY),
+            Some(retired),
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_key_chunk_yield_lets_queued_sealing_overtake() {
+        let coordinator = MaintenanceCoordinator::new(1);
+        let background = coordinator.acquire(MaintenancePriority::Background).await.unwrap();
+        let boundary = Arc::new(Barrier::new(2));
+        let worker_boundary = boundary.clone();
+        let (ready, ready_rx) = tokio::sync::oneshot::channel();
+        let worker = tokio::task::spawn_blocking(move || {
+            let mut budget = FilterMaintenanceBudget::new(background);
+            for _ in 1..FILTER_WORKER_SCAN_KEYS_PER_CHUNK {
+                budget.after_key()?;
+            }
+            let _ = ready.send(());
+            worker_boundary.wait();
+            budget.after_key()
+        });
+        ready_rx.await.unwrap();
+
+        let mut sealing = Box::pin(coordinator.acquire(MaintenancePriority::Sealing));
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(matches!(sealing.as_mut().poll(&mut context), std::task::Poll::Pending));
+        boundary.wait();
+        let sealing = tokio::time::timeout(Duration::from_secs(1), sealing.as_mut())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!worker.is_finished());
+        drop(sealing);
+        worker.await.unwrap().unwrap();
     }
 
     #[test]
@@ -2762,9 +3307,40 @@ mod tests {
         assert!(publisher_failure_has_manifest_invariant(&partitions, id, &bundle));
     }
 
+    #[tokio::test]
+    async fn filter_bundle_clones_retain_lifetime_after_registry_removal() {
+        let (_context, _temp, partitions, store, id, ..) = sealed_filter_fixture().await;
+        let baseline = partitions
+            .lock()
+            .partition_lifetime_strong_count(id)
+            .unwrap();
+        let bundle = store
+            .build_and_publish(&partitions, id, &CancellationFlag::new())
+            .unwrap();
+        assert_eq!(
+            partitions.lock().partition_lifetime_strong_count(id),
+            Some(baseline + 1),
+        );
+        let registry = FilterRegistry::default();
+        registry.install(id, bundle.clone());
+        let retained = registry.get(id).unwrap();
+        registry.remove(id);
+        drop(bundle);
+        assert_eq!(
+            partitions.lock().partition_lifetime_strong_count(id),
+            Some(baseline + 1),
+        );
+        drop(retained);
+        assert_eq!(
+            partitions.lock().partition_lifetime_strong_count(id),
+            Some(baseline),
+        );
+    }
+
     #[test]
     fn selected_rate_metric_keeps_the_process_local_maximum_after_lower_installation() {
         let key = [0x11; 32];
+        let account_key = [0x11; 33];
         let make_bundle = |rate| {
             let make_filter = |namespace, key: &[u8]| {
                 let mut builder = FilterBuilder::new(identity(namespace), 1, rate).unwrap();
@@ -2775,6 +3351,7 @@ mod tests {
                 make_filter(FilterNamespace::Transactions, &key),
                 make_filter(FilterNamespace::InboundMessages, &key),
                 make_filter(FilterNamespace::Blocks, &key[..13]),
+                make_filter(FilterNamespace::Accounts, &account_key),
                 u64::MAX,
             )
             .unwrap()
@@ -2815,14 +3392,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn persisted_account_filter_rejects_namespace_identity_mismatches() {
+        let (_context, _temp, partitions, store, id, ..) = sealed_filter_fixture().await;
+        let bundle = store
+            .build_and_publish(&partitions, id, &CancellationFlag::new())
+            .unwrap();
+        let path = store
+            .final_generation_path(id, bundle.generation_id())
+            .join(FilterNamespace::Accounts.file_name());
+        let original = fs::read(&path).unwrap();
+        for (field, offset) in [("partition id", 10), ("generation id", 18), ("manifest digest", 34)] {
+            let mut corrupted = original.clone();
+            corrupted[offset] ^= 1;
+            fs::write(&path, corrupted).unwrap();
+            let error = match store.load_and_validate(id, bundle.manifest_digest()) {
+                Ok(_) => panic!("account filter with mismatched {field} must be rejected"),
+                Err(error) => error,
+            };
+            assert!(
+                format!("{error:#}").contains("filter file identity mismatch"),
+                "unexpected {field} mismatch error: {error:#}",
+            );
+        }
+        fs::write(&path, original).unwrap();
+        assert!(store
+            .load_and_validate(id, bundle.manifest_digest())
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
     async fn builder_uses_only_authoritative_locator_keys_and_validates_every_serialized_key() {
-        let (_context, _temp, partitions, store, id, transaction_key, inbound_key, block_key) =
+        let (_context, _temp, partitions, store, id, transaction_key, inbound_key, block_key, account_key) =
             sealed_filter_fixture().await;
         let cancelled = CancellationFlag::new();
         let bundle = store.build_and_publish(&partitions, id, &cancelled).unwrap();
         assert!(bundle.filter(FilterNamespace::Transactions).contains(&transaction_key).unwrap());
         assert!(bundle.filter(FilterNamespace::InboundMessages).contains(&inbound_key).unwrap());
         assert!(bundle.filter(FilterNamespace::Blocks).contains(&block_key).unwrap());
+        assert!(bundle.filter(FilterNamespace::Accounts).contains(&account_key).unwrap());
+        assert_eq!(bundle.filter(FilterNamespace::Accounts).metadata().source_key_count, 1);
         let loaded = store.load_and_validate_sealed(&partitions, id, &cancelled).unwrap().unwrap();
         assert_eq!(loaded.generation_id(), bundle.generation_id());
         assert_eq!(partitions.lock().sealed_cache_entry_count(), 0);
@@ -2913,6 +3522,18 @@ mod tests {
             Err(error) => error,
         };
         assert!(format!("{error:#}").contains("filter key length"));
+        db.accounts.insert([0; 32], []).unwrap();
+        let error = match build_filter_file(
+            &db,
+            identity(FilterNamespace::Accounts),
+            1,
+            1_000,
+            &CancellationFlag::new(),
+        ) {
+            Ok(_) => panic!("malformed account key must reject filter build"),
+            Err(error) => error,
+        };
+        assert!(format!("{error:#}").contains("filter key length"));
     }
 
     #[test]
@@ -2940,8 +3561,8 @@ mod tests {
                 actual
             );
         }
-        let rates = [1_000; 3];
-        let counts = [1; 3];
+        let rates = [1_000; 4];
+        let counts = [1; 4];
         let total = counts
             .into_iter()
             .zip(rates)
@@ -2955,7 +3576,7 @@ mod tests {
         assert_eq!(selection.selected_bundle_bytes, total);
         let minimum_total = counts
             .into_iter()
-            .zip([500_000; 3])
+            .zip([500_000; 4])
             .try_fold(0u64, |total, (count, rate)| {
                 total.checked_add(estimated_filter_bundle_bytes(count, rate)?)
                     .context("test estimated filter bundle size overflow")
@@ -2966,7 +3587,7 @@ mod tests {
 
     #[test]
     fn adaptive_selection_advances_largest_namespaces_by_discrete_qfilter_precision() {
-        fn total(counts: [u64; 3], rates: [u32; 3]) -> u64 {
+        fn total(counts: [u64; 4], rates: [u32; 4]) -> u64 {
             counts.into_iter().zip(rates).try_fold(0u64, |total, (count, rate)| {
                 total.checked_add(estimated_filter_bundle_bytes(count, rate)?)
                     .context("test estimated filter bundle size overflow")
@@ -2974,15 +3595,16 @@ mod tests {
             .unwrap()
         }
 
-        let counts = [1_024, 128, 1];
-        let preferred = [1_000; 3];
+        let counts = [1_024, 128, 1, 1];
+        let preferred = [1_000; 4];
         let first_step = next_false_positive_rate_step(preferred[0], 100_000).unwrap();
         let second_largest_step = next_false_positive_rate_step(first_step, 100_000).unwrap();
         let expected = [
-            [first_step, 1_000, 1_000],
-            [first_step, first_step, 1_000],
-            [first_step, first_step, first_step],
-            [second_largest_step, first_step, first_step],
+            [first_step, 1_000, 1_000, 1_000],
+            [first_step, first_step, 1_000, 1_000],
+            [first_step, first_step, first_step, 1_000],
+            [first_step, first_step, first_step, first_step],
+            [second_largest_step, first_step, first_step, first_step],
         ];
         for rates in expected {
             let selection = select_false_positive_rates(counts, preferred, 100_000, total(counts, rates)).unwrap();
@@ -2990,11 +3612,12 @@ mod tests {
         }
         assert_eq!(qfilter_precision_bits(first_step).unwrap() + 1, qfilter_precision_bits(1_000).unwrap());
 
-        let equal_counts = [1; 3];
+        let equal_counts = [1; 4];
         for rates in [
-            [first_step, 1_000, 1_000],
-            [first_step, first_step, 1_000],
-            [first_step, first_step, first_step],
+            [first_step, 1_000, 1_000, 1_000],
+            [first_step, first_step, 1_000, 1_000],
+            [first_step, first_step, first_step, 1_000],
+            [first_step, first_step, first_step, first_step],
         ] {
             let selection = select_false_positive_rates(equal_counts, preferred, 100_000, total(equal_counts, rates)).unwrap();
             assert_eq!(selection.rates, rates);
@@ -3123,6 +3746,160 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retirement_before_catalog_generation_publication_rejects_late_install() {
+        let (context, _temp, partitions, store, id, ..) = sealed_filter_fixture().await;
+        let registry = Arc::new(FilterRegistry::default());
+        let published = Arc::new(AtomicBool::new(false));
+        let publisher: FilterPublisher = {
+            let published = published.clone();
+            Arc::new(move |_, _| {
+                published.store(true, Ordering::Release);
+                Ok(())
+            })
+        };
+        let worker = Arc::new(FilterWorker::new(
+            context,
+            Default::default(),
+            partitions.clone(),
+            registry.clone(),
+            publisher,
+            Arc::new(SnapshotPublisher::default()),
+            Arc::new(MaintenanceCoordinator::new(1)),
+        ));
+        store.set_publication_gate(worker.publication_gate.clone());
+        let publication_entered = Arc::new(Barrier::new(2));
+        let publication_release = Arc::new(Barrier::new(2));
+        let build = {
+            let partitions = partitions.clone();
+            let ineligible = worker.ineligible.clone();
+            let publication_entered = publication_entered.clone();
+            let publication_release = publication_release.clone();
+            tokio::task::spawn_blocking(move || {
+                RETIRE_BEFORE_PUBLICATION_BARRIERS.with(|barriers| {
+                    *barriers.borrow_mut() = Some((publication_entered, publication_release));
+                });
+                FILTER_PUBLICATION_STAGE_HOOK.with(|hook| {
+                    *hook.borrow_mut() = Some(pause_before_catalog_generation_publication);
+                });
+                let result = store.build_and_publish_inner(
+                    &partitions,
+                    id,
+                    &CancellationFlag::new(),
+                    None,
+                    Some(&ineligible),
+                );
+                FILTER_PUBLICATION_STAGE_HOOK.with(|hook| *hook.borrow_mut() = None);
+                RETIRE_BEFORE_PUBLICATION_BARRIERS.with(|barriers| *barriers.borrow_mut() = None);
+                let catalog_present = store.catalog.descriptors.get(id.0.to_be_bytes()).unwrap().is_some();
+                let partition_root_exists = store.partition_root(id).exists();
+                (result, catalog_present, partition_root_exists)
+            })
+        };
+        publication_entered.wait();
+        partitions.lock().retire_partition_for_snapshot_test(id).unwrap();
+        let retirement = {
+            let worker = worker.clone();
+            tokio::spawn(async move { worker.retire_partition(id).await })
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !worker.ineligible.lock().contains(&id) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        publication_release.wait();
+
+        let (result, catalog_present, partition_root_exists) = build.await.unwrap();
+        let error = match result {
+            Ok(_) => panic!("late filter publication must be rejected after retirement"),
+            Err(error) => error,
+        };
+        assert!(format!("{error:#}").contains("became ineligible before catalog generation publication"));
+        assert!(!catalog_present);
+        assert!(!partition_root_exists);
+        worker.start();
+        tokio::time::timeout(Duration::from_secs(5), retirement)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(registry.get(id).is_none());
+        assert!(!published.load(Ordering::Acquire));
+        worker.shutdown();
+    }
+
+    #[tokio::test]
+    async fn lifecycle_handoff_removes_pending_registry_catalog_and_owned_artifacts() {
+        let (context, _temp, partitions, store, id, ..) = sealed_filter_fixture().await;
+        let bundle = store.build_and_publish(&partitions, id, &CancellationFlag::new()).unwrap();
+        let generation_path = store.final_generation_path(id, bundle.generation_id());
+        drop(store);
+        let registry = Arc::new(FilterRegistry::default());
+        registry.install(id, bundle);
+        let published = Arc::new(AtomicBool::new(false));
+        let publisher: FilterPublisher = {
+            let published = published.clone();
+            Arc::new(move |_, _| {
+                published.store(true, Ordering::Release);
+                Ok(())
+            })
+        };
+        let worker = Arc::new(FilterWorker::new(
+            context.clone(),
+            Default::default(),
+            partitions,
+            registry.clone(),
+            publisher,
+            Arc::new(SnapshotPublisher::default()),
+            Arc::new(MaintenanceCoordinator::new(1)),
+        ));
+        worker.notify_sealed(id);
+        assert!(worker.pending_sealed_contains(id));
+        let publication_entered = Arc::new(Barrier::new(2));
+        let publication_release = Arc::new(Barrier::new(2));
+        let in_flight_publication = {
+            let publication_gate = worker.publication_gate.clone();
+            let cancelled = worker.cancelled.clone();
+            let publication_entered = publication_entered.clone();
+            let publication_release = publication_release.clone();
+            tokio::task::spawn_blocking(move || {
+                publication_gate.publish(&cancelled, || {
+                    publication_entered.wait();
+                    publication_release.wait();
+                    Ok(())
+                })
+            })
+        };
+        publication_entered.wait();
+        let retirement = {
+            let worker = worker.clone();
+            tokio::spawn(async move { worker.retire_partition(id).await })
+        };
+        tokio::task::yield_now().await;
+        assert!(!worker.ineligible.lock().contains(&id));
+        publication_release.wait();
+        in_flight_publication.await.unwrap().unwrap();
+        worker.start();
+
+        retirement.await.unwrap().unwrap();
+
+        assert!(!worker.pending_sealed_contains(id));
+        assert!(registry.get(id).is_none());
+        assert!(!generation_path.exists());
+        assert!(!published.load(Ordering::Acquire));
+        worker.notify_sealed(id);
+        assert!(!worker.pending_sealed_contains(id));
+        worker.publication_gate.cancel(&worker.cancelled);
+        worker.ineligible_complete.notify_waiters();
+        let task = worker.task.lock().take().unwrap();
+        task.abort();
+        let _ = task.await;
+        let store = FilterCatalogStore::open(&context, Default::default()).unwrap();
+        assert!(store.catalog.descriptors.get(id.0.to_be_bytes()).unwrap().is_none());
+    }
+
+    #[tokio::test]
     async fn cancelled_worker_prevents_catalog_registry_and_publisher_publication() {
         let (context, _temp, partitions, store, id, ..) = sealed_filter_fixture().await;
         let registry = Arc::new(FilterRegistry::default());
@@ -3142,7 +3919,13 @@ mod tests {
             partitions,
             registry.clone(),
             publisher,
+            Arc::new(SnapshotPublisher::default()),
+            Arc::new(MaintenanceCoordinator::new(1)),
             Arc::new(Mutex::new(BTreeSet::from([id]))),
+            Arc::new(Mutex::new(BTreeSet::new())),
+            Arc::new(Mutex::new(BTreeSet::new())),
+            Arc::new(Mutex::new(BTreeSet::new())),
+            Arc::new(Notify::new()),
             Arc::new(Notify::new()),
             cancelled,
             Arc::new(FilterPublicationGate::default()),

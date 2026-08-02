@@ -85,6 +85,25 @@ impl ColumnFamilyOptions<TableContext> for Transactions {
     }
 }
 
+/// Accounts with at least one indexed transaction in this partition.
+/// - Key: `workchain: i8, account: [u8; 32]`
+/// - Value: empty
+pub struct Accounts;
+
+impl Accounts {
+    pub const KEY_LEN: usize = 1 + 32;
+}
+
+impl ColumnFamily for Accounts {
+    const NAME: &'static str = "accounts";
+}
+
+impl ColumnFamilyOptions<TableContext> for Accounts {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        zstd_block_based_table_factory(opts, ctx);
+    }
+}
+
 /// Transaction hash to full key
 /// - Key: `tx_hash: [u8; 32]`
 /// - Value: `workchain: i8, account: [u8; 32], lt: u64 (BE), shard_depth: u8, seqno: u32 (LE), root_hash: [u8; 32], file_hash: [u8; 32], mc_seqno: u32 (LE)`
@@ -182,6 +201,103 @@ impl ColumnFamily for BlocksByMcSeqno {
 impl ColumnFamilyOptions<TableContext> for BlocksByMcSeqno {
     fn options(opts: &mut Options, ctx: &mut TableContext) {
         zstd_block_based_table_factory(opts, ctx);
+    }
+}
+
+/// Monolithic tail transaction payloads keyed by `account || lt`.
+pub struct TailTransactions;
+
+impl ColumnFamily for TailTransactions {
+    const NAME: &'static str = "transactions";
+}
+
+impl ColumnFamilyOptions<TableContext> for TailTransactions {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        zstd_block_based_table_factory(opts, ctx);
+        opts.set_compression_type(DBCompressionType::Zstd);
+        with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE, DBCompressionType::Zstd);
+    }
+}
+
+/// Monolithic tail account directory keyed by `account || lt`.
+pub struct TailTransactionsByAccount;
+
+impl ColumnFamily for TailTransactionsByAccount {
+    const NAME: &'static str = "transactions_by_account";
+}
+
+impl ColumnFamilyOptions<TableContext> for TailTransactionsByAccount {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        zstd_block_based_table_factory(opts, ctx);
+    }
+}
+
+/// Monolithic tail hash directory keyed by transaction hash.
+pub struct TailTransactionsByHash;
+
+impl ColumnFamily for TailTransactionsByHash {
+    const NAME: &'static str = "transactions_by_hash";
+}
+
+impl ColumnFamilyOptions<TableContext> for TailTransactionsByHash {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        zstd_block_based_table_factory(opts, ctx);
+        optimize_for_point_lookup(opts, ctx);
+    }
+}
+
+/// Monolithic tail inbound-message directory keyed by message hash.
+pub struct TailTransactionsByInMsg;
+
+impl ColumnFamily for TailTransactionsByInMsg {
+    const NAME: &'static str = "transactions_by_in_msg";
+}
+
+impl ColumnFamilyOptions<TableContext> for TailTransactionsByInMsg {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        zstd_block_based_table_factory(opts, ctx);
+        optimize_for_point_lookup(opts, ctx);
+    }
+}
+
+/// Logical retirement queue keyed by `dead_generation || payload_key`.
+pub struct TailRetiredByGeneration;
+
+impl ColumnFamily for TailRetiredByGeneration {
+    const NAME: &'static str = "retired_by_generation";
+}
+
+impl ColumnFamilyOptions<TableContext> for TailRetiredByGeneration {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        zstd_block_based_table_factory(opts, ctx);
+    }
+}
+
+/// Authoritative evacuation progress keyed by target generation.
+pub struct TailGenerationProgress;
+
+impl ColumnFamily for TailGenerationProgress {
+    const NAME: &'static str = "generation_progress";
+}
+
+impl ColumnFamilyOptions<TableContext> for TailGenerationProgress {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        zstd_block_based_table_factory(opts, ctx);
+        optimize_for_point_lookup(opts, ctx);
+    }
+}
+
+/// Terminal generation certificates and the fixed tail identity record.
+pub struct TailGenerationCommits;
+
+impl ColumnFamily for TailGenerationCommits {
+    const NAME: &'static str = "generation_commits";
+}
+
+impl ColumnFamilyOptions<TableContext> for TailGenerationCommits {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        zstd_block_based_table_factory(opts, ctx);
+        optimize_for_point_lookup(opts, ctx);
     }
 }
 
