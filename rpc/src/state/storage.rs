@@ -1503,7 +1503,7 @@ impl RpcStorage {
             .begin_gc_intent_at_frontier(config, frontier)
     }
 
-    pub(super) fn startup_sealing_pending(&self, expected: Option<PartitionId>) -> bool {
+    pub(super) fn gc_pass_sealing_pending(&self, expected: Option<PartitionId>) -> bool {
         expected.is_some_and(|expected| {
             self.partitions.lock().next_sealing_partition() == Some(expected)
         })
@@ -2015,7 +2015,7 @@ impl RpcStorage {
             "RPC effective frontier changed after block-set admission"
         );
 
-        let notify_sealing = {
+        let pending_sealing = {
             let mut partitions = self.partitions.lock();
             let persisted = partitions.visible_frontier().copied();
             if token.mode == BlockSetMode::New && persisted == Some(*block_id) {
@@ -2106,14 +2106,17 @@ impl RpcStorage {
                 };
                 *published = Some(snapshot);
             }
-            partitions.next_sealing_partition().is_some()
+            partitions.next_sealing_partition()
         };
 
         admission.take();
         drop(published);
         drop(admission);
-        if notify_sealing {
+        if pending_sealing.is_some() {
             self.sealing_notify.notify_one();
+        }
+        if token.mode != BlockSetMode::Same {
+            self.gc.notify_frontier(*block_id, pending_sealing);
         }
         Ok(())
     }
@@ -6893,6 +6896,7 @@ mod tests {
             .evacuate_gc(Some(&TransactionsGcConfig {
                 tx_ttl: Duration::from_secs(10),
                 keep_tx_per_account: 1,
+                ..Default::default()
             }))
             .unwrap()
             .unwrap();
@@ -7032,6 +7036,7 @@ mod tests {
             .evacuate_gc(Some(&TransactionsGcConfig {
                 tx_ttl: Duration::from_secs(10),
                 keep_tx_per_account: 2,
+                ..Default::default()
             }))
             .unwrap()
             .unwrap();
@@ -8380,6 +8385,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn frontier_notification_runs_a_second_noop_gc_pass() {
+        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
+        let mut gc_config = TransactionsGcConfig::default();
+        gc_config.min_interval = Duration::from_nanos(1);
+        let storage = Arc::new(RpcStorage::open_full(
+            context,
+            gc_test_config(128, 16 * 1024 * 1024),
+            Some(gc_config),
+        )
+        .unwrap());
+        let zerostate = masterchain_block(0);
+        publish_test_frontier(&storage, &zerostate);
+        storage.start_maintenance(&zerostate).unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            storage.gc.wait_for_gc_passes_completed(1),
+        )
+        .await
+        .unwrap();
+
+        let first = masterchain_block(1);
+        assert_eq!(storage.admit_block_set(&first).unwrap(), BlockSetMode::New);
+        insert_masterchain_commit(&storage.partitions.lock(), &first, 0);
+        storage
+            .commit_masterchain_block_set_with_predecessor(&first, &zerostate)
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            storage.gc.wait_for_gc_passes_completed(2),
+        )
+        .await
+        .unwrap();
+        assert_eq!(storage.gc.gc_passes_completed(), 2);
+        assert_eq!(storage.partitions.lock().gc_intent().unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn busy_frontier_notification_is_not_queued_for_after_pass_completion() {
+        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
+        let mut config = gc_test_config(128, 16 * 1024 * 1024);
+        config.maintenance.max_concurrent_tasks = 1;
+        let mut gc_config = TransactionsGcConfig::default();
+        gc_config.min_interval = Duration::from_nanos(1);
+        let storage = Arc::new(RpcStorage::open_full(context, config, Some(gc_config)).unwrap());
+        let zerostate = masterchain_block(0);
+        publish_test_frontier(&storage, &zerostate);
+        let blocker = storage
+            .maintenance
+            .acquire(MaintenancePriority::Background)
+            .await
+            .unwrap();
+        storage.start_maintenance(&zerostate).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while storage.maintenance.background_waiters() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let first = masterchain_block(1);
+        assert_eq!(storage.admit_block_set(&first).unwrap(), BlockSetMode::New);
+        insert_masterchain_commit(&storage.partitions.lock(), &first, 0);
+        storage
+            .commit_masterchain_block_set_with_predecessor(&first, &zerostate)
+            .unwrap();
+        assert_eq!(storage.gc.gc_passes_completed(), 0);
+        drop(blocker);
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            storage.gc.wait_for_gc_passes_completed(1),
+        )
+        .await
+        .unwrap();
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(storage.gc.gc_passes_completed(), 1);
+
+        let second = masterchain_block(2);
+        assert_eq!(storage.admit_block_set(&second).unwrap(), BlockSetMode::New);
+        insert_masterchain_commit(&storage.partitions.lock(), &second, 0);
+        storage
+            .commit_masterchain_block_set_with_predecessor(&second, &first)
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            storage.gc.wait_for_gc_passes_completed(2),
+        )
+        .await
+        .unwrap();
+        assert_eq!(storage.gc.gc_passes_completed(), 2);
+    }
+
+    #[tokio::test]
     async fn startup_maintenance_waiter_does_not_keep_rpc_storage_alive() {
         let (context, _tmp) = StorageContext::new_temp().await.unwrap();
         let mut config = gc_test_config(128, 16 * 1024 * 1024);
@@ -8476,6 +8576,7 @@ mod tests {
             .begin_or_resume_gc(Some(&TransactionsGcConfig {
                 tx_ttl: Duration::from_secs(10),
                 keep_tx_per_account: 1,
+                ..Default::default()
             }))
             .unwrap()
             .unwrap();
@@ -8561,6 +8662,7 @@ mod tests {
             .begin_or_resume_gc(Some(&TransactionsGcConfig {
                 tx_ttl: Duration::from_secs(10),
                 keep_tx_per_account: 1,
+                ..Default::default()
             }))
             .unwrap()
             .unwrap();
@@ -8641,6 +8743,7 @@ mod tests {
             .begin_or_resume_gc(Some(&TransactionsGcConfig {
                 tx_ttl: Duration::from_secs(10),
                 keep_tx_per_account: 1,
+                ..Default::default()
             }))
             .unwrap()
             .unwrap();
@@ -8758,6 +8861,7 @@ mod tests {
             .begin_or_resume_gc(Some(&TransactionsGcConfig {
                 tx_ttl: Duration::from_secs(10),
                 keep_tx_per_account: 1,
+                ..Default::default()
             }))
             .unwrap()
             .unwrap();
@@ -9089,6 +9193,7 @@ mod tests {
         let gc_config = TransactionsGcConfig {
             tx_ttl: Duration::from_secs(10),
             keep_tx_per_account: 1,
+            ..Default::default()
         };
         let storage = Arc::new(RpcStorage::open_full(
             context,
@@ -9164,11 +9269,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn frontier_gc_pass_uses_its_fixed_masterchain_ttl_cutoff() {
+        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
+        let gc_config = TransactionsGcConfig {
+            tx_ttl: Duration::from_secs(10),
+            keep_tx_per_account: 1,
+            min_interval: Duration::from_nanos(1),
+        };
+        let storage = Arc::new(RpcStorage::open_full(
+            context,
+            gc_test_config(128, 16 * 1024 * 1024),
+            Some(gc_config),
+        )
+        .unwrap());
+        storage.sealing_cancel.cancel();
+        let source_mc = masterchain_block(90);
+        let source = insert_read_test_block(
+            &storage,
+            &gc_account(0x77),
+            &source_mc,
+            &basechain_block(90),
+            &[gc_transaction(90, 0x78)],
+            1,
+        );
+        storage.commit_masterchain_block_set(&source_mc).unwrap();
+        seal_gc_partition(&storage, source).await;
+        let startup_frontier = masterchain_block(100);
+        publish_test_frontier(&storage, &startup_frontier);
+        storage.start_maintenance(&startup_frontier).unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            storage.gc.wait_for_gc_passes_completed(1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(storage.partitions.lock().removed_through_partition_id(), 0);
+        assert!(storage
+            .partitions
+            .lock()
+            .descriptors()
+            .iter()
+            .any(|descriptor| descriptor.id == source));
+
+        let next_frontier = masterchain_block(101);
+        assert_eq!(storage.admit_block_set(&next_frontier).unwrap(), BlockSetMode::New);
+        insert_masterchain_commit(&storage.partitions.lock(), &next_frontier, 0);
+        storage
+            .commit_masterchain_block_set_with_predecessor(&next_frontier, &startup_frontier)
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            storage.gc.wait_for_gc_passes_completed(2),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(storage.partitions.lock().removed_through_partition_id(), source.0);
+        assert_eq!(storage.partitions.lock().gc_intent().unwrap(), None);
+        assert!(storage.load_snapshot().unwrap().descriptor(source).is_none());
+    }
+
+    #[tokio::test]
     async fn startup_maintenance_keeps_the_reconciled_frontier_after_new_publication() {
         let (context, _tmp) = StorageContext::new_temp().await.unwrap();
         let gc_config = TransactionsGcConfig {
             tx_ttl: Duration::from_secs(10),
             keep_tx_per_account: 1,
+            ..Default::default()
         };
         let storage = Arc::new(RpcStorage::open_full(
             context,
@@ -9443,6 +9610,7 @@ mod tests {
                 .evacuate_gc(Some(&TransactionsGcConfig {
                     tx_ttl: Duration::from_secs(10),
                     keep_tx_per_account: keep,
+                    ..Default::default()
                 }))
                 .unwrap()
                 .unwrap();
@@ -9505,6 +9673,7 @@ mod tests {
         let original_config = TransactionsGcConfig {
             tx_ttl: Duration::from_secs(10),
             keep_tx_per_account: 1,
+            ..Default::default()
         };
         let intent = storage
             .begin_or_resume_gc(Some(&original_config))
@@ -9531,6 +9700,7 @@ mod tests {
         let changed_config = TransactionsGcConfig {
             tx_ttl: Duration::from_secs(1),
             keep_tx_per_account: 0,
+            ..Default::default()
         };
         let resumed = storage
             .begin_or_resume_gc(Some(&changed_config))
@@ -9592,6 +9762,7 @@ mod tests {
         let gc_config = TransactionsGcConfig {
             tx_ttl: Duration::from_secs(10),
             keep_tx_per_account: 1,
+            ..Default::default()
         };
         let intent = storage
             .begin_or_resume_gc(Some(&gc_config))
@@ -9694,6 +9865,7 @@ mod tests {
             .evacuate_gc(Some(&TransactionsGcConfig {
                 tx_ttl: Duration::from_secs(10),
                 keep_tx_per_account: 1,
+                ..Default::default()
             }))
             .unwrap()
             .unwrap();
@@ -9819,6 +9991,7 @@ mod tests {
             .evacuate_gc(Some(&TransactionsGcConfig {
                 tx_ttl: Duration::from_secs(10),
                 keep_tx_per_account: 2,
+                ..Default::default()
             }))
             .unwrap()
             .unwrap();
@@ -9881,6 +10054,7 @@ mod tests {
         let gc_config = TransactionsGcConfig {
             tx_ttl: Duration::from_secs(10),
             keep_tx_per_account: 2,
+            ..Default::default()
         };
         let intent = storage
             .begin_or_resume_gc(Some(&gc_config))
@@ -10057,6 +10231,7 @@ mod tests {
         let gc_config = TransactionsGcConfig {
             tx_ttl: Duration::from_secs(10),
             keep_tx_per_account: 0,
+            ..Default::default()
         };
         let intent = storage
             .begin_or_resume_gc(Some(&gc_config))
@@ -10176,6 +10351,7 @@ mod tests {
             .begin_or_resume_gc(Some(&TransactionsGcConfig {
                 tx_ttl: Duration::from_secs(10),
                 keep_tx_per_account: 1,
+                ..Default::default()
             }))
             .unwrap()
             .unwrap();
@@ -10345,6 +10521,7 @@ mod tests {
             .evacuate_gc(Some(&TransactionsGcConfig {
                 tx_ttl: Duration::from_secs(10),
                 keep_tx_per_account: 1,
+                ..Default::default()
             }))
             .unwrap()
             .unwrap());
@@ -10440,6 +10617,7 @@ mod tests {
             .evacuate_gc(Some(&TransactionsGcConfig {
                 tx_ttl: Duration::from_secs(10),
                 keep_tx_per_account: 1,
+                ..Default::default()
             }))
             .unwrap()
             .unwrap());
@@ -12552,6 +12730,96 @@ mod tests {
             .commit_masterchain_block_set_with_predecessor(&second, &first)
             .unwrap();
         assert_eq!(storage.load_snapshot().unwrap().visible_frontier(), &second);
+    }
+
+    #[tokio::test]
+    async fn masterchain_boundary_notifies_gc_only_for_effective_progress() {
+        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
+        let mut gc_config = TransactionsGcConfig::default();
+        gc_config.min_interval = Duration::from_nanos(1);
+        let storage = Arc::new(RpcStorage::open_full(
+            context,
+            RpcTransactionPartitionsConfig::default(),
+            Some(gc_config.clone()),
+        )
+        .unwrap());
+        let zerostate = masterchain_block(0);
+        publish_test_frontier(&storage, &zerostate);
+        storage
+            .gc
+            .configure_startup(
+                Arc::downgrade(&storage),
+                Some(gc_config),
+                zerostate,
+                None,
+            )
+            .unwrap();
+        storage.gc.complete_active_pass();
+
+        let first = masterchain_block(1);
+        assert_eq!(storage.admit_block_set(&first).unwrap(), BlockSetMode::New);
+        insert_masterchain_commit(&storage.partitions.lock(), &first, 0);
+        storage
+            .commit_masterchain_block_set_with_predecessor(&first, &zerostate)
+            .unwrap();
+        assert_eq!(storage.gc.active_pass_frontier(), Some(first));
+        storage.gc.complete_active_pass();
+
+        assert_eq!(storage.admit_block_set(&first).unwrap(), BlockSetMode::Same);
+        storage
+            .commit_masterchain_block_set_with_predecessor(&first, &zerostate)
+            .unwrap();
+        assert_eq!(storage.gc.active_pass_frontier(), None);
+
+        let second = masterchain_block(2);
+        assert_eq!(storage.admit_block_set(&second).unwrap(), BlockSetMode::New);
+        insert_masterchain_commit(&storage.partitions.lock(), &second, 0);
+        assert!(storage
+            .commit_masterchain_block_set_with_predecessor(&second, &zerostate)
+            .is_err());
+        assert_eq!(storage.gc.active_pass_frontier(), None);
+        storage
+            .commit_masterchain_block_set_with_predecessor(&second, &first)
+            .unwrap();
+        assert_eq!(storage.gc.active_pass_frontier(), Some(second));
+    }
+
+    #[tokio::test]
+    async fn durable_replay_boundary_notifies_gc_with_replayed_frontier() {
+        let (context, _tmp) = StorageContext::new_temp().await.unwrap();
+        let mut gc_config = TransactionsGcConfig::default();
+        gc_config.min_interval = Duration::from_nanos(1);
+        let storage = Arc::new(RpcStorage::open_full(
+            context,
+            RpcTransactionPartitionsConfig::default(),
+            Some(gc_config.clone()),
+        )
+        .unwrap());
+        let first = masterchain_block(1);
+        let second = masterchain_block(2);
+        publish_test_frontier(&storage, &first);
+        storage
+            .gc
+            .configure_startup(
+                Arc::downgrade(&storage),
+                Some(gc_config),
+                first,
+                None,
+            )
+            .unwrap();
+        storage.gc.complete_active_pass();
+        {
+            let mut manager = storage.partitions.lock();
+            insert_masterchain_commit(&manager, &second, 0);
+            manager.commit_masterchain_block_set(&second).unwrap();
+        }
+
+        assert_eq!(storage.admit_block_set(&second).unwrap(), BlockSetMode::Replay);
+        storage
+            .commit_masterchain_block_set_with_predecessor(&second, &first)
+            .unwrap();
+        assert_eq!(storage.load_snapshot().unwrap().visible_frontier(), &second);
+        assert_eq!(storage.gc.active_pass_frontier(), Some(second));
     }
 
     #[tokio::test]

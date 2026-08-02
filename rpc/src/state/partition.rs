@@ -2630,6 +2630,7 @@ pub(super) mod tests {
         TransactionsGcConfig {
             tx_ttl: Duration::from_secs(ttl_seconds),
             keep_tx_per_account,
+            ..Default::default()
         }
     }
 

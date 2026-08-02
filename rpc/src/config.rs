@@ -102,7 +102,8 @@ pub enum RpcStorageConfig {
     Full {
         /// Transactions garbage collector configuration.
         ///
-        /// Default: clear all transactions older than `1 week` every `1 hour`.
+        /// Default: clear all transactions older than `1 week`, starting GC no more often than
+        /// every `10 minutes`.
         ///
         /// `None` to disable garbage collection.
         gc: Option<TransactionsGcConfig>,
@@ -376,15 +377,30 @@ pub struct TransactionsGcConfig {
     /// Keep at least this amount of transactions per account.
     ///
     /// Default: `10`.
-    #[serde(default)]
+    #[serde(default = "default_transactions_gc_keep_tx_per_account")]
     pub keep_tx_per_account: usize,
+
+    /// Minimum interval between transaction GC pass starts.
+    ///
+    /// Default: `10 minutes`.
+    #[serde(default = "default_transactions_gc_min_interval", with = "serde_helpers::humantime")]
+    pub min_interval: Duration,
+}
+
+fn default_transactions_gc_min_interval() -> Duration {
+    Duration::from_secs(60 * 10)
+}
+
+fn default_transactions_gc_keep_tx_per_account() -> usize {
+    10
 }
 
 impl Default for TransactionsGcConfig {
     fn default() -> Self {
         Self {
             tx_ttl: Duration::from_secs(60 * 60 * 24 * 7),
-            keep_tx_per_account: 10,
+            keep_tx_per_account: default_transactions_gc_keep_tx_per_account(),
+            min_interval: default_transactions_gc_min_interval(),
         }
     }
 }
@@ -396,6 +412,9 @@ impl TransactionsGcConfig {
         }
         if self.tx_ttl.subsec_nanos() != 0 {
             return Err("rpc transactions GC tx_ttl must use whole seconds");
+        }
+        if self.min_interval.is_zero() {
+            return Err("rpc transactions GC min_interval must be positive");
         }
         u64::try_from(self.keep_tx_per_account)
             .map_err(|_| "rpc transactions GC keep_tx_per_account must fit u64")?;
@@ -482,6 +501,7 @@ mod tests {
         assert!(TransactionsGcConfig {
             tx_ttl: Duration::from_secs(u64::MAX),
             keep_tx_per_account: usize::MAX,
+            min_interval: Duration::from_nanos(1),
         }
         .validate()
         .is_ok());
@@ -595,6 +615,9 @@ mod tests {
     #[test]
     fn transactions_gc_validates_fixed_codec_boundaries() {
         let mut config = TransactionsGcConfig::default();
+        assert_eq!(config.tx_ttl, Duration::from_secs(60 * 60 * 24 * 7));
+        assert_eq!(config.keep_tx_per_account, 10);
+        assert_eq!(config.min_interval, Duration::from_secs(60 * 10));
         assert!(config.validate().is_ok());
         config.keep_tx_per_account = usize::MAX;
         assert!(config.validate().is_ok());
@@ -602,6 +625,30 @@ mod tests {
         assert!(config.validate().is_err());
         config.tx_ttl = Duration::from_millis(1500);
         assert!(config.validate().is_err());
+        config.tx_ttl = Duration::from_secs(1);
+        config.min_interval = Duration::ZERO;
+        assert!(config.validate().is_err());
+        config.min_interval = Duration::from_nanos(1);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn transactions_gc_min_interval_serde_is_backward_compatible() {
+        let config: TransactionsGcConfig = serde_json::from_str(r#"{"tx_ttl":"1h"}"#).unwrap();
+        assert_eq!(config.tx_ttl, Duration::from_secs(60 * 60));
+        assert_eq!(config.keep_tx_per_account, 10);
+        assert_eq!(config.min_interval, Duration::from_secs(60 * 10));
+
+        let config: TransactionsGcConfig = serde_json::from_str(
+            r#"{"tx_ttl":"1h","keep_tx_per_account":7,"min_interval":"250ms"}"#,
+        )
+        .unwrap();
+        assert_eq!(config.min_interval, Duration::from_millis(250));
+        assert_eq!(
+            serde_json::from_str::<TransactionsGcConfig>(&serde_json::to_string(&config).unwrap())
+                .unwrap(),
+            config,
+        );
     }
 
     #[test]
@@ -624,6 +671,14 @@ mod tests {
         assert!(serde_json::from_str::<TransactionsGcConfig>(&gc).is_err());
         assert!(serde_json::from_str::<TransactionsGcConfig>(
             r#"{"tx_ttl":"18446744073709551616s"}"#,
+        )
+        .is_err());
+        assert!(serde_json::from_str::<TransactionsGcConfig>(
+            r#"{"tx_ttl":"1s","min_interval":"invalid"}"#,
+        )
+        .is_err());
+        assert!(serde_json::from_str::<TransactionsGcConfig>(
+            r#"{"tx_ttl":"1s","min_interval":"18446744073709551616s"}"#,
         )
         .is_err());
     }
