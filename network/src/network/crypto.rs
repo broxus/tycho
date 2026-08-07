@@ -11,6 +11,8 @@ use rustls_pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, SubjectPub
 
 use crate::types::PeerId;
 
+pub const ALPN_V1: &[u8] = b"tycho/1";
+
 pub(crate) fn generate_cert(
     keypair: &ed25519::KeypairBytes,
     key_provider: &dyn KeyProvider,

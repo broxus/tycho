@@ -60,7 +60,6 @@ impl<'de> Deserialize<'de> for Version {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Request {
-    pub version: Version,
     #[serde(with = "serde_body")]
     pub body: Bytes,
 }
@@ -71,7 +70,6 @@ impl Request {
         T: tl_proto::TlWrite<Repr = tl_proto::Boxed>,
     {
         Self {
-            version: Default::default(),
             body: tl_proto::serialize(body).into(),
         }
     }
@@ -87,7 +85,6 @@ impl AsRef<[u8]> for Request {
 impl From<PrefixedRequest> for Request {
     fn from(request: PrefixedRequest) -> Self {
         Self {
-            version: request.version,
             body: request.prefixed_body,
         }
     }
@@ -95,7 +92,6 @@ impl From<PrefixedRequest> for Request {
 
 #[derive(Clone)]
 pub struct PrefixedRequest {
-    pub version: Version,
     prefixed_body: Bytes,
     prefix_len: usize,
 }
@@ -113,7 +109,6 @@ impl PrefixedRequest {
         body.write_to(&mut prefixed_body);
 
         Self {
-            version: Default::default(),
             prefixed_body: prefixed_body.freeze(),
             prefix_len,
         }
@@ -134,7 +129,6 @@ impl PrefixedRequest {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Response {
-    pub version: Version,
     #[serde(with = "serde_body")]
     pub body: Bytes,
 }
@@ -145,7 +139,6 @@ impl Response {
         T: tl_proto::TlWrite<Repr = tl_proto::Boxed>,
     {
         Self {
-            version: Default::default(),
             body: tl_proto::serialize(body).into(),
         }
     }

@@ -80,6 +80,7 @@ impl NetworkBuilder {
 
         let endpoint_config = EndpointConfig::builder()
             .with_private_key(private_key)
+            .with_client_config_cache_capacity(config.client_config_cache_capacity)
             .with_0rtt_enabled(config.enable_0rtt)
             .with_transport_config(quic_config.make_transport_config())
             .with_connection_metrics(config.connection_metrics)
@@ -516,10 +517,7 @@ mod tests {
     fn echo_service() -> BoxCloneService<ServiceRequest, Response> {
         let handle = |request: ServiceRequest| async move {
             tracing::trace!("received: {}", request.body.escape_ascii());
-            let response = Response {
-                version: Default::default(),
-                body: request.body,
-            };
+            let response = Response { body: request.body };
             Some(response)
         };
         service_query_fn(handle).boxed_clone()
@@ -591,7 +589,6 @@ mod tests {
             .insert(make_invalid_peer_info(&peer1), false)?;
 
         let req = Request {
-            version: Default::default(),
             body: "hello".into(),
         };
 
@@ -647,7 +644,6 @@ mod tests {
             let _peer2_peer1_handle = peer2.known_peers().insert(make_peer_info(&peer1), false)?;
 
             let req = Request {
-                version: Default::default(),
                 body: "hello".into(),
             };
             let peer1_fut = std::pin::pin!(peer1.query(peer2.peer_id(), req.clone()));
@@ -689,7 +685,6 @@ mod tests {
         let _right_to_left = right.known_peers().insert(make_peer_info(&left), false)?;
 
         let req = Request {
-            version: Default::default(),
             body: vec![0xff; 750 * 1024].into(),
         };
 

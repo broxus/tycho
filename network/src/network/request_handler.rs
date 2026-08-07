@@ -2,8 +2,8 @@ use std::future::IntoFuture;
 use std::sync::Arc;
 
 use anyhow::Result;
-use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
+use futures_util::{SinkExt, StreamExt};
 use quinn::ConnectionError;
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
@@ -12,7 +12,7 @@ use tycho_util::metrics::HistogramGuard;
 use crate::network::config::NetworkConfig;
 use crate::network::connection::{Connection, RecvStream, SendStream};
 use crate::network::connection_manager::ActivePeers;
-use crate::network::wire::{make_codec, recv_request, send_response};
+use crate::network::wire::{WireError, make_codec};
 use crate::types::{
     BoxCloneService, DisconnectReason, InboundRequestMeta, Response, Service, ServiceRequest,
 };
@@ -278,11 +278,14 @@ impl UniStreamRequestHandler {
     }
 
     async fn do_handle(mut self) -> Result<()> {
-        let req = recv_request(&mut self.recv_stream).await?;
+        let Some(body) = self.recv_stream.next().await else {
+            anyhow::bail!(WireError::UnexpectedEof);
+        };
+
         self.service
             .on_message(ServiceRequest {
                 metadata: self.meta,
-                body: req.body,
+                body: body?.freeze(),
             })
             .await;
         Ok(())
@@ -321,17 +324,20 @@ impl BiStreamRequestHandler {
     }
 
     async fn do_handle(mut self) -> Result<()> {
-        let req = recv_request(&mut self.recv_stream).await?;
+        let Some(body) = self.recv_stream.next().await else {
+            anyhow::bail!(WireError::UnexpectedEof);
+        };
+
         let handler = self.service.on_query(ServiceRequest {
             metadata: self.meta,
-            body: req.body,
+            body: body?.freeze(),
         });
 
         let stopped = self.send_stream.get_mut().stopped();
         tokio::select! {
             res = handler => {
                 if let Some(res) = res {
-                    send_response(&mut self.send_stream, res).await?;
+                    self.send_stream.send(res.body).await?;
                 }
                 self.send_stream.get_mut().finish().expect("must not be closed twise");
                 _ = self.send_stream.get_mut().stopped().await;

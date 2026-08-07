@@ -1380,10 +1380,7 @@ mod test {
     fn echo_service() -> BoxCloneService<ServiceRequest, Response> {
         let handle = |request: ServiceRequest| async move {
             tracing::trace!("received: {}", request.body.escape_ascii());
-            let response = Response {
-                version: Default::default(),
-                body: request.body,
-            };
+            let response = Response { body: request.body };
             Some(response)
         };
         service_query_fn(handle).boxed_clone()

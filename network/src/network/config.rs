@@ -8,10 +8,10 @@ use rustls::SupportedCipherSuite;
 use rustls::crypto::CryptoProvider;
 use rustls::sign::CertifiedKey;
 use serde::{Deserialize, Serialize};
-use tycho_util::serde_helpers;
+use tycho_util::{FastHasherState, serde_helpers};
 
 use crate::network::crypto::{
-    CertVerifier, CertVerifierWithPeerId, SUPPORTED_SIG_ALGS, generate_cert,
+    ALPN_V1, CertVerifier, CertVerifierWithPeerId, SUPPORTED_SIG_ALGS, generate_cert,
     peer_id_from_certificate,
 };
 use crate::types::PeerId;
@@ -72,6 +72,9 @@ pub struct NetworkConfig {
     /// Default: no.
     pub enable_0rtt: bool,
 
+    /// Default: 100
+    pub client_config_cache_capacity: usize,
+
     /// Default: disabled.
     pub connection_metrics: Option<ConnectionMetricsLevel>,
 }
@@ -93,6 +96,7 @@ impl Default for NetworkConfig {
             max_concurrent_requests_per_peer: 128,
             shutdown_idle_timeout: Duration::from_secs(60),
             enable_0rtt: false,
+            client_config_cache_capacity: 100,
             connection_metrics: None,
         }
     }
@@ -146,6 +150,12 @@ pub struct QuicConfig {
     /// Default: true.
     pub send_fairness: bool,
 
+    /// Connection idle timeout.
+    ///
+    /// Default: `60 seconds`.
+    #[serde(with = "serde_helpers::humantime")]
+    pub idle_timeout: Duration,
+
     /// Whether to use "Generic Segmentation Offload" to accelerate transmits,
     /// when supported by the environment.
     ///
@@ -176,6 +186,7 @@ impl Default for QuicConfig {
             receive_window: None,
             send_window: None,
             send_fairness: true,
+            idle_timeout: Duration::from_secs(60),
             enable_segmentation_offload: true,
             socket_send_buffer_size: None,
             socket_recv_buffer_size: None,
@@ -201,6 +212,12 @@ impl QuicConfig {
         config.enable_segmentation_offload(self.enable_segmentation_offload);
         config.send_fairness(self.send_fairness);
 
+        config.max_idle_timeout(Some(
+            self.idle_timeout
+                .try_into()
+                .unwrap_or(quinn::VarInt::MAX.into()),
+        ));
+
         if let Some(stream_receive_window) = self.stream_receive_window {
             config.stream_receive_window(make_varint(stream_receive_window));
         }
@@ -213,6 +230,8 @@ impl QuicConfig {
         if self.use_pmtu {
             let mtu = quinn::MtuDiscoveryConfig::default();
             config.mtu_discovery_config(Some(mtu));
+        } else {
+            config.mtu_discovery_config(None);
         }
 
         if let Some(mtu) = self.initial_mtu {
@@ -234,6 +253,7 @@ pub(crate) struct EndpointConfig {
     pub enable_early_data: bool,
     pub crypto_provider: Arc<CryptoProvider>,
     pub connection_metrics: Option<ConnectionMetricsLevel>,
+    pub client_configs: moka::sync::Cache<PeerId, quinn::ClientConfig, FastHasherState>,
 }
 
 impl EndpointConfig {
@@ -245,6 +265,10 @@ impl EndpointConfig {
     }
 
     pub fn make_client_config_for_peer_id(&self, peer_id: &PeerId) -> quinn::ClientConfig {
+        if let Some(existing) = self.client_configs.get(peer_id) {
+            return existing;
+        }
+
         let mut client_config =
             rustls::ClientConfig::builder_with_provider(self.crypto_provider.clone())
                 .with_protocol_versions(DEFAULT_PROTOCOL_VERSIONS)
@@ -253,13 +277,19 @@ impl EndpointConfig {
                 .with_custom_certificate_verifier(Arc::new(CertVerifierWithPeerId::new(peer_id)))
                 .with_client_cert_resolver(self.cert_resolver.clone());
 
+        client_config.alpn_protocols = vec![ALPN_V1.to_owned()];
+
         client_config.enable_early_data = self.enable_early_data;
         let quinn_config =
             QuicClientConfig::try_from(client_config).expect("cipher suite is always provided");
 
         let mut client = quinn::ClientConfig::new(Arc::new(quinn_config));
         client.transport_config(self.transport_config.clone());
-        client
+
+        self.client_configs
+            .entry_by_ref(peer_id)
+            .or_insert(client)
+            .into_value()
     }
 }
 
@@ -270,12 +300,18 @@ pub(crate) struct EndpointConfigBuilder<MandatoryFields = ([u8; 32],)> {
 
 #[derive(Default)]
 struct EndpointConfigBuilderFields {
+    client_config_cache_capacity: usize,
     enable_0rtt: bool,
     transport_config: Option<quinn::TransportConfig>,
     connection_metrics: Option<ConnectionMetricsLevel>,
 }
 
 impl<MandatoryFields> EndpointConfigBuilder<MandatoryFields> {
+    pub fn with_client_config_cache_capacity(mut self, capacity: usize) -> Self {
+        self.optional_fields.client_config_cache_capacity = capacity;
+        self
+    }
+
     pub fn with_0rtt_enabled(mut self, enable_0rtt: bool) -> Self {
         self.optional_fields.enable_0rtt = enable_0rtt;
         self
@@ -340,6 +376,11 @@ impl EndpointConfigBuilder {
 
         let peer_id = peer_id_from_certificate(certified_key.end_entity_cert()?)?;
 
+        let client_configs = moka::sync::Cache::builder()
+            .max_capacity(self.optional_fields.client_config_cache_capacity as _)
+            .eviction_policy(moka::policy::EvictionPolicy::lru())
+            .build_with_hasher(FastHasherState::default());
+
         Ok(EndpointConfig {
             peer_id,
             cert_resolver,
@@ -349,6 +390,7 @@ impl EndpointConfigBuilder {
             enable_early_data: self.optional_fields.enable_0rtt,
             crypto_provider,
             connection_metrics: self.optional_fields.connection_metrics,
+            client_configs,
         })
     }
 }
@@ -368,6 +410,8 @@ fn make_server_config(
         .unwrap()
         .with_client_cert_verifier(cert_verifier)
         .with_cert_resolver(Arc::new(server_cert_resolver));
+
+    server_crypto.alpn_protocols = vec![ALPN_V1.to_owned()];
 
     if enable_0rtt {
         server_crypto.max_early_data_size = u32::MAX;
@@ -397,9 +441,9 @@ fn compute_reset_key(private_key: &[u8; 32]) -> Arc<ring::hmac::Key> {
 
 static DEFAULT_CIPHER_SUITES: &[SupportedCipherSuite] = &[
     // TLS1.3 suites
-    rustls::crypto::ring::cipher_suite::TLS13_AES_256_GCM_SHA384,
     rustls::crypto::ring::cipher_suite::TLS13_AES_128_GCM_SHA256,
     rustls::crypto::ring::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
+    rustls::crypto::ring::cipher_suite::TLS13_AES_256_GCM_SHA384,
 ];
 
 static DEFAULT_KX_GROUPS: &[&dyn rustls::crypto::SupportedKxGroup] =

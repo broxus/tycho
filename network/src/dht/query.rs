@@ -388,7 +388,6 @@ impl Query {
 
         let peer_id = handle.peer_info().id;
         let req = network.query(&peer_id, Request {
-            version: Default::default(),
             body: request_body.clone(),
         });
 
@@ -473,7 +472,6 @@ impl StoreValue<()> {
         };
 
         let req = network.send(&node.id, Request {
-            version: Default::default(),
             body: request_body.clone(),
         });
 

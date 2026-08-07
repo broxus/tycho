@@ -470,7 +470,6 @@ impl Service<ServiceRequest> for DhtService {
         }
 
         futures_util::future::ready(response.map(|body| Response {
-            version: Default::default(),
             body: Bytes::from(body),
         }))
     }

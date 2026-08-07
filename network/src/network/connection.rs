@@ -9,13 +9,14 @@ use quinn::{ConnectionError, VarInt};
 use rustls_pki_types::CertificateDer;
 
 use crate::network::config::ConnectionMetricsLevel;
-use crate::network::crypto::peer_id_from_certificate;
-use crate::types::{Direction, InboundRequestMeta, PeerId};
+use crate::network::crypto::{ALPN_V1, peer_id_from_certificate};
+use crate::types::{Direction, InboundRequestMeta, PeerId, Version};
 
 #[derive(Clone)]
 pub struct Connection {
     inner: quinn::Connection,
     request_meta: Arc<InboundRequestMeta>,
+    known_version: Option<Version>,
 }
 
 macro_rules! emit_gauges {
@@ -36,14 +37,16 @@ impl Connection {
         peer_id: PeerId,
         connection_metrics: Option<ConnectionMetricsLevel>,
     ) -> Self {
-        let connection = Self {
+        let mut connection = Self {
             request_meta: Arc::new(InboundRequestMeta {
                 peer_id,
                 origin,
                 remote_address: inner.remote_address(),
             }),
+            known_version: None,
             inner,
         };
+        connection.sync_known_version();
 
         let conn = connection.inner.clone();
 
@@ -144,8 +147,16 @@ impl Connection {
         connection
     }
 
+    pub fn sync_known_version(&mut self) {
+        self.known_version = extract_known_version(&self.inner);
+    }
+
     pub fn request_meta(&self) -> &Arc<InboundRequestMeta> {
         &self.request_meta
+    }
+
+    pub fn known_version(&self) -> Option<Version> {
+        self.known_version
     }
 
     pub fn peer_id(&self) -> &PeerId {
@@ -203,6 +214,21 @@ impl std::fmt::Debug for Connection {
             .field("remote_address", &self.remote_address())
             .field("peer_id", &self.request_meta.peer_id)
             .finish_non_exhaustive()
+    }
+}
+
+fn extract_known_version(connection: &quinn::Connection) -> Option<Version> {
+    let handshake = connection.handshake_data()?;
+    let handshake = handshake
+        .downcast::<quinn::crypto::rustls::HandshakeData>()
+        .ok()?;
+    let protocol = handshake.protocol?;
+
+    // NOTE: Add other versions here when needed.
+    if protocol.as_slice() == ALPN_V1 {
+        Some(Version::V1)
+    } else {
+        None
     }
 }
 

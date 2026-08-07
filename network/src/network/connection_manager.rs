@@ -353,16 +353,18 @@ impl ConnectionManager {
     ) {
         async fn handle_incoming_task(
             seqno: u32,
-            connection: ConnectionClosedOnDrop,
+            mut connection: ConnectionClosedOnDrop,
             accepted: Option<quinn::ZeroRttAccepted>,
             timeout_at: Instant,
         ) -> ConnectingOutput {
             let target_peer_id = *connection.peer_id();
             let target_address = connection.remote_address().into();
+
             let fut = async {
                 if let Some(accepted) = accepted {
                     // NOTE: `bool` output of this future is meaningless for servers.
                     accepted.await;
+                    connection.sync_known_version();
                 }
                 handshake(&connection).await
             };
@@ -748,6 +750,12 @@ impl std::ops::Deref for ConnectionClosedOnDrop {
     #[inline]
     fn deref(&self) -> &Self::Target {
         &self.connection
+    }
+}
+
+impl std::ops::DerefMut for ConnectionClosedOnDrop {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.connection
     }
 }
 

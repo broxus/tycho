@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use futures_util::{SinkExt, StreamExt};
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tycho_util::metrics::{GaugeGuard, HistogramGuard};
 
 use crate::network::config::NetworkConfig;
 use crate::network::connection::Connection;
-use crate::network::wire::{make_codec, recv_response, send_request};
+use crate::network::wire::{WireError, make_codec};
 use crate::types::{PeerId, Request, Response};
 
 // Histograms
@@ -45,10 +46,15 @@ impl Peer {
         let mut send_stream = FramedWrite::new(send_stream, make_codec(&self.config));
         let mut recv_stream = FramedRead::new(recv_stream, make_codec(&self.config));
 
-        send_request(&mut send_stream, request).await?;
+        send_stream.send(request.body).await?;
         send_stream.get_mut().finish()?;
 
-        recv_response(&mut recv_stream).await.map_err(Into::into)
+        match recv_stream.next().await {
+            Some(body) => Ok(Response {
+                body: body?.freeze(),
+            }),
+            None => Err(anyhow::anyhow!(WireError::UnexpectedEof)),
+        }
     }
 
     pub async fn send_message(&self, request: Request) -> Result<()> {
@@ -59,10 +65,10 @@ impl Peer {
         let send_stream = self.connection.open_uni().await?;
         let mut send_stream = FramedWrite::new(send_stream, make_codec(&self.config));
 
-        send_request(&mut send_stream, request).await?;
+        send_stream.send(request.body).await?;
         send_stream.get_mut().finish()?;
-        _ = send_stream.get_mut().stopped().await;
 
+        _ = send_stream.get_mut().stopped().await;
         Ok(())
     }
 }
