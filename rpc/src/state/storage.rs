@@ -10,13 +10,15 @@ use tycho_storage::kv::InstanceId;
 use tycho_types::cell::Lazy;
 use tycho_types::models::*;
 use tycho_types::prelude::*;
-use tycho_util::metrics::HistogramGuard;
+use tycho_util::metrics::{GaugeGuard, HistogramGuard};
 use tycho_util::sync::CancellationFlag;
 use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb;
 
 use super::db::RpcDb;
 use super::tables::{self, Transactions};
+
+pub(super) const METRIC_TRANSACTIONS_GC_IS_RUNNING: &str = "tycho_rpc_transactions_gc_is_running";
 
 #[derive(Default, Clone)]
 pub struct BlacklistedAccounts {
@@ -884,6 +886,7 @@ impl RpcStorage {
 
             let raw = db.rocksdb().as_ref();
 
+            let _gauge = GaugeGuard::increment(METRIC_TRANSACTIONS_GC_IS_RUNNING, 1);
             tracing::info!("started removing old transactions");
             let started_at = Instant::now();
 

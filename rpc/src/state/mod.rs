@@ -78,6 +78,7 @@ impl RpcStateBuilder {
                 let rpc_storage = Arc::new(RpcStorage::new(db));
 
                 if let Some(config) = gc {
+                    metrics::gauge!(METRIC_TRANSACTIONS_GC_IS_RUNNING).set(0);
                     gc_handle = Some(tokio::spawn(transactions_gc(
                         config.clone(),
                         core_storage.clone(),

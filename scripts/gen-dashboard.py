@@ -1597,6 +1597,10 @@ def jrpc() -> RowPanel:
             "tycho_rpc_in_req_fail_total",
             "Number of failed incoming JRPC requests over time",
         ),
+        create_gauge_panel(
+            "tycho_rpc_transactions_gc_is_running",
+            "RPC transactions GC is running",
+        ),
     ]
     for method in methods:
         metrics.append(
