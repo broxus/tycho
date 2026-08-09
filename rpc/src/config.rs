@@ -102,7 +102,8 @@ pub enum RpcStorageConfig {
     Full {
         /// Transactions garbage collector configuration.
         ///
-        /// Default: clear all transactions older than `1 week` every `1 hour`.
+        /// Default: clear all transactions older than `1 week`, starting GC no more often than
+        /// every `60 minutes`.
         ///
         /// `None` to disable garbage collection.
         gc: Option<TransactionsGcConfig>,
@@ -201,15 +202,33 @@ pub struct TransactionsGcConfig {
     /// Keep at least this amount of transactions per account.
     ///
     /// Default: `10`.
-    #[serde(default)]
+    #[serde(default = "default_transactions_gc_keep_tx_per_account")]
     pub keep_tx_per_account: usize,
+
+    /// Minimum interval between transaction GC pass starts.
+    ///
+    /// Default: `60 minutes`.
+    #[serde(
+        default = "default_transactions_gc_min_interval",
+        with = "serde_helpers::humantime"
+    )]
+    pub min_interval: Duration,
+}
+
+fn default_transactions_gc_min_interval() -> Duration {
+    Duration::from_secs(60 * 60)
+}
+
+fn default_transactions_gc_keep_tx_per_account() -> usize {
+    10
 }
 
 impl Default for TransactionsGcConfig {
     fn default() -> Self {
         Self {
             tx_ttl: Duration::from_secs(60 * 60 * 24 * 7),
-            keep_tx_per_account: 10,
+            keep_tx_per_account: default_transactions_gc_keep_tx_per_account(),
+            min_interval: default_transactions_gc_min_interval(),
         }
     }
 }

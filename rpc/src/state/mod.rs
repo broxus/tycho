@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
@@ -886,6 +886,11 @@ impl Inner {
                 self.subscriptions.fanout_updates(updates).await;
             }
         }
+
+        if should_notify_transactions_gc(is_masterchain, self.config.storage.gc_is_enabled()) {
+            self.gc_notify.notify_waiters();
+        }
+
         Ok(())
     }
 
@@ -961,11 +966,6 @@ impl Inner {
             if !info.key_block {
                 return Ok(());
             }
-        }
-
-        // Send a new KeyBlock notification to run GC
-        if self.config.storage.gc_is_enabled() {
-            self.gc_notify.notify_waiters();
         }
 
         let custom = block.load_custom()?;
@@ -1201,7 +1201,6 @@ impl CachedAccounts {
 
 type ShardAccountsDict = Dict<HashBytes, (DepthBalanceInfo, ShardAccount)>;
 
-// TODO: Use only rpc storage to find closest key block LT.
 async fn transactions_gc(
     config: TransactionsGcConfig,
     core_storage: CoreStorage,
@@ -1212,9 +1211,13 @@ async fn transactions_gc(
         return;
     };
 
+    let mut last_started_at = None;
     loop {
-        // Wait for a new KeyBlock notification
         gc_notify.notified().await;
+
+        if !should_start_transactions_gc(&mut last_started_at, config.min_interval) {
+            continue;
+        }
 
         let target_utime = now_sec().saturating_sub(tx_ttl_sec);
         let gc_range = match find_closest_key_block_lt(&core_storage, target_utime).await {
@@ -1240,6 +1243,24 @@ async fn transactions_gc(
             );
         }
     }
+}
+
+fn should_start_transactions_gc(
+    last_started_at: &mut Option<Instant>,
+    min_interval: Duration,
+) -> bool {
+    let started_at = Instant::now();
+    if last_started_at.is_some_and(|last_started_at| {
+        started_at.saturating_duration_since(last_started_at) < min_interval
+    }) {
+        return false;
+    }
+    *last_started_at = Some(started_at);
+    true
+}
+
+fn should_notify_transactions_gc(is_masterchain: bool, gc_is_enabled: bool) -> bool {
+    is_masterchain && gc_is_enabled
 }
 
 pub async fn watch_blacklisted_accounts(config_path: PathBuf, accounts: BlacklistedAccounts) {
@@ -1363,6 +1384,7 @@ impl From<axum::extract::rejection::JsonRejection> for BadRequestError {
 #[cfg(test)]
 mod test {
     use std::str::FromStr;
+    use std::time::{Duration, Instant};
 
     use tycho_block_util::block::BlockStuffAug;
     use tycho_core::block_strider::DelayedTasks;
@@ -1425,6 +1447,30 @@ mod test {
 
         BlockStuff::from_block_and_root(&block_id, block, root, block_data.len())
             .with_archive_data(block_data.as_slice())
+    }
+
+    #[test]
+    fn transactions_gc_start_interval_admission() {
+        let min_interval = Duration::from_secs(60 * 10);
+        let mut last_started_at = None;
+
+        assert!(should_start_transactions_gc(
+            &mut last_started_at,
+            min_interval
+        ));
+        let first_started_at = last_started_at.unwrap();
+        assert!(!should_start_transactions_gc(
+            &mut last_started_at,
+            min_interval
+        ));
+        assert_eq!(last_started_at, Some(first_started_at));
+        let expired_started_at = Instant::now() - min_interval;
+        last_started_at = Some(expired_started_at);
+        assert!(should_start_transactions_gc(
+            &mut last_started_at,
+            min_interval
+        ));
+        assert!(last_started_at.unwrap() > expired_started_at);
     }
 
     #[tokio::test]
