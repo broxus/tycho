@@ -143,7 +143,7 @@ mod s3 {
             block_id: &'a BlockId,
             kind: PersistentStateKind,
         ) -> Result<FoundState<'a>> {
-            let Some(_) = self
+            let Some(info) = self
                 .s3_client
                 .get_persistent_state_info(block_id, kind)
                 .await?
@@ -151,19 +151,37 @@ mod s3 {
                 anyhow::bail!("not found");
             };
 
+            let info_for_part = info.clone();
+
             Ok(FoundState {
-                split_depth: 0,
-                parts: Vec::new(),
+                split_depth: info.split_depth,
+                parts: info
+                    .parts
+                    .iter()
+                    .map(|part| FoundStatePart {
+                        prefix: part.prefix,
+                    })
+                    .collect(),
                 download: Box::new(move |output| {
+                    let info = info.clone();
                     Box::pin(async move {
                         let output = self
                             .s3_client
-                            .download_persistent_state(block_id, kind, output)
+                            .download_persistent_state(info, None, output)
                             .await?;
                         Ok(output)
                     })
                 }),
-                download_part: None,
+                download_part: Some(Box::new(move |part, output| {
+                    let info = info_for_part.clone();
+                    Box::pin(async move {
+                        let output = self
+                            .s3_client
+                            .download_persistent_state(info, Some(part.prefix), output)
+                            .await?;
+                        Ok(output)
+                    })
+                })),
             })
         }
 
@@ -392,6 +410,99 @@ mod s3 {
                 Self::Primary => Self::Secondary,
                 Self::Secondary => Self::Primary,
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use bytes::Bytes;
+        use object_store::ObjectStoreExt;
+        use object_store::memory::InMemory;
+        use tycho_storage::StorageContext;
+        use tycho_types::cell::HashBytes;
+        use tycho_types::models::ShardIdent;
+        use tycho_util::fs::MappedFile;
+
+        use super::*;
+        use crate::storage::{CoreStorageConfig, PersistentStateMeta};
+
+        #[tokio::test]
+        async fn s3_starter_client_returns_split_found_state_and_downloads() -> Result<()> {
+            let store = Arc::new(InMemory::new());
+            let client = S3Client::new_for_tests(store.clone());
+            let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
+            let storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
+            let block_id = BlockId {
+                shard: ShardIdent::BASECHAIN,
+                seqno: 42,
+                root_hash: HashBytes::from([1; 32]),
+                file_hash: HashBytes::from([2; 32]),
+            };
+
+            // publish the split fixture
+            let prefixes = vec![0x2000000000000000, 0xa000000000000000];
+            let main = b"split main";
+            let parts = [b"first part".as_slice(), b"second part".as_slice()];
+            let meta = PersistentStateMeta::new(2, prefixes.clone());
+
+            store
+                .put(
+                    &client.make_state_meta_key(&block_id),
+                    Bytes::from(meta.to_bytes()?).into(),
+                )
+                .await?;
+            store
+                .put(
+                    &client.make_state_key(&block_id, PersistentStateKind::Shard, None)?,
+                    tycho_util::compression::zstd_compress_simple(main).into(),
+                )
+                .await?;
+            for (prefix, part) in prefixes.iter().zip(parts) {
+                store
+                    .put(
+                        &client.make_state_key(
+                            &block_id,
+                            PersistentStateKind::Shard,
+                            Some(*prefix),
+                        )?,
+                        tycho_util::compression::zstd_compress_simple(part).into(),
+                    )
+                    .await?;
+            }
+
+            let starter_client = S3StarterClient::new(client, storage.clone());
+
+            // discover the split state
+            let mut found = starter_client
+                .find_persistent_state(&block_id, PersistentStateKind::Shard)
+                .await?;
+            assert_eq!(found.split_depth, 2);
+            assert_eq!(
+                found
+                    .parts
+                    .iter()
+                    .map(|part| part.prefix)
+                    .collect::<Vec<_>>(),
+                prefixes,
+            );
+
+            // download the main state file
+            let main_file =
+                (found.download)(storage.context().temp_files().unnamed_file().open()?).await?;
+            let main_file = MappedFile::from_existing_file(main_file)?;
+            assert_eq!(main_file.as_slice(), main);
+
+            // download one declared part
+            let download_part = found.download_part.take().expect("split part downloader");
+            let part_file = download_part(
+                found.parts[0].clone(),
+                storage.context().temp_files().unnamed_file().open()?,
+            )
+            .await?;
+            let part_file = MappedFile::from_existing_file(part_file)?;
+            assert_eq!(part_file.as_slice(), parts[0]);
+
+            Ok(())
         }
     }
 }
