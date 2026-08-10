@@ -29,6 +29,21 @@ where
     Ok(())
 }
 
+pub fn load_json_from_slice<T>(data: &[u8]) -> Result<T>
+where
+    for<'de> T: Deserialize<'de>,
+{
+    let de = &mut serde_json::Deserializer::from_slice(data);
+    serde_path_to_error::deserialize(de).map_err(Into::into)
+}
+
+pub fn save_json_to_vec<T>(value: T) -> Result<Vec<u8>>
+where
+    T: Serialize,
+{
+    Ok(serde_json::to_vec_pretty(&value)?)
+}
+
 pub mod socket_addr {
     use std::net::SocketAddr;
 
@@ -550,5 +565,18 @@ mod tests {
             let parsed: Test = serde_json::from_str(&test).unwrap();
             assert_eq!(value, parsed);
         }
+    }
+
+    #[test]
+    fn json_slice_roundtrip() {
+        #[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]
+        struct Test {
+            value: u64,
+        }
+
+        let data = save_json_to_vec(&Test { value: 123 }).unwrap();
+        assert_eq!(load_json_from_slice::<Test>(&data).unwrap(), Test {
+            value: 123
+        });
     }
 }

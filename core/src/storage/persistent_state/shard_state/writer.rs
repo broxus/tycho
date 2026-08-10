@@ -592,23 +592,13 @@ impl PersistentStateMeta {
     }
 
     pub fn write_to_file(&self, file_path: impl AsRef<std::path::Path>) -> Result<()> {
-        let raw = RawPersistentStateMeta {
-            version: Self::VERSION,
-            split_depth: self.split_depth,
-            parts: self
-                .parts
-                .iter()
-                .map(|prefix| format!("{prefix:016x}"))
-                .collect(),
-        };
-
         let file_path = file_path.as_ref();
         let temp_file_path = file_path.with_extension("temp");
         scopeguard::defer! {
             std::fs::remove_file(&temp_file_path).ok();
         }
 
-        tycho_util::serde_helpers::save_json_to_file(&raw, &temp_file_path)?;
+        std::fs::write(&temp_file_path, self.to_bytes()?)?;
         std::fs::rename(&temp_file_path, file_path)?;
 
         Ok(())
@@ -626,8 +616,31 @@ impl PersistentStateMeta {
             return Ok(None);
         }
 
-        let raw: RawPersistentStateMeta =
-            tycho_util::serde_helpers::load_json_from_file(file_path)?;
+        Self::from_bytes(&std::fs::read(file_path)?)
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        tycho_util::serde_helpers::save_json_to_vec(self.to_raw())
+    }
+
+    pub fn from_bytes(data: &[u8]) -> Result<Option<Self>> {
+        let raw: RawPersistentStateMeta = tycho_util::serde_helpers::load_json_from_slice(data)?;
+        Self::from_raw(raw).map(Some)
+    }
+
+    fn to_raw(&self) -> RawPersistentStateMeta {
+        RawPersistentStateMeta {
+            version: Self::VERSION,
+            split_depth: self.split_depth,
+            parts: self
+                .parts
+                .iter()
+                .map(|prefix| format!("{prefix:016x}"))
+                .collect(),
+        }
+    }
+
+    fn from_raw(raw: RawPersistentStateMeta) -> Result<Self> {
         anyhow::ensure!(
             raw.version == Self::VERSION,
             "unsupported persistent state meta version: {}",
@@ -638,10 +651,15 @@ impl PersistentStateMeta {
             if prefix.len() != 16 || !prefix.chars().all(|c| c.is_ascii_hexdigit()) {
                 anyhow::bail!("invalid persistent state part prefix: {prefix}");
             }
-            parts.push(u64::from_str_radix(&prefix, 16)?);
+            let prefix = u64::from_str_radix(&prefix, 16)?;
+            anyhow::ensure!(
+                !parts.contains(&prefix),
+                "duplicated persistent state part prefix: {prefix:016x}"
+            );
+            parts.push(prefix);
         }
 
-        Ok(Some(Self::new(raw.split_depth, parts)))
+        Ok(Self::new(raw.split_depth, parts))
     }
 }
 

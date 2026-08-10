@@ -229,8 +229,8 @@ mod s3_impl {
                 .map(|info| PersistentStateInfo {
                     size: info.size,
                     chunk_size: self.chunk_size,
-                    split_depth: 0,
-                    parts: Vec::new(),
+                    split_depth: info.split_depth,
+                    parts: info.parts,
                 }))
         }
 
@@ -241,10 +241,6 @@ mod s3_impl {
             kind: PersistentStateKind,
             part_shard_prefix: Option<u64>,
         ) -> Result<Option<Bytes>> {
-            if part_shard_prefix.is_some() {
-                return Ok(None);
-            }
-
             self.check_rate_limit()?;
             self.check_bandwidth_limit()?;
 
@@ -254,7 +250,13 @@ mod s3_impl {
                 return Ok(None);
             }
 
-            let path = self.client.make_state_key(block_id, kind);
+            let path = match self
+                .client
+                .make_state_key(block_id, kind, part_shard_prefix)
+            {
+                Ok(path) => path,
+                Err(_) => return Ok(None),
+            };
             let client = self.client.client();
 
             let range = std::ops::Range {
@@ -284,6 +286,83 @@ mod s3_impl {
                     .expect("shouldn't happen since burst = bytes_per_sec.max(chunk_size")
                     .map_err(|err| anyhow::anyhow!("S3 bandwidth limit exceeded {err:?}"))?;
             }
+            Ok(())
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use object_store::memory::InMemory;
+        use tycho_storage::StorageContext;
+        use tycho_types::cell::HashBytes;
+        use tycho_types::models::ShardIdent;
+
+        use super::*;
+        use crate::storage::{CoreStorageConfig, PersistentStateMeta};
+
+        #[tokio::test]
+        async fn s3_rpc_provider_advertises_split_info_and_reads_declared_part() -> Result<()> {
+            let store = Arc::new(InMemory::new());
+            let client = S3Client::new_for_tests(store.clone());
+            let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
+            let storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
+            let provider =
+                S3RpcDataProvider::new(client.clone(), storage, &S3ProxyConfig::default());
+            let block_id = BlockId {
+                shard: ShardIdent::BASECHAIN,
+                seqno: 42,
+                root_hash: HashBytes::from([1; 32]),
+                file_hash: HashBytes::from([2; 32]),
+            };
+
+            // publish the split fixture
+            let prefix = 0x2000000000000000;
+            let main = vec![1; client.chunk_size().get() as usize];
+            let part = vec![2; client.chunk_size().get() as usize];
+            let meta = PersistentStateMeta::new(2, vec![prefix]);
+
+            store
+                .put(
+                    &client.make_state_meta_key(&block_id),
+                    Bytes::from(meta.to_bytes()?).into(),
+                )
+                .await?;
+            store
+                .put(
+                    &client.make_state_key(&block_id, PersistentStateKind::Shard, None)?,
+                    Bytes::from(main.clone()).into(),
+                )
+                .await?;
+            store
+                .put(
+                    &client.make_state_key(&block_id, PersistentStateKind::Shard, Some(prefix))?,
+                    Bytes::from(part.clone()).into(),
+                )
+                .await?;
+
+            // request split state info
+            let info = provider
+                .get_persistent_state_info(&block_id, PersistentStateKind::Shard)
+                .await?
+                .expect("split persistent state must be available");
+            assert_eq!(info.split_depth, 2);
+            assert_eq!(info.size.get(), main.len() as u64);
+            assert_eq!(info.parts.len(), 1);
+            assert_eq!(info.parts[0].prefix, prefix);
+            assert_eq!(info.parts[0].size.get(), part.len() as u64);
+
+            // read the aligned declared part chunk
+            let part_chunk = provider
+                .get_persistent_state_chunk(&block_id, 0, PersistentStateKind::Shard, Some(prefix))
+                .await?;
+            assert_eq!(part_chunk, Some(Bytes::from(part)));
+
+            // request an unaligned chunk
+            let unaligned_chunk = provider
+                .get_persistent_state_chunk(&block_id, 1, PersistentStateKind::Shard, Some(prefix))
+                .await?;
+            assert_eq!(unaligned_chunk, None);
+
             Ok(())
         }
     }

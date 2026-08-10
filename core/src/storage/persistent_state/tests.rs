@@ -49,6 +49,26 @@ fn persistent_state_meta_roundtrip() -> Result<()> {
 }
 
 #[test]
+fn persistent_state_meta_bytes_roundtrip() -> Result<()> {
+    let meta = PersistentStateMeta::new(2, vec![0xa000000000000000, 0x2000000000000000]);
+    assert_eq!(
+        PersistentStateMeta::from_bytes(&meta.to_bytes()?)?,
+        Some(meta)
+    );
+    assert!(
+        PersistentStateMeta::from_bytes(br#"{"version":1,"split_depth":2,"parts":["invalid"]}"#)
+            .is_err()
+    );
+    assert!(
+        PersistentStateMeta::from_bytes(
+            br#"{"version":1,"split_depth":2,"parts":["2000000000000000","2000000000000000"]}"#
+        )
+        .is_err()
+    );
+    Ok(())
+}
+
+#[test]
 fn shard_state_part_file_name_parser_recognizes_only_parts() -> Result<()> {
     let block_id = BlockId {
         shard: ShardIdent::BASECHAIN,
