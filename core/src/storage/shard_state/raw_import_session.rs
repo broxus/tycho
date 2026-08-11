@@ -29,10 +29,7 @@ impl RawImportSession {
 
     /// Creates the marker once while the session is not finished.
     pub(crate) fn begin(&self) -> Result<()> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|e| anyhow::anyhow!("raw import session lock poisoned: {e}"))?;
+        let mut state = self.state.lock().unwrap();
         match *state {
             RawImportSessionState::Pending => {
                 Self::begin_raw_import(&self.cells_db)?;
@@ -64,10 +61,7 @@ impl RawImportSession {
 
     /// Completes the session and clears its marker when it was started.
     pub fn finish(self) -> Result<()> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|e| anyhow::anyhow!("raw import session lock poisoned: {e}"))?;
+        let mut state = self.state.lock().unwrap();
         match *state {
             RawImportSessionState::Pending => {
                 *state = RawImportSessionState::Finished;

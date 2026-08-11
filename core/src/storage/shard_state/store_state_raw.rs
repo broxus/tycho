@@ -88,14 +88,7 @@ impl StoreStateContext {
                 workers.push(scope.spawn(move || -> Result<Vec<TempState>> {
                     let mut results = Vec::new();
                     loop {
-                        let job = jobs
-                            .lock()
-                            .map_err(|e| {
-                                anyhow::anyhow!(
-                                    "persistent state import queue lock poisoned: {e:?}"
-                                )
-                            })?
-                            .pop_front();
+                        let job = jobs.lock().unwrap().pop_front();
                         let Some(reader) = job else {
                             break;
                         };

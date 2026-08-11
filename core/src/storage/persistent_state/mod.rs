@@ -14,8 +14,9 @@ use tokio::sync::{Notify, Semaphore, mpsc};
 use tokio::time::Instant;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::queue::QueueStateHeader;
+use tycho_block_util::state::validate_shard_prefixes;
 use tycho_storage::fs::Dir;
-use tycho_types::models::{BlockId, PrevBlockRef};
+use tycho_types::models::{BlockId, PrevBlockRef, ShardIdent};
 use tycho_util::fs::MappedFile;
 use tycho_util::sync::CancellationFlag;
 use tycho_util::{FastHashMap, FastHashSet};
@@ -23,13 +24,12 @@ use tycho_util::{FastHashMap, FastHashSet};
 pub use self::queue_state::reader::{QueueDiffReader, QueueStateReader};
 pub use self::queue_state::writer::QueueStateWriter;
 pub use self::shard_state::reader::{BriefBocHeader, ShardStateReader};
-pub use self::shard_state::writer::{
-    PersistentStateMeta, ShardStateWriter, validate_persistent_state_split_metadata,
-};
+pub use self::shard_state::writer::{PersistentStateMeta, ShardStateWriter};
 use super::{
     BlockHandle, BlockHandleStorage, BlockStorage, CellsDb, KeyBlocksDirection, NodeStateStorage,
     ShardStateStorage,
 };
+use crate::storage::CoreStorageConfig;
 
 mod queue_state {
     pub mod reader;
@@ -490,12 +490,15 @@ impl PersistentStateStorage {
         split_depth: u8,
     ) -> Result<()> {
         // prevent from storing persistent state with invalid meta
-        validate_persistent_state_split_metadata(
-            &handle.id().shard,
-            PersistentStateKind::Shard,
-            (if parts.is_empty() { 0 } else { split_depth }).into(),
-            parts.iter().map(|(prefix, _)| *prefix),
-        )?;
+        if split_depth > 0 {
+            validate_persistent_state_split_metadata(
+                handle.id().shard,
+                split_depth,
+                parts.iter().map(|(prefix, _)| *prefix),
+            )?;
+        } else {
+            anyhow::ensure!(parts.is_empty(), "unsplit states must not have any parts");
+        }
         if self
             .try_reuse_persistent_state(mc_seqno, handle, PersistentStateKind::Shard)
             .await?
@@ -1049,13 +1052,14 @@ impl Inner {
                 }
                 None => PersistentStateMeta::default(),
             };
+
             // fail on invalid persistent state meta
             validate_persistent_state_split_metadata(
-                &block_id.shard,
-                PersistentStateKind::Shard,
-                meta.split_depth.into(),
+                block_id.shard,
+                meta.split_depth,
                 meta.parts.iter().copied(),
             )?;
+
             let mut parts = Vec::with_capacity(meta.parts.len());
             for &prefix in &meta.parts {
                 let file_name = ShardStateWriter::file_name_ext(block_id, Some(prefix));
@@ -1190,6 +1194,23 @@ pub(super) fn check_can_reuse_shard_state_part_files(
     }
 
     Ok(true)
+}
+
+pub fn validate_persistent_state_split_metadata(
+    shard_ident: ShardIdent,
+    split_depth: u8,
+    prefixes: impl IntoIterator<IntoIter: ExactSizeIterator<Item = u64>>,
+) -> Result<()> {
+    anyhow::ensure!(split_depth <= CoreStorageConfig::MAX_PERSISTENT_STATE_SPLIT_DEPTH);
+    if split_depth > 0 {
+        validate_shard_prefixes(shard_ident, split_depth, prefixes)
+    } else {
+        anyhow::ensure!(
+            prefixes.into_iter().len() == 0,
+            "unsplit states must not use parts"
+        );
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
