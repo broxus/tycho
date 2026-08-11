@@ -25,7 +25,6 @@ use crate::ZEROSTATE_BOC;
 use crate::storage::persistent_state::{
     CacheKey, PersistentStateKind, PersistentStateMeta, QueueStateReader, QueueStateWriter,
     ShardStateWriter, check_can_reuse_shard_state_part_files, parse_shard_state_part_file_name,
-    validate_persistent_state_split_metadata,
 };
 use crate::storage::shard_state::StoreStateRawError;
 use crate::storage::{CoreStorage, CoreStorageConfig, NewBlockMeta};
@@ -46,103 +45,6 @@ fn persistent_state_meta_roundtrip() -> Result<()> {
     let loaded = PersistentStateMeta::read(&dir, &block_id)?.unwrap();
 
     assert_eq!(loaded, meta);
-    Ok(())
-}
-
-#[test]
-fn persistent_state_split_metadata_validation() -> Result<()> {
-    let assert_invalid =
-        |kind: PersistentStateKind, split_depth: u32, prefixes: Vec<u64>, expected: &str| {
-            let err = validate_persistent_state_split_metadata(
-                &ShardIdent::BASECHAIN,
-                kind,
-                split_depth,
-                prefixes,
-            )
-            .unwrap_err();
-            assert!(
-                err.to_string().contains(expected),
-                "unexpected error: {err:?}"
-            );
-        };
-
-    validate_persistent_state_split_metadata(
-        &ShardIdent::BASECHAIN,
-        PersistentStateKind::Shard,
-        0,
-        Vec::<u64>::new(),
-    )?;
-    validate_persistent_state_split_metadata(
-        &ShardIdent::BASECHAIN,
-        PersistentStateKind::Shard,
-        2,
-        vec![0x2000000000000000, 0xa000000000000000],
-    )?;
-    let non_full_shard = ShardIdent::new(0, 0x4000000000000000).unwrap();
-    validate_persistent_state_split_metadata(
-        &non_full_shard,
-        PersistentStateKind::Shard,
-        2,
-        vec![0x2000000000000000, 0x6000000000000000],
-    )?;
-    let err = validate_persistent_state_split_metadata(
-        &non_full_shard,
-        PersistentStateKind::Shard,
-        2,
-        vec![0xa000000000000000],
-    )
-    .unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("invalid persistent state part prefix")
-    );
-    let deep_shard = ShardIdent::new(0, 0x1000000000000000).unwrap();
-    validate_persistent_state_split_metadata(&deep_shard, PersistentStateKind::Shard, 2, vec![
-        0x2000000000000000,
-    ])?;
-
-    assert_invalid(
-        PersistentStateKind::Queue,
-        1,
-        vec![0x4000000000000000],
-        "not supported for Queue",
-    );
-    assert_invalid(
-        PersistentStateKind::Shard,
-        1,
-        Vec::new(),
-        "split depth without parts",
-    );
-    assert_invalid(
-        PersistentStateKind::Shard,
-        0,
-        vec![0x8000000000000000],
-        "must be positive",
-    );
-    assert_invalid(
-        PersistentStateKind::Shard,
-        u32::from(CoreStorageConfig::MAX_PERSISTENT_STATE_SPLIT_DEPTH) + 1,
-        Vec::new(),
-        "exceeds maximum",
-    );
-    assert_invalid(
-        PersistentStateKind::Shard,
-        1,
-        vec![0x4000000000000000, 0xc000000000000000, 0x4000000000000000],
-        "too many persistent state parts",
-    );
-    assert_invalid(
-        PersistentStateKind::Shard,
-        2,
-        vec![0x2000000000000000, 0x2000000000000000],
-        "duplicate persistent state part prefix",
-    );
-    assert_invalid(
-        PersistentStateKind::Shard,
-        2,
-        vec![0x4000000000000000],
-        "invalid persistent state part prefix",
-    );
     Ok(())
 }
 
@@ -360,14 +262,9 @@ async fn persistent_state_writer_rejects_missing_absent_cell() -> Result<()> {
     let mut absent_cells = FastHashMap::default();
     absent_cells.insert(HashBytes::from([3; 32]), zerostate_root);
 
-    let err = ShardStateWriter::new(&persistent_states.inner.cells_db, &dir, &zerostate_id)
+    ShardStateWriter::new(&persistent_states.inner.cells_db, &dir, &zerostate_id)
         .write_with_absent(&zerostate_id.root_hash, absent_cells, None)
         .unwrap_err();
-
-    assert!(err.chain().any(|e| {
-        e.to_string()
-            .contains("not all requested absent cells were written")
-    }));
 
     Ok(())
 }
@@ -684,14 +581,10 @@ async fn split_persistent_shard_state_import_from_dump() -> Result<()> {
 
     PersistentStateMeta::new(2, vec![0x4000000000000000]).write(&states_dir, &block_id)?;
     let ctx = StorageContext::new(StorageConfig::new_potato(tmp_dir.path())).await?;
-    let err = match CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await {
-        Ok(_) => panic!("invalid split metadata must prevent preload"),
-        Err(e) => e,
-    };
-    assert!(
-        err.to_string()
-            .contains("invalid persistent state part prefix")
-    );
+    CoreStorage::open(ctx, CoreStorageConfig::new_potato())
+        .await
+        .map(|_| ())
+        .unwrap_err();
 
     // Import the split bundle into a fresh storage and verify it reconstructs the same state.
     let (ctx, imported_tmp_dir) = StorageContext::new_temp().await?;

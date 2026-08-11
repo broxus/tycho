@@ -514,27 +514,19 @@ impl BlockchainRpcClient {
                     split_depth,
                     parts,
                 } => {
-                    // split not supported for persistent queue state
-                    if kind != PersistentStateKind::Shard {
-                        let neighbour = handle.reject();
-                        let e = anyhow::anyhow!(
-                            "split persistent state info is not supported for {kind:?}"
-                        );
-                        tracing::warn!(
-                            peer_id = %neighbour.peer_id(),
-                            ?kind,
-                            "rejected invalid persistent state split metadata: {e:?}",
-                        );
-                        err = Some(Error::Internal(e));
-                        continue;
-                    }
+                    let split_depth = split_depth.try_into().unwrap_or(u8::MAX);
 
-                    if let Err(e) = validate_persistent_state_split_metadata(
-                        &block_id.shard,
-                        kind,
-                        split_depth,
-                        parts.iter().map(|part| part.prefix),
-                    ) {
+                    if let Err(e) = (|| {
+                        anyhow::ensure!(
+                            kind == PersistentStateKind::Shard,
+                            "only shard state can be split into parts"
+                        );
+                        validate_persistent_state_split_metadata(
+                            block_id.shard,
+                            split_depth,
+                            parts.iter().map(|part| part.prefix),
+                        )
+                    })() {
                         let neighbour = handle.reject();
                         tracing::warn!(
                             peer_id = %neighbour.peer_id(),
@@ -829,7 +821,7 @@ pub struct PendingPersistentState {
     pub kind: PersistentStateKind,
     pub size: NonZeroU64,
     pub chunk_size: NonZeroU32,
-    pub split_depth: u32,
+    pub split_depth: u8,
     pub parts: Vec<PendingPersistentStatePart>,
     pub neighbour: Neighbour,
 }

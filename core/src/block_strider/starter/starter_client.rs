@@ -90,7 +90,7 @@ pub struct FoundBlockDataFull {
 }
 
 pub struct FoundState<'a> {
-    pub split_depth: u32,
+    pub split_depth: u8,
     pub parts: Vec<FoundStatePart>,
     pub download: Box<DownloadFn<'a>>,
     pub download_part: Option<Box<DownloadPartFn<'a>>>,

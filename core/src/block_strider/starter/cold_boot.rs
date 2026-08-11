@@ -920,9 +920,8 @@ impl StarterInner {
                 {
                     // omit invalid downloaded bundle
                     match validate_persistent_state_split_metadata(
-                        &block_id.shard,
-                        PersistentStateKind::Shard,
-                        meta.split_depth.into(),
+                        block_id.shard,
+                        meta.split_depth,
                         meta.parts.iter().copied(),
                     ) {
                         Ok(()) => StoreZeroStateFrom::File(downloaded_persistent_state_bundle(
@@ -1266,9 +1265,8 @@ impl StarterInner {
             {
                 // omit and remove invalid downloaded bundle
                 match validate_persistent_state_split_metadata(
-                    &block_id.shard,
-                    kind,
-                    meta.split_depth.into(),
+                    block_id.shard,
+                    meta.split_depth,
                     meta.parts.iter().copied(),
                 ) {
                     Ok(()) => return Ok(downloaded_persistent_state_bundle(state_file, meta)),
@@ -1286,19 +1284,29 @@ impl StarterInner {
 
             let mut pending_state = client.find_persistent_state(block_id, kind).await?;
             let remote_meta = PersistentStateMeta::new(
-                pending_state
-                    .split_depth
-                    .try_into()
-                    .context("invalid persistent split depth")?,
+                pending_state.split_depth,
                 pending_state.parts.iter().map(|part| part.prefix).collect(),
             );
             // the starter client is trait-based, so keep this boundary check for non-RPC providers
-            validate_persistent_state_split_metadata(
-                &block_id.shard,
-                kind,
-                remote_meta.split_depth.into(),
-                remote_meta.parts.iter().copied(),
-            )?;
+            match kind {
+                PersistentStateKind::Shard => {
+                    validate_persistent_state_split_metadata(
+                        block_id.shard,
+                        remote_meta.split_depth,
+                        remote_meta.parts.iter().copied(),
+                    )?;
+                }
+                PersistentStateKind::Queue => {
+                    anyhow::ensure!(
+                        remote_meta.split_depth == 0,
+                        "unexpected split depth for persistent queue"
+                    );
+                    anyhow::ensure!(
+                        pending_state.parts.is_empty(),
+                        "unexpected parts for persistent queue"
+                    );
+                }
+            }
 
             if local_meta.as_ref() != Some(&remote_meta) {
                 let old_prefixes = local_meta
