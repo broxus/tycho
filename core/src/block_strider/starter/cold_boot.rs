@@ -1159,7 +1159,9 @@ impl StarterInner {
 
         // NOTE: Intentionally dont spawn yet
         let remove_state_file = async move {
-            if let Err(e) = tokio::fs::remove_file(&state_file_path).await {
+            if let Err(e) = tokio::fs::remove_file(&state_file_path).await
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
                 tracing::warn!(
                     path = %state_file_path.display(),
                     "failed to remove downloaded queue state: {e:?}",
@@ -1302,7 +1304,9 @@ impl StarterInner {
                 }
             }
 
-            if local_meta.as_ref() != Some(&remote_meta) {
+            // remove previously downloaded persistent shard state files
+            // if local meta doe not match the remote one
+            if kind == PersistentStateKind::Shard && local_meta.as_ref() != Some(&remote_meta) {
                 let old_prefixes = local_meta
                     .as_ref()
                     .into_iter()
@@ -1314,9 +1318,7 @@ impl StarterInner {
                     &old_prefixes.chain(new_prefixes).collect::<Vec<_>>(),
                 )
                 .await;
-                if kind == PersistentStateKind::Shard {
-                    remote_meta.write_to_file(meta_file.path())?;
-                }
+                remote_meta.write_to_file(meta_file.path())?;
             }
 
             if is_downloaded_persistent_state_ready(state_file, &remote_meta) {
@@ -1414,7 +1416,9 @@ async fn remove_downloaded_persistent_state_files(
             return;
         }
 
-        if let Err(e) = tokio::fs::remove_file(file_path).await {
+        if let Err(e) = tokio::fs::remove_file(file_path).await
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
             tracing::warn!(
                 file_path = %file_path.display(),
                 "failed to remove downloaded shard state: {e:?}",
