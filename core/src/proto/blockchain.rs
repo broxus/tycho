@@ -3,6 +3,9 @@ use std::num::{NonZeroU32, NonZeroU64};
 use bytes::Bytes;
 use tl_proto::{TlRead, TlWrite};
 use tycho_block_util::tl::{block_id as tl_block_id, block_id_vec as tl_block_id_vec};
+use tycho_util::tl::VecWithMaxLen;
+
+use crate::storage::CoreStorageConfig;
 
 /// Data for computing a public overlay id.
 #[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
@@ -71,7 +74,10 @@ pub enum PersistentStateInfo {
     FoundWithParts {
         size: NonZeroU64,
         chunk_size: NonZeroU32,
-        split_depth: u32,
+        split_depth: NonZeroU32,
+        #[tl(with = "VecWithMaxLen::<{
+            1 << CoreStorageConfig::MAX_PERSISTENT_STATE_SPLIT_DEPTH
+        }>")]
         parts: Vec<PersistentStatePartInfo>,
     },
     #[tl(id = "blockchain.persistentStateInfo.notFound")]
