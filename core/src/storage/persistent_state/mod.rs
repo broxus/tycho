@@ -373,9 +373,12 @@ impl PersistentStateStorage {
         };
         let cached = self.inner.descriptor_cache.get(&key)?.clone();
         let part_index = match (state_kind, part_shard_prefix) {
-            (PersistentStateKind::Shard, Some(prefix)) => {
-                Some(cached.parts.iter().position(|part| part.prefix == prefix)?)
-            }
+            (PersistentStateKind::Shard, Some(prefix)) => Some(
+                cached
+                    .parts
+                    .binary_search_by_key(&prefix, |part| part.prefix)
+                    .ok()?,
+            ),
             _ => None,
         };
 
@@ -1038,7 +1041,7 @@ impl Inner {
         let file = load_mapped(kind.make_file_name(block_id))
             .with_context(|| format!("failed to cache {kind:?} for {block_id}"))?;
 
-        let (meta, parts) = if kind == PersistentStateKind::Shard {
+        let (meta, mut parts) = if kind == PersistentStateKind::Shard {
             // cache metadata, and parts if exist
             let meta = match PersistentStateMeta::read(&states_dir, block_id)? {
                 Some(meta) => meta,
@@ -1077,6 +1080,7 @@ impl Inner {
         } else {
             (None, Vec::new())
         };
+        parts.sort_unstable_by_key(|part| part.prefix);
 
         let new_state = Arc::new(CachedState {
             mc_seqno,

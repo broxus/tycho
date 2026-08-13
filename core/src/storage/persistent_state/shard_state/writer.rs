@@ -309,12 +309,8 @@ impl<'a> ShardStateWriter<'a> {
 
             // skip refs for absent cells
             if !descriptor.is_absent() {
-                let hash_depth_len = if descriptor.store_hashes() {
-                    descriptor.hash_count() * (32 + 2)
-                } else {
-                    0
-                };
-                let ref_offset = 2 + hash_depth_len as usize + descriptor.byte_len() as usize;
+                debug_assert!(!descriptor.store_hashes());
+                let ref_offset = 2 + descriptor.byte_len() as usize;
                 for r in 0..descriptor.reference_count() as usize {
                     let ref_offset = ref_offset + r * REF_SIZE;
                     let slice = &mut cell_buffer[ref_offset..ref_offset + REF_SIZE];
