@@ -870,10 +870,7 @@ impl StarterInner {
                                 &block_handle,
                                 bundle.main.read(true).open()?,
                                 persistent_parts,
-                                bundle
-                                    .split_depth
-                                    .try_into()
-                                    .context("invalid persistent split depth")?,
+                                bundle.split_depth,
                             )
                             .await
                     }
@@ -1035,10 +1032,7 @@ impl StarterInner {
                     &block_handle,
                     bundle.main.read(true).open()?,
                     persistent_parts,
-                    bundle
-                        .split_depth
-                        .try_into()
-                        .context("invalid persistent split depth")?,
+                    bundle.split_depth,
                 )
                 .await
                 .context("failed to store persistent shard state bundle")?;
@@ -1391,7 +1385,7 @@ fn downloaded_persistent_state_bundle(
     DownloadedPersistentStateBundle {
         main: state_file.clone(),
         parts: downloaded_persistent_state_part_files(state_file, meta),
-        split_depth: meta.split_depth.into(),
+        split_depth: meta.split_depth,
     }
 }
 
@@ -1416,6 +1410,10 @@ async fn remove_downloaded_persistent_state_files(
     prefixes: &[u64],
 ) {
     let remove_file = async |file_path: &Path| {
+        if !file_path.exists() {
+            return;
+        }
+
         if let Err(e) = tokio::fs::remove_file(file_path).await {
             tracing::warn!(
                 file_path = %file_path.display(),
@@ -1435,7 +1433,7 @@ async fn remove_downloaded_persistent_state_files(
 struct DownloadedPersistentStateBundle {
     main: FileBuilder,
     parts: Vec<(u64, FileBuilder)>,
-    split_depth: u32,
+    split_depth: u8,
 }
 
 async fn download_block_proof_task(

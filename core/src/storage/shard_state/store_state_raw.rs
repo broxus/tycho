@@ -676,7 +676,7 @@ impl FinalizationContext {
         self.cell_usages.insert(HashBytesKey(repr_hash), -1);
 
         // Done
-        Ok(FinalizeCellResult::Other)
+        Ok(FinalizeCellResult::Final)
     }
 
     fn finalize_cell_usages(&mut self) {
@@ -698,7 +698,7 @@ impl FinalizationContext {
 
 enum FinalizeCellResult {
     Absent { hash: HashBytes },
-    Other,
+    Final,
 }
 
 struct PreprocessedState {
@@ -724,16 +724,9 @@ impl<'a> RawCell<'a> {
     where
         R: Read,
     {
-        let descriptor = {
-            let d1 = src.read_byte()?;
-            let check = CellDescriptor::new([d1, 0]);
-            if check.is_absent() {
-                check
-            } else {
-                let d2 = src.read_byte()?;
-                CellDescriptor::new([d1, d2])
-            }
-        };
+        let mut descriptor = [0u8; 2];
+        src.read_exact(&mut descriptor)?;
+        let descriptor = CellDescriptor::new(descriptor);
         let byte_len = descriptor.byte_len() as usize;
         let ref_count = descriptor.reference_count() as usize;
 
@@ -743,11 +736,7 @@ impl<'a> RawCell<'a> {
 
         // for absent cells read stored hashes and depth into data
         let data_len = if descriptor.is_absent() {
-            if byte_len != 0 {
-                return Err(parser_error(
-                    "absent cell should have no data except hashes/depths",
-                ));
-            }
+            debug_assert_eq!(byte_len, 0);
             descriptor.hash_count() as usize * (32 + 2)
         } else {
             byte_len
@@ -758,8 +747,9 @@ impl<'a> RawCell<'a> {
 
         let mut reference_indices = ArrayVec::new();
 
-        // skip refs for absent cells
-        if !descriptor.is_absent() {
+        let bit_len = if descriptor.is_absent() {
+            0
+        } else {
             for _ in 0..ref_count {
                 let index = src.read_be_uint(ref_size)? as usize;
                 if index >= cell_count || index <= cell_index {
@@ -769,15 +759,15 @@ impl<'a> RawCell<'a> {
                     unsafe { reference_indices.push(index as u32) };
                 }
             }
-        }
 
-        // TODO: Require normalized
-        let bit_len = if descriptor.is_aligned() {
-            (byte_len * 8) as u16
-        } else if let Some(data) = data.last() {
-            byte_len as u16 * 8 - data.trailing_zeros() as u16 - 1
-        } else {
-            0
+            // TODO: Require normalized
+            if descriptor.is_aligned() {
+                (byte_len * 8) as u16
+            } else if let Some(data) = data.last() {
+                byte_len as u16 * 8 - data.trailing_zeros() as u16 - 1
+            } else {
+                0
+            }
         };
 
         Ok(RawCell {
