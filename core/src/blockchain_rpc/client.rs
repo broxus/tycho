@@ -514,7 +514,7 @@ impl BlockchainRpcClient {
                     split_depth,
                     parts,
                 } => {
-                    let split_depth = split_depth.try_into().unwrap_or(u8::MAX);
+                    let split_depth = split_depth.get().try_into().unwrap_or(u8::MAX);
 
                     if let Err(e) = (|| {
                         anyhow::ensure!(
@@ -548,19 +548,22 @@ impl BlockchainRpcClient {
                         "found split persistent state",
                     );
 
+                    let mut parts = parts
+                        .into_iter()
+                        .map(|part| PendingPersistentStatePart {
+                            prefix: part.prefix,
+                            size: part.size,
+                        })
+                        .collect::<Vec<_>>();
+                    parts.sort_unstable_by_key(|item| item.prefix);
+
                     return Ok(PendingPersistentState {
                         block_id: *block_id,
                         kind,
                         size,
                         chunk_size,
                         split_depth,
-                        parts: parts
-                            .into_iter()
-                            .map(|part| PendingPersistentStatePart {
-                                prefix: part.prefix,
-                                size: part.size,
-                            })
-                            .collect(),
+                        parts,
                         neighbour,
                     });
                 }
@@ -828,7 +831,11 @@ pub struct PendingPersistentState {
 
 impl PendingPersistentState {
     pub fn part(&self, prefix: u64) -> Option<&PendingPersistentStatePart> {
-        self.parts.iter().find(|part| part.prefix == prefix)
+        let index = self
+            .parts
+            .binary_search_by_key(&prefix, |part| part.prefix)
+            .ok()?;
+        Some(&self.parts[index])
     }
 }
 

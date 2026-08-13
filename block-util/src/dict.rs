@@ -280,8 +280,7 @@ where
         }
 
         let Some((left_shard, right_shard)) = shard.split() else {
-            shards.push((*shard, dict));
-            return Ok(());
+            return Err(Error::IntOverflow);
         };
 
         let PartialSplitDict {
@@ -306,7 +305,10 @@ where
         )
     }
 
-    let mut shards = Vec::with_capacity(2usize.pow(depth as _));
+    if depth >= ShardIdent::MAX_SPLIT_DEPTH {
+        return Err(Error::IntOverflow);
+    }
+    let mut shards = Vec::with_capacity(1 << depth);
 
     let (dict_root, _) = dict.into_parts();
     split_dict_impl(

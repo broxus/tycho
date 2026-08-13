@@ -490,15 +490,12 @@ impl PersistentStateStorage {
         split_depth: u8,
     ) -> Result<()> {
         // prevent from storing persistent state with invalid meta
-        if split_depth > 0 {
-            validate_persistent_state_split_metadata(
-                handle.id().shard,
-                split_depth,
-                parts.iter().map(|(prefix, _)| *prefix),
-            )?;
-        } else {
-            anyhow::ensure!(parts.is_empty(), "unsplit states must not have any parts");
-        }
+        validate_persistent_state_split_metadata(
+            handle.id().shard,
+            split_depth,
+            parts.iter().map(|(prefix, _)| *prefix),
+        )?;
+
         if self
             .try_reuse_persistent_state(mc_seqno, handle, PersistentStateKind::Shard)
             .await?

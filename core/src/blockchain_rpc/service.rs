@@ -778,11 +778,14 @@ impl<B> Inner<B> {
                 .get_persistent_state_info(block_id, state_kind)
                 .await?
         {
-            return if state_kind == PersistentStateKind::Shard && !info.parts.is_empty() {
+            return if state_kind == PersistentStateKind::Shard
+                && let Some(split_depth) = NonZeroU32::new(info.split_depth as u32)
+            {
+                // NOTE: Parts can be empty here if we split an empty state.
                 Ok(PersistentStateInfo::FoundWithParts {
                     size: info.size,
                     chunk_size: info.chunk_size,
-                    split_depth: u32::from(info.split_depth),
+                    split_depth,
                     parts: info
                         .parts
                         .into_iter()
