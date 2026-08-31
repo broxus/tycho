@@ -8,7 +8,7 @@ use tycho_network::{OverlayId, PeerId};
 use tycho_types::models::{ConsensusConfig, GenesisInfo};
 use tycho_util::FastHashMap;
 
-use crate::dag::ProofLeader;
+use crate::dag::Wave;
 use crate::engine::ConsensusConfigExt;
 use crate::models::{AnchorLink, Digest, Point, PointData, PointRole, Round, Through, UnixTime};
 
@@ -124,7 +124,7 @@ impl MempoolConfigBuilder {
             .as_ref()
             .context("mempool consensus config is not known")?;
 
-        let genesis_round = ProofLeader::align_genesis(genesis_info.start_round);
+        let genesis_round = Wave::align_genesis(genesis_info.start_round);
 
         let mempool_config = MempoolConfig {
             consensus: consensus.clone(),

@@ -2,7 +2,7 @@ use tycho_crypto::ed25519::KeyPair;
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
-use crate::dag::{DagHead, DagRound, WAVE_ROUNDS};
+use crate::dag::{DagHead, DagRound};
 use crate::effects::{AltFormat, RoundCtx};
 use crate::engine::{InputBuffer, MempoolConfig};
 use crate::models::{
@@ -11,11 +11,8 @@ use crate::models::{
 };
 
 pub struct LastOwnPoint {
-    pub digest: Digest,
+    pub info: PointInfo,
     pub evidence: FastHashMap<PeerId, Signature>,
-    pub includes: FastHashMap<PeerId, Digest>,
-    pub sticky_anchors: Option<u8>,
-    pub round: Round,
     pub signers: PeerCount,
 }
 
@@ -88,10 +85,10 @@ impl Producer {
         let local_id = PeerId::from(key_pair.public_key);
 
         let proven_vertex = match last_own_point {
-            Some(prev) if prev.round == current_round.prev() => {
+            Some(prev) if prev.info.round() == current_round.prev() => {
                 // previous round's point needs 2F signatures from peers scheduled for current round
                 if prev.evidence.len() >= prev.signers.majority_of_others() {
-                    Some(&prev.digest) // prev point is used only once
+                    Some(prev.info.digest()) // prev point is used only once
                 } else {
                     return Err(ProduceError::NotEnoughEvidence); // has to skip round
                 }
@@ -104,19 +101,9 @@ impl Producer {
         let role = if proven_vertex.is_some() {
             let last_own_point = last_own_point.as_ref().expect("guarded by `proven_vertex`");
             let is_leader = current_leader.is_some_and(|leader| leader == local_id);
-            let is_proof_far_enough = match &anchor_proof {
-                AnchorLink::Indirect(link) => {
-                    let rounds_to_proof = (current_round - link.to.round.0).0;
-                    if conf.consensus.sticky_anchors == 0 {
-                        rounds_to_proof >= WAVE_ROUNDS
-                    } else {
-                        rounds_to_proof > WAVE_ROUNDS
-                    }
-                }
-                AnchorLink::Direct(_) => false,
-            };
+            let is_wave_far_enough = anchor_proof.is_wave_far_enough(current_round, conf);
 
-            if let Some(sticky_anchors) = last_own_point.sticky_anchors {
+            if let Some(sticky_anchors) = last_own_point.info.sticky_anchors() {
                 if let Some(seq_no) = sticky_anchors.checked_add(1)
                     && seq_no <= conf.consensus.sticky_anchors
                 {
@@ -124,7 +111,7 @@ impl Producer {
                 } else {
                     PointRole::AnchorTrigger
                 }
-            } else if is_leader && is_proof_far_enough {
+            } else if is_leader && is_wave_far_enough {
                 PointRole::AnchorProof { seq_no: 0 }
             } else {
                 PointRole::Regular
@@ -216,8 +203,8 @@ impl Producer {
         };
 
         let includes = last_own_point
-            .filter(|l| l.round == round)
-            .map(|l| &l.includes);
+            .filter(|l| l.info.round() == round)
+            .map(|l| l.info.includes());
 
         // have to link all @ r-2 if r-1 was skipped - because we made signatures;
         witness_round

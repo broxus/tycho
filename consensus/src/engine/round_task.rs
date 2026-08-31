@@ -102,7 +102,7 @@ impl RoundTaskReady {
         round_ctx: RoundCtx,
     ) -> TaskResult<Result<Point, ProduceError>> {
         let allowed_to_produce = (last_own_point.as_ref()).is_none_or(|prev_own| {
-            match prev_own.round.cmp(&head.prev().round()) {
+            match prev_own.info.round().cmp(&head.prev().round()) {
                 cmp::Ordering::Less => true,
                 cmp::Ordering::Equal => {
                     prev_own.evidence.len() >= prev_own.signers.majority_of_others()
@@ -112,7 +112,7 @@ impl RoundTaskReady {
                     panic!(
                         "already produced point at {:?} and gathered {}/{} evidence, \
                              trying to produce point at {:?}",
-                        prev_own.round,
+                        prev_own.info.round(),
                         prev_own.evidence.len(),
                         prev_own.signers.majority_of_others(),
                         head.current().round()

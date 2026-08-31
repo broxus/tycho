@@ -6,7 +6,6 @@ use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
 use super::link::*;
-use crate::dag::WAVE_ROUNDS;
 use crate::engine::MempoolConfig;
 use crate::models::point::proto_utils::{digests_map, signatures_map, u8_as_u32};
 use crate::models::point::{Digest, Round, UnixTime, proto_utils};
@@ -135,30 +134,21 @@ impl PointData {
             + 2 * UnixTime::MAX_TL_BYTES
     };
 
-    pub(super) fn is_proof_link_ok(
+    pub(super) fn is_wave_link_ok(
         &self,
         is_leader: bool,
         has_prev_point: bool,
         round: Round,
         conf: &MempoolConfig,
     ) -> bool {
-        let is_proof_far_enough = |proof_round: Round| {
-            let rounds_to_proof = (round - proof_round.0).0;
-            if conf.consensus.sticky_anchors == 0 {
-                rounds_to_proof >= WAVE_ROUNDS
-            } else {
-                rounds_to_proof > WAVE_ROUNDS
-            }
-        };
         match &self.role {
             PointRole::Regular => !{
                 is_leader
                     && has_prev_point // optional for Regular and encoded for AnchorProof
-                    && is_proof_far_enough(self.linked_anchor_round(AnchorStageRole::Proof, round))
+                    && self.anchor_proof.is_wave_far_enough(round, conf)
             },
             PointRole::AnchorProof { seq_no: 0 } => {
-                is_leader
-                    && is_proof_far_enough(self.linked_anchor_round(AnchorStageRole::Proof, round))
+                is_leader && self.anchor_proof.is_wave_far_enough(round, conf)
             }
             PointRole::AnchorProof { .. } | PointRole::AnchorTrigger | PointRole::Genesis => true,
         }
@@ -242,20 +232,6 @@ impl PointData {
             return Err(StructureIssue::AnchorTime);
         }
         Ok(())
-    }
-
-    /// param round - should come from wrapping point
-    /// resulting None should be replaced with id of wrapping point
-    pub(super) fn linked_anchor_round(&self, link_field: AnchorStageRole, round: Round) -> Round {
-        let link = match link_field {
-            AnchorStageRole::Trigger => &self.anchor_trigger,
-            AnchorStageRole::Proof => &self.anchor_proof,
-        };
-        match link {
-            AnchorLink::Direct(Through::Includes(_)) => round.prev(),
-            AnchorLink::Direct(Through::Witness(_)) => round.prev().prev(),
-            AnchorLink::Indirect(IndirectLink { to, .. }) => to.round,
-        }
     }
 
     pub(super) fn through_id(&self, through: &Through, round: Round) -> Option<PointId> {

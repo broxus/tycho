@@ -152,10 +152,7 @@ fn point<const PEER_COUNT: usize>(
     let prev_info = includes.get(&peers[idx].0);
 
     let last_own_point = prev_info.map(|info| LastOwnPoint {
-        digest: *info.digest(),
-        includes: info.includes().clone(),
-        sticky_anchors: info.sticky_anchors(),
-        round: info.round(),
+        info: info.clone(),
         signers: peer_count,
         evidence: {
             let mut evidence = FastHashMap::with_capacity(PEER_COUNT);

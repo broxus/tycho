@@ -10,7 +10,7 @@ use tycho_util::metrics::HistogramGuard;
 
 use crate::dag::dag_location::DagLocation;
 use crate::dag::dag_point_future::WeakDagPointFuture;
-use crate::dag::{DagRound, ProofLeader, WeakDagRound};
+use crate::dag::{DagRound, Wave, WeakDagRound};
 use crate::effects::{AltFormat, Ctx, TaskResult, ValidateCtx};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule, PeerScheduleStateless};
@@ -284,14 +284,13 @@ impl Verifier {
         conf: &MempoolConfig,
     ) -> Option<IllFormedReason> {
         let is_leader = point_round
-            .ok_or_else(|| ProofLeader::new(info.round(), &peer_schedule.atomic(), conf).finish())
+            .ok_or_else(|| Wave::new(info.round(), &peer_schedule.atomic(), conf).leader())
             .as_ref()
             .map_or_else(|fallback| fallback.as_ref(), |round| round.leader())
             .is_some_and(|leader| leader == info.author());
         // `ToSelf` introduces proof and trigger ids;
         // `validate()` recursively checks that later points inherit them through (in)direct links
-        (!info.is_proof_link_ok(is_leader, conf))
-            .then_some(IllFormedReason::BadProofLink(is_leader))
+        (!info.is_wave_link_ok(is_leader, conf)).then_some(IllFormedReason::BadProofLink(is_leader))
     }
 
     fn other_versions(

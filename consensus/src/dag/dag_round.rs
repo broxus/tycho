@@ -8,8 +8,8 @@ use tycho_util::FastDashMap;
 use crate::dag::IllFormedReason;
 use crate::dag::dag_location::DagLocation;
 use crate::dag::dag_point_future::{DagPointFuture, WeakDagPointFuture};
-use crate::dag::proof_leader::ProofLeader;
 use crate::dag::threshold::Threshold;
+use crate::dag::wave::Wave;
 use crate::effects::{AltFmt, AltFormat, Ctx, RoundCtx, ValidateCtx};
 use crate::engine::{MempoolConfig, NodeConfig};
 use crate::intercom::{Downloader, PeerSchedule};
@@ -31,7 +31,7 @@ pub struct DagRound(Arc<DagRoundInner>);
 pub struct DagRoundInner {
     round: Round,
     peer_count: PeerCount,
-    proof_leader: Option<PeerId>,
+    wave_leader: Option<PeerId>,
     used_anchor_proof: OnceLock<PeerId>,
     locations: FastDashMap<PeerId, DagLocation>,
     threshold: Threshold,
@@ -84,10 +84,10 @@ impl DagRound {
         peer_schedule: &PeerSchedule,
         conf: &MempoolConfig,
     ) -> Self {
-        let (peers, proof_leader) = {
+        let (peers, wave) = {
             let guard = peer_schedule.atomic();
             let peers = guard.peers_for(round).clone();
-            (peers, ProofLeader::new(round, &guard, conf))
+            (peers, Wave::new(round, &guard, conf))
         };
 
         let peer_count = if round > conf.genesis_round {
@@ -122,7 +122,7 @@ impl DagRound {
         let this = Self(Arc::new(DagRoundInner {
             round,
             peer_count,
-            proof_leader: proof_leader.finish(),
+            wave_leader: wave.leader(),
             used_anchor_proof: OnceLock::new(),
             locations: FastDashMap::with_capacity_and_hasher(peers.len(), Default::default()),
             threshold: Threshold::new(round, peer_count, conf),
@@ -146,7 +146,7 @@ impl DagRound {
     }
 
     pub fn leader(&self) -> Option<&PeerId> {
-        self.0.proof_leader.as_ref()
+        self.0.wave_leader.as_ref()
     }
 
     pub fn used_anchor_proof(&self) -> &OnceLock<PeerId> {

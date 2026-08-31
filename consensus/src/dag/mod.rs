@@ -3,10 +3,9 @@ pub use dag_round::*;
 pub use front::*;
 pub use head::*;
 pub use producer::*;
-pub use proof_leader::*;
 pub use verifier::*;
+pub use wave::*;
 
-mod proof_leader;
 // parts must not know about private details of the whole
 mod commit;
 mod dag_location;
@@ -17,3 +16,4 @@ mod head;
 mod producer;
 mod threshold;
 mod verifier;
+mod wave;
