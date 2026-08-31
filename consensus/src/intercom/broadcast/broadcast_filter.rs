@@ -103,8 +103,9 @@ struct CacheInfo {
 }
 
 // Note logic still under consideration because of contradiction in requirements:
-//  * we must determine the latest consensus round reliably:
-//    the current approach is to collect 1F+1 uniquely authored points at the same future round
+//  * we must determine the latest consensus round reliably; the current approach accepts either:
+//    * one successfully verified point with non-empty evidence
+//    * `PeerCount::reliable_minority()` unique authors of verified points at the same future round
 //    => we should collect as much points as possible
 //  * we must defend the DAG and current cache from spam from future rounds,
 //    => we should discard points from the far future
@@ -354,8 +355,8 @@ impl BroadcastFilter {
         cached_info
     }
 
-    /// just drop unneeded data when Engine is paused and round task is not running
-    /// while collator is syncing blocks
+    /// Drops cached rounds outside the useful window around a newly observed consensus round.
+    /// Called when a broadcast threshold advances `consensus_round`; does not flush points to DAG.
     pub fn clean(&self, round: Round, head: &DagHead, round_ctx: &RoundCtx) {
         let _task_time = HistogramGuard::begin("tycho_mempool_bf_clean_time");
         // inclusive bounds on what should be left in cache

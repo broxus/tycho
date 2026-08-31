@@ -169,6 +169,10 @@ impl Point {
         };
         let data = <_>::read_from(payload_and_data)?;
 
+        if !payload_and_data.is_empty() {
+            return Err(TlError::InvalidData);
+        }
+
         let id = PointId {
             digest: *read.digest,
             author: *read.body.author,
