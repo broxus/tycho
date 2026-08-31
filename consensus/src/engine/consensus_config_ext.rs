@@ -3,7 +3,7 @@ use std::num::NonZeroU64;
 use anyhow::{Result, ensure};
 use tycho_types::models::{ConsensusConfig, GenesisInfo};
 
-use crate::dag::{ProofLeader, WAVE_ROUNDS};
+use crate::dag::{WAVE_ROUNDS, Wave};
 
 /// ```text
 ///    RESET_ROUNDS      DagFront.top() == DagHead.next()
@@ -136,6 +136,6 @@ pub trait GenesisInfoExt {
 
 impl GenesisInfoExt for GenesisInfo {
     fn start_round_aligned(&self) -> u32 {
-        ProofLeader::align_genesis(self.start_round).0
+        Wave::align_genesis(self.start_round).0
     }
 }

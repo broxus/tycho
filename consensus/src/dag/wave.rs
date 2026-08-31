@@ -12,14 +12,14 @@ use crate::models::{AnchorStageRole, Round};
 pub const WAVE_ROUNDS: u32 = 3;
 
 #[derive(Debug)]
-pub struct ProofLeader {
+pub struct Wave {
     round: Round,
     anchor_candidate: Round,
     ordered_peers: Arc<Vec<PeerId>>,
     current_peers: Arc<FastHashSet<PeerId>>,
 }
 
-impl ProofLeader {
+impl Wave {
     pub fn new(round: Round, peer_schedule: &PeerScheduleStateless, conf: &MempoolConfig) -> Self {
         // Genesis point appears as a Proof in anchor chain during commit,
         // so it has to be at a round with Proof role
@@ -33,11 +33,15 @@ impl ProofLeader {
         }
     }
 
-    pub fn finish(self) -> Option<PeerId> {
+    pub fn leader(self) -> Option<PeerId> {
         assert!(
             !self.ordered_peers.is_empty(),
             "leader from empty validator set"
         );
+        if Self::role(self.round)? != AnchorStageRole::Proof {
+            return None;
+        }
+
         // reproducible global coin
         let leader_index = rand_pcg::Pcg32::seed_from_u64(self.anchor_candidate.0 as u64)
             .random_range(0..self.ordered_peers.len());
@@ -48,9 +52,6 @@ impl ProofLeader {
             return None;
         };
 
-        if Self::role(self.round)? != AnchorStageRole::Proof {
-            return None;
-        }
         Some(leader)
     }
 
@@ -82,7 +83,7 @@ mod tests {
     #[test]
     pub fn test_genesis_aligned() -> Result<()> {
         for start_round in 0..10 {
-            let genesis_round = ProofLeader::align_genesis(start_round).0;
+            let genesis_round = Wave::align_genesis(start_round).0;
             ensure!(
                 genesis_round >= start_round,
                 "genesis round must not be less than start round after alignment, \
@@ -106,7 +107,7 @@ mod tests {
                  BasicVerifier::verify() and to set first working v_set in PeerSchedule"
             );
 
-            let role = ProofLeader::role(Round(genesis_round));
+            let role = Wave::role(Round(genesis_round));
             anyhow::ensure!(
                 role == Some(AnchorStageRole::Proof),
                 "genesis must be aligned to be Proof leader; round={genesis_round}",

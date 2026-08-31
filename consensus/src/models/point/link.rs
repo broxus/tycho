@@ -4,7 +4,9 @@ use serde::Serialize;
 use tl_proto::{TlRead, TlWrite};
 use tycho_network::PeerId;
 
+use crate::dag::WAVE_ROUNDS;
 use crate::effects::{AltFmt, AltFormat};
+use crate::engine::MempoolConfig;
 use crate::models::{Digest, PointId, PointMap, Round};
 
 #[derive(Clone, Debug, PartialEq, TlRead, TlWrite, Serialize)]
@@ -18,6 +20,20 @@ pub enum AnchorLink {
 
 impl AnchorLink {
     pub const MAX_TL_BYTES: usize = 4 + IndirectLink::MAX_TL_BYTES;
+
+    pub fn is_wave_far_enough(&self, current_round: Round, conf: &MempoolConfig) -> bool {
+        match &self {
+            AnchorLink::Indirect(link) => {
+                let rounds_to_wave = (current_round - link.to.round.0).0;
+                if conf.consensus.sticky_anchors == 0 {
+                    rounds_to_wave >= WAVE_ROUNDS
+                } else {
+                    rounds_to_wave > WAVE_ROUNDS
+                }
+            }
+            AnchorLink::Direct(_) => false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, TlRead, TlWrite, Serialize)]

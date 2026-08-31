@@ -181,11 +181,8 @@ impl Broadcaster {
             }
         }
         Ok(Arc::new(LastOwnPoint {
-            digest: *self.point.info().digest(),
-            evidence: mem::take(&mut self.signatures).into_iter().collect(),
-            includes: self.point.info().includes().clone(),
-            sticky_anchors: self.point.info().sticky_anchors(),
-            round: self.point.info().round(),
+            info: self.point.info().clone(),
+            evidence: mem::take(&mut self.signatures),
             signers: self.signers_count,
         }))
     }
