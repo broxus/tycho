@@ -473,16 +473,17 @@ impl Verifier {
                     let tuple = (AnchorStageRole::Proof, dep_id);
                     invalid_reason = Some(InvalidReason::AnchorLink(tuple));
                 }
-                if let Some(sticky_anchors) = info.sticky_anchors() {
-                    let mut is_sticky_sequence_ok = sticky_anchors < conf.consensus.sticky_anchors;
-                    is_sticky_sequence_ok &= if let Some(prev_sticky) = dep.sticky_anchors() {
-                        prev_sticky.checked_add(1) == Some(sticky_anchors)
-                    } else {
-                        sticky_anchors == 0
-                    };
+                if let Some(sticky_anchors) = info.sticky_anchors()
+                    && sticky_anchors > 0
+                {
+                    let prev_sticky = dep.sticky_anchors();
+                    let is_sticky_sequence_ok = sticky_anchors <= conf.consensus.sticky_anchors
+                        && prev_sticky
+                            .and_then(|seq_no| seq_no.checked_add(1))
+                            .is_some_and(|next| next == sticky_anchors);
 
                     if !is_sticky_sequence_ok {
-                        let tuple = (dep_id, dep.sticky_anchors(), sticky_anchors);
+                        let tuple = (dep_id, prev_sticky, sticky_anchors);
                         invalid_reason = Some(InvalidReason::BadStickySequence(tuple));
                     }
                 }
@@ -876,7 +877,7 @@ impl<'a> BasicVerifierInner<'a> {
         (self.info.check_structure(false)).map_err(IllFormedReason::Structure)?;
 
         if let Some(sticky_anchors) = self.info.sticky_anchors()
-            && sticky_anchors >= self.conf.consensus.sticky_anchors
+            && sticky_anchors > self.conf.consensus.sticky_anchors
         {
             return Err(IllFormedReason::TooManyStickyAnchors(sticky_anchors));
         }
