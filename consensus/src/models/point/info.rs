@@ -162,8 +162,8 @@ impl PointInfo {
         if is_ok { Ok(()) } else { Err(EvidenceSigError) }
     }
 
-    pub fn is_proof_link_ok(&self, is_leader: bool, conf: &MempoolConfig) -> bool {
-        (self.0.data).is_proof_link_ok(is_leader, self.prev_digest().is_some(), self.round(), conf)
+    pub fn is_wave_link_ok(&self, is_leader: bool, conf: &MempoolConfig) -> bool {
+        (self.0.data).is_wave_link_ok(is_leader, self.prev_digest().is_some(), self.round(), conf)
     }
 
     pub fn check_structure(&self, is_genesis: bool) -> Result<(), StructureIssue> {
