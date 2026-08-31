@@ -2,7 +2,7 @@ use tycho_crypto::ed25519::KeyPair;
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
-use crate::dag::{DagHead, DagRound};
+use crate::dag::{DagHead, DagRound, WAVE_ROUNDS};
 use crate::effects::{AltFormat, RoundCtx};
 use crate::engine::{InputBuffer, MempoolConfig};
 use crate::models::{
@@ -104,38 +104,28 @@ impl Producer {
         let role = if proven_vertex.is_some() {
             let last_own_point = last_own_point.as_ref().expect("guarded by `proven_vertex`");
             let is_leader = current_leader.is_some_and(|leader| leader == local_id);
-            let is_trigger = matches!(&anchor_proof,
-                AnchorLink::Direct(Through::Includes(author))
-                if author == local_id
-            );
             let is_proof_far_enough = match &anchor_proof {
                 AnchorLink::Indirect(link) => {
                     let rounds_to_proof = (current_round - link.to.round.0).0;
                     if conf.consensus.sticky_anchors == 0 {
-                        rounds_to_proof > 2
+                        rounds_to_proof >= WAVE_ROUNDS
                     } else {
-                        rounds_to_proof > 3
+                        rounds_to_proof > WAVE_ROUNDS
                     }
                 }
                 AnchorLink::Direct(_) => false,
             };
 
             if let Some(sticky_anchors) = last_own_point.sticky_anchors {
-                if sticky_anchors.saturating_add(1) < conf.consensus.sticky_anchors {
-                    PointRole::Sticky {
-                        seq_no: sticky_anchors + 1,
-                    }
-                } else {
-                    PointRole::AnchorTrigger
-                }
-            } else if is_trigger {
-                if last_own_point.sticky_anchors.is_none() && 0 < conf.consensus.sticky_anchors {
-                    PointRole::Sticky { seq_no: 0 }
+                if let Some(seq_no) = sticky_anchors.checked_add(1)
+                    && seq_no <= conf.consensus.sticky_anchors
+                {
+                    PointRole::AnchorProof { seq_no }
                 } else {
                     PointRole::AnchorTrigger
                 }
             } else if is_leader && is_proof_far_enough {
-                PointRole::AnchorProof
+                PointRole::AnchorProof { seq_no: 0 }
             } else {
                 PointRole::Regular
             }

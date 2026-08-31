@@ -232,7 +232,7 @@ impl PointInfo {
 
     pub fn sticky_anchors(&self) -> Option<u8> {
         match &self.0.data.role {
-            PointRole::Sticky { seq_no } => Some(*seq_no),
+            PointRole::AnchorProof { seq_no } => Some(*seq_no),
             _ => None,
         }
     }

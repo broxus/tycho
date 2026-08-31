@@ -60,9 +60,8 @@ consensus.peerSignaturePair
 * Representation of Point Role enum
 */
 consensus.pointRole.regular                                           = consensus.PointRole;
-consensus.pointRole.proof                                             = consensus.PointRole;
+consensus.pointRole.proof                  seq_no:int                 = consensus.PointRole;
 consensus.pointRole.trigger                                           = consensus.PointRole;
-consensus.pointRole.sticky                 seq_no:int                 = consensus.PointRole;
 consensus.pointRole.genesis                                           = consensus.PointRole;
 
 /**
