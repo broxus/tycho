@@ -6,6 +6,7 @@ use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
 use super::link::*;
+use crate::dag::WAVE_ROUNDS;
 use crate::engine::MempoolConfig;
 use crate::models::point::proto_utils::{digests_map, signatures_map, u8_as_u32};
 use crate::models::point::{Digest, Round, UnixTime, proto_utils};
@@ -41,11 +42,6 @@ pub struct PointData {
     pub anchor_time: UnixTime,
 }
 
-/// | property \ role   | regular      | proof      | trigger      | sticky     | genesis      |
-/// |-------------------|--------------|------------|--------------|------------|--------------|
-/// | anchor proof      | (in)direct   | self       | prev point   | self       | self         |
-/// | anchor trigger    | (in)direct   | (in)direct | self         | self       | self         |
-/// | chained an. proof | inapplicable | -3+ rounds | inapplicable | prev point | inapplicable |
 #[derive(Clone, Debug, TlRead, TlWrite, Serialize)]
 #[cfg_attr(test, derive(PartialEq))]
 #[tl(boxed, scheme = "proto.tl")]
@@ -53,17 +49,13 @@ pub enum PointRole {
     #[tl(id = "consensus.pointRole.regular")]
     Regular,
     #[tl(id = "consensus.pointRole.proof")]
-    AnchorProof,
-    /// the last trigger in sticky chain; the single one if no sticky anchors
-    #[tl(id = "consensus.pointRole.trigger")]
-    AnchorTrigger,
-    /// both a proof and a trigger, may reside between Proof and Trigger;
-    /// may be the last in chain if prematurely torn by a leader fault (skipped round, gone off)
-    #[tl(id = "consensus.pointRole.sticky")]
-    Sticky {
+    AnchorProof {
         #[tl(with = "u8_as_u32")]
         seq_no: u8,
     },
+    /// the last trigger in sticky chain; the single one if no sticky anchors
+    #[tl(id = "consensus.pointRole.trigger")]
+    AnchorTrigger,
     #[tl(id = "consensus.pointRole.genesis")]
     Genesis,
 }
@@ -74,21 +66,22 @@ impl PointRole {
     pub fn is_anchor_proof(&self) -> bool {
         match self {
             Self::Regular | Self::AnchorTrigger => false,
-            Self::AnchorProof | Self::Sticky { .. } | Self::Genesis => true,
+            Self::AnchorProof { .. } | Self::Genesis => true,
         }
     }
 
     pub fn is_anchor_trigger(&self) -> bool {
         match self {
-            Self::Regular | Self::AnchorProof => false,
-            Self::AnchorTrigger | Self::Sticky { .. } | Self::Genesis => true,
+            Self::Regular => false,
+            Self::AnchorProof { seq_no } => *seq_no > 0,
+            Self::AnchorTrigger | Self::Genesis => true,
         }
     }
 
     fn requires_prev_point(&self) -> bool {
         match self {
             Self::Regular | Self::Genesis => false,
-            Self::AnchorProof | Self::AnchorTrigger | Self::Sticky { .. } => true,
+            Self::AnchorProof { .. } | Self::AnchorTrigger => true,
         }
     }
 }
@@ -103,6 +96,8 @@ pub enum StructureIssue {
     AuthorInMap(PointMap),
     #[error("{0:?} must have prev point")]
     RolePrevPoint(AnchorStageRole),
+    #[error("Trigger must link prev point as anchor proof")]
+    TriggerBadProofLink,
     #[error("bad {0:?} link through {1:?} map")]
     Link(AnchorStageRole, PointMap),
     #[error("anchor stage role {0:?}")]
@@ -150,9 +145,9 @@ impl PointData {
         let is_proof_far_enough = |proof_round: Round| {
             let rounds_to_proof = (round - proof_round.0).0;
             if conf.consensus.sticky_anchors == 0 {
-                rounds_to_proof > 2
+                rounds_to_proof >= WAVE_ROUNDS
             } else {
-                rounds_to_proof > 3
+                rounds_to_proof > WAVE_ROUNDS
             }
         };
         match &self.role {
@@ -161,12 +156,11 @@ impl PointData {
                     && has_prev_point // optional for Regular and encoded for AnchorProof
                     && is_proof_far_enough(self.linked_anchor_round(AnchorStageRole::Proof, round))
             },
-            PointRole::AnchorProof => {
+            PointRole::AnchorProof { seq_no: 0 } => {
                 is_leader
                     && is_proof_far_enough(self.linked_anchor_round(AnchorStageRole::Proof, round))
             }
-            // role encodes links
-            PointRole::AnchorTrigger | PointRole::Sticky { .. } | PointRole::Genesis => true,
+            PointRole::AnchorProof { .. } | PointRole::AnchorTrigger | PointRole::Genesis => true,
         }
     }
 
@@ -192,6 +186,15 @@ impl PointData {
             .or((self.witness.contains_key(author)).then_some(PointMap::Witness))
             .map(StructureIssue::AuthorInMap)
             .map_or(Ok(()), Err)?;
+
+        if self.role.is_anchor_trigger()
+            && !matches!(
+                &self.anchor_proof,
+                AnchorLink::Direct(Through::Includes(peer)) if peer == author
+            )
+        {
+            return Err(StructureIssue::TriggerBadProofLink);
+        }
 
         for role in [AnchorStageRole::Proof, AnchorStageRole::Trigger] {
             let is_in_role = match role {
