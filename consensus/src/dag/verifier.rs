@@ -62,6 +62,8 @@ pub enum IllFormedReason {
     EvidenceSigError(EvidenceSigError),
     #[error("point before genesis cannot exist in this overlay")]
     BeforeGenesis,
+    #[error("author is not scheduled: outdated vset or author out of vset")]
+    UnknownAuthor,
     #[error("too large payload: {0} bytes")]
     TooLargePayload(u32),
     #[error("structure issue: {0}")]
@@ -70,8 +72,6 @@ pub enum IllFormedReason {
     TooManyStickyAnchors(u8),
     #[error("links anchor across genesis")]
     LinksAcrossGenesis,
-    #[error("author is not scheduled: outdated vset or author out of vset")]
-    UnknownAuthor,
     #[error("{0:?} peer map must be empty")]
     MustBeEmpty(PointMap),
     #[error("unknown peers in {:?} map: {}", .0.1, .0.0.as_slice().alt())]
@@ -782,7 +782,6 @@ impl<'a> BasicVerifier<'a> {
     }
 
     pub fn verify(self) -> Result<(), VerifyError> {
-        // must check for well-formedness before PeerChecked uses `round.prev()`
         let result = (self.0).and_then(|inner| {
             (inner.check_well_formed())
                 .and_then(BasicVerifierInner::check_peers)
@@ -828,24 +827,34 @@ impl<'a> BasicVerifierInner<'a> {
                 .map_err(|_e| VerifyError::Fail(UninitVset((len, round, point_map))))
         }
 
-        let this = match (info.round() - conf.genesis_round.prev().0).0 {
-            0 => return Err(VerifyError::IllFormed(IllFormedReason::BeforeGenesis)),
-            1 => {
-                let a = peer_schedule_stateless.peers_for(info.round()).clone();
-                let peer_count_a = peer_count_genesis(a.len(), info.round(), PointMap::Evidence)?;
-                Self {
-                    info,
-                    same_round_peers: (peer_count_a, a),
-                    includes_peers: None,
-                    witness_peers: None,
-                    conf,
-                }
-            }
+        let rounds_to_genesis = (info.round() - conf.genesis_round.prev().0).0;
+
+        let a = peer_schedule_stateless.peers_for(info.round()).clone();
+        let peer_count_a = if rounds_to_genesis == 0 {
+            return Err(VerifyError::IllFormed(IllFormedReason::BeforeGenesis));
+        } else if rounds_to_genesis == 1 {
+            peer_count_genesis(a.len(), info.round(), PointMap::Evidence)?
+        } else {
+            peer_count(a.len(), info.round(), PointMap::Evidence)?
+        };
+
+        if !a.contains(info.author()) {
+            return Err(VerifyError::IllFormed(IllFormedReason::UnknownAuthor));
+        }
+
+        let this = match rounds_to_genesis {
+            0 => unreachable!(),
+            1 => Self {
+                info,
+                same_round_peers: (peer_count_a, a),
+                includes_peers: None,
+                witness_peers: None,
+                conf,
+            },
             2 => {
-                let rounds = [info.round(), info.round().prev()];
-                let [a, b] = peer_schedule_stateless.peers_for_array(rounds);
-                let peer_count_a = peer_count(a.len(), rounds[0], PointMap::Evidence)?;
-                let peer_count_b = peer_count_genesis(b.len(), rounds[1], PointMap::Includes)?;
+                let b_round = info.round().prev();
+                let b = peer_schedule_stateless.peers_for(b_round).clone();
+                let peer_count_b = peer_count_genesis(b.len(), b_round, PointMap::Includes)?;
                 Self {
                     info,
                     same_round_peers: (peer_count_a, a),
@@ -855,21 +864,18 @@ impl<'a> BasicVerifierInner<'a> {
                 }
             }
             more => {
-                let rounds = [
-                    info.round(),
-                    info.round().prev(),
-                    info.round().prev().prev(),
-                ];
-                let [a, b, c] = peer_schedule_stateless.peers_for_array(rounds);
+                let bc_rounds = [info.round().prev(), info.round().prev().prev()];
+                let [b, c] = peer_schedule_stateless.peers_for_array(bc_rounds);
+                let peer_count_b = peer_count(b.len(), bc_rounds[0], PointMap::Includes)?;
                 let peer_count_c = if more == 3 {
-                    peer_count_genesis(c.len(), rounds[2], PointMap::Witness)?
+                    peer_count_genesis(c.len(), bc_rounds[1], PointMap::Witness)?
                 } else {
-                    peer_count(c.len(), rounds[2], PointMap::Witness)?
+                    peer_count(c.len(), bc_rounds[1], PointMap::Witness)?
                 };
                 Self {
                     info,
-                    same_round_peers: (peer_count(a.len(), rounds[0], PointMap::Evidence)?, a),
-                    includes_peers: Some((peer_count(b.len(), rounds[1], PointMap::Includes)?, b)),
+                    same_round_peers: (peer_count_a, a),
+                    includes_peers: Some((peer_count_b, b)),
                     witness_peers: Some((peer_count_c, c)),
                     conf,
                 }
@@ -943,9 +949,6 @@ impl<'a> BasicVerifierInner<'a> {
         // inside proving point @ r+0.
         {
             let (total, scheduled) = &self.same_round_peers;
-            if !scheduled.contains(self.info.author()) {
-                return Err(IllFormedReason::UnknownAuthor);
-            }
             let evidence = &self.info.evidence();
             if !evidence.is_empty() {
                 if *total == PeerCount::GENESIS {

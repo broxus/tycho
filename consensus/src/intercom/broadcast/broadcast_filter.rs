@@ -103,8 +103,9 @@ struct CacheInfo {
 }
 
 // Note logic still under consideration because of contradiction in requirements:
-//  * we must determine the latest consensus round reliably:
-//    the current approach is to collect 1F+1 uniquely authored points at the same future round
+//  * we must determine the latest consensus round reliably; the current approach accepts either:
+//    * one successfully verified point with non-empty evidence
+//    * `PeerCount::reliable_minority()` unique authors of verified points at the same future round
 //    => we should collect as much points as possible
 //  * we must defend the DAG and current cache from spam from future rounds,
 //    => we should discard points from the far future
@@ -153,26 +154,24 @@ impl BroadcastFilter {
             (peer_count, bv)
         };
 
-        let merged = bv.verify().and(match maybe_issue {
-            None => Ok(()),
-            Some(issue) => Err(VerifyError::IllFormed(IllFormedReason::EvidenceSigError(
-                issue,
-            ))),
-        });
-
-        let checked = match merged {
-            Err(VerifyError::IllFormed(IllFormedReason::UnknownAuthor)) => return false,
-            Ok(()) => Ok(if id.round > prune_after {
+        let maybe_issue = maybe_issue.map(IllFormedReason::EvidenceSigError);
+        #[allow(clippy::unnested_or_patterns)]
+        let checked = match (maybe_issue, bv.verify()) {
+            (_, Err(VerifyError::IllFormed(IllFormedReason::BeforeGenesis)))
+            | (_, Err(VerifyError::IllFormed(IllFormedReason::UnknownAuthor))) => return false,
+            (None, Ok(())) => Ok(if id.round > prune_after {
                 CachedItem::OkPruned(id.digest)
             } else {
                 CachedItem::Ok(point.clone())
             }),
-            Err(VerifyError::IllFormed(reason)) => Ok(if id.round > prune_after {
-                CachedItem::IllFormedPruned(id.digest, reason)
-            } else {
-                CachedItem::IllFormed(point.clone(), reason)
-            }),
-            Err(VerifyError::Fail(reason)) => Err(reason),
+            (Some(reason), _) | (None, Err(VerifyError::IllFormed(reason))) => {
+                Ok(if id.round > prune_after {
+                    CachedItem::IllFormedPruned(id.digest, reason)
+                } else {
+                    CachedItem::IllFormed(point.clone(), reason)
+                })
+            }
+            (None, Err(VerifyError::Fail(reason))) => Err(reason),
         };
 
         let cache_info = if let Ok(verified) = &checked {
@@ -354,8 +353,8 @@ impl BroadcastFilter {
         cached_info
     }
 
-    /// just drop unneeded data when Engine is paused and round task is not running
-    /// while collator is syncing blocks
+    /// Drops cached rounds outside the useful window around a newly observed consensus round.
+    /// Called when a broadcast threshold advances `consensus_round`; does not flush points to DAG.
     pub fn clean(&self, round: Round, head: &DagHead, round_ctx: &RoundCtx) {
         let _task_time = HistogramGuard::begin("tycho_mempool_bf_clean_time");
         // inclusive bounds on what should be left in cache
