@@ -363,7 +363,6 @@ pub mod option_string {
 }
 
 pub mod signature {
-    use base64::engine::Engine as _;
     use base64::prelude::BASE64_STANDARD;
 
     use super::*;

@@ -1545,9 +1545,7 @@ impl StorageCell {
         let data_ptr = Box::into_raw(Box::<[u8]>::from(&buffer[6..6 + allocated_len])).cast::<u8>();
 
         let reference_states = Default::default();
-        let mut reference_data = unsafe {
-            MaybeUninit::<[UnsafeCell<StorageCellReferenceData>; 4]>::uninit().assume_init()
-        };
+        let mut reference_data = MaybeUninit::<[UnsafeCell<StorageCellReferenceData>; 4]>::uninit();
 
         const { assert!(std::mem::size_of::<UnsafeCell<StorageCellReferenceData>>() == 32) };
         unsafe {
@@ -1569,7 +1567,8 @@ impl StorageCell {
             repr_depth,
             repr_hash: *repr_hash,
             reference_states,
-            reference_data,
+            // SAFETY (mostly): we have initialized all parts that we are going to read.
+            reference_data: unsafe { reference_data.assume_init() },
         })
     }
 

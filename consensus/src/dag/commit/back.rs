@@ -117,7 +117,7 @@ impl DagBack {
         &self,
         trigger: &PointInfo,
     ) -> EngineResult<VecDeque<EnqueuedAnchor>> {
-        let bottom_round = (self.last_committed_proof).map_or(self.bottom_round(), |proof| proof);
+        let bottom_round = (self.last_committed_proof).unwrap_or(self.bottom_round());
 
         let range = RangeInclusive::new(
             // exclude used or unusable proof (it may be out of range)
