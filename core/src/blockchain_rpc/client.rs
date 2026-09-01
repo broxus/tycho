@@ -423,26 +423,6 @@ impl BlockchainRpcClient {
         Ok(res)
     }
 
-    pub async fn get_persistent_state_part(
-        &self,
-        neighbour: &Neighbour,
-        block_id: &BlockId,
-        offset: u64,
-    ) -> Result<QueryResponse<Data>, Error> {
-        let client = &self.inner.overlay_client;
-        let data = client
-            .query_raw::<Data>(
-                neighbour.clone(),
-                Request::from_tl(rpc::GetPersistentShardStateChunk {
-                    block_id: *block_id,
-                    offset,
-                }),
-                None,
-            )
-            .await?;
-        Ok(data)
-    }
-
     pub async fn find_persistent_state(
         &self,
         block_id: &BlockId,
@@ -607,6 +587,7 @@ impl BlockchainRpcClient {
                 .ok_or(Error::NotFound)?,
             None => state.size,
         };
+        let is_split = state.split_depth > 0;
 
         download_and_decompress(
             size,
@@ -622,6 +603,11 @@ impl BlockchainRpcClient {
                             Request::from_tl(rpc::GetPersistentShardStatePartChunk {
                                 block_id,
                                 prefix,
+                                offset,
+                            })
+                        } else if is_split {
+                            Request::from_tl(rpc::GetPersistentShardStateRootChunk {
+                                block_id,
                                 offset,
                             })
                         } else {

@@ -18,7 +18,9 @@ use crate::blockchain_rpc::rate_limits::BlockchainRpcRateLimitsConfig;
 use crate::blockchain_rpc::{BAD_REQUEST_ERROR_CODE, INTERNAL_ERROR_CODE, NOT_FOUND_ERROR_CODE};
 use crate::proto::blockchain::*;
 use crate::proto::overlay;
-use crate::storage::{BlockConnection, CoreStorage, KeyBlocksDirection, PersistentStateKind};
+use crate::storage::{
+    BlockConnection, CoreStorage, KeyBlocksDirection, PersistentStateKind, PersistentStatePrefix,
+};
 
 const RPC_METHOD_TIMINGS_METRIC: &str = "tycho_blockchain_rpc_method_time";
 
@@ -340,9 +342,28 @@ impl<B: BroadcastListener> Service<ServiceRequest> for BlockchainRpcService<B> {
                 offset = %req.offset,
             )]
             rpc::GetPersistentShardStateChunk as req => {
-                inner.handle_get_persistent_shard_state_chunk(&req).await
+                inner.read_persistent_state_chunk(
+                    &req.block_id,
+                    req.offset,
+                    PersistentStateKind::Shard,
+                    PersistentStatePrefix::Unsplit,
+                )
+                .await
             },
-
+            #[meta(
+                "getPersistentShardStateRootChunk",
+                block_id = %req.block_id,
+                offset = %req.offset,
+            )]
+            rpc::GetPersistentShardStateRootChunk as req => {
+                inner.read_persistent_state_chunk(
+                    &req.block_id,
+                    req.offset,
+                    PersistentStateKind::Shard,
+                    PersistentStatePrefix::Split(None),
+                )
+                .await
+            },
             #[meta(
                 "getPersistentShardStatePartChunk",
                 block_id = %req.block_id,
@@ -350,7 +371,13 @@ impl<B: BroadcastListener> Service<ServiceRequest> for BlockchainRpcService<B> {
                 offset = %req.offset,
             )]
             rpc::GetPersistentShardStatePartChunk as req => {
-                inner.handle_get_persistent_shard_state_part_chunk(&req).await
+                inner.read_persistent_state_chunk(
+                    &req.block_id,
+                    req.offset,
+                    PersistentStateKind::Shard,
+                    PersistentStatePrefix::Split(Some(req.prefix)),
+                )
+                .await
             },
 
             #[meta(
@@ -675,32 +702,6 @@ impl<B> Inner<B> {
         }
     }
 
-    async fn handle_get_persistent_shard_state_chunk(
-        &self,
-        req: &rpc::GetPersistentShardStateChunk,
-    ) -> overlay::Response<Data> {
-        self.read_persistent_state_chunk(
-            &req.block_id,
-            req.offset,
-            PersistentStateKind::Shard,
-            None,
-        )
-        .await
-    }
-
-    async fn handle_get_persistent_shard_state_part_chunk(
-        &self,
-        req: &rpc::GetPersistentShardStatePartChunk,
-    ) -> overlay::Response<Data> {
-        self.read_persistent_state_chunk(
-            &req.block_id,
-            req.offset,
-            PersistentStateKind::Shard,
-            Some(req.prefix),
-        )
-        .await
-    }
-
     async fn handle_get_persistent_queue_state_chunk(
         &self,
         req: &rpc::GetPersistentQueueStateChunk,
@@ -709,7 +710,7 @@ impl<B> Inner<B> {
             &req.block_id,
             req.offset,
             PersistentStateKind::Queue,
-            None,
+            PersistentStatePrefix::Unsplit,
         )
         .await
     }
@@ -811,7 +812,7 @@ impl<B> Inner<B> {
         block_id: &BlockId,
         offset: u64,
         state_kind: PersistentStateKind,
-        part_shard_prefix: Option<u64>,
+        prefix: PersistentStatePrefix,
     ) -> overlay::Response<Data> {
         let persistent_state_request_validation = || {
             anyhow::ensure!(
@@ -828,7 +829,7 @@ impl<B> Inner<B> {
 
         match self
             .rpc_data_provider
-            .get_persistent_state_chunk(block_id, offset, state_kind, part_shard_prefix)
+            .get_persistent_state_chunk(block_id, offset, state_kind, prefix)
             .await
         {
             Ok(Some(data)) => overlay::Response::Ok(Data { data }),
@@ -838,7 +839,7 @@ impl<B> Inner<B> {
                     ?block_id,
                     offset,
                     ?state_kind,
-                    ?part_shard_prefix,
+                    ?prefix,
                     "get_persistent_state_chunk failed: {e:?}"
                 );
                 overlay::Response::Err(INTERNAL_ERROR_CODE)

@@ -424,7 +424,7 @@ mod s3 {
         use tycho_util::fs::MappedFile;
 
         use super::*;
-        use crate::storage::{CoreStorageConfig, PersistentStateMeta};
+        use crate::storage::{CoreStorageConfig, PersistentStateMeta, PersistentStatePrefix};
 
         #[tokio::test]
         async fn s3_starter_client_returns_split_found_state_and_downloads() -> Result<()> {
@@ -453,7 +453,11 @@ mod s3 {
                 .await?;
             store
                 .put(
-                    &client.make_state_key(&block_id, PersistentStateKind::Shard, None)?,
+                    &client.make_state_key(
+                        &block_id,
+                        PersistentStateKind::Shard,
+                        PersistentStatePrefix::Split(None),
+                    )?,
                     tycho_util::compression::zstd_compress_simple(main).into(),
                 )
                 .await?;
@@ -463,7 +467,7 @@ mod s3 {
                         &client.make_state_key(
                             &block_id,
                             PersistentStateKind::Shard,
-                            Some(*prefix),
+                            PersistentStatePrefix::Split(Some(*prefix)),
                         )?,
                         tycho_util::compression::zstd_compress_simple(part).into(),
                     )

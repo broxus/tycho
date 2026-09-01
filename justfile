@@ -51,7 +51,7 @@ docs:
 
 # Runs all tests.
 test:
-    cargo nextest run --workspace --features test
+    cargo nextest run --workspace --features test,s3
 
 # Tests documentation examples.
 test_docs:

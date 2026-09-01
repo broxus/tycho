@@ -45,6 +45,13 @@ mod tests;
 
 const BASE_DIR: &str = "states";
 
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersistentStatePrefix {
+    #[default]
+    Unsplit,
+    Split(Option<u64>),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PersistentStateKind {
     Shard,
@@ -353,7 +360,7 @@ impl PersistentStateStorage {
         block_id: &BlockId,
         offset: u64,
         state_kind: PersistentStateKind,
-        part_shard_prefix: Option<u64>,
+        prefix: PersistentStatePrefix,
     ) -> Option<Vec<u8>> {
         // NOTE: Should be noop on x64
         let offset = usize::try_from(offset).ok()?;
@@ -372,8 +379,8 @@ impl PersistentStateStorage {
             kind: state_kind,
         };
         let cached = self.inner.descriptor_cache.get(&key)?.clone();
-        let part_index = match (state_kind, part_shard_prefix) {
-            (PersistentStateKind::Shard, Some(prefix)) => Some(
+        let part_index = match (state_kind, prefix) {
+            (PersistentStateKind::Shard, PersistentStatePrefix::Split(Some(prefix))) => Some(
                 cached
                     .parts
                     .binary_search_by_key(&prefix, |part| part.prefix)

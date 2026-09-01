@@ -12,7 +12,8 @@ use tycho_core::blockchain_rpc::{
 use tycho_core::overlay_client::PublicOverlayClient;
 use tycho_core::proto::blockchain::{KeyBlockIds, PersistentStateInfo};
 use tycho_core::storage::{
-    CoreStorage, CoreStorageConfig, NewBlockMeta, PersistentStateKind, PersistentStateStorage,
+    CoreStorage, CoreStorageConfig, NewBlockMeta, PersistentStateKind, PersistentStatePrefix,
+    PersistentStateStorage,
 };
 use tycho_network::{DhtClient, InboundRequestMeta, Network, OverlayId, PeerId, PublicOverlay};
 use tycho_storage::StorageContext;
@@ -444,7 +445,7 @@ async fn overlay_server_split_persistent_state() -> Result<()> {
         persistent_states,
         &block_id,
         PersistentStateKind::Shard,
-        None,
+        PersistentStatePrefix::Split(None),
         state_info.size,
         state_info.chunk_size,
     )
@@ -453,7 +454,7 @@ async fn overlay_server_split_persistent_state() -> Result<()> {
         persistent_states,
         &block_id,
         PersistentStateKind::Shard,
-        Some(first_part.prefix),
+        PersistentStatePrefix::Split(Some(first_part.prefix)),
         first_part.size,
         state_info.chunk_size,
     )
@@ -512,14 +513,14 @@ async fn read_persistent_state_decompressed(
     persistent_states: &PersistentStateStorage,
     block_id: &BlockId,
     state_kind: PersistentStateKind,
-    part_shard_prefix: Option<u64>,
+    prefix: PersistentStatePrefix,
     size: std::num::NonZeroU64,
     chunk_size: std::num::NonZeroU32,
 ) -> Result<Vec<u8>> {
     let mut compressed = Vec::new();
     for offset in (0..size.get()).step_by(chunk_size.get() as usize) {
         let chunk = persistent_states
-            .read_state_chunk(block_id, offset, state_kind, part_shard_prefix)
+            .read_state_chunk(block_id, offset, state_kind, prefix)
             .await
             .context("failed to read persistent state chunk")?;
         compressed.extend_from_slice(&chunk);

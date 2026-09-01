@@ -27,7 +27,7 @@ use crate::storage::persistent_state::{
     ShardStateWriter, check_can_reuse_shard_state_part_files, parse_shard_state_part_file_name,
 };
 use crate::storage::shard_state::StoreStateRawError;
-use crate::storage::{CoreStorage, CoreStorageConfig, NewBlockMeta};
+use crate::storage::{CoreStorage, CoreStorageConfig, NewBlockMeta, PersistentStatePrefix};
 
 #[test]
 fn persistent_state_meta_roundtrip() -> Result<()> {
@@ -357,7 +357,12 @@ async fn persistent_shard_state() -> Result<()> {
 
     let read_verify_state = || async {
         let persistent_state_data = persistent_states
-            .read_state_chunk(zerostate.block_id(), 0, PersistentStateKind::Shard, None)
+            .read_state_chunk(
+                zerostate.block_id(),
+                0,
+                PersistentStateKind::Shard,
+                PersistentStatePrefix::Unsplit,
+            )
             .await
             .unwrap();
 
@@ -580,7 +585,7 @@ async fn split_persistent_shard_state_import_from_dump() -> Result<()> {
             &block_id,
             0,
             PersistentStateKind::Shard,
-            Some(meta.parts[0]),
+            PersistentStatePrefix::Split(Some(meta.parts[0])),
         )
         .await
         .unwrap();
