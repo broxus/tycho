@@ -9,6 +9,7 @@ use tycho_types::models::BlockId;
 use crate::proto::blockchain::ArchiveInfo;
 use crate::storage::{
     ArchiveId, BlockStorage, CoreStorage, PersistentStateInfo, PersistentStateKind,
+    PersistentStatePrefix,
 };
 
 /// Abstraction for rpc data providers (storage, S3, etc.)
@@ -38,7 +39,7 @@ pub trait RpcDataProvider: Send + Sync + 'static {
         block_id: &BlockId,
         offset: u64,
         kind: PersistentStateKind,
-        part_shard_prefix: Option<u64>,
+        prefix: PersistentStatePrefix,
     ) -> Result<Option<Bytes>>;
 }
 
@@ -110,11 +111,11 @@ impl RpcDataProvider for StorageRpcDataProvider {
         block_id: &BlockId,
         offset: u64,
         kind: PersistentStateKind,
-        part_shard_prefix: Option<u64>,
+        prefix: PersistentStatePrefix,
     ) -> Result<Option<Bytes>> {
         let persistent_state_storage = self.storage.persistent_state_storage();
         Ok(persistent_state_storage
-            .read_state_chunk(block_id, offset, kind, part_shard_prefix)
+            .read_state_chunk(block_id, offset, kind, prefix)
             .await
             .map(Bytes::from))
     }
@@ -239,7 +240,7 @@ mod s3_impl {
             block_id: &BlockId,
             offset: u64,
             kind: PersistentStateKind,
-            part_shard_prefix: Option<u64>,
+            prefix: PersistentStatePrefix,
         ) -> Result<Option<Bytes>> {
             self.check_rate_limit()?;
             self.check_bandwidth_limit()?;
@@ -250,10 +251,7 @@ mod s3_impl {
                 return Ok(None);
             }
 
-            let path = match self
-                .client
-                .make_state_key(block_id, kind, part_shard_prefix)
-            {
+            let path = match self.client.make_state_key(block_id, kind, prefix) {
                 Ok(path) => path,
                 Err(_) => return Ok(None),
             };
@@ -329,13 +327,21 @@ mod s3_impl {
                 .await?;
             store
                 .put(
-                    &client.make_state_key(&block_id, PersistentStateKind::Shard, None)?,
+                    &client.make_state_key(
+                        &block_id,
+                        PersistentStateKind::Shard,
+                        PersistentStatePrefix::Split(None),
+                    )?,
                     Bytes::from(main.clone()).into(),
                 )
                 .await?;
             store
                 .put(
-                    &client.make_state_key(&block_id, PersistentStateKind::Shard, Some(prefix))?,
+                    &client.make_state_key(
+                        &block_id,
+                        PersistentStateKind::Shard,
+                        PersistentStatePrefix::Split(Some(prefix)),
+                    )?,
                     Bytes::from(part.clone()).into(),
                 )
                 .await?;
@@ -353,13 +359,23 @@ mod s3_impl {
 
             // read the aligned declared part chunk
             let part_chunk = provider
-                .get_persistent_state_chunk(&block_id, 0, PersistentStateKind::Shard, Some(prefix))
+                .get_persistent_state_chunk(
+                    &block_id,
+                    0,
+                    PersistentStateKind::Shard,
+                    PersistentStatePrefix::Split(Some(prefix)),
+                )
                 .await?;
             assert_eq!(part_chunk, Some(Bytes::from(part)));
 
             // request an unaligned chunk
             let unaligned_chunk = provider
-                .get_persistent_state_chunk(&block_id, 1, PersistentStateKind::Shard, Some(prefix))
+                .get_persistent_state_chunk(
+                    &block_id,
+                    1,
+                    PersistentStateKind::Shard,
+                    PersistentStatePrefix::Split(Some(prefix)),
+                )
                 .await?;
             assert_eq!(unaligned_chunk, None);
 
@@ -442,12 +458,12 @@ where
         block_id: &BlockId,
         offset: u64,
         kind: PersistentStateKind,
-        part_shard_prefix: Option<u64>,
+        prefix: PersistentStatePrefix,
     ) -> Result<Option<Bytes>> {
         // Try primary first
         match self
             .primary
-            .get_persistent_state_chunk(block_id, offset, kind, part_shard_prefix)
+            .get_persistent_state_chunk(block_id, offset, kind, prefix)
             .await
         {
             Ok(Some(chunk)) => return Ok(Some(chunk)),
@@ -457,7 +473,7 @@ where
                     ?block_id,
                     offset,
                     ?kind,
-                    ?part_shard_prefix,
+                    ?prefix,
                     "primary state provider error: {e:?}"
                 );
             }
@@ -465,7 +481,7 @@ where
 
         // Fallback
         self.fallback
-            .get_persistent_state_chunk(block_id, offset, kind, part_shard_prefix)
+            .get_persistent_state_chunk(block_id, offset, kind, prefix)
             .await
     }
 }

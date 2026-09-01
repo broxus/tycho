@@ -14,8 +14,8 @@ use tycho_block_util::archive::ArchiveVerifier;
 use tycho_types::models::BlockId;
 
 use crate::storage::{
-    PersistentStateKind, PersistentStateMeta, PersistentStatePartInfo, ShardStateWriter,
-    validate_persistent_state_split_metadata,
+    PersistentStateKind, PersistentStateMeta, PersistentStatePartInfo, PersistentStatePrefix,
+    ShardStateWriter, validate_persistent_state_split_metadata,
 };
 use crate::util::downloader::{DownloaderError, DownloaderResponseHandle, download_and_decompress};
 
@@ -83,6 +83,8 @@ pub struct S3Client {
 }
 
 impl S3Client {
+    pub const SPLIT_ROOT_FILE_EXTENSION: &str = "boc.split";
+
     pub fn new(config: &S3ClientConfig) -> anyhow::Result<Self> {
         let chunk_size = config.chunk_size.as_u64();
         anyhow::ensure!(chunk_size >= 1024, "chunk size must be at least 1 KiB");
@@ -138,7 +140,7 @@ impl S3Client {
         &self,
         block_id: &BlockId,
         kind: PersistentStateKind,
-        part_prefix: Option<u64>,
+        part_prefix: PersistentStatePrefix,
     ) -> anyhow::Result<Path> {
         self.inner.make_state_key(block_id, kind, part_prefix)
     }
@@ -257,17 +259,20 @@ impl S3Client {
         };
 
         // read main object after manifest: is valid or not exists
+        let prefix = if meta.is_none() {
+            PersistentStatePrefix::Unsplit
+        } else {
+            PersistentStatePrefix::Split(None)
+        };
         let main_path = self
             .inner
-            .make_state_key(block_id, kind, None)
+            .make_state_key(block_id, kind, prefix)
             .map_err(persistent_state_error)?;
+
         let main_size = match self.inner.client.head(&main_path).await {
-            Ok(meta) => NonZeroU64::new(meta.size),
-            Err(Error::NotFound { .. }) => None,
+            Ok(meta) if meta.size > 0 => NonZeroU64::new(meta.size).unwrap(),
+            Ok(_) | Err(Error::NotFound { .. }) => return Ok(None),
             Err(e) => return Err(e),
-        };
-        let Some(main_size) = main_size else {
-            return Ok(None);
         };
 
         // return fast if no manifest or kind is queue
@@ -309,7 +314,7 @@ impl S3Client {
             .map(|prefix| {
                 let path = self
                     .inner
-                    .make_state_key(block_id, kind, Some(prefix))
+                    .make_state_key(block_id, kind, PersistentStatePrefix::Split(Some(prefix)))
                     .map_err(persistent_state_error);
                 let client = client.clone();
                 async move {
@@ -367,9 +372,15 @@ impl S3Client {
                 })?,
             None => info.size,
         };
+
+        let prefix = match part_prefix {
+            Some(prefix) => PersistentStatePrefix::Split(Some(prefix)),
+            None if info.split_depth > 0 => PersistentStatePrefix::Split(None),
+            None => PersistentStatePrefix::Unsplit,
+        };
         let path = self
             .inner
-            .make_state_key(&info.block_id, info.kind, part_prefix)
+            .make_state_key(&info.block_id, info.kind, prefix)
             .map_err(persistent_state_error)?;
 
         download_and_decompress(
@@ -449,13 +460,21 @@ impl Inner {
         &self,
         block_id: &BlockId,
         kind: PersistentStateKind,
-        part_prefix: Option<u64>,
+        prefix: PersistentStatePrefix,
     ) -> anyhow::Result<Path> {
-        let file_name = match part_prefix {
-            Some(prefix) => kind
+        let file_name = match prefix {
+            PersistentStatePrefix::Unsplit => kind.make_file_name(block_id),
+            PersistentStatePrefix::Split(None) => {
+                anyhow::ensure!(
+                    kind == PersistentStateKind::Shard,
+                    "only shard state can be split"
+                );
+                kind.make_file_name(block_id)
+                    .with_extension(S3Client::SPLIT_ROOT_FILE_EXTENSION)
+            }
+            PersistentStatePrefix::Split(Some(prefix)) => kind
                 .make_part_file_name(block_id, prefix)
                 .context("persistent state parts are not supported for queue state")?,
-            None => kind.make_file_name(block_id),
         };
         Ok(Path::from(format!(
             "{}{}",
@@ -591,7 +610,11 @@ mod tests {
         put(
             &store,
             client
-                .make_state_key(&legacy_id, PersistentStateKind::Shard, None)
+                .make_state_key(
+                    &legacy_id,
+                    PersistentStateKind::Shard,
+                    PersistentStatePrefix::Unsplit,
+                )
                 .unwrap(),
             b"legacy",
         )
@@ -631,7 +654,11 @@ mod tests {
         put(
             &store,
             client
-                .make_state_key(&split_id, PersistentStateKind::Shard, None)
+                .make_state_key(
+                    &split_id,
+                    PersistentStateKind::Shard,
+                    PersistentStatePrefix::Split(None),
+                )
                 .unwrap(),
             b"main",
         )
@@ -642,7 +669,7 @@ mod tests {
                 .make_state_key(
                     &split_id,
                     PersistentStateKind::Shard,
-                    Some(0x2000000000000000),
+                    PersistentStatePrefix::Split(Some(0x2000000000000000)),
                 )
                 .unwrap(),
             b"first",
@@ -654,7 +681,7 @@ mod tests {
                 .make_state_key(
                     &split_id,
                     PersistentStateKind::Shard,
-                    Some(0xa000000000000000),
+                    PersistentStatePrefix::Split(Some(0xa000000000000000)),
                 )
                 .unwrap(),
             b"second",
@@ -705,7 +732,11 @@ mod tests {
         put(
             &store,
             client
-                .make_state_key(&test_block_id, PersistentStateKind::Shard, None)
+                .make_state_key(
+                    &test_block_id,
+                    PersistentStateKind::Shard,
+                    PersistentStatePrefix::Split(None),
+                )
                 .unwrap(),
             b"main",
         )
@@ -787,7 +818,11 @@ mod tests {
         put(
             &store,
             client
-                .make_state_key(&block_id, PersistentStateKind::Shard, None)
+                .make_state_key(
+                    &block_id,
+                    PersistentStateKind::Shard,
+                    PersistentStatePrefix::Split(None),
+                )
                 .unwrap(),
             &main,
         )
@@ -798,7 +833,7 @@ mod tests {
                 .make_state_key(
                     &block_id,
                     PersistentStateKind::Shard,
-                    Some(0x2000000000000000),
+                    PersistentStatePrefix::Split(Some(0x2000000000000000)),
                 )
                 .unwrap(),
             &part,

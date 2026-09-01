@@ -214,6 +214,18 @@ pub mod rpc {
     #[derive(Debug, Clone, TlRead, TlWrite)]
     #[tl(
         boxed,
+        id = "blockchain.getPersistentShardStateRootChunk",
+        scheme = "proto.tl"
+    )]
+    pub struct GetPersistentShardStateRootChunk {
+        #[tl(with = "tl_block_id")]
+        pub block_id: tycho_types::models::BlockId,
+        pub offset: u64,
+    }
+
+    #[derive(Debug, Clone, TlRead, TlWrite)]
+    #[tl(
+        boxed,
         id = "blockchain.getPersistentShardStatePartChunk",
         scheme = "proto.tl"
     )]

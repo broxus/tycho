@@ -24,8 +24,9 @@ pub use self::gc::ManualGcTrigger;
 pub use self::node_state::{NodeStateStorage, NodeSyncState};
 pub use self::persistent_state::{
     BriefBocHeader, PersistentState, PersistentStateInfo, PersistentStateKind, PersistentStateMeta,
-    PersistentStatePartInfo, PersistentStateStorage, QueueDiffReader, QueueStateReader,
-    QueueStateWriter, ShardStateReader, ShardStateWriter, validate_persistent_state_split_metadata,
+    PersistentStatePartInfo, PersistentStatePrefix, PersistentStateStorage, QueueDiffReader,
+    QueueStateReader, QueueStateWriter, ShardStateReader, ShardStateWriter,
+    validate_persistent_state_split_metadata,
 };
 pub use self::shard_state::{
     BlockInfoForApply, InitiatedStoreState, LoadStateHint, ShardStateStorage,

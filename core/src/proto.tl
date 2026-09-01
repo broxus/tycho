@@ -289,6 +289,18 @@ blockchain.getPersistentShardStateChunk
     = overlay.Response blockchain.Data;
 
 /**
+* Get persistent shard state split root chunk
+*
+* @param block_id       requested block id
+* @param prefix         persistent shard state part prefix
+* @param offset         part offset in bytes
+*/
+blockchain.getPersistentShardStateRootChunk
+    block_id:blockchain.blockId
+    offset:long
+    = overlay.Response blockchain.Data;
+
+/**
 * Get persistent shard state part chunk
 *
 * @param block_id       requested block id
