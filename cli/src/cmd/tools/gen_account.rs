@@ -355,8 +355,7 @@ impl GiverBuilder {
             .0
             .expect("invalid giver state");
 
-        let address;
-        match &mut account.state {
+        let address = match &mut account.state {
             AccountState::Active(state_init) => {
                 let mut data = CellBuilder::new();
 
@@ -377,7 +376,7 @@ impl GiverBuilder {
                 state_init.data = Some(data.build()?);
 
                 // Compute address
-                address = *CellBuilder::build_from(&*state_init)?.repr_hash();
+                *CellBuilder::build_from(&*state_init)?.repr_hash()
             }
             _ => unreachable!("saved state is for the active account"),
         };

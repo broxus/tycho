@@ -56,9 +56,7 @@ impl HashesEntryWriter<'_> {
     }
 
     pub fn clear(&mut self) {
-        for byte in &mut *self.0 {
-            *byte = 0;
-        }
+        self.0.fill(0);
     }
 
     pub fn set_level_mask(&mut self, level_mask: LevelMask) {

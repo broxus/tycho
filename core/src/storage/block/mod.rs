@@ -768,6 +768,7 @@ mod tests {
             total_blocks_removed: 69 + 49,
         });
 
+        #[allow(clippy::single_range_in_vec_init)]
         let removed_ranges = FastHashMap::from_iter([
             (ShardIdent::MASTERCHAIN, vec![1..=69]),
             (ShardIdent::BASECHAIN, vec![1..=49]),

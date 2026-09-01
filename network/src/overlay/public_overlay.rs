@@ -875,11 +875,11 @@ mod tests {
         let entries = generate_public_entries(&overlay, now, 7 * 3 * 10);
 
         let tracker = tokio_util::task::TaskTracker::new();
-        for entries in entries.chunks_exact(7 * 3) {
+        for entries in entries.as_chunks::<{ 7 * 3 }>().0 {
             let overlay = overlay.clone();
             let entries = entries.to_vec();
             tracker.spawn(async move {
-                for entries in entries.chunks_exact(7) {
+                for entries in entries.as_chunks::<7>().0 {
                     overlay.add_untrusted_entries(&local_id, entries, now).await;
                 }
             });

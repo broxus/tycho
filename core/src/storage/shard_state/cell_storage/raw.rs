@@ -352,8 +352,8 @@ impl<'a> RawImportContext<'a> {
         }
 
         let mut refs = ChildHashes::new();
-        for chunk in data[offset..end_offset].chunks_exact(32) {
-            refs.push(HashBytes::from_slice(chunk));
+        for chunk in data[offset..end_offset].as_chunks::<32>().0 {
+            refs.push(*HashBytes::wrap(chunk));
         }
 
         Ok(refs)

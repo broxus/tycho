@@ -85,7 +85,7 @@ impl MempoolAdapterStubImpl {
 
         let mut prev_anchor_id = 0;
         let start_anchor_id = prev_anchor_id + 1;
-        for anchor_id in start_anchor_id.. {
+        for anchor_id in start_anchor_id..=u32::MAX {
             if self.sleep_between_anchors.load(Ordering::Acquire) {
                 tokio::time::sleep(make_round_interval() * 4).await;
             } else {
@@ -159,7 +159,7 @@ impl MempoolAdapterStubImpl {
             .or(now)
             .unwrap_or_default();
 
-        for anchor_id in max_anchor_id + 1.. {
+        for anchor_id in max_anchor_id + 1..=u32::MAX {
             if self.sleep_between_anchors.load(Ordering::Acquire) {
                 tokio::time::sleep(make_round_interval() * 4).await;
             } else {

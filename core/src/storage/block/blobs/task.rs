@@ -84,7 +84,7 @@ impl CommitArchiveTask {
                     ArchiveEntryType::Proof,
                     ArchiveEntryType::QueueDiff,
                 ] {
-                    for raw_block_id in raw_block_ids.chunks_exact(BlockId::SIZE_HINT) {
+                    for raw_block_id in raw_block_ids.as_chunks::<{ BlockId::SIZE_HINT }>().0 {
                         anyhow::ensure!(!cancelled.check(), "task aborted");
 
                         let block_id = BlockId::from_slice(raw_block_id);
