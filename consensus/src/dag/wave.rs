@@ -66,11 +66,7 @@ impl Wave {
     }
 
     pub const fn align_genesis(start_round: u32) -> Round {
-        let mut quotient = (start_round + 1) / WAVE_ROUNDS;
-        if quotient == 0 {
-            quotient = 1;
-        };
-        Round(quotient * WAVE_ROUNDS + 1)
+        Round((start_round / WAVE_ROUNDS) * WAVE_ROUNDS + 2)
     }
 }
 
@@ -89,14 +85,11 @@ mod tests {
                 "genesis round must not be less than start round after alignment, \
                  start_round={start_round}, genesis_round={genesis_round}",
             );
-            if start_round >= WAVE_ROUNDS {
-                // skip check for near zero value - it's unimportant and impossible
-                ensure!(
-                    genesis_round < start_round + WAVE_ROUNDS,
-                    "aligned genesis increased too much, \
+            ensure!(
+                genesis_round < start_round + WAVE_ROUNDS,
+                "aligned genesis increased too much, \
                     start_round={start_round}, genesis_round={genesis_round}",
-                );
-            }
+            );
             anyhow::ensure!(
                 genesis_round > Round::BOTTOM.0,
                 "aligned genesis {genesis_round:?} is too low and will make code panic"
@@ -109,8 +102,8 @@ mod tests {
 
             let role = Wave::role(Round(genesis_round));
             anyhow::ensure!(
-                role == Some(AnchorStageRole::Proof),
-                "genesis must be aligned to be Proof leader; round={genesis_round}",
+                role == Some(AnchorStageRole::Trigger),
+                "genesis must be aligned to be Trigger; round={genesis_round}",
             );
         }
         Ok(())
