@@ -7,6 +7,7 @@ use parking_lot::{Mutex, RwLock};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_crypto::ed25519::KeyPair;
+use tycho_slasher_traits::ValidatorEventsListener;
 use tycho_types::models::{BlockId, BlockIdShort, CollationConfig, ProcessedUptoInfo, ShardIdent};
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuard;
@@ -77,6 +78,7 @@ where
 
     validator: Arc<V>,
     cancel_validation_runner: Mutex<CancelValidationRunnerState>,
+    stats_recorder: Arc<dyn ValidatorEventsListener>,
 
     active_collation_sessions: RwLock<FastHashMap<ShardIdent, Arc<CollationSessionInfo>>>,
     active_collators: FastDashMap<ShardIdent, ActiveCollator<Box<CF::Collator>>>,
@@ -136,6 +138,7 @@ where
         mpool_adapter_factory: MPF,
         validator: V,
         collator_factory: CF,
+        stats_recorder: Arc<dyn ValidatorEventsListener>,
         mempool_config_override: Option<MempoolGlobalConfig>,
     ) -> Arc<CollationManager<CF, V>>
     where
@@ -170,6 +173,7 @@ where
 
             validator,
             cancel_validation_runner: Default::default(),
+            stats_recorder,
 
             active_collation_sessions: Default::default(),
             active_collators: Default::default(),

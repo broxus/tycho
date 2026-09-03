@@ -3,12 +3,14 @@ use std::sync::Arc;
 use anyhow::Result;
 use tycho_slasher_traits::ValidationSessionId;
 use tycho_storage::StorageContext;
+use tycho_storage::kv::ApplyMigrations;
 use tycho_types::cell::HashBytes;
-use weedb::{OwnedSnapshot, rocksdb};
+use weedb::{OwnedSnapshot, WeeDb, rocksdb};
 
-use self::db::{SlasherDb, tables};
+use self::db::{SlasherDb, SlasherDbExt, tables};
 use self::models::{StoredBlocksBatch, StoredVsetInfo, StoredVsetReport};
 use crate::BlocksBatch;
+use crate::storage::db::SlasherTables;
 
 pub mod db;
 pub mod models;
@@ -22,8 +24,11 @@ pub struct SlasherStorage {
 }
 
 impl SlasherStorage {
-    pub fn open(ctx: &StorageContext) -> Result<Self> {
-        let db = ctx.open_preconfigured(SLASHER_DB_SUBDIR)?;
+    pub async fn open(ctx: &StorageContext) -> Result<Self> {
+        let db: WeeDb<SlasherTables> = ctx.open_preconfigured(SLASHER_DB_SUBDIR)?;
+
+        db.normalize_version().await?;
+        db.apply_migrations().await?;
 
         Ok(Self {
             inner: Arc::new(Inner { db }),

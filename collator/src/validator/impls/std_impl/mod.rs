@@ -77,7 +77,7 @@ impl ValidatorStdImpl {
         net_context: ValidatorNetworkContext,
         keypair: Arc<KeyPair>,
         config: ValidatorStdImplConfig,
-        recorder: Arc<dyn ValidatorEventsListener>,
+        stats_recorder: Arc<dyn ValidatorEventsListener>,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -85,7 +85,7 @@ impl ValidatorStdImpl {
                 keypair,
                 sessions: Default::default(),
                 config,
-                events: ValidatorEvents::new(recorder),
+                events: ValidatorEvents::new(stats_recorder),
             }),
         }
     }
