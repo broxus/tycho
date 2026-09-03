@@ -8,7 +8,7 @@ use axum::response::{IntoResponse, Response};
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
-use tycho_block_util::message::{ExtMsgRepr, validate_external_message};
+use tycho_block_util::message::{ExtMsgRepr, parse_external_message};
 use tycho_types::models::*;
 use tycho_types::prelude::*;
 use tycho_util::metrics::HistogramGuard;
@@ -84,14 +84,23 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<RfcBehaviour, Method
             }
         }
         MethodParams::SendMessage(p) => {
-            if let Err(e) = validate_external_message(&p.message).await {
-                return JrpcErrorResponse {
-                    id: Some(req.id),
-                    code: INVALID_BOC_CODE,
-                    message: e.to_string().into(),
-                    behaviour: PhantomData::<RfcBehaviour>,
+            if state.config().validate_external_messages {
+                let msg_cell = match parse_external_message(&p.message).await {
+                    Ok(cell) => cell,
+                    Err(e) => {
+                        return JrpcErrorResponse {
+                            id: Some(req.id),
+                            code: INVALID_BOC_CODE,
+                            message: e.to_string().into(),
+                            behaviour: PhantomData::<RfcBehaviour>,
+                        }
+                        .into_response();
+                    }
+                };
+
+                if let Err(e) = state.check_external_message(msg_cell).await {
+                    return error_to_response(req.id, e);
                 }
-                .into_response();
             }
 
             state.broadcast_external_message(&p.message).await;
@@ -520,6 +529,10 @@ fn error_to_response(id: i64, e: RpcStateError) -> Response {
     let (code, message) = match e {
         RpcStateError::NotReady => (NOT_READY_CODE, Cow::Borrowed("not ready")),
         RpcStateError::NotSupported => (NOT_SUPPORTED_CODE, Cow::Borrowed("method not supported")),
+        RpcStateError::NotAccepted { exit_code } => (
+            INVALID_MESSAGE_CODE,
+            format!("message not accepted, exit code: {exit_code}").into(),
+        ),
         RpcStateError::Internal(e) => (INTERNAL_ERROR_CODE, e.to_string().into()),
         RpcStateError::BadRequest(e) => (INVALID_PARAMS_CODE, e.to_string().into()),
     };

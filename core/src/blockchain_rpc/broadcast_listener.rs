@@ -6,6 +6,7 @@ use bytes::Bytes;
 use futures_util::FutureExt;
 use futures_util::future::BoxFuture;
 use tycho_network::InboundRequestMeta;
+use tycho_types::prelude::Cell;
 
 use super::SelfBroadcastListener;
 
@@ -17,6 +18,13 @@ pub trait BroadcastListener: Send + Sync + 'static {
         meta: Arc<InboundRequestMeta>,
         message: Bytes,
     ) -> Self::HandleMessageFut<'_>;
+}
+
+/// Optional validator for external messages received via overlay broadcast.
+#[async_trait::async_trait]
+pub trait ExternalMessageValidator: Send + Sync + 'static {
+    /// Validate an external message cell.
+    async fn validate(&self, msg_cell: Cell) -> anyhow::Result<()>;
 }
 
 macro_rules! impl_listener_tuple {

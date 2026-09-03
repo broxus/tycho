@@ -22,8 +22,9 @@ use crate::block_strider::{
 #[cfg(feature = "s3")]
 use crate::blockchain_rpc::S3RpcDataProvider;
 use crate::blockchain_rpc::{
-    BlockchainRpcClient, BlockchainRpcService, BroadcastListener, IntoRpcDataProvider,
-    SelfBroadcastListener, StorageRpcDataProvider,
+    BlockchainRpcClient, BlockchainRpcService, BroadcastListener, ExternalMessageValidator,
+    ExternalMessageValidatorHandle, IntoRpcDataProvider, SelfBroadcastListener,
+    StorageRpcDataProvider,
 };
 use crate::global_config::{GlobalConfig, ZerostateId};
 use crate::overlay_client::{PublicOverlayClient, ValidatorsResolver};
@@ -74,6 +75,7 @@ pub struct NodeBase {
     pub core_storage: CoreStorage,
 
     pub blockchain_rpc_client: BlockchainRpcClient,
+    pub external_message_validator_handle: ExternalMessageValidatorHandle,
 
     #[cfg(feature = "s3")]
     pub s3_client: Option<S3Client>,
@@ -233,6 +235,14 @@ impl NodeBase {
         StorageBlockProvider::new(self.core_storage.clone())
     }
 
+    pub fn set_external_message_validator(&self, validator: Arc<dyn ExternalMessageValidator>) {
+        self.external_message_validator_handle
+            .set(validator)
+            .unwrap_or_else(|_| {
+                panic!("external message validator already initialized");
+            });
+    }
+
     /// Creates a new [`BlockStrider`] using options from the base config.
     pub fn build_strider<P, S>(
         &self,
@@ -331,33 +341,38 @@ impl<'a> NodeBaseBuilder<'a, init::Step1> {
             .transpose()
             .context("failed to create S3 client")?;
 
-        let (_, blockchain_rpc_client) = self.step.prev_step.net.add_blockchain_rpc(
-            &self.common.global_config.zerostate,
-            self.step.store.core_storage.clone(),
-            (
-                StorageRpcDataProvider::new(self.step.store.core_storage.clone()),
-                #[cfg(feature = "s3")]
-                s3_client.clone().and_then(|s3_client| {
-                    let proxy_config = self
-                        .common
-                        .base_config
-                        .blockchain_rpc_service
-                        .s3_proxy
-                        .as_ref()?; // when s3_proxy = None - ignore rpc provider
-                    let storage = self.step.store.core_storage.clone();
-                    Some(S3RpcDataProvider::new(s3_client, storage, proxy_config))
-                }),
-            ),
-            remote_broadcast_listener,
-            self_broadcast_listener,
-            self.common.base_config,
-        );
+        let (blockchain_rpc_service, blockchain_rpc_client) =
+            self.step.prev_step.net.add_blockchain_rpc(
+                &self.common.global_config.zerostate,
+                self.step.store.core_storage.clone(),
+                (
+                    StorageRpcDataProvider::new(self.step.store.core_storage.clone()),
+                    #[cfg(feature = "s3")]
+                    s3_client.clone().and_then(|s3_client| {
+                        let proxy_config = self
+                            .common
+                            .base_config
+                            .blockchain_rpc_service
+                            .s3_proxy
+                            .as_ref()?; // when s3_proxy = None - ignore rpc provider
+                        let storage = self.step.store.core_storage.clone();
+                        Some(S3RpcDataProvider::new(s3_client, storage, proxy_config))
+                    }),
+                ),
+                remote_broadcast_listener,
+                self_broadcast_listener,
+                self.common.base_config,
+            );
+
+        let external_message_validator_handle =
+            blockchain_rpc_service.external_message_validator_handle();
 
         Ok(NodeBaseBuilder {
             common: self.common,
             step: init::Step2 {
                 prev_step: self.step,
                 blockchain_rpc_client,
+                external_message_validator_handle,
                 #[cfg(feature = "s3")]
                 s3_client,
             },
@@ -370,6 +385,7 @@ impl<'a> NodeBaseBuilder<'a, init::Final> {
         let net = self.step.prev_step.prev_step.net;
         let store = self.step.prev_step.store;
         let blockchain_rpc_client = self.step.blockchain_rpc_client;
+        let external_message_validator_handle = self.step.external_message_validator_handle;
         #[cfg(feature = "s3")]
         let s3_client = self.step.s3_client;
 
@@ -385,6 +401,7 @@ impl<'a> NodeBaseBuilder<'a, init::Final> {
             storage_context: store.context,
             core_storage: store.core_storage,
             blockchain_rpc_client,
+            external_message_validator_handle,
             #[cfg(feature = "s3")]
             s3_client,
         })
@@ -495,6 +512,7 @@ pub mod init {
     pub struct Step2 {
         pub(super) prev_step: Step1,
         pub(super) blockchain_rpc_client: BlockchainRpcClient,
+        pub(super) external_message_validator_handle: ExternalMessageValidatorHandle,
         #[cfg(feature = "s3")]
         pub(super) s3_client: Option<S3Client>,
     }

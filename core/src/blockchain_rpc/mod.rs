@@ -1,5 +1,6 @@
 pub use self::broadcast_listener::{
-    BoxBroadcastListener, BroadcastListener, BroadcastListenerExt, NoopBroadcastListener,
+    BoxBroadcastListener, BroadcastListener, BroadcastListenerExt, ExternalMessageValidator,
+    NoopBroadcastListener,
 };
 pub use self::client::{
     BlockDataFull, BlockDataFullWithNeighbour, BlockchainRpcClient, BlockchainRpcClientBuilder,
@@ -14,6 +15,7 @@ pub use self::rate_limits::{BlockchainRpcRateLimitsConfig, BlockchainRpcTrafficL
 pub use self::service::S3ProxyConfig;
 pub use self::service::{
     BlockchainRpcService, BlockchainRpcServiceBuilder, BlockchainRpcServiceConfig,
+    ExternalMessageValidatorHandle,
 };
 
 mod broadcast_listener;
