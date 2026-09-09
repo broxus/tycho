@@ -15,8 +15,8 @@ use crate::effects::{AltFormat, Ctx, TaskResult, ValidateCtx};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule, PeerScheduleStateless};
 use crate::models::{
-    AnchorStageRole, Cert, CertDirectDeps, DagPoint, Digest, EvidenceSigError, IndirectLink,
-    PeerCount, PointId, PointInfo, PointMap, Round, StructureIssue, Through, UnixTime,
+    AnchorStageRole, Cert, CertDirectDeps, DagPoint, EvidenceSigError, IndirectLink, PeerCount,
+    PointId, PointInfo, PointMap, Round, StructureIssue, Through, UnixTime,
 };
 use crate::storage::MempoolStore;
 // Note on equivocation.
@@ -233,14 +233,14 @@ impl Verifier {
             return ctx.validated(&cert, ValidateResult::Invalid(reason));
         }
 
-        deps_and_prev.extend(
-            // peer has to jump over a round if it could not produce valid point in prev loc
-            r_1.view(info.author(), |loc| {
-                // do not add same prev_digest twice - it is added as one of 'includes'
-                Self::other_versions(loc, info.prev_digest())
-            })
-            .unwrap_or_default(),
-        );
+        // other versions are checked only if there is no prev digest in point
+        if info.prev_digest().is_none() {
+            deps_and_prev.extend(
+                // peer has to jump over a round if it could not produce valid point in prev loc
+                r_1.view(info.author(), Self::all_versions)
+                    .unwrap_or_default(),
+            );
+        }
 
         let mut latest_invalid_dep = None;
 
@@ -296,17 +296,10 @@ impl Verifier {
         (!info.is_wave_link_ok(is_leader, conf)).then_some(IllFormedReason::BadWaveLink(is_leader))
     }
 
-    fn other_versions(
-        dag_location: &DagLocation,
-        excluded: Option<&Digest>,
-    ) -> Vec<WeakDagPointFuture> {
-        let mut others = Vec::with_capacity(
-            (dag_location.versions.len()).saturating_sub(excluded.is_some() as usize),
-        );
-        for (digest, shared) in &dag_location.versions {
-            if excluded != Some(digest) {
-                others.push(shared.downgrade());
-            }
+    fn all_versions(dag_location: &DagLocation) -> Vec<WeakDagPointFuture> {
+        let mut others = Vec::with_capacity(dag_location.versions.len());
+        for shared in dag_location.versions.values() {
+            others.push(shared.downgrade());
         }
         others
     }
@@ -412,13 +405,13 @@ impl Verifier {
                         );
                         true
                     }
-                    Some(_) | None => {
+                    None => {
                         match dag_point {
                             DagPoint::Valid(valid) => {
                                 // a requirement to reference the first resolved is reproducible;
                                 // if the current point is certifying, then it's prev point
                                 // is supported by majority, and we can't invalidate the current
-                                if prev_digest_in_point.is_none() && valid.is_first_valid() {
+                                if valid.is_first_valid() {
                                     invalid_reason =
                                         Some(InvalidReason::MustHaveReferencedPrevPoint(dep_id));
                                 } // else: will not throw err only when first valid is referenced
@@ -435,8 +428,9 @@ impl Verifier {
                                 } // else: skip, because it may be some other point's dependency
                             }
                         }
-                        continue; // it's not among point dependencies
+                        continue;
                     }
+                    Some(_) => continue, // it's not among point dependencies
                 }
             } else {
                 false
