@@ -357,23 +357,22 @@ mod test {
 
     #[tokio::test]
     async fn test_commit_with_gap() {
-        test_impl(0, Round(25), [9, 5, 17], Round(97)).await;
+        test_impl(0, Round(25), [6, 4, 13], Round(98)).await;
 
-        test_impl(1, Round(23), [10, 4, 18], Round(98)).await;
-        test_impl(2, Round(24), [14, 7, 26], Round(98)).await;
-        test_impl(3, Round(25), [12, 8, 22], Round(98)).await;
+        test_impl(1, Round(22), [6, 4, 13], Round(98)).await;
+        test_impl(2, Round(23), [9, 6, 19], Round(98)).await;
+        test_impl(3, Round(24), [12, 8, 25], Round(98)).await;
+        test_impl(4, Round(25), [15, 10, 31], Round(98)).await;
 
-        test_impl(4, Round(26), [15, 10, 27], Round(98)).await; // N mod 3 == 1
-        test_impl(5, Round(26), [18, 11, 33], Round(98)).await; // N mod 3 == 2 is optimal
-        test_impl(6, Round(26), [16, 10, 30], Round(97)).await; // N mod 3 == 0
+        test_impl(5, Round(26), [12, 8, 27], Round(98)).await; // N mod 4 == 1
+        test_impl(6, Round(26), [14, 9, 31], Round(98)).await; // N mod 4 == 2
+        test_impl(7, Round(26), [16, 10, 35], Round(98)).await; // N mod 4 == 3
+        test_impl(8, Round(26), [18, 11, 39], Round(98)).await; // N mod 4 == 0 is optimal
 
-        test_impl(7, Round(26), [18, 11, 35], Round(98)).await;
-        test_impl(8, Round(26), [20, 12, 39], Round(98)).await;
-        test_impl(9, Round(25), [20, 10, 32], Round(98)).await;
-
-        test_impl(10, Round(26), [22, 11, 35], Round(98)).await;
-        test_impl(11, Round(26), [23, 12, 39], Round(98)).await;
-        test_impl(12, Round(26), [21, 10, 36], Round(98)).await;
+        test_impl(9, Round(26), [17, 9, 33], Round(98)).await;
+        test_impl(10, Round(26), [18, 10, 36], Round(98)).await;
+        test_impl(11, Round(26), [19, 11, 39], Round(98)).await;
+        test_impl(12, Round(26), [20, 12, 42], Round(98)).await;
     }
 
     async fn test_impl(

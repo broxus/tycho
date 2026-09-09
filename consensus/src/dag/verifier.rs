@@ -293,7 +293,7 @@ impl Verifier {
             .is_some_and(|leader| leader == info.author());
         // Proof role introduces scheduled authority; `validate()` recursively checks that
         // later points inherit proof and trigger ids through (in)direct links.
-        (!info.is_wave_link_ok(is_leader, conf)).then_some(IllFormedReason::BadWaveLink(is_leader))
+        (!info.is_wave_link_ok(is_leader)).then_some(IllFormedReason::BadWaveLink(is_leader))
     }
 
     fn all_versions(dag_location: &DagLocation) -> Vec<WeakDagPointFuture> {

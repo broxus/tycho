@@ -9,7 +9,7 @@ use crate::intercom::PeerScheduleStateless;
 use crate::models::{AnchorStageRole, Round};
 
 /// How often the new leader is selected
-pub const WAVE_ROUNDS: u32 = 3;
+pub const WAVE_ROUNDS: u32 = 4;
 
 #[derive(Debug)]
 pub struct Wave {
@@ -58,15 +58,16 @@ impl Wave {
     fn role(round: Round) -> Option<AnchorStageRole> {
         #[allow(clippy::match_same_arms, reason = "comments")]
         match round.0 % WAVE_ROUNDS {
-            0 => None, // anchor candidate (surprisingly, nothing special about this point)
-            1 => Some(AnchorStageRole::Proof),
-            2 => Some(AnchorStageRole::Trigger),
+            0 => None,
+            1 => None,
+            2 => Some(AnchorStageRole::Proof),
+            3 => Some(AnchorStageRole::Trigger),
             _ => unreachable!(),
         }
     }
 
     pub const fn align_genesis(start_round: u32) -> Round {
-        Round((start_round / WAVE_ROUNDS) * WAVE_ROUNDS + 2)
+        Round((start_round / WAVE_ROUNDS) * WAVE_ROUNDS + 3)
     }
 }
 

@@ -102,7 +102,7 @@ impl Producer {
             if proven_vertex.is_some() {
                 let last_own_point = last_own_point.as_ref().expect("guarded by `proven_vertex`");
                 let is_leader = current_leader.is_some_and(|leader| leader == local_id);
-                let is_wave_far_enough = anchors.proof.is_wave_far_enough(current_round, conf);
+                let is_wave_far_enough = anchors.proof.is_wave_far_enough(current_round);
 
                 if let Some((sticky_anchors, _)) = last_own_point.info.sticky_anchors() {
                     if let Some(seq_no) = sticky_anchors.checked_add(1)
