@@ -6,7 +6,6 @@ use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
 use super::link::*;
-use crate::engine::MempoolConfig;
 use crate::models::point::proto_utils::{digests_map, signatures_map, u8_as_u32};
 use crate::models::point::{Digest, Round, UnixTime, proto_utils};
 use crate::models::{PeerCount, PointId, Signature};
@@ -147,16 +146,15 @@ impl PointData {
         is_leader: bool,
         has_prev_point: bool,
         round: Round,
-        conf: &MempoolConfig,
     ) -> bool {
         match &self.role {
             PointRole::Regular => !{
                 is_leader
                     && has_prev_point // optional for Regular and encoded for AnchorProof
-                    && self.anchor_proof.is_wave_far_enough(round, conf)
+                    && self.anchor_proof.is_wave_far_enough(round)
             },
             PointRole::AnchorProof { seq_no: 0, .. } => {
-                is_leader && self.anchor_proof.is_wave_far_enough(round, conf)
+                is_leader && self.anchor_proof.is_wave_far_enough(round)
             }
             PointRole::AnchorProof { .. } | PointRole::AnchorTrigger | PointRole::Genesis => true,
         }
