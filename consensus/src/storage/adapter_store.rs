@@ -315,12 +315,13 @@ impl MempoolAdapterStore {
             let proof = proofs.remove(&anchor_round.next()).with_context(|| {
                 format!("no proof point for commit at round {}", anchor_round.0)
             })?;
+            let prev_anchor = Some(anchor.anchor_proof().top().round())
+                .filter(|r| *r > conf.genesis_round)
+                .map(|r| r.prev());
             result.push(AnchorData {
                 proof_key: proof.key(),
                 anchor,
-                prev_anchor: Some(proof.anchor_proof().target().round())
-                    .filter(|r| *r > conf.genesis_round)
-                    .map(|r| r.prev()),
+                prev_anchor,
                 history: keyed_vec.into_iter().map(|(_, info)| info).collect(),
                 is_executable: false, // define later
             });

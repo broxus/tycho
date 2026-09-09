@@ -205,7 +205,7 @@ impl DagBack {
                 && Some(proof.digest()) == trigger.prev_digest())
             .then(|| trigger.clone());
 
-            lookup_proof_id = proof.anchor_proof().target().id();
+            lookup_proof_id = anchor.anchor_proof().top().id();
 
             // iter is from newest to oldest, restore historical order
             result.push_front(EnqueuedAnchor {
