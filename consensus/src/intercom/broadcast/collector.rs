@@ -7,6 +7,7 @@ use tokio::time::MissedTickBehavior;
 use crate::dag::{DagHead, DagRound};
 use crate::dyn_event;
 use crate::effects::{CollectCtx, Ctx, TaskResult};
+use crate::engine::ConsensusConfigExt;
 use crate::engine::round_watch::{Consensus, RoundWatcher, TopKnownAnchor};
 use crate::intercom::BroadcasterSignal;
 use crate::models::Round;
@@ -189,8 +190,7 @@ impl CollectorTask {
         };
 
         let new_pause_at = {
-            let pause_at =
-                top_known_anchor + self.ctx.conf().consensus.max_consensus_lag_rounds.get();
+            let pause_at = top_known_anchor + self.ctx.conf().consensus.pause_offset();
             (self.current_dag_round.round() <= top_known_anchor).then_some(pause_at.0)
         };
 
