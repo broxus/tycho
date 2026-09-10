@@ -2,7 +2,7 @@ use tycho_crypto::ed25519::KeyPair;
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
-use crate::dag::{DagHead, DagRound};
+use crate::dag::{DagHead, DagRound, RequireRegularPoints};
 use crate::effects::{AltFormat, RoundCtx};
 use crate::engine::{InputBuffer, MempoolConfig};
 use crate::models::{
@@ -60,6 +60,7 @@ impl Producer {
             last_own_point,
             input_buffer,
             key_pair,
+            head.current().require_regular_points(),
             head.current().round(),
             head.current().leader(),
             &includes,
@@ -74,6 +75,7 @@ impl Producer {
         input_buffer: &InputBuffer,
 
         key_pair: &KeyPair,
+        require_regular_points: RequireRegularPoints,
         current_round: Round,
         current_leader: Option<&PeerId>,
 
@@ -99,6 +101,10 @@ impl Producer {
         let anchors = link::anchor_links(current_round, includes, witness);
 
         let role = 'role: {
+            if require_regular_points.0 {
+                break 'role PointRole::Regular;
+            }
+
             if proven_vertex.is_some() {
                 let last_own_point = last_own_point.as_ref().expect("guarded by `proven_vertex`");
                 let is_leader = current_leader.is_some_and(|leader| leader == local_id);

@@ -189,6 +189,10 @@ impl PointInfo {
         }
     }
 
+    pub fn is_regular(&self) -> bool {
+        matches!(self.0.data.role, PointRole::Regular)
+    }
+
     pub fn is_anchor_proof(&self) -> bool {
         self.0.data.role.is_anchor_proof()
     }

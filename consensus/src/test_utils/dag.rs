@@ -9,7 +9,9 @@ use tycho_crypto::ed25519::KeyPair;
 use tycho_network::{Network, OverlayId, PeerId, PrivateOverlay, Router};
 use tycho_util::FastHashMap;
 
-use crate::dag::{BasicVerifier, DagRound, LastOwnPoint, Producer, ValidateResult, Verifier};
+use crate::dag::{
+    BasicVerifier, DagRound, LastOwnPoint, Producer, RequireRegularPoints, ValidateResult, Verifier,
+};
 use crate::effects::{Ctx, EngineCtx, MempoolRayon, RoundCtx, TaskTracker, ValidateCtx};
 use crate::engine::{InputBuffer, MempoolConfig, MempoolMergedConfig};
 use crate::intercom::{
@@ -170,6 +172,7 @@ fn point<const PEER_COUNT: usize>(
         last_own_point.as_ref(),
         input_buffer,
         &peers[idx].1,
+        RequireRegularPoints(false),
         round,
         round_leader,
         includes,
