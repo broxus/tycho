@@ -10,7 +10,7 @@ use tycho_util::metrics::HistogramGuard;
 
 use crate::dag::dag_location::DagLocation;
 use crate::dag::dag_point_future::WeakDagPointFuture;
-use crate::dag::{DagRound, Wave, WeakDagRound};
+use crate::dag::{DagRound, RequireRegularPoints, Wave, WeakDagRound};
 use crate::effects::{AltFormat, Ctx, TaskResult, ValidateCtx};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule, PeerScheduleStateless};
@@ -82,6 +82,8 @@ pub enum IllFormedReason {
     #[error("{} peers is not enough in {:?} map for 3F+1={}", .0.0, .0.2, .0.1.full())]
     LackOfPeers((usize, PeerCount, PointMap)),
     // Errors below are thrown from `validate()` because they require DagRound
+    #[error("point was required to be regular in front of vset change")]
+    NotRegular,
     #[error("bad wave link; is_leader={0}")]
     BadWaveLink(bool),
 }
@@ -196,7 +198,7 @@ impl Verifier {
 
         let r_0 = r_0_weak.upgrade();
 
-        if let Some(reason) = Self::check_wave_link(&info, r_0.as_ref(), peer_schedule, ctx.conf())
+        if let Some(reason) = Self::check_ill_formed(&info, r_0.as_ref(), peer_schedule, ctx.conf())
         {
             return ctx.validated(&cert, ValidateResult::IllFormed(reason));
         }
@@ -211,8 +213,11 @@ impl Verifier {
             "Coding error: dag round mismatches point round"
         );
 
+        // dont overwrite value if Some - use `get_or_insert()`
+        let mut invalid_reason = None;
+
         let Some(r_1) = r_0.prev().upgrade() else {
-            let reason = InvalidReason::NoRoundInDag(PointMap::Includes);
+            let reason = invalid_reason.unwrap_or(InvalidReason::NoRoundInDag(PointMap::Includes));
             return ctx.validated(&cert, ValidateResult::Invalid(reason));
         };
         let r_2_opt = r_1.prev().upgrade();
@@ -228,9 +233,7 @@ impl Verifier {
         cert.set_deps(cert_deps);
 
         if r_2_opt.is_none() && !info.witness().is_empty() {
-            // to catch history conflict earlier we've spawned deps and certified the prev one
-            let reason = InvalidReason::NoRoundInDag(PointMap::Witness);
-            return ctx.validated(&cert, ValidateResult::Invalid(reason));
+            _ = invalid_reason.get_or_insert(InvalidReason::NoRoundInDag(PointMap::Witness));
         }
 
         // other versions are checked only if there is no prev digest in point
@@ -244,30 +247,35 @@ impl Verifier {
 
         let mut latest_invalid_dep = None;
 
-        let is_valid_fut =
-            Self::check_valid(&info, deps_and_prev, &mut latest_invalid_dep, ctx.conf())
-                .instrument(entered_span.exit());
+        let is_valid_fut = Self::check_valid(
+            &info,
+            deps_and_prev,
+            &mut latest_invalid_dep,
+            r_0.require_regular_points(),
+            ctx.conf(),
+        )
+        .instrument(entered_span.exit());
 
         // drop strong links before await
-        drop(r_0);
-        drop(r_1);
-        drop(r_2_opt);
+        drop((r_0, r_1, r_2_opt));
 
-        let invalid_reason = match is_valid_fut.await? {
-            Some(direct) => Some(direct),
-            None => {
-                Self::check_indirect_links(
-                    &info,
-                    &mut latest_invalid_dep,
-                    &r_0_weak,
-                    &downloader,
-                    &store,
-                    &ctx,
-                )
-                .instrument(ctx.span().clone())
-                .await?
+        if let Some(reason) = is_valid_fut.await? {
+            _ = invalid_reason.get_or_insert(reason);
+        } else {
+            let indirect_fut = Self::check_indirect_links(
+                &info,
+                &mut latest_invalid_dep,
+                &r_0_weak,
+                &downloader,
+                &store,
+                &ctx,
+            )
+            .instrument(ctx.span().clone());
+
+            if let Some(reason) = indirect_fut.await? {
+                _ = invalid_reason.get_or_insert(reason);
             }
-        };
+        }
 
         let valid_result = if let Some(reason) = invalid_reason {
             ValidateResult::Invalid(reason)
@@ -280,20 +288,33 @@ impl Verifier {
         ctx.validated(&cert, valid_result)
     }
 
-    fn check_wave_link(
+    fn check_ill_formed(
         info: &PointInfo,
         point_round: Option<&DagRound>,
         peer_schedule: &PeerSchedule,
         conf: &MempoolConfig,
     ) -> Option<IllFormedReason> {
-        let is_leader = point_round
-            .ok_or_else(|| Wave::new(info.round(), &peer_schedule.atomic(), conf).leader())
-            .as_ref()
-            .map_or_else(|fallback| fallback.as_ref(), |round| round.leader())
-            .is_some_and(|leader| leader == info.author());
-        // Proof role introduces scheduled authority; `validate()` recursively checks that
-        // later points inherit proof and trigger ids through (in)direct links.
-        (!info.is_wave_link_ok(is_leader)).then_some(IllFormedReason::BadWaveLink(is_leader))
+        let (require_regular_points, is_leader) = match &point_round {
+            Some(dag_round) => {
+                let is_leader = (dag_round.leader()).is_some_and(|leader| leader == info.author());
+                (dag_round.require_regular_points(), is_leader)
+            }
+            None => {
+                let guard = peer_schedule.atomic();
+                let require_regular_points = guard.require_regular_points(info.round());
+                let wave = Wave::new(info.round(), &guard, conf);
+                drop(guard);
+                let is_leader = wave.leader().is_some_and(|leader| leader == info.author());
+                (require_regular_points, is_leader)
+            }
+        };
+        if require_regular_points.0 {
+            (!info.is_regular()).then_some(IllFormedReason::NotRegular)
+        } else {
+            // Proof role introduces scheduled authority; `validate()` recursively checks that
+            // later points inherit proof and trigger ids through (in)direct links.
+            (!info.is_wave_link_ok(is_leader)).then_some(IllFormedReason::BadWaveLink(is_leader))
+        }
     }
 
     fn all_versions(dag_location: &DagLocation) -> Vec<WeakDagPointFuture> {
@@ -363,6 +384,7 @@ impl Verifier {
         info: &PointInfo,
         mut deps_and_prev: FuturesUnordered<WeakDagPointFuture>,
         latest_invalid_dep: &mut Option<InvalidDependency>,
+        require_regular_points: RequireRegularPoints,
         conf: &MempoolConfig,
     ) -> TaskResult<Option<InvalidReason>> {
         let prev_digest_in_point = info.prev_digest();
@@ -445,7 +467,9 @@ impl Verifier {
                 }
             };
 
-            if is_prev_point && let Some(reason) = Self::is_proof_ok(info, dep) {
+            if is_prev_point
+                && let Some(reason) = Self::is_proof_ok(info, dep, require_regular_points)
+            {
                 invalid_reason = Some(reason);
             }
 
@@ -690,6 +714,7 @@ impl Verifier {
     fn is_proof_ok(
         info: &PointInfo,   // @ r+0
         proven: &PointInfo, // @ r-1
+        require_regular_points: RequireRegularPoints,
     ) -> Option<InvalidReason> {
         assert_eq!(
             info.author(),
@@ -709,7 +734,7 @@ impl Verifier {
             proven.digest(),
             "Coding error: mismatched previous point of the same author, must have been checked before"
         );
-        if proven.is_anchor_proof() {
+        if !require_regular_points.0 && proven.is_anchor_proof() {
             if !info.is_anchor_trigger() {
                 return Some(InvalidReason::NotTrigger(*proven.id()));
             }

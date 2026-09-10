@@ -49,6 +49,8 @@ pub trait ConsensusConfigExt {
 
     fn max_total_rounds(&self) -> u32;
 
+    fn pause_offset(&self) -> u32;
+
     fn min_round_duration_millis(&self) -> NonZeroU64;
 
     fn validate(&self) -> Result<()>;
@@ -89,6 +91,12 @@ impl ConsensusConfigExt for ConsensusConfig {
         self.sync_support_rounds.get() as u32 // to follow consensus during sync
             + self.reset_rounds()
             - DAG_ROUNDS_TO_DROP // pure config math: ignore implementation detail
+    }
+
+    /// applies only to TKA internally in mempool; allows to stop mempool a bit before vset
+    /// switch round to suppress leader-stage points; see [`crate::dag::RequireRegularPoints`]
+    fn pause_offset(&self) -> u32 {
+        self.max_consensus_lag_rounds.get() as u32 - WAVE_ROUNDS
     }
 
     /// applicable only if mempool is configured for stable round rate and it is not paused

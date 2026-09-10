@@ -32,6 +32,7 @@ pub struct DagRoundInner {
     round: Round,
     peer_count: PeerCount,
     wave_leader: Option<PeerId>,
+    require_regular_points: RequireRegularPoints,
     used_anchor_proof: OnceLock<PeerId>,
     locations: FastDashMap<PeerId, DagLocation>,
     threshold: Threshold,
@@ -39,6 +40,10 @@ pub struct DagRoundInner {
     /// sequence of prev rounds: 0 for newest; never empty
     prevs: Vec<WeakDagRound>,
 }
+
+/// last wave of an ending vset epoch is leaderless (incl no sticky points) for smooth transition
+#[derive(Copy, Clone)]
+pub struct RequireRegularPoints(pub bool);
 
 impl WeakDagRound {
     pub fn upgrade(&self) -> Option<DagRound> {
@@ -84,10 +89,15 @@ impl DagRound {
         peer_schedule: &PeerSchedule,
         conf: &MempoolConfig,
     ) -> Self {
-        let (peers, wave) = {
+        let (peers, require_regular_points, wave) = {
             let guard = peer_schedule.atomic();
+            let require_regular_points = guard.require_regular_points(round);
             let peers = guard.peers_for(round).clone();
-            (peers, Wave::new(round, &guard, conf))
+            (
+                peers,
+                require_regular_points,
+                Wave::new(round, &guard, conf),
+            )
         };
 
         let peer_count = if round > conf.genesis_round {
@@ -123,6 +133,7 @@ impl DagRound {
             round,
             peer_count,
             wave_leader: wave.leader(),
+            require_regular_points,
             used_anchor_proof: OnceLock::new(),
             locations: FastDashMap::with_capacity_and_hasher(peers.len(), Default::default()),
             threshold: Threshold::new(round, peer_count, conf),
@@ -147,6 +158,10 @@ impl DagRound {
 
     pub fn leader(&self) -> Option<&PeerId> {
         self.0.wave_leader.as_ref()
+    }
+
+    pub fn require_regular_points(&self) -> RequireRegularPoints {
+        self.0.require_regular_points
     }
 
     pub fn used_anchor_proof(&self) -> &OnceLock<PeerId> {
