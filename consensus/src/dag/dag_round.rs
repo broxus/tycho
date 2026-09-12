@@ -163,10 +163,11 @@ impl DagRound {
     {
         match self.0.locations.get_mut(author) {
             Some(mut loc) => edit(loc.value_mut()),
-            None => panic!(
-                "DAG must not contain location {} @ {}",
-                author.alt(),
-                self.round().0
+            None => edit(
+                // peer from next vset is able to create an ill-formed point in prev vset epoch
+                (self.0.locations.entry(*author))
+                    .or_insert(DagLocation::new(self.downgrade()))
+                    .value_mut(),
             ),
         }
     }
