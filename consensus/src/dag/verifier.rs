@@ -67,6 +67,8 @@ pub enum IllFormedReason {
     Structure(StructureIssue),
     #[error("too many sticky anchors: {0}")]
     TooManyStickyAnchors(u8),
+    #[error("wrong last sticky sequence flag")]
+    BadLastStickyFlag,
     #[error("links anchor across genesis")]
     LinksAcrossGenesis,
     #[error("author is not scheduled: outdated vset or author out of vset")]
@@ -94,6 +96,8 @@ pub enum InvalidReason {
     DependencyRoundDropped,
     #[error("point must be either a trigger or sticky after an anchor proof")]
     NotTrigger(PointId),
+    #[error("terminal trigger follows non-final proof {:?}", .0.alt())]
+    TerminalTriggerBeforeLastProof(PointId),
     #[error("time is not greater than in prev point {:?}", .0.alt())]
     TimeNotGreaterThanInPrevPoint(PointId),
     #[error("anchor proof does not inherit time from its candidate {:?}", .0.alt())]
@@ -472,10 +476,10 @@ impl Verifier {
                     let tuple = (AnchorStageRole::Proof, dep_id);
                     invalid_reason = Some(InvalidReason::AnchorLink(tuple));
                 }
-                if let Some(sticky_anchors) = info.sticky_anchors()
+                if let Some((sticky_anchors, _)) = info.sticky_anchors()
                     && sticky_anchors > 0
                 {
-                    let prev_sticky = dep.sticky_anchors();
+                    let prev_sticky = dep.sticky_anchors().map(|(seq_no, _)| seq_no);
                     let is_sticky_sequence_ok = sticky_anchors <= conf.consensus.sticky_anchors
                         && prev_sticky
                             .and_then(|seq_no| seq_no.checked_add(1))
@@ -715,8 +719,14 @@ impl Verifier {
             proven.digest(),
             "Coding error: mismatched previous point of the same author, must have been checked before"
         );
-        if proven.is_anchor_proof() && !info.is_anchor_trigger() {
-            return Some(InvalidReason::NotTrigger(*proven.id()));
+        if proven.is_anchor_proof() {
+            if !info.is_anchor_trigger() {
+                return Some(InvalidReason::NotTrigger(*proven.id()));
+            }
+            let is_terminal_trigger = !info.is_anchor_proof();
+            if is_terminal_trigger && let Some((_, false)) = proven.sticky_anchors() {
+                return Some(InvalidReason::TerminalTriggerBeforeLastProof(*proven.id()));
+            }
         }
 
         if info.time() <= proven.time() {
@@ -875,10 +885,12 @@ impl<'a> BasicVerifierInner<'a> {
 
         (self.info.check_structure(false)).map_err(IllFormedReason::Structure)?;
 
-        if let Some(sticky_anchors) = self.info.sticky_anchors()
-            && sticky_anchors > self.conf.consensus.sticky_anchors
-        {
-            return Err(IllFormedReason::TooManyStickyAnchors(sticky_anchors));
+        if let Some((sticky_anchors, is_last)) = self.info.sticky_anchors() {
+            if sticky_anchors > self.conf.consensus.sticky_anchors {
+                return Err(IllFormedReason::TooManyStickyAnchors(sticky_anchors));
+            } else if is_last != (sticky_anchors == self.conf.consensus.sticky_anchors) {
+                return Err(IllFormedReason::BadLastStickyFlag);
+            }
         }
 
         if self.info.anchor_proof().linked().round() < self.conf.genesis_round

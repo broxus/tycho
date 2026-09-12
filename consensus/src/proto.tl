@@ -60,7 +60,7 @@ consensus.peerSignaturePair
 * Representation of Point Role enum
 */
 consensus.pointRole.regular                                           = consensus.PointRole;
-consensus.pointRole.proof                  seq_no:int                 = consensus.PointRole;
+consensus.pointRole.proof         seq_no:int     is_last:Bool         = consensus.PointRole;
 consensus.pointRole.trigger                                           = consensus.PointRole;
 consensus.pointRole.genesis                                           = consensus.PointRole;
 
@@ -130,7 +130,7 @@ journal.recordKey
 * Stored journal record value
 */
 journal.recordValue
-    is_ban_related:bool
+    is_ban_related:Bool
     kind:journal.RecordKind
     peer_id:int256
     point_keys:(vector journal.PointRef)
@@ -160,7 +160,7 @@ journal.eventTag.evidenceNoInclusion                        = journal.EventTag;
 /*
 * Journal point reference
 */
-journal.pointRef            bytes           bool            = journal.PointRef;
+journal.pointRef            bytes           Bool            = journal.PointRef;
 
 /*
 * Ref counted journal point representation

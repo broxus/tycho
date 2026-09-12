@@ -51,6 +51,7 @@ pub enum PointRole {
     AnchorProof {
         #[tl(with = "u8_as_u32")]
         seq_no: u8,
+        is_last: bool,
     },
     /// the last trigger in sticky chain; the single one if no sticky anchors
     #[tl(id = "consensus.pointRole.trigger")]
@@ -60,7 +61,7 @@ pub enum PointRole {
 }
 
 impl PointRole {
-    pub(super) const MAX_BYTE_SIZE: usize = 4 + 4;
+    pub(super) const MAX_BYTE_SIZE: usize = 4 + 4 + 4;
 
     pub fn is_anchor_proof(&self) -> bool {
         match self {
@@ -72,7 +73,7 @@ impl PointRole {
     pub fn is_anchor_trigger(&self) -> bool {
         match self {
             Self::Regular => false,
-            Self::AnchorProof { seq_no } => *seq_no > 0,
+            Self::AnchorProof { seq_no, .. } => *seq_no > 0,
             Self::AnchorTrigger | Self::Genesis => true,
         }
     }
@@ -147,7 +148,7 @@ impl PointData {
                     && has_prev_point // optional for Regular and encoded for AnchorProof
                     && self.anchor_proof.is_wave_far_enough(round, conf)
             },
-            PointRole::AnchorProof { seq_no: 0 } => {
+            PointRole::AnchorProof { seq_no: 0, .. } => {
                 is_leader && self.anchor_proof.is_wave_far_enough(round, conf)
             }
             PointRole::AnchorProof { .. } | PointRole::AnchorTrigger | PointRole::Genesis => true,

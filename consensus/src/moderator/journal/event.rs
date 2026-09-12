@@ -236,6 +236,7 @@ impl JournalDagEvent {
             | InvalidReason::NoRoundInDag(_) | InvalidReason::DependencyRoundDropped
             | InvalidReason::DepNotFound(_) => {},
             InvalidReason::NotTrigger(point_id)
+            | InvalidReason::TerminalTriggerBeforeLastProof(point_id)
             | InvalidReason::TimeNotGreaterThanInPrevPoint(point_id)
             | InvalidReason::AnchorProofDoesntInheritAnchorTime(point_id)
             | InvalidReason::AnchorTimeNotInheritedFromProof(point_id)
