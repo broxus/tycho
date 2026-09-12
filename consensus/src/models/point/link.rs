@@ -40,7 +40,7 @@ impl AnchorLink {
 #[tl(boxed, id = "consensus.link.indirect", scheme = "proto.tl")]
 pub struct IndirectLink {
     pub to: PointId,
-    pub path: Through,
+    pub through: Through,
 }
 
 impl IndirectLink {
@@ -81,7 +81,7 @@ impl IndirectLink {
         fill_next(4, &PeerId::TL_ID.to_le_bytes());
         fill_next(PeerId::MAX_TL_BYTES - 4, &self.to.author.0);
 
-        let (tl_id, peer_id) = match &self.path {
+        let (tl_id, peer_id) = match &self.through {
             Through::Includes(peer_id) => (Through::TL_ID_INCLUDES, peer_id),
             Through::Witness(peer_id) => (Through::TL_ID_WITNESS, peer_id),
         };
@@ -108,7 +108,7 @@ impl AltFormat for IndirectLink {}
 impl Debug for AltFmt<'_, IndirectLink> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let inner = AltFormat::unpack(self);
-        write!(f, "to {:?} {:?}", inner.to.alt(), inner.path.alt())
+        write!(f, "to {:?} {:?}", inner.to.alt(), inner.through.alt())
     }
 }
 
@@ -139,7 +139,7 @@ impl IndirectLink {
     pub fn random() -> Self {
         Self {
             to: PointId::random(),
-            path: Through::random(),
+            through: Through::random(),
         }
     }
 }

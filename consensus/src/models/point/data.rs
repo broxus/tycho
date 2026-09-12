@@ -78,6 +78,13 @@ impl PointRole {
         }
     }
 
+    pub fn is_anchor_stage(&self, role: AnchorStageRole) -> bool {
+        match role {
+            AnchorStageRole::Proof => self.is_anchor_proof(),
+            AnchorStageRole::Trigger => self.is_anchor_trigger(),
+        }
+    }
+
     fn requires_prev_point(&self) -> bool {
         match self {
             Self::Regular | Self::Genesis => false,
@@ -94,14 +101,10 @@ pub enum StructureIssue {
     BadGenesisPrevPoint,
     #[error("{0:?} map must not contain author")]
     AuthorInMap(PointMap),
-    #[error("{0:?} must have prev point")]
-    RolePrevPoint(AnchorStageRole),
     #[error("Trigger must link prev point as anchor proof")]
     TriggerBadProofLink,
     #[error("bad {0:?} link through {1:?} map")]
     Link(AnchorStageRole, PointMap),
-    #[error("anchor stage role {0:?}")]
-    SelfAnchorStage(AnchorStageRole),
     #[error("anchor time")]
     AnchorTime,
     #[error("must have prev point")]
@@ -117,8 +120,12 @@ pub enum PointMap {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AnchorStageRole {
-    Trigger,
     Proof,
+    Trigger,
+}
+
+impl AnchorStageRole {
+    pub const ALL: [Self; 2] = [Self::Proof, Self::Trigger];
 }
 
 impl PointData {
@@ -187,24 +194,10 @@ impl PointData {
             return Err(StructureIssue::TriggerBadProofLink);
         }
 
-        for role in [AnchorStageRole::Proof, AnchorStageRole::Trigger] {
-            let is_in_role = match role {
-                AnchorStageRole::Trigger => self.role.is_anchor_trigger(),
-                AnchorStageRole::Proof => self.role.is_anchor_proof(),
-            };
-            if is_in_role {
-                if !has_prev_point {
-                    return Err(StructureIssue::RolePrevPoint(role));
-                }
-                // leader must maintain its chain of proofs,
-                // while others must link to previous points (checked at the end of this method)
-                if self.evidence.is_empty() {
-                    return Err(StructureIssue::SelfAnchorStage(role));
-                }
-            }
+        for role in AnchorStageRole::ALL {
             let link = match role {
-                AnchorStageRole::Trigger => &self.anchor_trigger,
                 AnchorStageRole::Proof => &self.anchor_proof,
+                AnchorStageRole::Trigger => &self.anchor_trigger,
             };
             if let Some(map) = match link {
                 AnchorLink::Direct(Through::Includes(peer)) => {
@@ -213,7 +206,7 @@ impl PointData {
                 AnchorLink::Direct(Through::Witness(peer)) => {
                     (!self.witness.contains_key(peer)).then_some(PointMap::Witness)
                 }
-                AnchorLink::Indirect(IndirectLink { to, path }) => match path {
+                AnchorLink::Indirect(IndirectLink { to, through }) => match through {
                     Through::Includes(peer) => {
                         { !self.includes.contains_key(peer) || to.round >= round.prev() }
                             .then_some(PointMap::Includes)

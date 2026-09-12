@@ -96,33 +96,32 @@ impl Producer {
             _ => None,
         };
 
-        let (anchor_proof, anchor_trigger) = link::anchor_links(current_round, includes, witness);
+        let anchors = link::anchor_links(current_round, includes, witness);
 
-        let role = if proven_vertex.is_some() {
-            let last_own_point = last_own_point.as_ref().expect("guarded by `proven_vertex`");
-            let is_leader = current_leader.is_some_and(|leader| leader == local_id);
-            let is_wave_far_enough = anchor_proof.is_wave_far_enough(current_round, conf);
+        let role = 'role: {
+            if proven_vertex.is_some() {
+                let last_own_point = last_own_point.as_ref().expect("guarded by `proven_vertex`");
+                let is_leader = current_leader.is_some_and(|leader| leader == local_id);
+                let is_wave_far_enough = anchors.proof.is_wave_far_enough(current_round, conf);
 
-            if let Some((sticky_anchors, _)) = last_own_point.info.sticky_anchors() {
-                if let Some(seq_no) = sticky_anchors.checked_add(1)
-                    && seq_no <= conf.consensus.sticky_anchors
-                {
-                    PointRole::AnchorProof {
-                        seq_no,
-                        is_last: seq_no == conf.consensus.sticky_anchors,
+                if let Some((sticky_anchors, _)) = last_own_point.info.sticky_anchors() {
+                    if let Some(seq_no) = sticky_anchors.checked_add(1)
+                        && seq_no <= conf.consensus.sticky_anchors
+                    {
+                        break 'role PointRole::AnchorProof {
+                            seq_no,
+                            is_last: seq_no == conf.consensus.sticky_anchors,
+                        };
+                    } else {
+                        break 'role PointRole::AnchorTrigger;
                     }
-                } else {
-                    PointRole::AnchorTrigger
+                } else if is_leader && is_wave_far_enough {
+                    break 'role PointRole::AnchorProof {
+                        seq_no: 0,
+                        is_last: 0 == conf.consensus.sticky_anchors,
+                    };
                 }
-            } else if is_leader && is_wave_far_enough {
-                PointRole::AnchorProof {
-                    seq_no: 0,
-                    is_last: 0 == conf.consensus.sticky_anchors,
-                }
-            } else {
-                PointRole::Regular
             }
-        } else {
             PointRole::Regular
         };
 
@@ -139,7 +138,7 @@ impl Producer {
 
         let (time, anchor_time) = Self::get_time(
             role.is_anchor_proof(),
-            &anchor_proof,
+            &anchors.proof,
             prev_info,
             includes,
             witness,
@@ -175,8 +174,8 @@ impl Producer {
                 includes,
                 witness,
                 evidence,
-                anchor_proof,
-                anchor_trigger,
+                anchor_proof: anchors.proof,
+                anchor_trigger: anchors.trigger,
                 role,
                 time,
                 anchor_time,
@@ -247,8 +246,8 @@ impl Producer {
 
                 info.time()
             }
-            AnchorLink::Direct(path) | AnchorLink::Indirect(IndirectLink { path, .. }) => {
-                let (peer_id, through) = match path {
+            AnchorLink::Direct(through) | AnchorLink::Indirect(IndirectLink { through, .. }) => {
+                let (peer_id, through) = match through {
                     Through::Includes(peer_id) => (peer_id, &includes),
                     Through::Witness(peer_id) => (peer_id, &witness),
                 };
@@ -309,11 +308,16 @@ impl Producer {
 mod link {
     use super::*;
 
+    pub(super) struct AnchorLinks {
+        pub proof: AnchorLink,
+        pub trigger: AnchorLink,
+    }
+
     pub fn anchor_links(
         current_round: Round,
         includes: &FastHashMap<PeerId, PointInfo>,
         witness: &FastHashMap<PeerId, PointInfo>,
-    ) -> (AnchorLink, AnchorLink) {
+    ) -> AnchorLinks {
         let trigger_source = link_source(includes, witness, AnchorStageRole::Trigger);
         let max_proof_source = link_source(includes, witness, AnchorStageRole::Proof);
 
@@ -325,15 +329,16 @@ mod link {
             max_proof_source
         };
 
-        let anchor_proof = link(current_round, proof_source, AnchorStageRole::Proof);
-        let anchor_trigger = link(current_round, trigger_source, AnchorStageRole::Trigger);
-        (anchor_proof, anchor_trigger)
+        AnchorLinks {
+            proof: link(current_round, proof_source, AnchorStageRole::Proof),
+            trigger: link(current_round, trigger_source, AnchorStageRole::Trigger),
+        }
     }
 
     #[derive(Clone, Copy)]
     struct LinkSource<'a> {
         info: &'a PointInfo,
-        path: Through,
+        through: Through,
     }
 
     fn link_source<'a>(
@@ -357,11 +362,11 @@ mod link {
         match newer_witness {
             Some((_, info)) => LinkSource {
                 info,
-                path: Through::Witness(*info.author()),
+                through: Through::Witness(*info.author()),
             },
             None => LinkSource {
                 info: incl_info,
-                path: Through::Includes(*incl_info.author()),
+                through: Through::Includes(*incl_info.author()),
             },
         }
     }
@@ -371,22 +376,22 @@ mod link {
         source: LinkSource<'_>,
         link_field: AnchorStageRole,
     ) -> AnchorLink {
-        let direct_round = match source.path {
+        let direct_round = match source.through {
             Through::Includes(_) => current_round.prev(),
             Through::Witness(_) => current_round.prev().prev(),
         };
 
         let is_anchor_role = match link_field {
-            AnchorStageRole::Trigger => source.info.is_anchor_trigger(),
             AnchorStageRole::Proof => source.info.is_anchor_proof(),
+            AnchorStageRole::Trigger => source.info.is_anchor_trigger(),
         };
 
         if source.info.round() == direct_round && is_anchor_role {
-            AnchorLink::Direct(source.path)
+            AnchorLink::Direct(source.through)
         } else {
             AnchorLink::Indirect(IndirectLink {
                 to: source.info.anchor(link_field).top().id(),
-                path: source.path,
+                through: source.through,
             })
         }
     }

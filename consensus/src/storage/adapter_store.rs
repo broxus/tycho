@@ -318,7 +318,7 @@ impl MempoolAdapterStore {
             result.push(AnchorData {
                 proof_key: proof.key(),
                 anchor,
-                prev_anchor: Some(proof.anchor_proof().linked().round())
+                prev_anchor: Some(proof.anchor_proof().target().round())
                     .filter(|r| *r > conf.genesis_round)
                     .map(|r| r.prev()),
                 history: keyed_vec.into_iter().map(|(_, info)| info).collect(),

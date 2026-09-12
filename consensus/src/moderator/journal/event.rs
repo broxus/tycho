@@ -223,7 +223,7 @@ impl JournalDagEvent {
             Self::TransInvalid(invalid) => {
                 point_keys.push(invalid.info().key());
                 let link = &invalid.root_cause().link;
-                if let Some(through) = invalid.info().through_id(&link.path) {
+                if let Some(through) = invalid.info().through_id(&link.through) {
                     point_keys.push(through.key()); // also may panic if not found
                 }
                 point_keys.push(link.to.key());
