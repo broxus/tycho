@@ -103,16 +103,22 @@ impl Producer {
             let is_leader = current_leader.is_some_and(|leader| leader == local_id);
             let is_wave_far_enough = anchor_proof.is_wave_far_enough(current_round, conf);
 
-            if let Some(sticky_anchors) = last_own_point.info.sticky_anchors() {
+            if let Some((sticky_anchors, _)) = last_own_point.info.sticky_anchors() {
                 if let Some(seq_no) = sticky_anchors.checked_add(1)
                     && seq_no <= conf.consensus.sticky_anchors
                 {
-                    PointRole::AnchorProof { seq_no }
+                    PointRole::AnchorProof {
+                        seq_no,
+                        is_last: seq_no == conf.consensus.sticky_anchors,
+                    }
                 } else {
                     PointRole::AnchorTrigger
                 }
             } else if is_leader && is_wave_far_enough {
-                PointRole::AnchorProof { seq_no: 0 }
+                PointRole::AnchorProof {
+                    seq_no: 0,
+                    is_last: 0 == conf.consensus.sticky_anchors,
+                }
             } else {
                 PointRole::Regular
             }

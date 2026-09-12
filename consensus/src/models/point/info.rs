@@ -230,9 +230,9 @@ impl PointInfo {
         [proof, trigger]
     }
 
-    pub fn sticky_anchors(&self) -> Option<u8> {
+    pub fn sticky_anchors(&self) -> Option<(u8, bool)> {
         match &self.0.data.role {
-            PointRole::AnchorProof { seq_no } => Some(*seq_no),
+            PointRole::AnchorProof { seq_no, is_last } => Some((*seq_no, *is_last)),
             _ => None,
         }
     }
