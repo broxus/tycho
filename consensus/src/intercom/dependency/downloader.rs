@@ -374,7 +374,7 @@ impl DownloadTask {
                 None
             }
             LastResponse::IllFormed(point, _) | LastResponse::Point(point)
-                if point.info().id() != self.query.point_id() =>
+                if point.info().key() != self.query.point_id().key() =>
             {
                 on_not_found();
                 DownloadCtx::meter_unreliable();
@@ -392,6 +392,22 @@ impl DownloadTask {
                     received: *wrong_id,
                 });
                 None
+            }
+            LastResponse::IllFormed(point, _) | LastResponse::Point(point)
+                if point.info().author() != self.query.point_id().author =>
+            {
+                // key matches and point is well-signed, so trust its contents
+                on_not_found();
+                let right_id = point.info().id();
+                tracing::error!(
+                    peer_id = display(out.peer_id.alt()),
+                    wrong_author = display(point.info().author().alt()),
+                    author = display(right_id.author.alt()),
+                    round = right_id.round.0,
+                    digest = display(right_id.digest.alt()),
+                    "parent point names wrong author",
+                );
+                Some(DownloadResult::NotFound)
             }
             LastResponse::IllFormed(point, issue) => {
                 tracing::error!(

@@ -164,10 +164,9 @@ fn gen_point() -> Point {
             includes: Default::default(),
             witness: Default::default(),
             evidence: Default::default(),
-            role: PointRole::Regular {
-                anchor_trigger: AnchorLink::random(),
-                anchor_proof: AnchorLink::random(),
-            },
+            anchor_proof: AnchorLink::random(),
+            anchor_trigger: AnchorLink::random(),
+            role: PointRole::Regular,
             time: UnixTime::now(),
             anchor_time: UnixTime::now(),
         },

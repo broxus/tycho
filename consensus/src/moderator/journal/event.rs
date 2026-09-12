@@ -223,7 +223,7 @@ impl JournalDagEvent {
             Self::TransInvalid(invalid) => {
                 point_keys.push(invalid.info().key());
                 let link = &invalid.root_cause().link;
-                if let Some(through) = invalid.info().through_id(&link.path) {
+                if let Some(through) = invalid.info().through_id(&link.through) {
                     point_keys.push(through.key()); // also may panic if not found
                 }
                 point_keys.push(link.to.key());
@@ -236,6 +236,7 @@ impl JournalDagEvent {
             | InvalidReason::NoRoundInDag(_) | InvalidReason::DependencyRoundDropped
             | InvalidReason::DepNotFound(_) => {},
             InvalidReason::NotTrigger(point_id)
+            | InvalidReason::TerminalTriggerBeforeLastProof(point_id)
             | InvalidReason::TimeNotGreaterThanInPrevPoint(point_id)
             | InvalidReason::AnchorProofDoesntInheritAnchorTime(point_id)
             | InvalidReason::AnchorTimeNotInheritedFromProof(point_id)
@@ -246,10 +247,7 @@ impl JournalDagEvent {
             | InvalidReason::AnchorLink((_, point_id))
             | InvalidReason::AnchorLinkRole((_, point_id))
             | InvalidReason::AnchorLinkBadPath((_, point_id))
-            | InvalidReason::ChainedProofRole(point_id)
-            | InvalidReason::ChainedProofBadPath(point_id)
             | InvalidReason::BadStickySequence((point_id, _, _))
-            | InvalidReason::NewerProofToChainInDependency(point_id)
             | InvalidReason::TriggerProofMismatch((point_id, _))
             | InvalidReason::DepIllFormed((point_id, _)) => {
                 point_keys.push(point_id.key());

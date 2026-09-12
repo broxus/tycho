@@ -9,7 +9,7 @@ use tycho_network::PeerId;
 use tycho_types::models::ConsensusConfig;
 use tycho_util::metrics::HistogramGuard;
 
-use crate::dag::ProofLeader;
+use crate::dag::Wave;
 use crate::engine::MempoolConfig;
 use crate::models::point::proto_utils::{PointBodyWrite, PointRawRead, PointRead, PointWrite};
 use crate::models::point::{Digest, PointData, Signature};
@@ -144,7 +144,7 @@ impl Point {
 
     pub fn from_bytes(serialized: Vec<u8>) -> Result<Self, TlError> {
         const ROUND_RANGE: std::ops::Range<Round> = {
-            let min = ProofLeader::align_genesis(0);
+            let min = Wave::align_genesis(0);
             let max = Round(u32::MAX - min.0);
             min..max
         };
@@ -168,6 +168,10 @@ impl Point {
             (payload_len, payload_bytes)
         };
         let data = <_>::read_from(payload_and_data)?;
+
+        if !payload_and_data.is_empty() {
+            return Err(TlError::InvalidData);
+        }
 
         let id = PointId {
             digest: *read.digest,
@@ -278,7 +282,7 @@ pub mod test_point {
                 round,
                 digest: Digest::random(),
             },
-            path: Through::Includes(one_of_peers()),
+            through: Through::Includes(one_of_peers()),
         };
 
         let data = PointData {
@@ -287,10 +291,9 @@ pub mod test_point {
                 (PeerId(rand::random()), Digest::random())
             })),
             evidence,
-            role: PointRole::Regular {
-                anchor_proof: AnchorLink::Indirect(indirect_link(prev_id.round - 7_u32)),
-                anchor_trigger: AnchorLink::Indirect(indirect_link(prev_id.round - 6_u32)),
-            },
+            anchor_proof: AnchorLink::Indirect(indirect_link(prev_id.round - 7_u32)),
+            anchor_trigger: AnchorLink::Indirect(indirect_link(prev_id.round - 6_u32)),
+            role: PointRole::Regular,
             time: anchor_time.next(),
             anchor_time,
         };

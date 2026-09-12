@@ -2,20 +2,17 @@ use tycho_crypto::ed25519::KeyPair;
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
-use crate::dag::{DagHead, DagRound};
+use crate::dag::{DagHead, DagRound, RequireRegularPoints};
 use crate::effects::{AltFormat, RoundCtx};
 use crate::engine::{InputBuffer, MempoolConfig};
 use crate::models::{
-    AnchorLink, AnchorStageRole, AnyLink, Digest, IndirectLink, PeerCount, Point, PointData,
-    PointInfo, PointRole, Round, Signature, Through, UnixTime,
+    AnchorLink, AnchorStageRole, Digest, IndirectLink, PeerCount, Point, PointData, PointInfo,
+    PointRole, Round, Signature, Through, UnixTime,
 };
 
 pub struct LastOwnPoint {
-    pub digest: Digest,
+    pub info: PointInfo,
     pub evidence: FastHashMap<PeerId, Signature>,
-    pub includes: FastHashMap<PeerId, Digest>,
-    pub sticky_anchors: Option<u8>,
-    pub round: Round,
     pub signers: PeerCount,
 }
 
@@ -63,6 +60,7 @@ impl Producer {
             last_own_point,
             input_buffer,
             key_pair,
+            head.current().require_regular_points(),
             head.current().round(),
             head.current().leader(),
             &includes,
@@ -77,6 +75,7 @@ impl Producer {
         input_buffer: &InputBuffer,
 
         key_pair: &KeyPair,
+        require_regular_points: RequireRegularPoints,
         current_round: Round,
         current_leader: Option<&PeerId>,
 
@@ -88,10 +87,10 @@ impl Producer {
         let local_id = PeerId::from(key_pair.public_key);
 
         let proven_vertex = match last_own_point {
-            Some(prev) if prev.round == current_round.prev() => {
+            Some(prev) if prev.info.round() == current_round.prev() => {
                 // previous round's point needs 2F signatures from peers scheduled for current round
                 if prev.evidence.len() >= prev.signers.majority_of_others() {
-                    Some(&prev.digest) // prev point is used only once
+                    Some(prev.info.digest()) // prev point is used only once
                 } else {
                     return Err(ProduceError::NotEnoughEvidence); // has to skip round
                 }
@@ -99,60 +98,37 @@ impl Producer {
             _ => None,
         };
 
-        let (anchor_proof, anchor_trigger) = link::anchor_links(current_round, includes, witness);
+        let anchors = link::anchor_links(current_round, includes, witness);
 
-        let role = if proven_vertex.is_some() {
-            let last_own_point = last_own_point.as_ref().expect("guarded by `proven_vertex`");
-            let is_leader = current_leader.is_some_and(|leader| leader == local_id);
-            let is_trigger = matches!(&anchor_proof,
-                AnchorLink::Direct(Through::Includes(author))
-                if author == local_id
-            );
-            let is_proof_far_enough = match &anchor_proof {
-                AnchorLink::Indirect(link) => {
-                    let rounds_to_proof = (current_round - link.to.round.0).0;
-                    if conf.consensus.sticky_anchors == 0 {
-                        rounds_to_proof > 2
+        let role = 'role: {
+            if require_regular_points.0 {
+                break 'role PointRole::Regular;
+            }
+
+            if proven_vertex.is_some() {
+                let last_own_point = last_own_point.as_ref().expect("guarded by `proven_vertex`");
+                let is_leader = current_leader.is_some_and(|leader| leader == local_id);
+                let is_wave_far_enough = anchors.proof.is_wave_far_enough(current_round);
+
+                if let Some((sticky_anchors, _)) = last_own_point.info.sticky_anchors() {
+                    if let Some(seq_no) = sticky_anchors.checked_add(1)
+                        && seq_no <= conf.consensus.sticky_anchors
+                    {
+                        break 'role PointRole::AnchorProof {
+                            seq_no,
+                            is_last: seq_no == conf.consensus.sticky_anchors,
+                        };
                     } else {
-                        rounds_to_proof > 3
+                        break 'role PointRole::AnchorTrigger;
                     }
-                }
-                AnchorLink::Direct(_) => false,
-            };
-
-            if let Some(sticky_anchors) = last_own_point.sticky_anchors {
-                if sticky_anchors.saturating_add(1) < conf.consensus.sticky_anchors {
-                    PointRole::Sticky {
-                        seq_no: sticky_anchors + 1,
-                    }
-                } else {
-                    PointRole::AnchorTrigger
-                }
-            } else if is_trigger {
-                if last_own_point.sticky_anchors.is_none() && 0 < conf.consensus.sticky_anchors {
-                    PointRole::Sticky { seq_no: 0 }
-                } else {
-                    PointRole::AnchorTrigger
-                }
-            } else if is_leader && is_proof_far_enough {
-                PointRole::AnchorProof {
-                    anchor_proof: match anchor_proof {
-                        AnchorLink::Indirect(link) => link,
-                        AnchorLink::Direct(_) => unreachable!("guarded by bool check"),
-                    },
-                    anchor_trigger,
-                }
-            } else {
-                PointRole::Regular {
-                    anchor_proof,
-                    anchor_trigger,
+                } else if is_leader && is_wave_far_enough {
+                    break 'role PointRole::AnchorProof {
+                        seq_no: 0,
+                        is_last: 0 == conf.consensus.sticky_anchors,
+                    };
                 }
             }
-        } else {
-            PointRole::Regular {
-                anchor_proof,
-                anchor_trigger,
-            }
+            PointRole::Regular
         };
 
         let payload = input_buffer.fetch(last_own_point.as_ref().is_none_or(|last| {
@@ -166,8 +142,13 @@ impl Producer {
 
         Self::check_prev_point(prev_info, proven_vertex)?;
 
-        let (time, anchor_time) =
-            Self::get_time(&role.anchor_proof(&local_id), prev_info, includes, witness);
+        let (time, anchor_time) = Self::get_time(
+            role.is_anchor_proof(),
+            &anchors.proof,
+            prev_info,
+            includes,
+            witness,
+        );
 
         let includes = includes
             .values()
@@ -199,6 +180,8 @@ impl Producer {
                 includes,
                 witness,
                 evidence,
+                anchor_proof: anchors.proof,
+                anchor_trigger: anchors.trigger,
                 role,
                 time,
                 anchor_time,
@@ -231,8 +214,8 @@ impl Producer {
         };
 
         let includes = last_own_point
-            .filter(|l| l.round == round)
-            .map(|l| &l.includes);
+            .filter(|l| l.info.round() == round)
+            .map(|l| l.info.includes());
 
         // have to link all @ r-2 if r-1 was skipped - because we made signatures;
         witness_round
@@ -257,19 +240,20 @@ impl Producer {
     }
 
     fn get_time(
-        anchor_proof: &AnyLink<'_>,
+        is_proof: bool,
+        anchor_proof: &AnchorLink,
         prev_info: Option<&PointInfo>,
         includes: &FastHashMap<PeerId, PointInfo>,
         witness: &FastHashMap<PeerId, PointInfo>,
     ) -> (UnixTime, UnixTime) {
         let anchor_time = match anchor_proof {
-            AnyLink::ToSelf => {
+            _ if is_proof => {
                 let info = prev_info.expect("anchor candidate should exist");
 
                 info.time()
             }
-            AnyLink::Direct(path) | AnyLink::Indirect(IndirectLink { path, .. }) => {
-                let (peer_id, through) = match path {
+            AnchorLink::Direct(through) | AnchorLink::Indirect(IndirectLink { through, .. }) => {
+                let (peer_id, through) = match through {
                     Through::Includes(peer_id) => (peer_id, &includes),
                     Through::Witness(peer_id) => (peer_id, &witness),
                 };
@@ -330,31 +314,37 @@ impl Producer {
 mod link {
     use super::*;
 
+    pub(super) struct AnchorLinks {
+        pub proof: AnchorLink,
+        pub trigger: AnchorLink,
+    }
+
     pub fn anchor_links(
         current_round: Round,
         includes: &FastHashMap<PeerId, PointInfo>,
         witness: &FastHashMap<PeerId, PointInfo>,
-    ) -> (AnchorLink, AnchorLink) {
+    ) -> AnchorLinks {
         let trigger_source = link_source(includes, witness, AnchorStageRole::Trigger);
         let max_proof_source = link_source(includes, witness, AnchorStageRole::Proof);
 
-        let proof_source = if trigger_source.info.anchor_round(AnchorStageRole::Trigger)
-            > max_proof_source.info.anchor_round(AnchorStageRole::Proof)
+        let proof_source = if trigger_source.info.anchor_proof().top().round()
+            >= max_proof_source.info.anchor_proof().top().round()
         {
             trigger_source
         } else {
             max_proof_source
         };
 
-        let anchor_proof = link(current_round, proof_source, AnchorStageRole::Proof);
-        let anchor_trigger = link(current_round, trigger_source, AnchorStageRole::Trigger);
-        (anchor_proof, anchor_trigger)
+        AnchorLinks {
+            proof: link(current_round, proof_source, AnchorStageRole::Proof),
+            trigger: link(current_round, trigger_source, AnchorStageRole::Trigger),
+        }
     }
 
     #[derive(Clone, Copy)]
     struct LinkSource<'a> {
         info: &'a PointInfo,
-        path: Through,
+        through: Through,
     }
 
     fn link_source<'a>(
@@ -364,24 +354,25 @@ mod link {
     ) -> LinkSource<'a> {
         let (_, incl_info) = includes
             .iter()
-            .max_by_key(|(_, info)| info.anchor_round(link_field))
+            .max_by_key(|(_, info)| info.anchor(link_field).top().round())
             .expect("non-empty list of includes for own point");
 
         let newer_witness = witness
             .iter()
-            .max_by_key(|(_, wit_info)| wit_info.anchor_round(link_field))
+            .max_by_key(|(_, wit_info)| wit_info.anchor(link_field).top().round())
             .filter(|(_, wit_info)| {
-                wit_info.anchor_round(link_field) > incl_info.anchor_round(link_field)
+                wit_info.anchor(link_field).top().round()
+                    > incl_info.anchor(link_field).top().round()
             });
 
         match newer_witness {
             Some((_, info)) => LinkSource {
                 info,
-                path: Through::Witness(*info.author()),
+                through: Through::Witness(*info.author()),
             },
             None => LinkSource {
                 info: incl_info,
-                path: Through::Includes(*incl_info.author()),
+                through: Through::Includes(*incl_info.author()),
             },
         }
     }
@@ -391,19 +382,22 @@ mod link {
         source: LinkSource<'_>,
         link_field: AnchorStageRole,
     ) -> AnchorLink {
-        let direct_round = match source.path {
+        let direct_round = match source.through {
             Through::Includes(_) => current_round.prev(),
             Through::Witness(_) => current_round.prev().prev(),
         };
 
-        if source.info.round() == direct_round
-            && source.info.anchor_link(link_field) == AnyLink::ToSelf
-        {
-            AnchorLink::Direct(source.path)
+        let is_anchor_role = match link_field {
+            AnchorStageRole::Proof => source.info.is_anchor_proof(),
+            AnchorStageRole::Trigger => source.info.is_anchor_trigger(),
+        };
+
+        if source.info.round() == direct_round && is_anchor_role {
+            AnchorLink::Direct(source.through)
         } else {
             AnchorLink::Indirect(IndirectLink {
-                to: source.info.anchor_id(link_field),
-                path: source.path,
+                to: source.info.anchor(link_field).top().id(),
+                through: source.through,
             })
         }
     }

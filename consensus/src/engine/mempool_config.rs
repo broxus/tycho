@@ -6,10 +6,11 @@ use serde::{Deserialize, Serialize};
 use tycho_crypto::ed25519::{KeyPair, SecretKey};
 use tycho_network::{OverlayId, PeerId};
 use tycho_types::models::{ConsensusConfig, GenesisInfo};
+use tycho_util::FastHashMap;
 
-use crate::dag::ProofLeader;
+use crate::dag::Wave;
 use crate::engine::ConsensusConfigExt;
-use crate::models::{Point, PointData, PointRole, Round, UnixTime};
+use crate::models::{AnchorLink, Digest, Point, PointData, PointRole, Round, Through, UnixTime};
 
 // replace with `ArcSwapOption` + copy on get() if need to change in runtime
 static NODE_CONFIG: OnceLock<MempoolNodeConfig> = OnceLock::new();
@@ -50,17 +51,20 @@ impl MempoolMergedConfig {
 
     pub(crate) fn genesis(&self) -> Point {
         let key_pair = KeyPair::from(&SecretKey::from_bytes(self.overlay_id.0));
+        let author = PeerId::from(key_pair.public_key);
         let millis = UnixTime::from_millis(self.genesis_info.genesis_millis);
         Point::new(
             &key_pair,
-            PeerId::from(key_pair.public_key),
+            author,
             self.conf.genesis_round,
             Default::default(),
             PointData {
                 time: millis,
-                includes: Default::default(),
+                includes: FastHashMap::from_iter([(author, Digest::ZERO)]),
                 witness: Default::default(),
                 evidence: Default::default(),
+                anchor_proof: AnchorLink::Direct(Through::Includes(author)),
+                anchor_trigger: AnchorLink::Direct(Through::Includes(author)),
                 role: PointRole::Genesis,
                 anchor_time: millis,
             },
@@ -120,7 +124,7 @@ impl MempoolConfigBuilder {
             .as_ref()
             .context("mempool consensus config is not known")?;
 
-        let genesis_round = ProofLeader::align_genesis(genesis_info.start_round);
+        let genesis_round = Wave::align_genesis(genesis_info.start_round);
 
         let mempool_config = MempoolConfig {
             consensus: consensus.clone(),

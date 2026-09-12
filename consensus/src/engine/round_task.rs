@@ -14,7 +14,7 @@ use crate::intercom::{
     Broadcaster, BroadcasterSignal, Collector, CollectorStatus, Dispatcher, Downloader,
     PeerSchedule, Responder,
 };
-use crate::models::{AnyLink, Point, PointInfo};
+use crate::models::{Point, PointInfo};
 use crate::storage::MempoolStore;
 
 pub struct RoundTaskState {
@@ -102,7 +102,7 @@ impl RoundTaskReady {
         round_ctx: RoundCtx,
     ) -> TaskResult<Result<Point, ProduceError>> {
         let allowed_to_produce = (last_own_point.as_ref()).is_none_or(|prev_own| {
-            match prev_own.round.cmp(&head.prev().round()) {
+            match prev_own.info.round().cmp(&head.prev().round()) {
                 cmp::Ordering::Less => true,
                 cmp::Ordering::Equal => {
                     prev_own.evidence.len() >= prev_own.signers.majority_of_others()
@@ -112,7 +112,7 @@ impl RoundTaskReady {
                     panic!(
                         "already produced point at {:?} and gathered {}/{} evidence, \
                              trying to produce point at {:?}",
-                        prev_own.round,
+                        prev_own.info.round(),
                         prev_own.evidence.len(),
                         prev_own.signers.majority_of_others(),
                         head.current().round()
@@ -222,7 +222,10 @@ impl RoundTaskReady {
                     drop(prev_bcast); // aborts after current broadcast finishes
                     broadcaster.update(&round_ctx);
                     let new_prev_bcast = round_ctx.task().spawn(broadcaster.run_continue());
-                    Ok(Some((new_prev_bcast, new_last_own_point)))
+                    Ok(Some(BcastTaskResult {
+                        new_prev_bcast,
+                        new_last_own_point,
+                    }))
                 } else {
                     bcaster_ready_tx.send(BroadcasterSignal::Ok).ok();
                     drop(collector_status_rx); // goes out of scope
@@ -265,8 +268,13 @@ impl RoundTaskReady {
 pub struct RoundTaskRunning {
     state: RoundTaskState,
     last_own_point: Option<Arc<LastOwnPoint>>,
-    broadcaster_run: Task<Option<(Task<()>, Arc<LastOwnPoint>)>>,
+    broadcaster_run: Task<Option<BcastTaskResult>>,
     collector_run: Task<Collector>,
+}
+
+pub struct BcastTaskResult {
+    new_prev_bcast: Task<()>,
+    new_last_own_point: Arc<LastOwnPoint>,
 }
 
 impl RoundTaskRunning {
@@ -274,9 +282,10 @@ impl RoundTaskRunning {
         let (collector, bcast_result) = tokio::try_join!(self.collector_run, self.broadcaster_run)?;
         let (prev_broadcast, last_own_point) = match bcast_result {
             None => (None, self.last_own_point),
-            Some((new_prev_bcast, new_last_own_point)) => {
-                (Some(new_prev_bcast), Some(new_last_own_point))
-            }
+            Some(BcastTaskResult {
+                new_prev_bcast,
+                new_last_own_point,
+            }) => (Some(new_prev_bcast), Some(new_last_own_point)),
         };
         let ready = RoundTaskReady {
             state: self.state,
@@ -318,8 +327,8 @@ impl RoundCtx {
                     digest = display(own_info.digest().alt()),
                     externals,
                     payload_bytes,
-                    is_proof = (own_info.anchor_proof() == AnyLink::ToSelf).then_some(true),
-                    is_trigger = (own_info.anchor_trigger() == AnyLink::ToSelf).then_some(true),
+                    is_proof = (own_info.is_anchor_proof()).then_some(true),
+                    is_trigger = (own_info.is_anchor_trigger()).then_some(true),
                     "produced point"
                 );
                 tracing::debug!(

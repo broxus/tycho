@@ -8,8 +8,8 @@ use tycho_util::FastDashMap;
 use crate::dag::IllFormedReason;
 use crate::dag::dag_location::DagLocation;
 use crate::dag::dag_point_future::{DagPointFuture, WeakDagPointFuture};
-use crate::dag::proof_leader::ProofLeader;
 use crate::dag::threshold::Threshold;
+use crate::dag::wave::Wave;
 use crate::effects::{AltFmt, AltFormat, Ctx, RoundCtx, ValidateCtx};
 use crate::engine::{MempoolConfig, NodeConfig};
 use crate::intercom::{Downloader, PeerSchedule};
@@ -31,7 +31,8 @@ pub struct DagRound(Arc<DagRoundInner>);
 pub struct DagRoundInner {
     round: Round,
     peer_count: PeerCount,
-    proof_leader: Option<PeerId>,
+    wave_leader: Option<PeerId>,
+    require_regular_points: RequireRegularPoints,
     used_anchor_proof: OnceLock<PeerId>,
     locations: FastDashMap<PeerId, DagLocation>,
     threshold: Threshold,
@@ -39,6 +40,10 @@ pub struct DagRoundInner {
     /// sequence of prev rounds: 0 for newest; never empty
     prevs: Vec<WeakDagRound>,
 }
+
+/// last wave of an ending vset epoch is leaderless (incl no sticky points) for smooth transition
+#[derive(Copy, Clone)]
+pub struct RequireRegularPoints(pub bool);
 
 impl WeakDagRound {
     pub fn upgrade(&self) -> Option<DagRound> {
@@ -84,10 +89,15 @@ impl DagRound {
         peer_schedule: &PeerSchedule,
         conf: &MempoolConfig,
     ) -> Self {
-        let (peers, proof_leader) = {
+        let (peers, require_regular_points, wave) = {
             let guard = peer_schedule.atomic();
+            let require_regular_points = guard.require_regular_points(round);
             let peers = guard.peers_for(round).clone();
-            (peers, ProofLeader::new(round, &guard, conf))
+            (
+                peers,
+                require_regular_points,
+                Wave::new(round, &guard, conf),
+            )
         };
 
         let peer_count = if round > conf.genesis_round {
@@ -122,7 +132,8 @@ impl DagRound {
         let this = Self(Arc::new(DagRoundInner {
             round,
             peer_count,
-            proof_leader: proof_leader.finish(),
+            wave_leader: wave.leader(),
+            require_regular_points,
             used_anchor_proof: OnceLock::new(),
             locations: FastDashMap::with_capacity_and_hasher(peers.len(), Default::default()),
             threshold: Threshold::new(round, peer_count, conf),
@@ -146,7 +157,11 @@ impl DagRound {
     }
 
     pub fn leader(&self) -> Option<&PeerId> {
-        self.0.proof_leader.as_ref()
+        self.0.wave_leader.as_ref()
+    }
+
+    pub fn require_regular_points(&self) -> RequireRegularPoints {
+        self.0.require_regular_points
     }
 
     pub fn used_anchor_proof(&self) -> &OnceLock<PeerId> {
@@ -163,10 +178,11 @@ impl DagRound {
     {
         match self.0.locations.get_mut(author) {
             Some(mut loc) => edit(loc.value_mut()),
-            None => panic!(
-                "DAG must not contain location {} @ {}",
-                author.alt(),
-                self.round().0
+            None => edit(
+                // peer from next vset is able to create an ill-formed point in prev vset epoch
+                (self.0.locations.entry(*author))
+                    .or_insert(DagLocation::new(self.downgrade()))
+                    .value_mut(),
             ),
         }
     }

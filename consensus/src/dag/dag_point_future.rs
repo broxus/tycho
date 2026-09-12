@@ -10,6 +10,7 @@ use tycho_network::PeerId;
 use tycho_util::futures::{Shared, WeakShared};
 use tycho_util::sync::OnceTake;
 
+use self::local_rollback::LocalPointWrite;
 use crate::dag::dag_location::InclusionState;
 use crate::dag::{
     BasicVerifier, DagRound, IllFormedReason, InvalidDependency, InvalidReason, UninitVset,
@@ -22,8 +23,7 @@ use crate::engine::NodeConfig;
 use crate::intercom::{DownloadResult, Downloader};
 use crate::models::point_status::*;
 use crate::models::{
-    AnyLink, Cert, CertDirectDeps, DagPoint, Digest, Point, PointId, PointInfo, PointRestore,
-    WeakCert,
+    Cert, CertDirectDeps, DagPoint, Digest, Point, PointId, PointInfo, PointRestore, WeakCert,
 };
 use crate::storage::MempoolStore;
 
@@ -117,19 +117,20 @@ impl DagPointFuture {
             };
             let check_evidence_task = validate_ctx.task().spawn_blocking(check_evidence_fn);
 
-            let abort_guard = scopeguard::guard((store.clone(), info.clone()), |(store, info)| {
-                let task =
-                    move || store.rollback_local_point_status(info.id(), None, info.prev_digest());
-                _ = validate_ctx.task().spawn_blocking(task);
+            let db_write = Arc::new(LocalPointWrite::new(point, store.clone()));
+            let abort_guard = scopeguard::guard(db_write.clone(), |write| {
+                // run db task in current async thread: otherwise it may not start (abort on drop)
+                // or survive Engine restart and interfere with load of the last broadcast point
+                write.cancel_and_rollback();
             });
 
             // write as a happy path, rollback after validation if not ok
             let store_fn = {
-                let store = store.clone();
+                let write = db_write.clone();
                 let mut status = Self::new_valid_status(&info, &cert);
                 status.is_first_valid = true;
                 status.is_first_resolved = true;
-                move || store.insert_point(&point, &PointStatusStored::Valid(status))
+                move || write.insert(&PointStatusStored::Valid(status))
             };
             let store_task = validate_ctx.task().spawn_blocking(store_fn);
 
@@ -206,17 +207,11 @@ impl DagPointFuture {
                 Ok(dag_point) => dag_point,
                 Err((err, status)) => {
                     let fut = validate_ctx.task().spawn_blocking({
-                        let info = info.clone();
-                        move || {
-                            store.rollback_local_point_status(
-                                info.id(),
-                                Some(&status),
-                                info.prev_digest(),
-                            );
-                        }
+                        let write = db_write.clone();
+                        move || write.rollback_with_status(&status)
                     });
-                    scopeguard::ScopeGuard::into_inner(abort_guard);
                     fut.await?;
+                    scopeguard::ScopeGuard::into_inner(abort_guard);
                     let _span = validate_ctx.span().enter();
                     panic!("local point {err}; {info:?}");
                 }
@@ -715,11 +710,8 @@ impl DagPointFuture {
 
     fn anchor_flags(info: &PointInfo) -> AnchorFlags {
         let mut anchor_flags = AnchorFlags::empty();
-        anchor_flags.set(AnchorFlags::Proof, info.anchor_proof() == AnyLink::ToSelf);
-        anchor_flags.set(
-            AnchorFlags::Trigger,
-            info.anchor_trigger() == AnyLink::ToSelf,
-        );
+        anchor_flags.set(AnchorFlags::Proof, info.is_anchor_proof());
+        anchor_flags.set(AnchorFlags::Trigger, info.is_anchor_trigger());
         anchor_flags
     }
 
@@ -830,6 +822,67 @@ impl future::Future for WeakDagPointFuture {
             Poll::Ready(Some((Err(Cancelled()), _))) => Poll::Ready(Err(Cancelled())),
             Poll::Ready(None) => Poll::Ready(Ok(None)),
             Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+mod local_rollback {
+    use parking_lot::Mutex;
+
+    use crate::models::Point;
+    use crate::models::point_status::PointStatusStored;
+    use crate::storage::MempoolStore;
+
+    /// Orders one local production attempt's writes against its cancellation cleanup.
+    pub struct LocalPointWrite {
+        point: Point,
+        store: MempoolStore,
+        state: Mutex<LocalPointWriteState>,
+    }
+
+    enum LocalPointWriteState {
+        Pending,
+        Written,
+        Cancelled,
+    }
+
+    impl LocalPointWrite {
+        pub fn new(point: Point, store: MempoolStore) -> Self {
+            Self {
+                point,
+                store,
+                state: Mutex::new(LocalPointWriteState::Pending),
+            }
+        }
+
+        pub fn insert(&self, status: &PointStatusStored) {
+            let mut state = self.state.lock();
+            if !matches!(*state, LocalPointWriteState::Pending) {
+                return;
+            }
+            // hold the lock through the write so cancellation cannot delete before it finishes
+            self.store.insert_point(&self.point, status);
+            *state = LocalPointWriteState::Written;
+        }
+
+        pub fn rollback_with_status(&self, status: &PointStatusStored) {
+            let state = self.state.lock();
+            if !matches!(*state, LocalPointWriteState::Written) {
+                return;
+            }
+            let info = self.point.info();
+            (self.store).rollback_local_point_status(info.id(), Some(status), info.prev_digest());
+            // keep Written: cancellation must still delete this record until the guard is disarmed
+        }
+
+        pub fn cancel_and_rollback(&self) {
+            let mut state = self.state.lock();
+            if matches!(*state, LocalPointWriteState::Written) {
+                let info = self.point.info();
+                (self.store).rollback_local_point_status(info.id(), None, info.prev_digest());
+            }
+            // prevent queued inserts and error rollbacks from recreating the deleted record
+            *state = LocalPointWriteState::Cancelled;
         }
     }
 }

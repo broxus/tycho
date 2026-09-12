@@ -20,7 +20,7 @@ use crate::engine::committer_task::CommitterTask;
 use crate::engine::lifecycle::{EngineBinding, EngineError, EngineNetwork, FixHistoryFlag};
 use crate::engine::round_task::RoundTaskReady;
 use crate::engine::round_watch::{RoundWatch, RoundWatcher, TopKnownAnchor};
-use crate::engine::{ConsensusConfigExt, MempoolMergedConfig};
+use crate::engine::{ConsensusConfigExt, MempoolConfig, MempoolMergedConfig};
 use crate::models::point_status::{PointStatusIllFormed, PointStatusStored};
 use crate::models::{DagPoint, MempoolOutput, Point, PointRestore, Round};
 use crate::storage::{DbCleaner, MempoolStore};
@@ -131,26 +131,7 @@ impl Engine {
         let conf = self.ctx.conf();
 
         // wait collator to load blocks and update peer schedule
-
-        let top_known_anchor = {
-            let min_top_known_anchor =
-                last_db_round - conf.consensus.max_consensus_lag_rounds.get();
-
-            // NOTE collator have to apply mc state update to mempool first,
-            //  and pass its top known anchor only after completion
-            let mut top_known_anchor_recv = self.round_task.state.top_known_anchor.receiver();
-            let mut top_known_anchor = top_known_anchor_recv.get();
-            while top_known_anchor < min_top_known_anchor {
-                tracing::info!(
-                    parent: self.ctx.span(),
-                    ?top_known_anchor,
-                    ?min_top_known_anchor,
-                    "waiting collator to load up to last top known anchor"
-                );
-                top_known_anchor = top_known_anchor_recv.next().await?;
-            }
-            top_known_anchor
-        };
+        let top_known_anchor = self.wait_tka(last_db_round, conf).await?;
 
         // get ready to commit and return deduplicated top known anchor's history to collator
 
@@ -258,6 +239,10 @@ impl Engine {
             }
         };
 
+        // wait for the updated peer schedule in case of vset change exactly at new dag top round
+        self.wait_tka(new_top_round, conf).await?;
+
+        // round being constructed <= schedule-applied TKA + pause_offset.
         (self.dag).fill_to_top(
             new_top_round,
             &self.round_task.state.peer_schedule,
@@ -268,6 +253,25 @@ impl Engine {
         self.round_task.state.consensus_round.set_max(new_top_round);
 
         Ok(replay_bcasts)
+    }
+
+    async fn wait_tka(&self, top_round: Round, conf: &MempoolConfig) -> TaskResult<Round> {
+        let min_top_known_anchor = top_round - conf.consensus.pause_offset();
+
+        // collator have to apply mc state update to mempool first,
+        // and pass its top known anchor only after completion
+        let mut top_known_anchor_recv = self.round_task.state.top_known_anchor.receiver();
+        let mut observed_tka = top_known_anchor_recv.get();
+        while observed_tka < min_top_known_anchor {
+            tracing::info!(
+                parent: self.ctx.span(),
+                ?observed_tka,
+                ?min_top_known_anchor,
+                "waiting collator to load up to last top known anchor"
+            );
+            observed_tka = top_known_anchor_recv.next().await?;
+        }
+        Ok(observed_tka)
     }
 
     async fn preload_points(
@@ -481,7 +485,7 @@ fn collator_feedback(
 ) -> Result<Round, BoxFuture<'static, TaskResult<()>>> {
     let top_known_anchor = top_known_anchor_recv.get();
     // For example in `max_consensus_lag_rounds` comments this results to `217` of `8..=217`
-    let pause_at = top_known_anchor + round_ctx.conf().consensus.max_consensus_lag_rounds.get();
+    let pause_at = top_known_anchor + round_ctx.conf().consensus.pause_offset();
     // Note pause bound is inclusive (`>=`): engine must not advance beyond `TKA + lag`.
     // Collator may schedule vset changes from a newer processed-to anchor than this node's current
     // `top_known_anchor`, so the switch round may be > current `pause_at + 1` until TKA catches up.
@@ -505,8 +509,7 @@ fn collator_feedback(
             loop {
                 let top_known_anchor = top_known_anchor_recv.next().await?;
                 //  exit if ready to produce point: collator synced enough
-                let pause_at =
-                    top_known_anchor + round_ctx.conf().consensus.max_consensus_lag_rounds.get();
+                let pause_at = top_known_anchor + round_ctx.conf().consensus.pause_offset();
                 let exit = old_dag_top_round < pause_at;
                 tracing::debug!(
                     parent: round_ctx.span(),

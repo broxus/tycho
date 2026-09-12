@@ -5,6 +5,7 @@ use tycho_crypto::ed25519::KeyPair;
 use tycho_network::PeerId;
 use tycho_util::{FastHashMap, FastHashSet};
 
+use crate::dag::{RequireRegularPoints, WAVE_ROUNDS};
 use crate::effects::{AltFmt, AltFormat};
 use crate::intercom::peer_schedule::epoch_starts::EpochStarts;
 use crate::intercom::peer_schedule::stats_ranges::StatsRanges;
@@ -90,6 +91,17 @@ impl PeerScheduleStateless {
         } else {
             None
         }
+    }
+
+    pub fn require_regular_points(&self, round: Round) -> RequireRegularPoints {
+        let Some(idx1) = self.epoch_starts.arr_idx(round) else {
+            panic!("current vset is not known for {round:?}");
+        };
+        let maybe_in_next_vset = round + WAVE_ROUNDS;
+        let Some(idx2) = self.epoch_starts.arr_idx(maybe_in_next_vset) else {
+            panic!("vset after pause bound is not known for {maybe_in_next_vset:?}");
+        };
+        RequireRegularPoints(idx1 != idx2)
     }
 
     pub fn stats_ranges(&self) -> StatsRanges {

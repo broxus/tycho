@@ -13,7 +13,7 @@ use crate::dag::commit::EnqueuedAnchor;
 use crate::dag::{DagRound, HistoryConflict};
 use crate::effects::{AltFmt, AltFormat};
 use crate::engine::{EngineResult, MempoolConfig};
-use crate::models::{AnyLink, Committable, DagPoint, Digest, PointInfo, Round, ValidPoint};
+use crate::models::{Committable, DagPoint, Digest, PointInfo, Round, ValidPoint};
 
 #[derive(Default)]
 pub struct DagBack {
@@ -205,9 +205,7 @@ impl DagBack {
                 && Some(proof.digest()) == trigger.prev_digest())
             .then(|| trigger.clone());
 
-            lookup_proof_id = proof
-                .chained_anchor_proof_to()
-                .expect("verify() is broken: anchor proof doesn't have a chained one");
+            lookup_proof_id = anchor.anchor_proof().top().id();
 
             // iter is from newest to oldest, restore historical order
             result.push_front(EnqueuedAnchor {
@@ -313,9 +311,8 @@ impl DagBack {
             .info()
             .clone();
 
-        assert_eq!(
-            proof.anchor_proof(),
-            AnyLink::ToSelf,
+        assert!(
+            proof.is_anchor_proof(),
             "validate() is broken: skipped anchor proofs are not allowed in proof chain"
         );
 

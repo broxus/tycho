@@ -4,22 +4,9 @@ use serde::Serialize;
 use tl_proto::{TlRead, TlWrite};
 use tycho_network::PeerId;
 
+use crate::dag::WAVE_ROUNDS;
 use crate::effects::{AltFmt, AltFormat};
 use crate::models::{Digest, PointId, PointMap, Round};
-
-#[derive(Debug, PartialEq)]
-pub enum AnyLink<'a> {
-    ToSelf,
-    Direct(Through),
-    Indirect(&'a IndirectLink),
-}
-
-#[derive(Debug, PartialEq)]
-pub enum ChainedProofLink<'a> {
-    Inapplicable,
-    PrevPoint { chained: u8 },
-    Indirect(&'a IndirectLink),
-}
 
 #[derive(Clone, Debug, PartialEq, TlRead, TlWrite, Serialize)]
 #[tl(boxed, scheme = "proto.tl")]
@@ -32,13 +19,23 @@ pub enum AnchorLink {
 
 impl AnchorLink {
     pub const MAX_TL_BYTES: usize = 4 + IndirectLink::MAX_TL_BYTES;
+
+    pub fn is_wave_far_enough(&self, current_round: Round) -> bool {
+        match &self {
+            AnchorLink::Indirect(link) => {
+                let rounds_to_wave = (current_round - link.to.round.0).0;
+                rounds_to_wave >= WAVE_ROUNDS
+            }
+            AnchorLink::Direct(_) => false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, TlRead, TlWrite, Serialize)]
 #[tl(boxed, id = "consensus.link.indirect", scheme = "proto.tl")]
 pub struct IndirectLink {
     pub to: PointId,
-    pub path: Through,
+    pub through: Through,
 }
 
 impl IndirectLink {
@@ -79,7 +76,7 @@ impl IndirectLink {
         fill_next(4, &PeerId::TL_ID.to_le_bytes());
         fill_next(PeerId::MAX_TL_BYTES - 4, &self.to.author.0);
 
-        let (tl_id, peer_id) = match &self.path {
+        let (tl_id, peer_id) = match &self.through {
             Through::Includes(peer_id) => (Through::TL_ID_INCLUDES, peer_id),
             Through::Witness(peer_id) => (Through::TL_ID_WITNESS, peer_id),
         };
@@ -106,7 +103,7 @@ impl AltFormat for IndirectLink {}
 impl Debug for AltFmt<'_, IndirectLink> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let inner = AltFormat::unpack(self);
-        write!(f, "to {:?} {:?}", inner.to.alt(), inner.path.alt())
+        write!(f, "to {:?} {:?}", inner.to.alt(), inner.through.alt())
     }
 }
 
@@ -137,7 +134,7 @@ impl IndirectLink {
     pub fn random() -> Self {
         Self {
             to: PointId::random(),
-            path: Through::random(),
+            through: Through::random(),
         }
     }
 }

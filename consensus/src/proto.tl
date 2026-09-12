@@ -5,6 +5,8 @@ consensus.pointData
     includes:(vector consensus.peerDigestPair)
     witness:(vector consensus.peerDigestPair)
     evidence:(vector consensus.peerSignaturePair)
+    anchor_proof:consensus.anchorLink
+    anchor_trigger:consensus.anchorLink
     role:consensus.pointRole
     time:int
     anchor_time:int
@@ -57,16 +59,9 @@ consensus.peerSignaturePair
 /**
 * Representation of Point Role enum
 */
-consensus.pointRole.regular
-    anchor_proof:consensus.anchorLink
-    anchor_trigger:consensus.anchorLink
-    = consensus.PointRole;
-consensus.pointRole.proof
-    anchor_proof:consensus.link.indirect
-    anchor_trigger:consensus.anchorLink
-    = consensus.PointRole;
+consensus.pointRole.regular                                           = consensus.PointRole;
+consensus.pointRole.proof         seq_no:int     is_last:Bool         = consensus.PointRole;
 consensus.pointRole.trigger                                           = consensus.PointRole;
-consensus.pointRole.sticky                 seq_no:int                 = consensus.PointRole;
 consensus.pointRole.genesis                                           = consensus.PointRole;
 
 /**
@@ -80,7 +75,7 @@ consensus.link.through.witness    x:transport.PeerId                    = consen
 
 consensus.link.indirect
     to:consensus.pointId
-    path:consensus.link.through
+    through:consensus.link.through
     = consensus.link.Indirect;
 
 /*
@@ -135,7 +130,7 @@ journal.recordKey
 * Stored journal record value
 */
 journal.recordValue
-    is_ban_related:bool
+    is_ban_related:Bool
     kind:journal.RecordKind
     peer_id:int256
     point_keys:(vector journal.PointRef)
@@ -165,7 +160,7 @@ journal.eventTag.evidenceNoInclusion                        = journal.EventTag;
 /*
 * Journal point reference
 */
-journal.pointRef            bytes           bool            = journal.PointRef;
+journal.pointRef            bytes           Bool            = journal.PointRef;
 
 /*
 * Ref counted journal point representation

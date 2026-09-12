@@ -6,10 +6,9 @@ use tl_proto::{TlRead, TlWrite};
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
-use crate::engine::MempoolConfig;
 use crate::models::{
-    AnchorStageRole, AnyLink, ChainedProofLink, Digest, EvidenceSigError, IndirectLink, PointData,
-    PointKey, PointRole, Round, Signature, StructureIssue, Through, UnixTime,
+    AnchorLink, AnchorStageRole, Digest, EvidenceSigError, IndirectLink, PointData, PointKey,
+    PointRole, Round, Signature, StructureIssue, Through, UnixTime,
 };
 
 #[derive(Clone, TlRead, TlWrite)]
@@ -162,8 +161,8 @@ impl PointInfo {
         if is_ok { Ok(()) } else { Err(EvidenceSigError) }
     }
 
-    pub fn is_proof_link_ok(&self, is_leader: bool, conf: &MempoolConfig) -> bool {
-        (self.0.data).is_proof_link_ok(is_leader, self.prev_digest().is_some(), self.round(), conf)
+    pub fn is_wave_link_ok(&self, is_leader: bool) -> bool {
+        (self.0.data).is_wave_link_ok(is_leader, self.prev_digest().is_some(), self.round())
     }
 
     pub fn check_structure(&self, is_genesis: bool) -> Result<(), StructureIssue> {
@@ -174,6 +173,13 @@ impl PointInfo {
             if self.time() != self.anchor_time() {
                 return Err(StructureIssue::AnchorTime);
             }
+            if self.prev_digest().is_none_or(|pd| pd != &Digest::ZERO)
+                || self.0.data.anchor_proof != AnchorLink::Direct(Through::Includes(*self.author()))
+                || self.0.data.anchor_proof != self.0.data.anchor_trigger
+            {
+                return Err(StructureIssue::BadGenesisPrevPoint);
+            }
+
             Ok(())
         } else {
             if matches!(self.0.data.role, PointRole::Genesis) {
@@ -183,95 +189,213 @@ impl PointInfo {
         }
     }
 
-    pub fn anchor_trigger(&self) -> AnyLink<'_> {
-        self.0.data.role.anchor_trigger()
+    pub fn is_regular(&self) -> bool {
+        matches!(self.0.data.role, PointRole::Regular)
     }
 
-    pub fn anchor_proof(&self) -> AnyLink<'_> {
-        self.0.data.role.anchor_proof(self.author())
+    pub fn is_anchor_proof(&self) -> bool {
+        self.0.data.role.is_anchor_proof()
     }
 
-    pub fn anchor_link(&self, link_field: AnchorStageRole) -> AnyLink<'_> {
-        (self.0.data).anchor_link(link_field, self.author())
+    pub fn is_anchor_trigger(&self) -> bool {
+        self.0.data.role.is_anchor_trigger()
     }
 
-    pub fn anchor_round(&self, link_field: AnchorStageRole) -> Round {
-        (self.0.data).anchor_round(link_field, self.round())
+    pub fn is_anchor_stage(&self, role: AnchorStageRole) -> bool {
+        self.0.data.role.is_anchor_stage(role)
     }
 
-    pub fn indirect_anchor_proof(&self) -> Option<&IndirectLink> {
-        match self.0.data.role.chained_anchor_proof() {
-            ChainedProofLink::Inapplicable | ChainedProofLink::PrevPoint { .. } => None,
-            ChainedProofLink::Indirect(link) => Some(link),
+    pub fn anchor_proof(&self) -> AnchorView<'_> {
+        self.anchor(AnchorStageRole::Proof)
+    }
+
+    pub fn anchor_trigger(&self) -> AnchorView<'_> {
+        self.anchor(AnchorStageRole::Trigger)
+    }
+
+    /// the final destination of an anchor link
+    pub fn anchor(&self, link_field: AnchorStageRole) -> AnchorView<'_> {
+        let link = match link_field {
+            AnchorStageRole::Proof => &self.0.data.anchor_proof,
+            AnchorStageRole::Trigger => &self.0.data.anchor_trigger,
+        };
+        AnchorView {
+            source: AnchorViewSource { info: self, link },
+            role: link_field,
         }
     }
 
-    pub fn sticky_anchors(&self) -> Option<u8> {
-        match self.0.data.role.chained_anchor_proof() {
-            ChainedProofLink::Inapplicable | ChainedProofLink::Indirect(_) => None,
-            ChainedProofLink::PrevPoint { chained } => Some(chained),
-        }
+    pub fn indirect_anchor_links(
+        &self,
+    ) -> [(AnchorStageRole, Option<&IndirectLink>); AnchorStageRole::ALL.len()] {
+        AnchorStageRole::ALL.map(|role| {
+            let link = match role {
+                AnchorStageRole::Proof => &self.0.data.anchor_proof,
+                AnchorStageRole::Trigger => &self.0.data.anchor_trigger,
+            };
+            let indirect = match link {
+                AnchorLink::Direct(_) => None,
+                AnchorLink::Indirect(link) => Some(link),
+            };
+            (role, indirect)
+        })
     }
 
-    pub fn chained_anchor_proof_to_round(&self) -> Option<Round> {
-        match &self.0.data.role.chained_anchor_proof() {
-            ChainedProofLink::Inapplicable => None,
-            ChainedProofLink::PrevPoint { .. } => Some(self.round().prev()),
-            ChainedProofLink::Indirect(link) => Some(link.to.round),
+    pub fn sticky_anchors(&self) -> Option<(u8, bool)> {
+        match &self.0.data.role {
+            PointRole::AnchorProof { seq_no, is_last } => Some((*seq_no, *is_last)),
+            _ => None,
         }
-    }
-
-    pub fn chained_anchor_proof_to(&self) -> Option<PointId> {
-        match &self.0.data.role.chained_anchor_proof() {
-            ChainedProofLink::Inapplicable => None,
-            ChainedProofLink::PrevPoint { .. } => {
-                Some((self.prev_id()).expect("Coding error: usage of ill-formed point"))
-            }
-            ChainedProofLink::Indirect(link) => Some(link.to),
-        }
-    }
-
-    pub fn chained_anchor_proof_to_through(&self) -> Option<(PointId, Option<PointId>)> {
-        match &self.0.data.role.chained_anchor_proof() {
-            ChainedProofLink::Inapplicable => None,
-            ChainedProofLink::PrevPoint { .. } => {
-                let prev_id = self
-                    .prev_id()
-                    .expect("Coding error: usage of ill-formed point");
-                Some((prev_id, None))
-            }
-            ChainedProofLink::Indirect(link) => {
-                let through = self
-                    .through_id(&link.path)
-                    .expect("Coding error: usage of ill-formed point");
-                Some((link.to, Some(through)))
-            }
-        }
-    }
-
-    /// Returns `Some(anchor proof id)` that must be defined by trigger link (its prev point).
-    pub fn trigger_bound_proof_id(&self) -> Option<PointId> {
-        let proof_id = self.data().inherited_anchor_proof_id(self.round())?;
-        (proof_id.round < self.anchor_round(AnchorStageRole::Trigger)).then_some(proof_id)
     }
 
     /// Well-formed point may return `None` if attribute belongs to another point
     pub fn through_id(&self, through: &Through) -> Option<PointId> {
         self.0.data.through_id(through, self.round())
     }
+}
 
-    /// the final destination of an anchor link
-    pub fn anchor_id(&self, link_field: AnchorStageRole) -> PointId {
-        (self.0.data)
-            .anchor_id(link_field, self.author(), self.round())
-            .unwrap_or_else(|| *self.id())
+pub struct AnchorView<'a> {
+    source: AnchorViewSource<'a>,
+    role: AnchorStageRole,
+}
+
+impl<'a> AnchorView<'a> {
+    pub fn top(self) -> AnchorViewTop<'a> {
+        AnchorViewTop {
+            is_top: self.source.info.is_anchor_stage(self.role),
+            target: self.target(),
+        }
     }
 
-    /// next point in path from `&self` to the anchor
-    pub fn anchor_link_through(&self, link_field: AnchorStageRole) -> PointId {
-        (self.0.data)
-            .anchor_link_id(link_field, self.author(), self.round())
-            .unwrap_or_else(|| *self.id())
+    pub fn target(self) -> AnchorViewTarget<'a> {
+        AnchorViewTarget(self.source)
+    }
+
+    pub fn source(self) -> AnchorViewSource<'a> {
+        self.source
+    }
+}
+
+pub struct AnchorViewTop<'a> {
+    is_top: bool,
+    target: AnchorViewTarget<'a>,
+}
+
+impl AnchorViewTop<'_> {
+    pub fn id(&self) -> PointId {
+        if self.is_top {
+            *self.target.0.info.id()
+        } else {
+            self.target.id()
+        }
+    }
+
+    pub fn round(&self) -> Round {
+        if self.is_top {
+            self.target.0.info.round()
+        } else {
+            self.target.round()
+        }
+    }
+
+    pub fn author(&self) -> &PeerId {
+        if self.is_top {
+            self.target.0.info.author()
+        } else {
+            self.target.author()
+        }
+    }
+
+    pub fn digest(&self) -> &Digest {
+        if self.is_top {
+            self.target.0.info.digest()
+        } else {
+            self.target.digest()
+        }
+    }
+}
+
+pub struct AnchorViewTarget<'a>(AnchorViewSource<'a>);
+
+impl AnchorViewTarget<'_> {
+    pub fn id(&self) -> PointId {
+        PointId {
+            round: self.round(),
+            author: *self.author(),
+            digest: *self.digest(),
+        }
+    }
+
+    pub fn round(&self) -> Round {
+        match self.0.link {
+            AnchorLink::Indirect(link) => link.to.round,
+            AnchorLink::Direct(_) => self.0.round(),
+        }
+    }
+
+    pub fn author(&self) -> &PeerId {
+        match self.0.link {
+            AnchorLink::Indirect(link) => &link.to.author,
+            AnchorLink::Direct(_) => self.0.author(),
+        }
+    }
+
+    pub fn digest(&self) -> &Digest {
+        match self.0.link {
+            AnchorLink::Indirect(link) => &link.to.digest,
+            AnchorLink::Direct(_) => self.0.digest(),
+        }
+    }
+}
+
+pub struct AnchorViewSource<'a> {
+    info: &'a PointInfo,
+    link: &'a AnchorLink,
+}
+
+impl AnchorViewSource<'_> {
+    pub fn id(&self) -> PointId {
+        PointId {
+            round: self.round(),
+            author: *self.author(),
+            digest: *self.digest(),
+        }
+    }
+
+    pub fn round(&self) -> Round {
+        let through = match self.link {
+            AnchorLink::Direct(through) => through,
+            AnchorLink::Indirect(link) => &link.through,
+        };
+        match through {
+            Through::Includes(_) => self.info.round().prev(),
+            Through::Witness(_) => self.info.round().prev().prev(),
+        }
+    }
+
+    pub fn author(&self) -> &PeerId {
+        let through = match self.link {
+            AnchorLink::Direct(through) => through,
+            AnchorLink::Indirect(link) => &link.through,
+        };
+        match through {
+            Through::Includes(peer_id) | Through::Witness(peer_id) => peer_id,
+        }
+    }
+
+    pub fn digest(&self) -> &Digest {
+        self.digest_safe().expect("usage of ill-formed point")
+    }
+
+    pub fn digest_safe(&self) -> Option<&Digest> {
+        let through = match self.link {
+            AnchorLink::Direct(through) => through,
+            AnchorLink::Indirect(link) => &link.through,
+        };
+        match through {
+            Through::Includes(peer_id) => self.info.data().includes.get(peer_id),
+            Through::Witness(peer_id) => self.info.data().witness.get(peer_id),
+        }
     }
 }
 
