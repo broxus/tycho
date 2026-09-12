@@ -222,7 +222,10 @@ impl RoundTaskReady {
                     drop(prev_bcast); // aborts after current broadcast finishes
                     broadcaster.update(&round_ctx);
                     let new_prev_bcast = round_ctx.task().spawn(broadcaster.run_continue());
-                    Ok(Some((new_prev_bcast, new_last_own_point)))
+                    Ok(Some(BcastTaskResult {
+                        new_prev_bcast,
+                        new_last_own_point,
+                    }))
                 } else {
                     bcaster_ready_tx.send(BroadcasterSignal::Ok).ok();
                     drop(collector_status_rx); // goes out of scope
@@ -265,8 +268,13 @@ impl RoundTaskReady {
 pub struct RoundTaskRunning {
     state: RoundTaskState,
     last_own_point: Option<Arc<LastOwnPoint>>,
-    broadcaster_run: Task<Option<(Task<()>, Arc<LastOwnPoint>)>>,
+    broadcaster_run: Task<Option<BcastTaskResult>>,
     collector_run: Task<Collector>,
+}
+
+pub struct BcastTaskResult {
+    new_prev_bcast: Task<()>,
+    new_last_own_point: Arc<LastOwnPoint>,
 }
 
 impl RoundTaskRunning {
@@ -274,9 +282,10 @@ impl RoundTaskRunning {
         let (collector, bcast_result) = tokio::try_join!(self.collector_run, self.broadcaster_run)?;
         let (prev_broadcast, last_own_point) = match bcast_result {
             None => (None, self.last_own_point),
-            Some((new_prev_bcast, new_last_own_point)) => {
-                (Some(new_prev_bcast), Some(new_last_own_point))
-            }
+            Some(BcastTaskResult {
+                new_prev_bcast,
+                new_last_own_point,
+            }) => (Some(new_prev_bcast), Some(new_last_own_point)),
         };
         let ready = RoundTaskReady {
             state: self.state,

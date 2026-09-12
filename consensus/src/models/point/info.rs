@@ -198,6 +198,10 @@ impl PointInfo {
         self.0.data.role.is_anchor_trigger()
     }
 
+    pub fn is_anchor_stage(&self, role: AnchorStageRole) -> bool {
+        self.0.data.role.is_anchor_stage(role)
+    }
+
     pub fn anchor_proof(&self) -> AnchorView<'_> {
         self.anchor(AnchorStageRole::Proof)
     }
@@ -213,21 +217,25 @@ impl PointInfo {
             AnchorStageRole::Trigger => &self.0.data.anchor_trigger,
         };
         AnchorView {
-            through: AnchorViewThrough { info: self, link },
+            source: AnchorViewSource { info: self, link },
             role: link_field,
         }
     }
 
-    pub fn indirect_anchor_links(&self) -> [Option<&IndirectLink>; 2] {
-        let proof = match &self.0.data.anchor_proof {
-            AnchorLink::Direct(_) => None,
-            AnchorLink::Indirect(link) => Some(link),
-        };
-        let trigger = match &self.0.data.anchor_trigger {
-            AnchorLink::Direct(_) => None,
-            AnchorLink::Indirect(link) => Some(link),
-        };
-        [proof, trigger]
+    pub fn indirect_anchor_links(
+        &self,
+    ) -> [(AnchorStageRole, Option<&IndirectLink>); AnchorStageRole::ALL.len()] {
+        AnchorStageRole::ALL.map(|role| {
+            let link = match role {
+                AnchorStageRole::Proof => &self.0.data.anchor_proof,
+                AnchorStageRole::Trigger => &self.0.data.anchor_trigger,
+            };
+            let indirect = match link {
+                AnchorLink::Direct(_) => None,
+                AnchorLink::Indirect(link) => Some(link),
+            };
+            (role, indirect)
+        })
     }
 
     pub fn sticky_anchors(&self) -> Option<(u8, bool)> {
@@ -244,72 +252,69 @@ impl PointInfo {
 }
 
 pub struct AnchorView<'a> {
-    through: AnchorViewThrough<'a>,
+    source: AnchorViewSource<'a>,
     role: AnchorStageRole,
 }
 
 impl<'a> AnchorView<'a> {
     pub fn top(self) -> AnchorViewTop<'a> {
         AnchorViewTop {
-            is_top: match self.role {
-                AnchorStageRole::Trigger => self.through.info.is_anchor_trigger(),
-                AnchorStageRole::Proof => self.through.info.is_anchor_proof(),
-            },
-            linked: self.linked(),
+            is_top: self.source.info.is_anchor_stage(self.role),
+            target: self.target(),
         }
     }
 
-    pub fn linked(self) -> AnchorViewLinked<'a> {
-        AnchorViewLinked(self.through)
+    pub fn target(self) -> AnchorViewTarget<'a> {
+        AnchorViewTarget(self.source)
     }
 
-    pub fn through(self) -> AnchorViewThrough<'a> {
-        self.through
+    pub fn source(self) -> AnchorViewSource<'a> {
+        self.source
     }
 }
 
 pub struct AnchorViewTop<'a> {
     is_top: bool,
-    linked: AnchorViewLinked<'a>,
+    target: AnchorViewTarget<'a>,
 }
 
 impl AnchorViewTop<'_> {
     pub fn id(&self) -> PointId {
         if self.is_top {
-            *self.linked.0.info.id()
+            *self.target.0.info.id()
         } else {
-            self.linked.id()
+            self.target.id()
         }
     }
 
     pub fn round(&self) -> Round {
         if self.is_top {
-            self.linked.0.info.round()
+            self.target.0.info.round()
         } else {
-            self.linked.round()
+            self.target.round()
         }
     }
 
     pub fn author(&self) -> &PeerId {
         if self.is_top {
-            self.linked.0.info.author()
+            self.target.0.info.author()
         } else {
-            self.linked.author()
+            self.target.author()
         }
     }
 
     pub fn digest(&self) -> &Digest {
         if self.is_top {
-            self.linked.0.info.digest()
+            self.target.0.info.digest()
         } else {
-            self.linked.digest()
+            self.target.digest()
         }
     }
 }
 
-pub struct AnchorViewLinked<'a>(AnchorViewThrough<'a>);
+pub struct AnchorViewTarget<'a>(AnchorViewSource<'a>);
 
-impl AnchorViewLinked<'_> {
+impl AnchorViewTarget<'_> {
     pub fn id(&self) -> PointId {
         PointId {
             round: self.round(),
@@ -340,12 +345,12 @@ impl AnchorViewLinked<'_> {
     }
 }
 
-pub struct AnchorViewThrough<'a> {
+pub struct AnchorViewSource<'a> {
     info: &'a PointInfo,
     link: &'a AnchorLink,
 }
 
-impl AnchorViewThrough<'_> {
+impl AnchorViewSource<'_> {
     pub fn id(&self) -> PointId {
         PointId {
             round: self.round(),
@@ -357,7 +362,7 @@ impl AnchorViewThrough<'_> {
     pub fn round(&self) -> Round {
         let through = match self.link {
             AnchorLink::Direct(through) => through,
-            AnchorLink::Indirect(link) => &link.path,
+            AnchorLink::Indirect(link) => &link.through,
         };
         match through {
             Through::Includes(_) => self.info.round().prev(),
@@ -368,7 +373,7 @@ impl AnchorViewThrough<'_> {
     pub fn author(&self) -> &PeerId {
         let through = match self.link {
             AnchorLink::Direct(through) => through,
-            AnchorLink::Indirect(link) => &link.path,
+            AnchorLink::Indirect(link) => &link.through,
         };
         match through {
             Through::Includes(peer_id) | Through::Witness(peer_id) => peer_id,
@@ -382,7 +387,7 @@ impl AnchorViewThrough<'_> {
     pub fn digest_safe(&self) -> Option<&Digest> {
         let through = match self.link {
             AnchorLink::Direct(through) => through,
-            AnchorLink::Indirect(link) => &link.path,
+            AnchorLink::Indirect(link) => &link.through,
         };
         match through {
             Through::Includes(peer_id) => self.info.data().includes.get(peer_id),

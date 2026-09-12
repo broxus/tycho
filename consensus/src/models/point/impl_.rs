@@ -282,7 +282,7 @@ pub mod test_point {
                 round,
                 digest: Digest::random(),
             },
-            path: Through::Includes(one_of_peers()),
+            through: Through::Includes(one_of_peers()),
         };
 
         let data = PointData {

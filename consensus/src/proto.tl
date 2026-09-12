@@ -75,7 +75,7 @@ consensus.link.through.witness    x:transport.PeerId                    = consen
 
 consensus.link.indirect
     to:consensus.pointId
-    path:consensus.link.through
+    through:consensus.link.through
     = consensus.link.Indirect;
 
 /*
