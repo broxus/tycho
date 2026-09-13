@@ -43,7 +43,7 @@ impl serde::Serialize for Digest {
 impl Digest {
     pub const MAX_TL_BYTES: usize = 32;
 
-    pub(super) const ZERO: Self = Self([0; 32]);
+    pub const ZERO: Self = Self([0; 32]);
 
     pub(super) fn new(bytes: &[u8]) -> Self {
         Self(blake3::hash(bytes).into())

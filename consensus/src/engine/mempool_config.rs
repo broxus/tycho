@@ -9,7 +9,7 @@ use tycho_types::models::{ConsensusConfig, GenesisInfo};
 
 use crate::dag::ProofLeader;
 use crate::engine::ConsensusConfigExt;
-use crate::models::{Point, PointData, PointRole, Round, UnixTime};
+use crate::models::{Digest, Point, PointData, PointRole, Round, UnixTime};
 
 // replace with `ArcSwapOption` + copy on get() if need to change in runtime
 static NODE_CONFIG: OnceLock<MempoolNodeConfig> = OnceLock::new();
@@ -25,6 +25,7 @@ impl NodeConfig {
 pub struct MempoolConfig {
     pub consensus: ConsensusConfig,
     pub genesis_round: Round,
+    pub genesis_digest: Digest,
     /// Estimated hard limit on serialized point size
     pub point_max_bytes: usize,
 }
@@ -49,23 +50,7 @@ impl MempoolMergedConfig {
     }
 
     pub(crate) fn genesis(&self) -> Point {
-        let key_pair = KeyPair::from(&SecretKey::from_bytes(self.overlay_id.0));
-        let millis = UnixTime::from_millis(self.genesis_info.genesis_millis);
-        Point::new(
-            &key_pair,
-            PeerId::from(key_pair.public_key),
-            self.conf.genesis_round,
-            Default::default(),
-            PointData {
-                time: millis,
-                includes: Default::default(),
-                witness: Default::default(),
-                evidence: Default::default(),
-                role: PointRole::Genesis,
-                anchor_time: millis,
-            },
-            &self.conf,
-        )
+        genesis(self.genesis_info, self.overlay_id, &self.conf)
     }
 }
 
@@ -122,12 +107,6 @@ impl MempoolConfigBuilder {
 
         let genesis_round = ProofLeader::align_genesis(genesis_info.start_round);
 
-        let mempool_config = MempoolConfig {
-            consensus: consensus.clone(),
-            genesis_round,
-            point_max_bytes: Point::max_byte_size(consensus),
-        };
-
         // reset types to u128 as it does not match fields in `ConsensusConfig`
         // and may be changed just to keep them handy, that must not affect hash
         let mut hasher = blake3::Hasher::new();
@@ -145,12 +124,43 @@ impl MempoolConfigBuilder {
 
         let overlay_id = OverlayId(hasher.finalize().into());
 
+        let mut mempool_config = MempoolConfig {
+            consensus: consensus.clone(),
+            genesis_round,
+            genesis_digest: Digest::ZERO, // temp
+            point_max_bytes: Point::max_byte_size(consensus),
+        };
+
+        let genesis = genesis(genesis_info, overlay_id, &mempool_config);
+
+        mempool_config.genesis_digest = *genesis.info().digest();
+
         Ok(MempoolMergedConfig {
             genesis_info,
             conf: mempool_config,
             overlay_id,
         })
     }
+}
+
+fn genesis(genesis_info: GenesisInfo, overlay_id: OverlayId, conf: &MempoolConfig) -> Point {
+    let key_pair = KeyPair::from(&SecretKey::from_bytes(overlay_id.0));
+    let millis = UnixTime::from_millis(genesis_info.genesis_millis);
+    Point::new(
+        &key_pair,
+        PeerId::from(key_pair.public_key),
+        conf.genesis_round,
+        Default::default(),
+        PointData {
+            includes: Default::default(),
+            witness: Default::default(),
+            evidence: Default::default(),
+            role: PointRole::Genesis,
+            anchor_time: millis,
+            time: millis,
+        },
+        conf,
+    )
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
