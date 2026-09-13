@@ -64,6 +64,8 @@ pub enum IllFormedReason {
     BeforeGenesis,
     #[error("author is not scheduled: outdated vset or author out of vset")]
     UnknownAuthor,
+    #[error("Pretends to be genesis")]
+    FalseGenesis,
     #[error("too large payload: {0} bytes")]
     TooLargePayload(u32),
     #[error("structure issue: {0}")]
@@ -912,6 +914,9 @@ impl<'a> BasicVerifierInner<'a> {
     /// its decided later in [`Self::check_proof_link`] whether current point belongs to leader
     fn check_well_formed(self) -> Result<Self, IllFormedReason> {
         if self.info.round() == self.conf.genesis_round {
+            if *self.info.digest() != self.conf.genesis_digest {
+                return Err(IllFormedReason::FalseGenesis);
+            }
             if self.info.payload_len() > 0 {
                 return Err(IllFormedReason::TooLargePayload(self.info.payload_bytes()));
             }
