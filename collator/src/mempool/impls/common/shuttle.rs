@@ -56,6 +56,7 @@ impl Shuttle {
                 chain_time,
                 author: *committed.anchor.author(),
                 externals: unique_messages,
+                stats: committed.stats.clone(),
             });
 
             metrics::counter!("tycho_mempool_msgs_unique_count")

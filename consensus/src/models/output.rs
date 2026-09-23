@@ -1,3 +1,5 @@
+use tycho_slasher_traits::AnchorStats;
+
 use crate::models::{PointInfo, PointKey, Round};
 
 pub struct AnchorData {
@@ -7,6 +9,7 @@ pub struct AnchorData {
     pub prev_anchor: Option<Round>,
     pub history: Vec<PointInfo>,
     pub is_executable: bool,
+    pub stats: Option<AnchorStats>,
 }
 
 pub enum MempoolOutput {

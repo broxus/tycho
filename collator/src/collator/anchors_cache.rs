@@ -343,6 +343,7 @@ mod tests {
             chain_time,
             author: PeerId([0; 32]),
             externals: Default::default(),
+            stats: None,
         })
     }
 

@@ -2,9 +2,9 @@ use tl_proto::{TlError, TlPacket, TlRead, TlResult, TlWrite};
 use tycho_slasher_traits::ValidationSessionId;
 use tycho_util::FastHashSet;
 
+use crate::BlocksBatch;
+use crate::bc::ObservedHistory;
 use crate::util::BitSet;
-use crate::{BlocksBatch, SignatureHistory};
-
 // === Vset State Stuff ===
 
 #[derive(Debug, Clone, Copy, TlRead, TlWrite)]
@@ -47,23 +47,33 @@ impl TlWrite for StoredBlocksBatch {
 
     fn max_size_hint(&self) -> usize {
         4 + 4
+            + (4 + 4)
+            + 4
             + self.0.committed_blocks.max_size_hint()
             + 4
-            + self
-                .0
-                .signatures_history
+            + (self.0.observed)
                 .iter()
-                .map(|item| 4 + item.bits.max_size_hint())
+                .map(|item| 4 + 4 + item.bits.max_size_hint())
                 .sum::<usize>()
     }
 
     fn write_to<P: TlPacket>(&self, packet: &mut P) {
         packet.write_u32(Self::TL_ID);
         packet.write_u32(self.0.start_seqno);
+        if let Some(anchor_range) = self.0.round_range.as_ref() {
+            packet.write_u32(*anchor_range.start());
+            packet.write_u32(*anchor_range.end());
+        } else {
+            packet.write_u32(0);
+            packet.write_u32(0);
+        };
+        packet.write_u32(self.0.filled_rounds);
+
         self.0.committed_blocks.write_to(packet);
-        packet.write_u32(self.0.signatures_history.len() as u32);
-        for item in &self.0.signatures_history {
+        packet.write_u32(self.0.observed.len() as u32);
+        for item in &self.0.observed {
             packet.write_u32(item.validator_idx as u32);
+            packet.write_u32(item.points_proven as u32);
             item.bits.write_to(packet);
         }
     }
@@ -78,6 +88,10 @@ impl<'tl> TlRead<'tl> for StoredBlocksBatch {
         }
 
         let start_seqno = u32::read_from(packet)?;
+        let round_range = Some(u32::read_from(packet)?..=u32::read_from(packet)?)
+            .filter(|range| *range.end() > 0);
+        let filled_rounds = u32::read_from(packet)?;
+
         let committed_blocks = BitSet::read_from(packet)?;
         let block_count = committed_blocks.len();
         if start_seqno.checked_add(block_count as u32).is_none() {
@@ -91,7 +105,7 @@ impl<'tl> TlRead<'tl> for StoredBlocksBatch {
             return Err(TlError::InvalidData);
         }
 
-        let mut signatures_history = Vec::with_capacity(history_count);
+        let mut observed = Vec::with_capacity(history_count);
         let mut unique_indices =
             FastHashSet::with_capacity_and_hasher(history_count, Default::default());
         for _ in 0..history_count {
@@ -101,20 +115,25 @@ impl<'tl> TlRead<'tl> for StoredBlocksBatch {
             if !unique_indices.insert(validator_idx) {
                 return Err(TlError::InvalidData);
             }
+            let points_proven =
+                u16::try_from(u32::read_from(packet)?).map_err(|_e| TlError::InvalidData)?;
             let bits = BitSet::read_from(packet)?;
             if bits.len() != block_count * 2 {
                 return Err(TlError::InvalidData);
             }
-            signatures_history.push(SignatureHistory {
+            observed.push(ObservedHistory {
                 validator_idx,
+                points_proven,
                 bits,
             });
         }
 
         Ok(Self(BlocksBatch {
             start_seqno,
+            round_range,
+            filled_rounds,
             committed_blocks,
-            signatures_history: signatures_history.into_boxed_slice(),
+            observed: observed.into_boxed_slice(),
         }))
     }
 }

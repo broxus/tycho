@@ -45,6 +45,7 @@ impl TryFrom<DumpedAnchor> for MempoolAnchor {
             author: value.author,
             chain_time: value.chain_time,
             externals,
+            stats: None,
         })
     }
 }

@@ -324,6 +324,7 @@ impl MempoolAdapterStore {
                 prev_anchor,
                 history: keyed_vec.into_iter().map(|(_, info)| info).collect(),
                 is_executable: false, // define later
+                stats: None,          // not needed
             });
         }
         Ok(result)

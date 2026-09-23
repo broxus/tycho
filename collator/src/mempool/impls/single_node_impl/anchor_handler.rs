@@ -60,6 +60,7 @@ impl SingleNodeAnchorHandler {
                     chain_time,
                     author: self.peer_id,
                     externals: unique_messages,
+                    stats: None,
                 }))
                 .expect("push new anchor");
 

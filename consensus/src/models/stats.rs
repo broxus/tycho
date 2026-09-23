@@ -11,7 +11,7 @@ pub enum MempoolStatsMergeError {
 
 #[derive(Debug)]
 pub struct MempoolPeerStats {
-    first_round: u32,
+    pub first_round: u32,
     filled_rounds: u32,
     cumulative: MempoolPeerCounters,
 }
