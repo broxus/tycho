@@ -1,5 +1,6 @@
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::{Arc, Weak};
+use std::time::Duration;
 
 #[cfg(target_os = "linux")]
 use anyhow::Context;
@@ -273,6 +274,10 @@ impl Network {
     /// returns the maximum size which can be potentially sent in a single frame
     pub fn max_frame_size(&self) -> usize {
         self.0.config.max_frame_size.0 as usize
+    }
+
+    pub fn connect_timeout(&self) -> Duration {
+        self.0.config.connect_timeout
     }
 }
 
