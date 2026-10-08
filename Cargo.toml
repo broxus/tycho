@@ -1,5 +1,5 @@
 [workspace.package]
-version = "0.3.12"
+version = "1.0.0"
 edition = "2024"
 authors = ["Broxus Team"]
 rust-version = "1.95.0"
@@ -37,7 +37,7 @@ ahash = "0.8"
 alloc-metrics = "0.1.1"
 anyhow = "1.0.103"
 arc-swap = "1.9.2"
-async-trait = "0.1"
+async-trait = "0.1.92"
 axum = "0.8"
 axum-client-ip = "1.3.1"
 backon = "1.5.1"
@@ -65,10 +65,7 @@ exponential-backoff = "1.2.1"
 fdlimit = "0.3.0"
 futures-executor = "0.3"
 futures-util = "0.3"
-governor = { version = "0.9", default-features = false, features = [
-    "std",
-    "quanta",
-] }
+governor = { version = "0.9", default-features = false, features = ["std", "quanta"] }
 getip = "0.2.1"
 hdrhistogram = "7.5.4"
 hashbrown = "0.16.1"
@@ -96,10 +93,7 @@ prost = "0.14.4"
 prost-build = "0.14.4"
 quick_cache = "0.6.21"
 qfilter = "0.2.5"
-quinn = { version = "0.11.11", default-features = false, features = [
-    "runtime-tokio",
-    "rustls",
-] }
+quinn = { version = "0.11.11", default-features = false, features = ["runtime-tokio", "rustls"] }
 quote = "1.0"
 object_store = "0.13"
 rand = "0.9"
@@ -142,9 +136,7 @@ tikv-jemalloc-ctl = { version = "0.6.1", features = ["stats"] }
 tl-proto = "0.5.4"
 tokio = { version = "1", default-features = false }
 tokio-stream = "0.1.18"
-tokio-util = { version = "0.7.18", default-features = false, features = [
-    "codec",
-] }
+tokio-util = { version = "0.7.18", default-features = false, features = ["codec"] }
 tower = "0.5"
 tower-http = "0.6"
 tracing = "0.1"
@@ -155,7 +147,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 triomphe = "0.1.16"
 tycho-crypto = { version = "0.4", features = ["tl-proto", "serde", "rand9"] }
 tycho-executor = "0.3.7"
-tycho-types = { version = "0.3.5", features = ["tycho", "stats"] }
+tycho-types = { version = "0.3.6", features = ["tycho", "stats"] }
 tycho-vm = "0.3.7"
 uuid = "1.23.4"
 walkdir = "2.5.0"
@@ -164,26 +156,25 @@ zstd-safe = "7.2"
 zstd-sys = "2.0"
 
 # local deps
-tycho-block-util = { path = "./block-util", version = "0.3.12" }
-tycho-build-info = { path = "./tycho-build-info", version = "0.3.12" }
-tycho-collator = { path = "./collator", version = "0.3.12" }
-tycho-consensus = { path = "./consensus", version = "0.3.12" }
-tycho-control = { path = "./control", version = "0.3.12" }
-tycho-core = { path = "./core", version = "0.3.12" }
-tycho-network = { path = "./network", version = "0.3.12" }
-tycho-rpc-subscriptions = { path = "./rpc-subscriptions", version = "0.3.12" }
-tycho-rpc = { path = "./rpc", version = "0.3.12" }
-tycho-slasher = { path = "./slasher", version = "0.3.12" }
-tycho-slasher-traits = { path = "./slasher-traits", version = "0.3.12" }
-tycho-storage = { path = "./storage", version = "0.3.12" }
-tycho-storage-traits = { path = "./storage-traits", version = "0.3.12" }
-tycho-util = { path = "./util", version = "0.3.12" }
-tycho-util-proc = { path = "./util-proc", version = "0.3.12" }
-tycho-wu-tuner = { path = "./wu-tuner", version = "0.3.12" }
+tycho-block-util = { path = "./block-util", version = "1.0.0" }
+tycho-build-info = { path = "./tycho-build-info", version = "1.0.0" }
+tycho-collator = { path = "./collator", version = "1.0.0" }
+tycho-consensus = { path = "./consensus", version = "1.0.0" }
+tycho-control = { path = "./control", version = "1.0.0" }
+tycho-core = { path = "./core", version = "1.0.0" }
+tycho-network = { path = "./network", version = "1.0.0" }
+tycho-rpc-subscriptions = { path = "./rpc-subscriptions", version = "1.0.0" }
+tycho-rpc = { path = "./rpc", version = "1.0.0" }
+tycho-slasher = { path = "./slasher", version = "1.0.0" }
+tycho-slasher-traits = { path = "./slasher-traits", version = "1.0.0" }
+tycho-storage = { path = "./storage", version = "1.0.0" }
+tycho-storage-traits = { path = "./storage-traits", version = "1.0.0" }
+tycho-util = { path = "./util", version = "1.0.0" }
+tycho-util-proc = { path = "./util-proc", version = "1.0.0" }
+tycho-wu-tuner = { path = "./wu-tuner", version = "1.0.0" }
 
 [patch.crates-io]
 # patches here
-tycho-types = { git = "https://github.com/broxus/tycho-types.git", rev = "b529060a4f229bc17f9a30cd12f90ee44931e16a" }
 
 [workspace.lints.rust]
 future_incompatible = "warn"

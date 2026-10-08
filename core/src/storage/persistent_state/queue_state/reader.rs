@@ -112,7 +112,7 @@ impl<'a> QueueDiffReader<'a> {
         };
 
         loop {
-            if let Some(boc) = &mut self.parsed_boc
+            if let Some(boc) = self.parsed_boc.as_mut()
                 && let Some(cell) = boc.next()
             {
                 if boc.roots.is_empty() {

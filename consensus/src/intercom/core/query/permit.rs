@@ -12,7 +12,7 @@ impl QueryPermits {
 
     pub fn try_acquire(&self) -> Option<QueryPermit> {
         self.0
-            .fetch_update(
+            .try_update(
                 atomic::Ordering::Relaxed,
                 atomic::Ordering::Relaxed,
                 |permits| permits.checked_sub(1),

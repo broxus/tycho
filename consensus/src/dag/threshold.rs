@@ -211,7 +211,7 @@ pub struct ThresholdCount {
 impl ThresholdCount {
     fn add_one_in_channel(count: &AtomicU32) {
         count
-            .fetch_update(
+            .try_update(
                 atomic::Ordering::Release,
                 atomic::Ordering::Relaxed,
                 |packed| {
@@ -232,7 +232,7 @@ impl ThresholdCount {
         let ready_len = u8::try_from(ready.len()).expect("too many ready includes");
         let delayed_len = u8::try_from(delayed.len()).expect("too many delayed");
         count
-            .fetch_update(
+            .try_update(
                 atomic::Ordering::Acquire,
                 atomic::Ordering::Relaxed,
                 |packed| {

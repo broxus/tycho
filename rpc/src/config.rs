@@ -16,7 +16,7 @@ use crate::endpoint::RpcRateLimitsConfig;
 pub struct RpcConfig {
     /// TCP socket address to listen for incoming RPC connections.
     ///
-    /// Default: `0.0.0.0:8000`
+    /// Default: `127.0.0.1:8000`
     #[important]
     pub listen_addr: SocketAddr,
 
@@ -151,7 +151,7 @@ impl RpcStorageConfig {
 impl Default for RpcConfig {
     fn default() -> Self {
         Self {
-            listen_addr: (Ipv4Addr::UNSPECIFIED, 8000).into(),
+            listen_addr: (Ipv4Addr::LOCALHOST, 8000).into(),
             generate_stub_keyblock: false,
             shard_split_depth: 4,
             allow_huge_requests: false,

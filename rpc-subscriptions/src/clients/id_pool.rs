@@ -32,7 +32,7 @@ where
         }
 
         self.next
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
                 if cur < self.max_id {
                     Some(cur + 1)
                 } else {

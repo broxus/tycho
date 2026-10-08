@@ -237,7 +237,7 @@ mod inner {
 
         fn max_height_published(&self, mut height: u16, top_mask: u16) -> bool {
             self.height
-                .fetch_update(
+                .try_update(
                     atomic::Ordering::Relaxed, // store: flags remain unchanged
                     atomic::Ordering::Acquire, // load: synchronizes-with `set_deps()`
                     |stored| {
