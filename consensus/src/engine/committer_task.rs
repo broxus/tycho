@@ -1,8 +1,10 @@
 use std::mem;
+use std::sync::Arc;
 
 use itertools::Itertools;
 use tokio::sync::mpsc;
 use tycho_network::PeerId;
+use tycho_slasher_traits::{AnchorPeerStats, AnchorStats};
 use tycho_util::FastHashMap;
 use tycho_util::metrics::HistogramGuard;
 
@@ -165,7 +167,7 @@ impl State {
 
                 let stats_ranges = inner.peer_schedule.atomic().stats_ranges();
 
-                for adata in committed {
+                for mut adata in committed {
                     let anchor_round = adata.anchor.round();
 
                     let (stat_map, events) = (inner.committer).remove_committed(
@@ -173,6 +175,9 @@ impl State {
                         &stats_ranges,
                         round_ctx.conf(),
                     )?;
+                    if let Some(stats_slot_map) = stats_ranges.stats_slot_map(anchor_round) {
+                        adata.stats = build_dense_anchor_stats(&stat_map, stats_slot_map);
+                    }
                     all_stats.push(stat_map);
 
                     round_ctx.commit_metrics(&adata.anchor);
@@ -194,6 +199,54 @@ impl State {
 
         Self::Running(task_ctx.spawn_blocking(task))
     }
+}
+
+fn build_dense_anchor_stats(
+    stat_map: &FastHashMap<PeerId, MempoolPeerStats>,
+    stats_slot_map: &FastHashMap<PeerId, usize>,
+) -> Option<AnchorStats> {
+    if stats_slot_map.is_empty() {
+        return None;
+    }
+
+    let mut dense = (0..stats_slot_map.len())
+        .map(|_| AnchorPeerStats { points_proven: 0 })
+        .collect::<Vec<_>>();
+
+    #[allow(clippy::reversed_empty_ranges)]
+    let mut round_range = u32::MAX..=0;
+    let mut filled_rounds = 0;
+
+    for (peer_id, stats) in stat_map {
+        let Some(counters) = stats.counters() else {
+            continue;
+        };
+
+        round_range = *round_range.start().min(&stats.first_round)
+            ..=*round_range.end().max(&counters.last_round);
+
+        filled_rounds = filled_rounds.max(stats.filled_rounds());
+
+        if counters.points_proved.inner() == 0 {
+            continue;
+        }
+        let Some(slot_id) = stats_slot_map.get(peer_id) else {
+            continue;
+        };
+        let Some(slot) = dense.get_mut(*slot_id) else {
+            continue;
+        };
+
+        slot.points_proven = slot
+            .points_proven
+            .saturating_add(counters.points_proved.inner());
+    }
+
+    (!round_range.is_empty()).then(|| AnchorStats {
+        round_range,
+        filled_rounds,
+        data: Arc::from(dense),
+    })
 }
 
 impl RoundCtx {
