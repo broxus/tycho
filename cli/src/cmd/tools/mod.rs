@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+mod archive;
 pub(crate) mod bc;
 mod check_cells_db;
 mod dump_state;
@@ -20,6 +21,7 @@ pub struct Cmd {
 impl Cmd {
     pub fn run(self) -> Result<()> {
         match self.cmd {
+            SubCmd::Archive(cmd) => cmd.run(),
             SubCmd::GenDht(cmd) => cmd.run(),
             SubCmd::GenKey(cmd) => cmd.run(),
             SubCmd::GenZerostate(cmd) => cmd.run(),
@@ -34,6 +36,7 @@ impl Cmd {
 
 #[derive(Subcommand)]
 enum SubCmd {
+    Archive(archive::Cmd),
     GenDht(gen_dht::Cmd),
     GenKey(gen_key::Cmd),
     GenZerostate(gen_zerostate::Cmd),

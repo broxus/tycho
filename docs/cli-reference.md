@@ -52,6 +52,10 @@ This document contains the help content for the `tycho` command-line program.
 * [`tycho tool gen-account wallet`↴](#tycho-tool-gen-account-wallet)
 * [`tycho tool gen-account multisig`↴](#tycho-tool-gen-account-multisig)
 * [`tycho tool gen-account giver`↴](#tycho-tool-gen-account-giver)
+* [`tycho tool archive`↴](#tycho-tool-archive)
+* [`tycho tool archive list`↴](#tycho-tool-archive-list)
+* [`tycho tool archive get`↴](#tycho-tool-archive-get)
+* [`tycho tool archive set`↴](#tycho-tool-archive-set)
 * [`tycho tool bc`↴](#tycho-tool-bc)
 * [`tycho tool bc get-param`↴](#tycho-tool-bc-get-param)
 * [`tycho tool bc set-param`↴](#tycho-tool-bc-set-param)
@@ -736,6 +740,7 @@ Work with blockchain stuff
 * `gen-key` — Generate a new key pair
 * `gen-zerostate` — Generate a zero state for a network
 * `gen-account` — Generate an account state
+* `archive` — Manipulate archive files
 * `bc` — Blockchain stuff
 * `check-cells-db` — Check that the cells database is consistent
 * `dump-state` — Dumps node state for a specific block, intended for testing collation of the next block. This tool interacts directly with the node's database, bypassing the need for a running node, which is useful for analyzing failed nodes
@@ -856,6 +861,69 @@ Generate a giver state
 * `-e`, `--extra-balance <EXTRA_BALANCE>` — Initial extra currencies balance of the account.
 
    Specified as a comma-separated list of `currency_id:amount`
+
+
+
+## `tycho tool archive`
+
+Manipulate archive files
+
+**Usage:** `tycho tool archive <COMMAND>`
+
+###### **Subcommands:**
+
+* `list` — List archive entries
+* `get` — Extract an archive entry
+* `set` — Replace or append an archive entry
+
+
+
+## `tycho tool archive list`
+
+List archive entries
+
+**Usage:** `tycho tool archive list <PATH>`
+
+###### **Arguments:**
+
+* `<PATH>` — Archive file path
+
+
+
+## `tycho tool archive get`
+
+Extract an archive entry
+
+**Usage:** `tycho tool archive get [OPTIONS] --block-id <BLOCK_ID> --ty <TY> <PATH>`
+
+###### **Arguments:**
+
+* `<PATH>` — Archive file path
+* `--block-id <BLOCK_ID>` — Entry block id
+* `--ty <TY>` — Entry type
+
+  Possible values: `block`, `proof`, `queue-diff`
+
+###### **Options:**
+
+* `-o`, `--output <OUTPUT>` — Output file path. Prints to stdout if omitted
+
+
+
+## `tycho tool archive set`
+
+Replace or append an archive entry
+
+**Usage:** `tycho tool archive set [OPTIONS] --block-id <BLOCK_ID> --ty <TY> <PATH> <INPUT>`
+
+###### **Arguments:**
+
+* `<PATH>` — Archive file path
+* `<INPUT>` — Input file path
+* `--block-id <BLOCK_ID>` — Entry block id
+* `--ty <TY>` — Entry type
+
+  Possible values: `block`, `proof`, `queue-diff`
 
 
 
